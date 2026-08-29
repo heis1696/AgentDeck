@@ -1,0 +1,18 @@
+appId: ai.agentdeck.desktop
+productName: AgentDeck
+directories:
+  output: release
+  buildResources: build
+files:
+  - out/**
+  - package.json
+icon: build/icon.ico
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch: [x64]
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  shortcutName: AgentDeck

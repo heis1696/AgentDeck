@@ -1,0 +1,40 @@
+{
+  "name": "agentdeck",
+  "version": "0.1.0",
+  "description": "本地任务看板 — 把任务派给本地 agent 执行",
+  "main": "./out/main/index.js",
+  "author": "agentdeck",
+  "license": "MIT",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "start": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "pack": "electron-vite build && electron-builder --dir",
+    "dist": "electron-vite build && electron-builder",
+    "smoke": "node scripts/smoke-runner.mjs",
+    "smoke:zcode": "node scripts/smoke-zcode.mjs",
+    "smoke:squad": "node scripts/smoke-squad.mjs",
+    "e2e:squad": "node scripts/e2e-squad-real.mjs",
+    "smoke:clis": "node scripts/smoke-cli-adapters.mjs",
+    "e2e:hetero": "node scripts/e2e-squad-hetero.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^2.3.0",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
+  }
+}
