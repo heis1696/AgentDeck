@@ -6,6 +6,19 @@
 
 （暂无）
 
+## [0.4.0] - 2026-08-30
+
+### 变更（清债）
+
+- **删除旧版双轨 squad 模式**：`src/main/squad.ts` 与 `mode:'squad'` 执行路径移除（0.3.0 起已无 UI 入口）；`Task.squad` 字段重命名为 `Task.integration {branch, note}`，启动时自动迁移存量数据；运行中的旧 squad 任务与重启后悬挂的 running 任务一律标记为失败并提示重跑（不再永久"执行中"）；设置项 `squadMaxWorkers` 更名 `workerConcurrency`（自动迁移）。侧栏/详情的委派徽标改为实时派生（⚡ 委派 已完成/总数）。
+- 复制任务不再整页刷新；renderer 的 Agent 类型统一为 `api.ts` 的 `AgentInfo`；系统通知点击会先唤起并聚焦窗口再跳转任务。
+
+### 新增
+
+- **失败分类学**：原始错误自动归类为 11 个稳定 code（cli_missing / protocol_config / provider_auth / provider_quota / rate_limit / output_limit / context_overflow / timeout / sandbox / process_crash / unknown），失败横幅显示人话标题 + code 徽标 + 处置提示，错误原文折叠保留；`retryable` 标记为后续自动重试的依据。
+- **用量汇总**：任务完成时把各回合 usage 事件（多态键名归一）累计到 `Task.usage`；详情页头部显示 tokens/成本 chip；新「用量」页按队员与平台聚合（KPI 卡 + 两张表）。
+- 新增 `smoke:migration`（0.3.x→0.4 数据迁移）与 `smoke:failure`（分类规则 + 落库）冒烟脚本。
+
 ## [0.3.0] - 2026-08-30
 
 ### 新增
