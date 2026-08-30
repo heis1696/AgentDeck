@@ -6,49 +6,74 @@ import { SettingsView } from './components/SettingsView'
 import { TeamView } from './components/TeamView'
 import { UsageView } from './components/UsageView'
 import { WorkspaceView, FOCUS_WORKSPACE } from './components/WorkspaceView'
+import { TabBar } from './components/TabBar'
 import type { Task } from '../../shared/types'
 
 type View = 'tasks' | 'team' | 'usage' | 'settings'
 
+const MAX_TABS = 8
+
 export function App() {
   const { tasks } = useTasks()
   const [view, setView] = useState<View>('tasks')
-  const [selectedId, setSelectedId] = useState<string | null>(null)
-  const selected = tasks.find((t) => t.id === selectedId) ?? null
+  /** 已打开的任务标签（taskId 列表，按打开顺序）；null 激活 = 工作区起始页 */
+  const [tabs, setTabs] = useState<string[]>([])
+  const [activeId, setActiveId] = useState<string | null>(null)
+  const selected = tasks.find((t) => t.id === activeId) ?? null
 
-  // 删除任务后若正选中它，回到工作区
-  useEffect(() => bridge.tasks.onDeleted((id) => {
-    setSelectedId((cur) => (cur === id ? null : cur))
-  }), [])
+  const openTask = (id: string) => {
+    setTabs((cur) => (cur.includes(id) ? cur : [...cur, id].slice(-MAX_TABS)))
+    setActiveId(id)
+    setView('tasks')
+  }
+  const closeTab = (id: string) => {
+    const next = tabs.filter((x) => x !== id)
+    setTabs(next)
+    if (activeId === id) setActiveId(next[next.length - 1] ?? null)
+  }
+  const closeActive = () => {
+    if (activeId) closeTab(activeId)
+  }
+  const cycleTab = (dir: 1 | -1) => {
+    if (tabs.length < 2 || !activeId) return
+    const i = tabs.indexOf(activeId)
+    setActiveId(tabs[(i + dir + tabs.length) % tabs.length])
+  }
+
+  // 删除任务 → 关掉它的标签（正选中则回退到最后一个/工作区）
+  useEffect(() => bridge.tasks.onDeleted((id) => closeTab(id)), [tabs, activeId])
 
   // 系统通知点击：聚焦对应任务
-  useEffect(() => bridge.tasks.onFocusTask((id) => {
-    setSelectedId(id)
-    setView('tasks')
-  }), [])
+  useEffect(() => bridge.tasks.onFocusTask((id) => openTask(id)), [])
 
   /** 回到常驻工作区（Ctrl+N / 侧栏按钮） */
   const goWorkspace = () => {
-    setSelectedId(null)
+    setActiveId(null)
     setView('tasks')
     window.dispatchEvent(new Event(FOCUS_WORKSPACE))
   }
 
-  // 快捷键：Ctrl+N 新任务（聚焦工作区输入框）
+  // 快捷键：Ctrl+N 新任务；Ctrl+W 关当前标签；Ctrl(+Shift)+Tab 切换标签
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'n') {
+      const mod = e.ctrlKey || e.metaKey
+      if (mod && e.key.toLowerCase() === 'n') {
         e.preventDefault()
         goWorkspace()
+      } else if (mod && e.key.toLowerCase() === 'w') {
+        e.preventDefault()
+        closeActive()
+      } else if (mod && e.key === 'Tab') {
+        e.preventDefault()
+        cycleTab(e.shiftKey ? -1 : 1)
       }
     }
     window.addEventListener('keydown', h)
     return () => window.removeEventListener('keydown', h)
-  }, [])
+  }, [tabs, activeId])
 
   const onCreated = (t: Task) => {
-    setSelectedId(t.id)
-    setView('tasks')
+    openTask(t.id)
   }
 
   return (
@@ -74,7 +99,7 @@ export function App() {
             设置
           </button>
         </nav>
-        {view === 'tasks' && <TaskList tasks={tasks} selectedId={selectedId} onSelect={setSelectedId} />}
+        {view === 'tasks' && <TaskList tasks={tasks} selectedId={activeId} onSelect={openTask} />}
       </aside>
       <main className="main">
         {view === 'settings' ? (
@@ -83,10 +108,15 @@ export function App() {
           <TeamView />
         ) : view === 'usage' ? (
           <UsageView />
-        ) : selected ? (
-          <TaskDetail task={selected} tasks={tasks} onSelect={setSelectedId} />
         ) : (
-          <WorkspaceView onCreated={onCreated} />
+          <div className="tasks-column">
+            {tabs.length > 0 && <TabBar tabs={tabs} tasks={tasks} activeId={activeId} onSelect={setActiveId} onClose={closeTab} />}
+            {selected ? (
+              <TaskDetail task={selected} tasks={tasks} onSelect={openTask} />
+            ) : (
+              <WorkspaceView onCreated={onCreated} />
+            )}
+          </div>
         )}
       </main>
     </div>
