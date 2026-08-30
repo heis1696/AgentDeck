@@ -13,6 +13,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   const [busy, setBusy] = useState(false)
   const [permission, setPermission] = useState<PermissionRequest | null>(null)
   const logRef = useRef<HTMLDivElement>(null)
+  const followRef = useRef<HTMLTextAreaElement>(null)
   const lastSeqRef = useRef(0)
   const workers = tasks.filter((t) => t.parentTaskId === task.id).sort((a, b) => (a.workerIndex ?? 0) - (b.workerIndex ?? 0))
   const parent = task.parentTaskId ? tasks.find((t) => t.id === task.parentTaskId) : null
@@ -54,19 +55,39 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     await bridge.tasks.respondPermission(req.requestId, opt.optionId, decision)
   }
 
-  // 流式文本（text 增量聚合）
-  const streamText = useMemo(() => {
-    let out = ''
-    for (const e of events) if (e.kind === 'text' && e.text) out += e.text
-    return out
-  }, [events])
+  // 对话视图：事件流按回合分组（user 事件开新回合；旧数据无 user 事件时按 final 分）
+  const turns = useMemo(() => {
+    const list: Turn[] = []
+    let cur: Turn | null = null
+    const open = (userText: string | null): Turn => {
+      cur = { userText, work: [], text: '', final: null, usage: null }
+      list.push(cur)
+      return cur
+    }
+    for (const e of events) {
+      if (e.kind === 'user') {
+        open(e.text ?? '')
+        continue
+      }
+      let t = cur ?? open(null)
+      if ((e.kind === 'text' || e.kind === 'final') && t.final !== null) t = open(null)
+      if (e.kind === 'text') t.text += e.text ?? ''
+      else if (e.kind === 'final') t.final = e.text ?? ''
+      else if (e.kind === 'usage') t.usage = { ...(t.usage ?? {}), ...cleanUsage(e.data) }
+      else t.work.push(e)
+    }
+    // 旧任务（无 user 事件）的兜底：首回合用户气泡用 task.prompt 补
+    if (list.length && list[0].userText == null) list[0].userText = task.prompt || null
+    if (!list.length && task.prompt) list.push({ userText: task.prompt, work: [], text: '', final: null, usage: null })
+    return list
+  }, [events, task.prompt])
 
   const turnActive = task.status === 'running'
 
   // 自动滚底
   useEffect(() => {
     if (tab === 'log' && logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
-  }, [events, tab, streamText])
+  }, [events, tab, turns])
 
   const doCancel = async () => {
     setBusy(true)
@@ -97,6 +118,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     if (!content || busy) return
     setBusy(true)
     setFollowUp('')
+    if (followRef.current) followRef.current.style.height = 'auto'
     const r = await bridge.tasks.followUp(task.id, content)
     if (!r.ok) alert(r.error)
     setBusy(false)
@@ -213,7 +235,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
 
       <div className="tabs">
         <button className={tab === 'log' ? 'active' : ''} onClick={() => setTab('log')}>
-          执行日志
+          对话
         </button>
         <button className={tab === 'result' ? 'active' : ''} onClick={() => setTab('result')}>
           结果
@@ -225,21 +247,45 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
 
       <div className="detail-body">
         {tab === 'log' && (
-          <div className="log" ref={logRef}>
-            <div className="log-prompt">
-              <span className="log-label">prompt</span>
-              <pre>{task.prompt}</pre>
-            </div>
-            {events.map((e) => (
-              <LogLine key={e.seq} e={e} />
-            ))}
-            {turnActive && streamText && (
-              <div className="log-stream">
-                <span className="log-label">agent</span>
-                <pre>{streamText}</pre>
-              </div>
-            )}
-            {turnActive && <div className="log-running">● 执行中…</div>}
+          <div className="log chat" ref={logRef}>
+            {turns.map((turn, i) => {
+              const isLast = i === turns.length - 1
+              const streaming = isLast && turnActive
+              const pending = isLast && task.status === 'queued'
+              const hasBubble = turn.final != null || !!turn.text || streaming || pending
+              return (
+                <div className="turn" key={i}>
+                  {turn.userText != null && (
+                    <div className="bubble user">
+                      <pre>{turn.userText}</pre>
+                    </div>
+                  )}
+                  {turn.work.length > 0 && (
+                    <details className="worklog">
+                      <summary>🔧 工作过程（{turn.work.filter((e) => e.kind === 'tool').length} 次工具调用）</summary>
+                      <div className="worklog-body">
+                        {turn.work.map((e) => (
+                          <LogLine key={e.seq} e={e} />
+                        ))}
+                      </div>
+                    </details>
+                  )}
+                  {hasBubble && (
+                    <div className="bubble agent">
+                      {turn.final != null ? (
+                        <Markdown text={turn.final} />
+                      ) : turn.text ? (
+                        <pre className="streaming">{turn.text}</pre>
+                      ) : null}
+                      {streaming && <div className="log-running">● 回复中…</div>}
+                      {pending && <div className="log-running">排队等待执行…</div>}
+                      {turn.usage && <UsageBadge usage={turn.usage} />}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+            {turns.length === 0 && <div className="list-empty">（无对话内容）</div>}
           </div>
         )}
         {tab === 'result' && (
@@ -264,13 +310,21 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
       {task.status === 'done' && task.sessionId && task.mode !== 'squad' && (
         <footer className="followup">
           <textarea
+            ref={followRef}
             value={followUp}
-            placeholder="追问 / 继续这个会话…"
-            onChange={(e) => setFollowUp(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendFollowUp()
+            placeholder="追问 / 继续这个会话…（Enter 发送，Shift+Enter 换行）"
+            rows={1}
+            onChange={(e) => {
+              setFollowUp(e.target.value)
+              autoGrow(e.target)
             }}
-            rows={2}
+            onKeyDown={(e) => {
+              // 回车发送；中文输入法组词的 Enter 不算（isComposing）
+              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                e.preventDefault()
+                void sendFollowUp()
+              }
+            }}
           />
           <button className="btn primary" disabled={busy || !followUp.trim()} onClick={sendFollowUp}>
             发送
@@ -281,16 +335,53 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   )
 }
 
-function LogLine({ e }: { e: TaskEvent }) {
-  if (e.kind === 'text') return null // 文本在 stream 区聚合展示
-  if (e.kind === 'final') {
-    return (
-      <div className="log-final">
-        <span className="log-label ok">final</span>
-        <Markdown text={e.text ?? ''} />
-      </div>
-    )
+/** 对话视图的一个回合：用户输入 → 工作过程（折叠）→ 回复气泡（含用量角标） */
+interface Turn {
+  userText: string | null
+  work: TaskEvent[]
+  text: string
+  final: string | null
+  usage: Record<string, unknown> | null
+}
+
+/** 去掉 usage 里的空值，便于逐条合并 */
+function cleanUsage(data: unknown): Record<string, unknown> {
+  if (!data || typeof data !== 'object') return {}
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(data as Record<string, unknown>)) {
+    if (v !== undefined && v !== null && v !== '') out[k] = v
   }
+  return out
+}
+
+/** textarea 自适应高度：随内容长高，封顶 max */
+function autoGrow(el: HTMLTextAreaElement, max = 200) {
+  el.style.height = 'auto'
+  el.style.height = `${Math.min(el.scrollHeight, max)}px`
+}
+
+/** 回复气泡右下角的用量角标 */
+function UsageBadge({ usage }: { usage: Record<string, unknown> }) {
+  const num = (v: unknown) => (typeof v === 'number' ? v : undefined)
+  const tokens = num(usage.totalTokens) ?? num(usage.tokenCount)
+  const inp = num(usage.inputTokens) ?? num(usage.input_tokens)
+  const out = num(usage.outputTokens) ?? num(usage.output_tokens)
+  const dur = num(usage.durationMs)
+  const cost = num(usage.costUsd)
+  const nTurns = num(usage.numTurns)
+  const parts: string[] = []
+  if (tokens) parts.push(`${tokens.toLocaleString()} tokens`)
+  else if (inp != null || out != null) parts.push(`${(inp ?? 0).toLocaleString()} / ${(out ?? 0).toLocaleString()} tokens`)
+  if (tokens && inp != null && out != null) parts.push(`in ${inp.toLocaleString()} / out ${out.toLocaleString()}`)
+  if (dur != null) parts.push(fmtDuration(dur))
+  if (cost != null) parts.push(`$${cost.toFixed(4)}`)
+  if (nTurns != null) parts.push(`${nTurns} 轮`)
+  if (!parts.length) return null
+  return <span className="bubble-usage">⚡ {parts.join(' · ')}</span>
+}
+
+function LogLine({ e }: { e: TaskEvent }) {
+  // text/final/user/usage 由气泡负责，这里只渲染工作过程里的行
   if (e.kind === 'status') {
     return (
       <div className="log-line status">
@@ -324,23 +415,6 @@ function LogLine({ e }: { e: TaskEvent }) {
     return (
       <div className="log-line tool">
         <span className="ts">{time}</span> 🛠 <b>{name}</b>
-      </div>
-    )
-  }
-  if (e.kind === 'usage') {
-    const d = (e.data ?? {}) as Record<string, unknown>
-    const tokens = (d.totalTokens ?? d.tokenCount) as number | undefined
-    const parts: string[] = []
-    if (tokens) parts.push(`${tokens.toLocaleString()} tokens`)
-    const inp = d.inputTokens as number | undefined
-    const out = d.outputTokens as number | undefined
-    if (inp != null && out != null) parts.push(`in ${inp.toLocaleString()} / out ${out.toLocaleString()}`)
-    const dur = d.durationMs as number | undefined
-    if (dur != null) parts.push(`${fmtDuration(dur)}`)
-    if (parts.length === 0) return null
-    return (
-      <div className="log-line usage">
-        <span className="ts">{new Date(e.ts).toISOString().slice(11, 19)}</span> ⚡ {parts.join(' · ')}
       </div>
     )
   }

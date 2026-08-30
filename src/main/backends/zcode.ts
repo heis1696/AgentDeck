@@ -414,13 +414,15 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
             }
             // scheduled 阶段静默
           } else if (payload.response !== undefined && payload.usage !== undefined) {
-            // 回合终态：payload 带 response + usage
+            // 回合终态：payload 带 response + usage。
+            // telemetry 的 turn.terminal 可能先到并已发过 usage/final，此时跳过，避免每回合双份用量
+            const alreadyEnded = lastTurnEnd !== null
             handleTurnEnd({
               response: String(payload.response ?? ''),
               ok: payload.resultType !== 'error',
               error: payload.resultType === 'error' ? String(payload.response ?? '') : undefined
             })
-            if (payload.usage) {
+            if (payload.usage && !alreadyEnded) {
               emit({ kind: 'usage', data: payload.usage })
             }
           } else if (type === 'checkpoint.created') {

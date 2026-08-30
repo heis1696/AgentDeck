@@ -53,6 +53,7 @@ export interface TaskEvent {
   seq: number
   ts: number
   kind:
+    | 'user' // 用户输入（首条 prompt / 追问），对话视图按它分回合
     | 'status' // 状态变化/请求状态
     | 'text' // 流式文本增量
     | 'final' // 回合最终回复

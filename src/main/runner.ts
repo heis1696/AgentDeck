@@ -45,6 +45,11 @@ export class TaskRunner {
   pushTask(taskId: string) {
     this.win()?.send('task:updated', this.store.get(taskId))
   }
+  /** 记录用户输入（首条 prompt / 追问），对话视图按 user 事件分气泡 */
+  private recordUser(taskId: string, text: string) {
+    const full = this.store.appendEvent(taskId, { ts: Date.now(), kind: 'user', text })
+    if (full) this.pushEvent(taskId, full)
+  }
   pushEvent(taskId: string, e: TaskEvent) {
     this.win()?.send('task:event', { taskId, event: e })
   }
@@ -171,6 +176,7 @@ export class TaskRunner {
     else this.runningNormal++
     this.store.update(taskId, { status: 'running', startedAt: Date.now(), error: undefined })
     this.pushTask(taskId)
+    this.recordUser(taskId, task.prompt)
 
     // squad 领队：编排本身不占并发槽（worker 用独立槽），立即释放并转交
     if (task.mode === 'squad' && this.squad) {
@@ -255,6 +261,7 @@ export class TaskRunner {
     let session = this.sessions.get(taskId)
     const backend = this.backends.get(task.backend)
     if (!backend) return { ok: false, error: '后端不可用' }
+    this.recordUser(taskId, content)
 
     if (!session) {
       // 应用重启后 session 丢失：用 zcode 的 session/resume 恢复

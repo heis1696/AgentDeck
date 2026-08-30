@@ -2,9 +2,9 @@ import { useEffect, useState } from 'react'
 import { bridge, useTasks } from './api'
 import { TaskList } from './components/TaskList'
 import { TaskDetail } from './components/TaskDetail'
-import { NewTaskDialog } from './components/NewTaskDialog'
 import { SettingsView } from './components/SettingsView'
 import { TeamView } from './components/TeamView'
+import { WorkspaceView, FOCUS_WORKSPACE } from './components/WorkspaceView'
 import type { Task } from '../../shared/types'
 
 type View = 'tasks' | 'team' | 'settings'
@@ -13,25 +13,26 @@ export function App() {
   const { tasks } = useTasks()
   const [view, setView] = useState<View>('tasks')
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [showNew, setShowNew] = useState(false)
   const selected = tasks.find((t) => t.id === selectedId) ?? null
 
-  // 任务完成/失败 → 系统通知
-  useEffect(() => {
-    // 通知由主进程 task:notify 推送，这里仅负责聚焦（v1 简化：不加监听）
-  }, [])
-
-  // 删除任务后若正选中它，回到空状态
+  // 删除任务后若正选中它，回到工作区
   useEffect(() => bridge.tasks.onDeleted((id) => {
     setSelectedId((cur) => (cur === id ? null : cur))
   }), [])
 
-  // 快捷键：Ctrl+N 新任务
+  /** 回到常驻工作区（Ctrl+N / 侧栏按钮） */
+  const goWorkspace = () => {
+    setSelectedId(null)
+    setView('tasks')
+    window.dispatchEvent(new Event(FOCUS_WORKSPACE))
+  }
+
+  // 快捷键：Ctrl+N 新任务（聚焦工作区输入框）
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'n') {
         e.preventDefault()
-        setShowNew(true)
+        goWorkspace()
       }
     }
     window.addEventListener('keydown', h)
@@ -39,7 +40,6 @@ export function App() {
   }, [])
 
   const onCreated = (t: Task) => {
-    setShowNew(false)
     setSelectedId(t.id)
     setView('tasks')
   }
@@ -50,7 +50,7 @@ export function App() {
         <div className="brand">
           <span className="brand-mark">⚓</span> AgentDeck
         </div>
-        <button className="new-task-btn" onClick={() => setShowNew(true)}>
+        <button className="new-task-btn" onClick={goWorkspace}>
           ＋ 新任务 <kbd>Ctrl+N</kbd>
         </button>
         <nav className="nav">
@@ -74,14 +74,9 @@ export function App() {
         ) : selected ? (
           <TaskDetail task={selected} tasks={tasks} onSelect={setSelectedId} />
         ) : (
-          <div className="empty">
-            <div className="empty-icon">⚓</div>
-            <p>左侧选择任务，或 Ctrl+N 创建新任务</p>
-            <p className="hint">单任务或 squad 协同均可指定队员（claude / codex / opencode / zcode）</p>
-          </div>
+          <WorkspaceView onCreated={onCreated} />
         )}
       </main>
-      {showNew && <NewTaskDialog onClose={() => setShowNew(false)} onCreated={onCreated} />}
     </div>
   )
 }
