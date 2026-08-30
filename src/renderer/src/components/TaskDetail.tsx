@@ -61,7 +61,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     const list: Turn[] = []
     let cur: Turn | null = null
     const open = (userText: string | null): Turn => {
-      cur = { userText, work: [], text: '', final: null, usage: null }
+      cur = { userText, work: [], sysNotes: [], text: '', final: null, usage: null }
       list.push(cur)
       return cur
     }
@@ -75,11 +75,12 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
       if (e.kind === 'text') t.text += e.text ?? ''
       else if (e.kind === 'final') t.final = e.text ?? ''
       else if (e.kind === 'usage') t.usage = { ...(t.usage ?? {}), ...cleanUsage(e.data) }
+      else if (e.kind === 'status' && SYS_NOTE_RE.test(e.text ?? '')) t.sysNotes.push(e.text ?? '')
       else t.work.push(e)
     }
     // 旧任务（无 user 事件）的兜底：首回合用户气泡用 task.prompt 补
     if (list.length && list[0].userText == null) list[0].userText = task.prompt || null
-    if (!list.length && task.prompt) list.push({ userText: task.prompt, work: [], text: '', final: null, usage: null })
+    if (!list.length && task.prompt) list.push({ userText: task.prompt, work: [], sysNotes: [], text: '', final: null, usage: null })
     return list
   }, [events, task.prompt])
 
@@ -292,8 +293,15 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
                       <pre>{turn.userText}</pre>
                     </div>
                   )}
+                  {turn.sysNotes.length > 0 && (
+                    <div className="sys-strip">
+                      {turn.sysNotes.map((n, j) => (
+                        <div key={j} className="sys-note">⚡ {n}</div>
+                      ))}
+                    </div>
+                  )}
                   {turn.work.length > 0 && (
-                    <details className="worklog">
+                    <details className="worklog" open={isLast && turnActive ? true : undefined}>
                       <summary>
                         🔧 工作过程（{turn.work.filter((e) => e.kind === 'tool').length} 次工具调用）
                         <ToolChips work={turn.work} />
@@ -370,14 +378,19 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   )
 }
 
-/** 对话视图的一个回合：用户输入 → 工作过程（折叠）→ 回复气泡（含用量角标） */
+/** 对话视图的一个回合：用户输入 → 系统条带（派工/重试/集成）→ 工作过程（折叠）→ 回复气泡（含用量角标） */
 interface Turn {
   userText: string | null
   work: TaskEvent[]
+  /** 委派/重试/集成等生命周期事件——提升为可见条带，不折叠 */
+  sysNotes: string[]
   text: string
   final: string | null
   usage: Record<string, unknown> | null
 }
+
+/** 需要可见展示的系统事件（委派轮次、防环拒绝、自动重试、集成结果、回灌） */
+const SYS_NOTE_RE = /(第\s*\d+\s*轮|拒绝派给|未找到可驱使|自动重试|不再下派|回灌|集成)/
 
 /** 工具调用分类（对标 Multica 转录的 Commands/Edits/Reads/Other） */
 function classifyTool(name: string): 'reads' | 'commands' | 'edits' | 'other' {

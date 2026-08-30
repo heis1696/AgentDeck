@@ -125,7 +125,7 @@ export function TeamView() {
               />
             </label>
             <label className="field">
-              <span>可驱使的队员（勾选后它成为领队：对话中可自行把子任务派给他们）</span>
+              <span>可驱使的队员（勾选后它成为领队/子领队：对话中可自行把子任务派给他们；领队→子领队→队员最多 3 层）</span>
               <div className="agent-picker">
                 {agents.filter((o) => o.id !== editing.id).length === 0 && <span className="hint">（队里还没有其他队员）</span>}
                 {agents
@@ -159,7 +159,7 @@ export function TeamView() {
               <input type="color" value={editing.color} onChange={(e) => update(editing, { color: e.target.value })} />
             </label>
             <div className="dialog-footer">
-              <span className="hint">勾选可驱使队员即成领队；委派在对话中自动发生，无需切模式</span>
+              <span className="hint">勾选可驱使队员即成领队（队员也可以是子领队）；委派在对话中自动发生，无需切模式</span>
               <button className="btn primary" onClick={commit} disabled={!editing.name.trim()}>
                 保存
               </button>
