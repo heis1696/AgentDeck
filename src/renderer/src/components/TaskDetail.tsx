@@ -178,7 +178,26 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
         </div>
       </header>
 
-      {task.status === 'failed' && task.error && <div className="error-banner">⚠ {task.error}</div>}
+      {task.status === 'failed' && task.error && (
+        <div className="error-banner">
+          {task.failure ? (
+            <>
+              <div className="failure-head">
+                ⚠ <b>{task.failure.title}</b>
+                <span className="failure-code">{task.failure.code}</span>
+                {task.failure.retryable && <span className="failure-retryable">可重试</span>}
+              </div>
+              <div className="failure-hint">{task.failure.hint}</div>
+              <details className="failure-raw">
+                <summary>错误原文</summary>
+                <pre>{task.error}</pre>
+              </details>
+            </>
+          ) : (
+            <>⚠ {task.error}</>
+          )}
+        </div>
+      )}
 
       {task.integration?.note && (
         <div className={`integration-banner ${task.integration.note.includes('未完成') ? 'warn' : ''}`}>

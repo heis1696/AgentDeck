@@ -2,6 +2,16 @@
 
 export type TaskStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
 
+/** 失败分类（main/failure.ts 产出；code 稳定，文案可变） */
+export interface FailureInfo {
+  code:
+    | 'cli_missing' | 'protocol_config' | 'provider_auth' | 'provider_quota' | 'rate_limit'
+    | 'output_limit' | 'context_overflow' | 'timeout' | 'sandbox' | 'process_crash' | 'unknown'
+  title: string
+  hint: string
+  retryable: boolean
+}
+
 /** 领队任务的 git 集成结果 */
 export interface IntegrationInfo {
   /** 集成分支名（repo 任务用） */
@@ -34,6 +44,8 @@ export interface Task {
   result?: string
   /** 失败原因 */
   error?: string
+  /** 失败分类（error 的人话解读） */
+  failure?: FailureInfo
   /** zcode 会话 id，用于续聊 */
   sessionId?: string
   /** 完成时抓取的 git 改动 */

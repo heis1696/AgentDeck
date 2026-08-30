@@ -198,6 +198,33 @@ body {
   font-size: 12px;
 }
 
+.failure-head { display: flex; align-items: center; gap: 8px; }
+.failure-code {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(229, 83, 75, 0.18);
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+}
+.failure-retryable {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(79, 140, 255, 0.16);
+  color: #4f8cff;
+  font-size: 11px;
+}
+.failure-hint { margin-top: 4px; opacity: 0.85; }
+.failure-raw { margin-top: 6px; opacity: 0.75; }
+.failure-raw summary { cursor: pointer; user-select: none; }
+.failure-raw pre {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 11px;
+  max-height: 120px;
+  overflow: auto;
+}
+
 .permission-banner {
   margin: 0 20px 8px;
   padding: 10px 14px;

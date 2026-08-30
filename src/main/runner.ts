@@ -5,6 +5,7 @@ import type { TaskStore } from './store'
 import type { AgentBackend, BackendSession, PermissionRequest } from './backends/types'
 import { snapshotGitAfter } from './git'
 import { buildAgentPrompt, buildDelegationBlock, runDelegationLoop, type AgentLike } from './delegate'
+import { classifyFailure } from './failure'
 
 function getWindows(): { send: (ch: string, v: unknown) => void }[] {
   try {
@@ -122,6 +123,11 @@ export class TaskRunner {
     this.pushTask(taskId)
   }
 
+  /** 失败落库：原始错误 + 分类解读（P1） */
+  private failTask(taskId: string, error: string) {
+    this.store.update(taskId, { status: 'failed', endedAt: Date.now(), error, failure: classifyFailure({ error }) })
+  }
+
   enqueue(task: Task) {
     this.pushTask(task.id)
     this.pump()
@@ -163,14 +169,14 @@ export class TaskRunner {
     if (!task || task.status !== 'queued') return
     const backend = this.backends.get(task.backend)
     if (!backend) {
-      this.store.update(taskId, { status: 'failed', error: `未知后端: ${task.backend}`, endedAt: Date.now() })
+      this.failTask(taskId, `未知后端: ${task.backend}`)
       this.pushTask(taskId)
       return
     }
     const isWorker = !!task.parentTaskId
     if (isWorker) this.runningWorkers++
     else this.runningNormal++
-    this.store.update(taskId, { status: 'running', startedAt: Date.now(), error: undefined })
+    this.store.update(taskId, { status: 'running', startedAt: Date.now(), error: undefined, failure: undefined })
     this.pushTask(taskId)
     this.recordUser(taskId, task.prompt)
 
@@ -218,16 +224,13 @@ export class TaskRunner {
         await this.finalizeDone(taskId, finalText)
         if (this.opts().notify) this.notify(task, '完成', finalText)
       } else {
-        this.store.update(taskId, { status: 'failed', endedAt: Date.now(), error: r.error || '回合失败' })
+        this.failTask(taskId, r.error || '回合失败')
         if (this.opts().notify) this.notify(task, '失败', r.error || '')
       }
     } catch (e) {
-      this.store.update(taskId, {
-        status: 'failed',
-        endedAt: Date.now(),
-        error: e instanceof Error ? e.message : String(e)
-      })
-      if (this.opts().notify) this.notify(task, '失败', e instanceof Error ? e.message : String(e))
+      const msg = e instanceof Error ? e.message : String(e)
+      this.failTask(taskId, msg)
+      if (this.opts().notify) this.notify(task, '失败', msg)
     } finally {
       this.store.flushEvents(taskId)
       this.launchHandles.delete(taskId)
@@ -273,7 +276,7 @@ export class TaskRunner {
     if (!session) {
       // 应用重启后 session 丢失：用 zcode 的 session/resume 恢复
       if (!task.sessionId) return { ok: false, error: '无会话可恢复' }
-      this.store.update(taskId, { status: 'running', endedAt: undefined, error: undefined })
+      this.store.update(taskId, { status: 'running', endedAt: undefined, error: undefined, failure: undefined })
       this.pushTask(taskId)
       try {
         const firstTurn = new Promise<{ ok: boolean; response: string; error?: string }>((resolve) => {
@@ -300,12 +303,12 @@ export class TaskRunner {
         return { ok: true }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
-        this.store.update(taskId, { status: 'failed', endedAt: Date.now(), error: msg })
+        this.failTask(taskId, msg)
         this.pushTask(taskId)
         return { ok: false, error: msg }
       }
     }
-    this.store.update(taskId, { status: 'running', endedAt: undefined, error: undefined })
+    this.store.update(taskId, { status: 'running', endedAt: undefined, error: undefined, failure: undefined })
     this.pushTask(taskId)
     try {
       await session.send(content)
@@ -314,7 +317,7 @@ export class TaskRunner {
       return { ok: true }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      this.store.update(taskId, { status: 'failed', endedAt: Date.now(), error: msg })
+      this.failTask(taskId, msg)
       this.pushTask(taskId)
       return { ok: false, error: msg }
     }

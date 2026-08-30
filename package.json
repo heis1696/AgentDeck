@@ -18,7 +18,8 @@
     "smoke:clis": "node scripts/smoke-cli-adapters.mjs",
     "smoke:delegate": "node scripts/smoke-delegate.mjs",
     "e2e:delegate": "node scripts/e2e-delegate-real.mjs",
-    "smoke:migration": "node scripts/smoke-migration.mjs"
+    "smoke:migration": "node scripts/smoke-migration.mjs",
+    "smoke:failure": "node scripts/smoke-failure.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

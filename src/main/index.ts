@@ -138,7 +138,7 @@ app.whenReady().then(() => {
     const t = store.get(id)
     if (!t) return { ok: false, error: '任务不存在' }
     if (t.status === 'running' || t.status === 'queued') return { ok: false, error: '任务已在队列/运行中' }
-    store.update(id, { status: 'queued', error: undefined, result: undefined, sessionId: undefined })
+    store.update(id, { status: 'queued', error: undefined, failure: undefined, result: undefined, sessionId: undefined })
     runner.enqueue(store.get(id)!)
     return { ok: true }
   })
