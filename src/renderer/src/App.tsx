@@ -7,6 +7,7 @@ import { TeamView } from './components/TeamView'
 import { UsageView } from './components/UsageView'
 import { WorkspaceView, FOCUS_WORKSPACE } from './components/WorkspaceView'
 import { TabBar } from './components/TabBar'
+import { BoardView } from './components/BoardView'
 import { ListTodo, Users, Gauge, Settings } from 'lucide-react'
 import type { Task } from '../../shared/types'
 
@@ -17,6 +18,9 @@ const MAX_TABS = 8
 export function App() {
   const { tasks } = useTasks()
   const [view, setView] = useState<View>('tasks')
+  /** 任务页展示形态：列表 / 看板（记忆） */
+  const [board, setBoard] = useState(() => localStorage.getItem('agentdeck:board') === '1')
+  const toggleBoard = () => setBoard((b) => { localStorage.setItem('agentdeck:board', b ? '0' : '1'); return !b })
   /** 已打开的任务标签（taskId 列表，按打开顺序）；null 激活 = 工作区起始页 */
   const [tabs, setTabs] = useState<string[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
@@ -111,9 +115,15 @@ export function App() {
           <UsageView />
         ) : (
           <div className="tasks-column">
+            <div className="tasks-toolbar">
+              <button className={`btn pill ${board ? '' : 'on'}`} onClick={() => board && toggleBoard()}>列表</button>
+              <button className={`btn pill ${board ? 'on' : ''}`} onClick={() => !board && toggleBoard()}>看板</button>
+            </div>
             {tabs.length > 0 && <TabBar tabs={tabs} tasks={tasks} activeId={activeId} onSelect={setActiveId} onClose={closeTab} />}
             {selected ? (
               <TaskDetail task={selected} tasks={tasks} onSelect={openTask} />
+            ) : board ? (
+              <BoardView tasks={tasks.filter((t) => !t.parentTaskId)} onOpen={openTask} />
             ) : (
               <WorkspaceView onCreated={onCreated} />
             )}

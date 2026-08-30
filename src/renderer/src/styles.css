@@ -997,3 +997,47 @@ body { font-family: var(--font-ui); }
   transition: all 0.12s ease;
 }
 .worker-card:hover { border-color: var(--accent); background: var(--bg-hover); }
+
+/* ---- 看板视图（0.9.0） ---- */
+.tasks-toolbar { display: flex; gap: 4px; padding: 8px 14px 0; flex-shrink: 0; }
+.btn.pill { border-radius: 99px; font-size: 11.5px; padding: 3px 14px; color: var(--text-dim); }
+.btn.pill.on { background: var(--accent-soft); color: var(--accent); box-shadow: inset 0 0 0 1px rgba(91,140,255,.3); border-color: transparent; }
+.board {
+  flex: 1; display: flex; gap: 12px;
+  padding: 12px 14px 16px;
+  overflow-x: auto; align-items: flex-start;
+}
+.board-col {
+  min-width: 220px; max-width: 280px; flex: 1;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  display: flex; flex-direction: column;
+  max-height: 100%;
+}
+.board-col-head {
+  display: flex; align-items: center; gap: 7px;
+  padding: 10px 12px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.board-col-title { font-size: 12.5px; font-weight: 600; }
+.board-col-count {
+  margin-left: auto;
+  font-size: 10.5px; color: var(--text-faint);
+  background: var(--bg-hover);
+  border-radius: 99px; padding: 1px 8px;
+}
+.board-col-body { padding: 8px; display: flex; flex-direction: column; gap: 7px; overflow-y: auto; }
+.board-col-empty { text-align: center; color: var(--text-faint); font-size: 11px; padding: 10px 0; }
+.board-card {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 9px 11px;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+.board-card:hover { border-color: var(--accent); transform: translateY(-1px); box-shadow: var(--shadow-pop); }
+.board-card-worker { font-size: 10px; color: var(--text-faint); }
+.board-card-title { font-size: 12.5px; font-weight: 550; margin: 2px 0 6px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.board-card-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
