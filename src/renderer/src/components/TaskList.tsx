@@ -38,6 +38,7 @@ export function TaskList({ tasks, selectedId, onSelect }: { tasks: Task[]; selec
           {kids.length > 0 && <span className="badge badge-squad">⚡ 委派 {kidsDone}/{kids.length}</span>}{' '}<span className="badge">{t.backend}</span>
           {t.status === 'running' && <span className="mini">执行中…</span>}
           {t.status === 'queued' && <span className="mini">排队</span>}
+          {!!t.attempt && (t.status === 'running' || t.status === 'queued') && <span className="mini">⟳{t.attempt}/2</span>}
           {(t.status === 'done' || t.status === 'failed' || t.status === 'cancelled') && (
             <>
               <span className="mini">{fmtTime(t.endedAt)}</span>

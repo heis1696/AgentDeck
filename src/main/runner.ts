@@ -227,11 +227,13 @@ export class TaskRunner {
         if (this.opts().notify) this.notify(task, '完成', finalText)
       } else {
         this.failTask(taskId, r.error || '回合失败')
+        this.maybeAutoRetry(taskId)
         if (this.opts().notify) this.notify(task, '失败', r.error || '')
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       this.failTask(taskId, msg)
+      this.maybeAutoRetry(taskId)
       if (this.opts().notify) this.notify(task, '失败', msg)
     } finally {
       this.store.flushEvents(taskId)
@@ -241,6 +243,36 @@ export class TaskRunner {
       else this.runningNormal--
       this.pump()
     }
+  }
+
+  /**
+   * 自动重试（P4）：仅 retryable 的瞬态失败（限流/超时/进程崩溃/沙箱），上限 2 次。
+   * 第 1 次优先带会话续跑（同后端可 resume）；第 2 次强制新会话（会话可能已被污染）。
+   * 手动"重新运行"不受此影响（恒新会话、attempt 清零）。
+   */
+  private maybeAutoRetry(taskId: string) {
+    const task = this.store.get(taskId)
+    if (!task || task.status !== 'failed') return
+    const attempt = task.attempt ?? 0
+    if (attempt >= 2) return
+    const failure = task.failure
+    if (!failure?.retryable) return
+    const next = attempt + 1
+    const fresh = next >= 2 || !task.sessionId || task.backend === 'dsh'
+    this.store.update(taskId, {
+      status: 'queued',
+      endedAt: undefined,
+      attempt: next,
+      ...(fresh ? { sessionId: undefined } : {})
+    })
+    const full = this.store.appendEvent(taskId, {
+      ts: Date.now(),
+      kind: 'status',
+      text: `⟳ 自动重试 ${next}/2（${failure.title}）${fresh ? '· 新会话' : '· 续会话'}`
+    })
+    if (full) this.pushEvent(taskId, full)
+    this.pushTask(taskId)
+    this.enqueue(this.store.get(taskId)!)
   }
 
   private notify(task: Task, what: string, body: string) {

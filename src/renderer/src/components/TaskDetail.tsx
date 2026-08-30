@@ -146,6 +146,9 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
                 ↩ 领队任务: {parent.title}
               </a>
             )}
+            {!!task.attempt && (
+              <span className="mini retry-chip" title={`自动重试 ${task.attempt}/2`}>⟳ 重试 {task.attempt}/2</span>
+            )}
             {duration > 0 && <span className="mini">{fmtDuration(duration)}</span>}
             {task.workdir && (
               <a className="mini link" title={task.workdir} onClick={() => bridge.openPath(task.workdir)}>

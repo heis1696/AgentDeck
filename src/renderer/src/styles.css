@@ -696,3 +696,5 @@ body {
 .dl-del { color: #ef8f8a; background: rgba(229, 101, 95, 0.08); }
 .dl-ctx { opacity: 0.75; }
 .tool-chips { opacity: 0.65; }
+
+.retry-chip { color: #e8b73f; }

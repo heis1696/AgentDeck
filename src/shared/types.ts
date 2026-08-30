@@ -57,6 +57,8 @@ export interface Task {
   error?: string
   /** 失败分类（error 的人话解读） */
   failure?: FailureInfo
+  /** 自动重试次数（0/缺省 = 首次；仅 retryable 失败自动 +1，上限 2） */
+  attempt?: number
   /** zcode 会话 id，用于续聊 */
   sessionId?: string
   /** 完成时抓取的 git 改动 */

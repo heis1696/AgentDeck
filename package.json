@@ -20,7 +20,8 @@
     "e2e:delegate": "node scripts/e2e-delegate-real.mjs",
     "smoke:migration": "node scripts/smoke-migration.mjs",
     "smoke:failure": "node scripts/smoke-failure.mjs",
-    "smoke:diff": "node scripts/smoke-diff.mjs"
+    "smoke:diff": "node scripts/smoke-diff.mjs",
+    "smoke:retry": "node scripts/smoke-retry.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
