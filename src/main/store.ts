@@ -1,7 +1,7 @@
 // 文件存储：userData/tasks.json（索引）+ userData/tasks/<id>/events.jsonl（日志流）
 import fs from 'node:fs'
 import path from 'node:path'
-import type { Task, TaskEvent } from '../shared/types'
+import type { Task, TaskEvent, IntegrationInfo } from '../shared/types'
 
 export class TaskStore {
   private dir: string
@@ -26,9 +26,35 @@ export class TaskStore {
   private loadIndex() {
     try {
       const raw = fs.readFileSync(this.indexFile(), 'utf8')
-      const list = JSON.parse(raw) as Task[]
-      for (const t of list) this.tasks.set(t.id, t)
+      const list = JSON.parse(raw) as unknown[]
+      for (const t of list) this.tasks.set((t as Task).id, this.migrate(t))
+      if (list.length) this.saveIndex()
     } catch {}
+  }
+
+  /** 一次性迁移 + 启动清扫：0.3.x 双轨 squad 字段 → integration；重启后悬挂的 running 任务标失败 */
+  private migrate(raw: unknown): Task {
+    const old = raw as Task & { mode?: string; squad?: { integrationBranch?: string; integrationNote?: string } }
+    const out = { ...old } as Partial<Task> & Record<string, unknown>
+    delete out.mode
+    if (old.squad) {
+      const integration: IntegrationInfo = {}
+      if (old.squad.integrationBranch) integration.branch = old.squad.integrationBranch
+      if (old.squad.integrationNote) integration.note = old.squad.integrationNote
+      delete out.squad
+      if (integration.branch || integration.note) out.integration = integration
+      if (old.status === 'running') {
+        out.status = 'failed'
+        out.error = '旧版协同任务在升级后中断，请重新运行'
+        out.endedAt = Date.now()
+      }
+    } else if (old.status === 'running') {
+      // 应用重启后没有任何会话能续上这个任务——标失败让用户重试，而不是永远"执行中"
+      out.status = 'failed'
+      out.error = '应用重启导致任务中断，请重新运行'
+      out.endedAt = Date.now()
+    }
+    return out as Task
   }
 
   private saveIndex() {
@@ -38,18 +64,17 @@ export class TaskStore {
     fs.renameSync(tmp, this.indexFile())
   }
 
-  create(input: Pick<Task, 'title' | 'prompt' | 'workdir' | 'backend'> & Partial<Pick<Task, 'mode' | 'parentTaskId' | 'workerIndex' | 'squad' | 'agentId'>>): Task {
+  create(input: Pick<Task, 'title' | 'prompt' | 'workdir' | 'backend'> & Partial<Pick<Task, 'parentTaskId' | 'workerIndex' | 'integration' | 'agentId'>>): Task {
     const task: Task = {
       id: `t_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
       title: input.title,
       prompt: input.prompt,
       workdir: input.workdir,
       backend: input.backend,
-      mode: input.mode ?? 'single',
       ...(input.agentId ? { agentId: input.agentId } : {}),
       ...(input.parentTaskId ? { parentTaskId: input.parentTaskId } : {}),
       ...(input.workerIndex !== undefined ? { workerIndex: input.workerIndex } : {}),
-      ...(input.squad ? { squad: input.squad } : {}),
+      ...(input.integration ? { integration: input.integration } : {}),
       status: 'queued',
       createdAt: Date.now(),
       eventCount: 0

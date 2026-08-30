@@ -4,7 +4,6 @@ import path from 'node:path'
 import fs from 'node:fs'
 import { TaskStore } from './store'
 import { TaskRunner } from './runner'
-import { SquadRunner } from './squad'
 import { loadSettings, saveSettings } from './settings'
 import { loadAgents, saveAgents, newAgentId, type Agent } from './agents'
 import { createZcodeBackend, findZcodeBundle, ensureZcodeCliConfig, zcodeDefaultPaths } from './backends/zcode'
@@ -64,31 +63,15 @@ app.whenReady().then(() => {
     concurrency: settings.concurrency,
     mode: settings.mode,
     notify: settings.notifyOnDone,
-    squadMaxWorkers: settings.squadMaxWorkers
+    workerConcurrency: settings.workerConcurrency
   }))
-  const squad = new SquadRunner({
-    store,
-    runner,
-    backends,
-    getAgents: () => agents,
-    opts: () => ({
-      concurrency: settings.concurrency,
-      mode: settings.mode,
-      notify: settings.notifyOnDone,
-      squadMaxWorkers: settings.squadMaxWorkers
-    }),
-    pushTask: (id) => runner.pushTask(id),
-    pushEvent: (id, e) => runner.pushEvent(id, e)
-  })
   runner.attachTeam(() => agents)
-  runner.attachSquad(squad)
-  void squad.recover()
 
   // ---- IPC ----
   ipcMain.handle('tasks:list', () => store.list())
   ipcMain.handle('tasks:get', (_e, id) => store.get(id) ?? null)
   ipcMain.handle('tasks:events', (_e, id: string, afterSeq: number) => store.readEvents(id, afterSeq))
-  ipcMain.handle('tasks:create', (_e, input: { title: string; prompt: string; workdir: string; backend?: string; agentId?: string; mode?: 'single' | 'squad'; maxWorkers?: number }) => {
+  ipcMain.handle('tasks:create', (_e, input: { title: string; prompt: string; workdir: string; backend?: string; agentId?: string }) => {
     // agentId 优先；backend 兜底为 zcode
     const agent = agents.find((a) => a.id === input.agentId)
     const backend = agent?.backend ?? input.backend ?? 'zcode'
@@ -97,9 +80,7 @@ app.whenReady().then(() => {
       prompt: input.prompt,
       workdir: input.workdir || '',
       backend,
-      ...(agent ? { agentId: agent.id } : {}),
-      mode: input.mode ?? 'single',
-      ...(input.mode === 'squad' ? { squad: { phase: 'planning', maxWorkers: Math.max(1, Math.min(input.maxWorkers ?? settings.squadMaxWorkers, 6)) } } : {})
+      ...(agent ? { agentId: agent.id } : {})
     })
     runner.enqueue(task)
     return task
@@ -143,7 +124,7 @@ app.whenReady().then(() => {
     const t = store.get(id)
     if (!t) return { ok: false, error: '任务不存在' }
     if (t.status === 'running') return { ok: false, error: '请先取消运行中的任务' }
-    // 级联删除 squad 子任务（父任务不在运行中时子任务不应仍在跑，若有则拒绝）
+    // 级联删除委派子任务（父任务不在运行中时子任务不应仍在跑，若有则拒绝）
     const kids = store.list().filter((x) => x.parentTaskId === id)
     if (kids.some((k) => k.status === 'running')) {
       return { ok: false, error: '请先取消运行中的子任务' }

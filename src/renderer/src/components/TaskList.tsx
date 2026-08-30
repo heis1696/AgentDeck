@@ -21,35 +21,34 @@ export function TaskList({ tasks, selectedId, onSelect }: { tasks: Task[]; selec
   const active = tasks.filter((t) => (t.status === 'running' || t.status === 'queued') && match(t))
   const finished = tasks.filter((t) => t.status !== 'running' && t.status !== 'queued' && match(t))
 
-  const item = (t: Task) => (
-    <div
-      key={t.id}
-      className={`task-item ${t.id === selectedId ? 'selected' : ''} status-${t.status} ${t.parentTaskId ? 'is-worker' : ''}`}
-      onClick={() => onSelect(t.id)}
-    >
-      <div className="task-item-row1">
-        <StatusDot status={t.status} />
-        <span className="task-item-title">{t.parentTaskId ? `└ ${t.title}` : t.title}</span>
+  const item = (t: Task) => {
+    const kids = tasks.filter((x) => x.parentTaskId === t.id)
+    const kidsDone = kids.filter((k) => k.status === 'done').length
+    return (
+      <div
+        key={t.id}
+        className={`task-item ${t.id === selectedId ? 'selected' : ''} status-${t.status} ${t.parentTaskId ? 'is-worker' : ''}`}
+        onClick={() => onSelect(t.id)}
+      >
+        <div className="task-item-row1">
+          <StatusDot status={t.status} />
+          <span className="task-item-title">{t.parentTaskId ? `└ ${t.title}` : t.title}</span>
+        </div>
+        <div className="task-item-row2">
+          {kids.length > 0 && <span className="badge badge-squad">⚡ 委派 {kidsDone}/{kids.length}</span>}{' '}<span className="badge">{t.backend}</span>
+          {t.status === 'running' && <span className="mini">执行中…</span>}
+          {t.status === 'queued' && <span className="mini">排队</span>}
+          {(t.status === 'done' || t.status === 'failed' || t.status === 'cancelled') && (
+            <>
+              <span className="mini">{fmtTime(t.endedAt)}</span>
+              {t.startedAt && t.endedAt ? <span className="mini">{fmtDuration(t.endedAt - t.startedAt)}</span> : null}
+            </>
+          )}
+          {t.workdir ? <span className="mini workdir" title={t.workdir}>{t.workdir.split(/[\\/]/).pop()}</span> : null}
+        </div>
       </div>
-      <div className="task-item-row2">
-        {t.squad ? <span className="badge badge-squad">⚡ 委派</span> : null}{' '}<span className="badge">{t.backend}</span>
-        {t.squad && t.status === 'running' && (
-          <span className="mini">
-            {{ planning: '规划中', executing: '子任务执行中', synthesizing: '汇总中', integrating: '集成中', done: '' }[t.squad.phase] || ''}
-          </span>
-        )}
-        {t.status === 'running' && t.mode === 'single' && <span className="mini">执行中…</span>}
-        {t.status === 'queued' && <span className="mini">排队</span>}
-        {(t.status === 'done' || t.status === 'failed' || t.status === 'cancelled') && (
-          <>
-            <span className="mini">{fmtTime(t.endedAt)}</span>
-            {t.startedAt && t.endedAt ? <span className="mini">{fmtDuration(t.endedAt - t.startedAt)}</span> : null}
-          </>
-        )}
-        {t.workdir ? <span className="mini workdir" title={t.workdir}>{t.workdir.split(/[\\/]/).pop()}</span> : null}
-      </div>
-    </div>
-  )
+    )
+  }
 
   return (
     <div className="task-list">

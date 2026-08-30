@@ -8,8 +8,11 @@ const file = () => path.join(app.getPath('userData'), 'settings.json')
 
 export function loadSettings(): AppSettings {
   try {
-    const raw = fs.readFileSync(file(), 'utf8')
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) }
+    const raw = JSON.parse(fs.readFileSync(file(), 'utf8')) as Partial<AppSettings> & { squadMaxWorkers?: number }
+    // 迁移：0.3.x 的 squadMaxWorkers → workerConcurrency
+    const legacy = raw.squadMaxWorkers
+    delete raw.squadMaxWorkers
+    return { ...DEFAULT_SETTINGS, ...raw, ...(legacy != null && raw.workerConcurrency == null ? { workerConcurrency: legacy } : {}) }
   } catch {
     return { ...DEFAULT_SETTINGS }
   }

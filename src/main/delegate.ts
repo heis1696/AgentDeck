@@ -157,12 +157,11 @@ export async function runDelegationLoop(
       }
       const childPrompt = sanitizeChildPrompt(call.prompt, task.workdir)
       const child = store.create({
-        title: `${target.name}: ${childPrompt.slice(0, 40).replace(/\n/g, ' ')}`,
-        prompt: childPrompt,
+        title: `${target.name}: ${call.prompt.slice(0, 40).replace(/\n/g, ' ')}`,
+        prompt: call.prompt,
         workdir,
         backend: target.backend,
         ...(target.id ? { agentId: target.id } : {}),
-        mode: 'single',
         parentTaskId: taskId,
         workerIndex: allChildren.length + childIds.length + 1
       })
@@ -248,7 +247,7 @@ export async function runDelegationLoop(
   }
 
   store.update(taskId, {
-    ...(integrationBranch ? { squad: { phase: 'done', maxWorkers: ctx.opts().maxParallel, integrationBranch, integrationNote } } : {}),
+    ...(integrationBranch ? { integration: { branch: integrationBranch, note: integrationNote } } : {}),
     gitDiff: gitDiff || undefined,
     gitStat: gitStat || undefined
   } as Partial<Task>)

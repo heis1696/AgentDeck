@@ -91,7 +91,7 @@ const backends = new Map([
   ['alpha', makeWorkerBackend('Alpha')],
   ['beta', makeWorkerBackend('Beta')]
 ])
-const runner = new TaskRunner(store, backends, () => ({ concurrency: 1, mode: 'yolo', notify: false, squadMaxWorkers: 3 }))
+const runner = new TaskRunner(store, backends, () => ({ concurrency: 1, mode: 'yolo', notify: false, workerConcurrency: 3 }))
 runner.attachTeam(() => team)
 
 const assert = (cond, msg) => { if (!cond) { console.error('❌', msg); process.exit(1) } console.log('  ✓', msg) }
@@ -101,7 +101,7 @@ assert(parseDelegates('x <delegate to="甲">任务A</delegate> y <delegate to="�
 assert(stripDelegates('前<delegate to="甲">A</delegate>后') === '前后', 'stripDelegates 剥离标记')
 
 // 主流程
-const leader = store.create({ title: '升级两文件', prompt: '升级 a 和 b', workdir: repo, backend: 'zcode', agentId: 'L1', mode: 'single' })
+const leader = store.create({ title: '升级两文件', prompt: '升级 a 和 b', workdir: repo, backend: 'zcode', agentId: 'L1' })
 runner.enqueue(leader)
 const t0 = Date.now()
 while (Date.now() - t0 < 20000) {
@@ -117,8 +117,8 @@ assert(children.some((c) => c.backend === 'alpha') && children.some((c) => c.bac
 assert(!fin.result.includes('<delegate'), '最终结果不含 delegate 标记')
 assert(fin.result.includes('最终总结'), '最终结果为领队收尾输出')
 // git 集成
-assert(!!fin.squad?.integrationBranch, `集成分支 ${fin.squad?.integrationBranch}`)
-const ib = fin.squad.integrationBranch
+assert(!!fin.integration?.branch, `集成分支 ${fin.integration?.branch}`)
+const ib = fin.integration.branch
 assert(execSync(`git show ${ib}:a.txt`, { cwd: repo, encoding: 'utf8' }).includes('by Alpha'), 'a.txt 由 Alpha 合入')
 assert(execSync(`git show ${ib}:b.txt`, { cwd: repo, encoding: 'utf8' }).includes('by Beta'), 'b.txt 由 Beta 合入')
 assert(fs.readFileSync(path.join(repo, 'a.txt'), 'utf8').trim() === 'a v1', '用户工作区未动')

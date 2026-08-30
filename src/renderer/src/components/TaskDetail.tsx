@@ -111,7 +111,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
       workdir: task.workdir,
       backend: task.backend
     })
-    if (t) window.location.reload()
+    if (t) onSelect(t.id)
   }
   const sendFollowUp = async () => {
     const content = followUp.trim()
@@ -135,9 +135,9 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
             <span className={`status-chip status-${task.status}`}>
               {{ queued: '排队中', running: '执行中', done: '完成', failed: '失败', cancelled: '已取消' }[task.status]}
             </span>
-            {task.mode === 'squad' && (
+            {workers.length > 0 && (
               <span className="badge badge-squad">
-                ⚡ 委派 · {{ planning: '规划中', executing: '子任务执行中', synthesizing: '汇总中', integrating: '集成中', done: '已完成' }[task.squad?.phase ?? 'planning']}
+                ⚡ 委派 {workers.filter((w) => w.status === 'done').length}/{workers.length}
               </span>
             )}
             {parent && (
@@ -180,10 +180,10 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
 
       {task.status === 'failed' && task.error && <div className="error-banner">⚠ {task.error}</div>}
 
-      {task.squad?.integrationNote && (
-        <div className={`integration-banner ${task.squad.integrationNote.includes('未完成') ? 'warn' : ''}`}>
-          🔀 {task.squad.integrationNote}
-          {task.squad.integrationBranch && task.workdir && (
+      {task.integration?.note && (
+        <div className={`integration-banner ${task.integration.note.includes('未完成') ? 'warn' : ''}`}>
+          🔀 {task.integration.note}
+          {task.integration.branch && task.workdir && (
             <a className="mini link" onClick={() => bridge.openPath(task.workdir)}>
               打开仓库
             </a>
@@ -307,7 +307,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
         )}
       </div>
 
-      {task.status === 'done' && task.sessionId && task.mode !== 'squad' && (
+      {task.status === 'done' && task.sessionId && (
         <footer className="followup">
           <textarea
             ref={followRef}

@@ -1,17 +1,5 @@
 import { useEffect, useState } from 'react'
-import { bridge } from '../api'
-
-interface Agent {
-  id: string
-  name: string
-  backend: string
-  model?: string
-  note?: string
-  color: string
-  role?: string
-  systemPrompt?: string
-  subordinates?: string[]
-}
+import { bridge, type AgentInfo as Agent } from '../api'
 
 export function TeamView() {
   const [agents, setAgents] = useState<Agent[]>([])

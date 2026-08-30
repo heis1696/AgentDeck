@@ -20,6 +20,12 @@ export function App() {
     setSelectedId((cur) => (cur === id ? null : cur))
   }), [])
 
+  // 系统通知点击：聚焦对应任务
+  useEffect(() => bridge.tasks.onFocusTask((id) => {
+    setSelectedId(id)
+    setView('tasks')
+  }), [])
+
   /** 回到常驻工作区（Ctrl+N / 侧栏按钮） */
   const goWorkspace = () => {
     setSelectedId(null)

@@ -1,4 +1,4 @@
-// git 快照与 squad worktree 支持
+// git 快照与委派 worktree 支持
 import { execFile } from 'node:child_process'
 import path from 'node:path'
 

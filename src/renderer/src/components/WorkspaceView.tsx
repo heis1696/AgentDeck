@@ -1,16 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { bridge } from '../api'
+import { bridge, type AgentInfo } from '../api'
 import type { Task } from '../../../shared/types'
-
-interface Agent {
-  id: string
-  name: string
-  backend: string
-  note?: string
-  color: string
-  role?: string
-  subordinates?: string[]
-}
 
 // 草稿存模块级：切去任务详情再回来不丢输入（会话内存活）
 const draft = {
@@ -26,7 +16,7 @@ export function WorkspaceView({ onCreated }: { onCreated: (t: Task) => void }) {
   const [prompt, setPrompt] = useState(draft.prompt)
   const [workdir, setWorkdir] = useState(draft.workdir)
   const [agentId, setAgentId] = useState(draft.agentId)
-  const [agents, setAgents] = useState<Agent[]>([])
+  const [agents, setAgents] = useState<AgentInfo[]>([])
   const [busy, setBusy] = useState(false)
   const promptRef = useRef<HTMLTextAreaElement>(null)
 
@@ -117,7 +107,7 @@ export function WorkspaceView({ onCreated }: { onCreated: (t: Task) => void }) {
             </div>
           </div>
         ) : (
-          <p className="hint squad-hint">未配置队员，默认用 zcode 执行；可在「队伍」页添加。</p>
+          <p className="hint hint">未配置队员，默认用 zcode 执行；可在「队伍」页添加。</p>
         )}
         <textarea
           ref={promptRef}

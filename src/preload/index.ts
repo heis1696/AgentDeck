@@ -20,7 +20,7 @@ const api = {
     list: (): Promise<Task[]> => ipcRenderer.invoke('tasks:list'),
     get: (id: string): Promise<Task | null> => ipcRenderer.invoke('tasks:get', id),
     events: (id: string, afterSeq = 0): Promise<TaskEvent[]> => ipcRenderer.invoke('tasks:events', id, afterSeq),
-    create: (input: { title: string; prompt: string; workdir: string; backend?: string; agentId?: string; mode?: 'single' | 'squad'; maxWorkers?: number }) =>
+    create: (input: { title: string; prompt: string; workdir: string; backend?: string; agentId?: string }) =>
       ipcRenderer.invoke('tasks:create', input) as Promise<Task>,
     cancel: (id: string) => ipcRenderer.invoke('tasks:cancel', id) as Promise<{ ok: boolean; error?: string }>,
     followUp: (id: string, content: string) =>
@@ -36,6 +36,11 @@ const api = {
       const h = (_e: unknown, id: string) => cb(id)
       ipcRenderer.on('task:deleted', h)
       return () => ipcRenderer.removeListener('task:deleted', h)
+    },
+    onFocusTask: (cb: (id: string) => void) => {
+      const h = (_e: unknown, id: string) => cb(id)
+      ipcRenderer.on('task:focus', h)
+      return () => ipcRenderer.removeListener('task:focus', h)
     },
     onEvent: (cb: (taskId: string, e: TaskEvent) => void) => {
       const h = (_e: unknown, payload: { taskId: string; event: TaskEvent }) => cb(payload.taskId, payload.event)

@@ -18,7 +18,7 @@ function getWindows(): { send: (ch: string, v: unknown) => void }[] {
 export class TaskRunner {
   private store: TaskStore
   private backends: Map<string, AgentBackend>
-  private opts: () => { concurrency: number; mode: string; notify: boolean; squadMaxWorkers: number }
+  private opts: () => { concurrency: number; mode: string; notify: boolean; workerConcurrency?: number }
   private sessions = new Map<string, BackendSession>()
   /** 启动即注册的中止句柄（一次性 CLI 在 session 返回前就要能取消） */
   private launchHandles = new Map<string, { stop: () => void }>()
@@ -26,14 +26,13 @@ export class TaskRunner {
   private pendingPermissions = new Map<string, { taskId: string; resolve: (v: { optionId?: string; decision: 'allow' | 'deny' }) => void; timer: NodeJS.Timeout }>()
   private runningNormal = 0
   private runningWorkers = 0
-  private squad: { run: (id: string) => Promise<void>; recover: () => Promise<void> } | null = null
   private getTeam: (() => AgentLike[]) | null = null
   private pumping = false
 
   constructor(
     store: TaskStore,
     backends: Map<string, AgentBackend>,
-    opts: () => { concurrency: number; mode: string; notify: boolean; squadMaxWorkers: number }
+    opts: () => { concurrency: number; mode: string; notify: boolean; workerConcurrency?: number }
   ) {
     this.store = store
     this.backends = backends
@@ -78,7 +77,7 @@ export class TaskRunner {
     }
   }
 
-  /** 权限确认：推给 UI，5 分钟无响应自动拒绝（squad 领队/worker 共用） */
+  /** 权限确认：推给 UI，5 分钟无响应自动拒绝（领队/worker 共用） */
   askPermission(taskId: string, req: PermissionRequest): Promise<{ optionId?: string; decision: 'allow' | 'deny' }> {
     return new Promise((resolve) => {
       const key = String(req.requestId)
@@ -128,12 +127,12 @@ export class TaskRunner {
     this.pump()
   }
 
-  /** 双通道：普通任务受 concurrency 限制；squad worker 受 squadMaxWorkers 限制（否则领队会占槽死锁） */
+  /** 双通道：普通任务受 concurrency 限制；委派子任务受 workerConcurrency 限制（否则领队会占槽死锁） */
   private pump() {
     if (this.pumping) return
     this.pumping = true
     try {
-      const { concurrency, squadMaxWorkers } = this.opts()
+      const { concurrency, workerConcurrency } = this.opts()
       const queued = this.store
         .list()
         .filter((t) => t.status === 'queued')
@@ -144,7 +143,7 @@ export class TaskRunner {
         const next = normal.shift()!
         void this.run(next.id)
       }
-      while (this.runningWorkers < Math.max(1, squadMaxWorkers) && workers.length) {
+      while (this.runningWorkers < Math.max(1, workerConcurrency ?? concurrency) && workers.length) {
         const next = workers.shift()!
         void this.run(next.id)
       }
@@ -153,22 +152,12 @@ export class TaskRunner {
     }
   }
 
-  /** squad 编排器注入（避免循环依赖：squad.ts 引 runner 类型） */
-  attachSquad(squad: { run: (id: string) => Promise<void>; recover: () => Promise<void> }) {
-    this.squad = squad
-  }
-
-  /** squad 领队的启动句柄注册（leader 会话在 squad 侧启动） */
-  registerLaunch(taskId: string, handle: { stop: () => void }) {
-    this.launchHandles.set(taskId, handle)
-  }
-
   /** 队伍提供者（agent 身份与委派名单） */
   attachTeam(getTeam: () => AgentLike[]) {
     this.getTeam = getTeam
   }
 
-  /** 执行一个任务（首回合）；squad 领队转交编排器且不占槽位 */
+  /** 执行一个任务（首回合） */
   private async run(taskId: string) {
     const task = this.store.get(taskId)
     if (!task || task.status !== 'queued') return
@@ -184,23 +173,6 @@ export class TaskRunner {
     this.store.update(taskId, { status: 'running', startedAt: Date.now(), error: undefined })
     this.pushTask(taskId)
     this.recordUser(taskId, task.prompt)
-
-    // squad 领队（旧模式任务，仅存量恢复路径）：编排本身不占并发槽
-    if (task.mode === 'squad' && this.squad) {
-      if (isWorker) this.runningWorkers--
-      else this.runningNormal--
-      try {
-        await this.squad.run(taskId)
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e)
-        this.store.update(taskId, { status: 'failed', endedAt: Date.now(), error: msg })
-        this.store.flushEvents(taskId)
-        this.pushTask(taskId)
-        if (this.opts().notify) this.notify(task, '失败', msg)
-      }
-      this.pump()
-      return
-    }
 
     // 首回合完成信号
     let firstTurnDone: ((v: { ok: boolean; response: string; error?: string }) => void) | null = null
@@ -237,7 +209,7 @@ export class TaskRunner {
             store: this.store,
             runner: this,
             getTeam: () => this.getTeam?.() ?? [],
-            opts: () => ({ mode: this.opts().mode, notify: this.opts().notify, maxParallel: this.opts().squadMaxWorkers }),
+            opts: () => ({ mode: this.opts().mode, notify: this.opts().notify, maxParallel: Math.max(1, this.opts().workerConcurrency ?? this.opts().concurrency) }),
             pushTask: (id) => this.pushTask(id),
             pushEvent: (id, e) => this.pushEvent(id, e)
           })
@@ -269,13 +241,19 @@ export class TaskRunner {
   private notify(task: Task, what: string, body: string) {
     if (!this.opts().notify) return
     try {
-      const { Notification } = require('electron') as typeof import('electron')
+      const { Notification, BrowserWindow } = require('electron') as typeof import('electron')
       if (Notification.isSupported()) {
         const n = new Notification({
           title: `任务${what}: ${task.title}`,
           body: (body || '').slice(0, 180)
         })
         n.on('click', () => {
+          // 后台时点击系统通知：先唤起窗口再聚焦任务
+          const w = BrowserWindow.getAllWindows()[0]
+          if (w) {
+            w.show()
+            w.focus()
+          }
           this.win()?.send('task:focus', task.id)
         })
         n.show()

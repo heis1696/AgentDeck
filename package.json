@@ -15,12 +15,10 @@
     "dist": "electron-vite build && electron-builder",
     "smoke": "node scripts/smoke-runner.mjs",
     "smoke:zcode": "node scripts/smoke-zcode.mjs",
-    "smoke:squad": "node scripts/smoke-squad.mjs",
-    "e2e:squad": "node scripts/e2e-squad-real.mjs",
     "smoke:clis": "node scripts/smoke-cli-adapters.mjs",
-    "e2e:hetero": "node scripts/e2e-squad-hetero.mjs",
     "smoke:delegate": "node scripts/smoke-delegate.mjs",
-    "e2e:delegate": "node scripts/e2e-delegate-real.mjs"
+    "e2e:delegate": "node scripts/e2e-delegate-real.mjs",
+    "smoke:migration": "node scripts/smoke-migration.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

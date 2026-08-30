@@ -1,5 +1,5 @@
 // Agent 身份层：Multica 式"agent 即队友"
-// Agent = 名字 + 后端 + 可选模型/说明；任务可指定 agent；squad 可跨 agent 派工
+// Agent = 名字 + 后端 + 可选模型/说明；任务可指定 agent；领队可跨 agent 派工
 import fs from 'node:fs'
 import path from 'node:path'
 import { app } from 'electron'

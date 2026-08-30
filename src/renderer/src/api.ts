@@ -8,13 +8,14 @@ interface Bridge {
     list: () => Promise<Task[]>
     get: (id: string) => Promise<Task | null>
     events: (id: string, afterSeq?: number) => Promise<TaskEvent[]>
-    create: (input: { title: string; prompt: string; workdir: string; backend?: string; agentId?: string; mode?: 'single' | 'squad'; maxWorkers?: number }) => Promise<Task>
+    create: (input: { title: string; prompt: string; workdir: string; backend?: string; agentId?: string }) => Promise<Task>
     cancel: (id: string) => Promise<{ ok: boolean; error?: string }>
     followUp: (id: string, content: string) => Promise<{ ok: boolean; error?: string }>
     delete: (id: string) => Promise<{ ok: boolean; error?: string }>
     retry: (id: string) => Promise<{ ok: boolean; error?: string }>
     onUpdated: (cb: (t: Task) => void) => () => void
     onDeleted: (cb: (id: string) => void) => () => void
+    onFocusTask: (cb: (id: string) => void) => () => void
     onEvent: (cb: (taskId: string, e: TaskEvent) => void) => () => void
     onPermission: (cb: (taskId: string, req: PermissionRequest) => void) => () => void
     respondPermission: (requestId: string | number, optionId: string, decision: 'allow' | 'deny') => Promise<{ ok: boolean; error?: string }>
@@ -35,6 +36,7 @@ interface Bridge {
   }
 }
 
+/** 队员（agent 身份）——与主进程 agents.ts 的 Agent 对齐 */
 export interface AgentInfo {
   id: string
   name: string
@@ -42,6 +44,9 @@ export interface AgentInfo {
   model?: string
   note?: string
   color: string
+  role?: string
+  systemPrompt?: string
+  subordinates?: string[]
 }
 
 export const bridge: Bridge = (window as any).agentdeck

@@ -41,7 +41,7 @@ const backends = new Map([
   ['claude', createClaudeBackend()],
   ['opencode', createOpencodeBackend()]
 ])
-const runner = new TaskRunner(store, backends, () => ({ concurrency: 1, mode: 'yolo', notify: false, squadMaxWorkers: 3 }))
+const runner = new TaskRunner(store, backends, () => ({ concurrency: 1, mode: 'yolo', notify: false, workerConcurrency: 3 }))
 runner.attachTeam(() => team)
 
 console.log('创建任务（不指定派发，看领队自发决策）…')
@@ -50,8 +50,7 @@ const leader = store.create({
   prompt: '给 utils.py 的 add 加中文 docstring 并新增 multiply 函数；同时在 NOTES.md 写这两个函数的使用说明。',
   workdir: repo,
   backend: 'zcode',
-  agentId: 'L1',
-  mode: 'single'
+  agentId: 'L1'
 })
 runner.enqueue(leader)
 
@@ -76,11 +75,11 @@ for (const k of kids) {
 }
 if (!kids.length) console.log('（领队未派发——自己干完了；这也合法）')
 console.log('最终结果前150字:', (fin.result ?? '').slice(0, 150).replace(/\n/g, ' '))
-console.log('集成:', fin.squad?.integrationNote ?? '(无子任务改动)')
+console.log('集成:', fin.integration?.note ?? '(无子任务改动)')
 console.log('diff stat:', (fin.gitStat ?? '').split('\n')[0])
 
-if (fin.squad?.integrationBranch) {
-  const ib = fin.squad.integrationBranch
+if (fin.integration?.branch) {
+  const ib = fin.integration.branch
   try {
     const py = execSync(`git show ${ib}:utils.py`, { cwd: repo, encoding: 'utf8' })
     console.log('utils.py docstring:', /"""/.test(py), '| multiply:', py.includes('multiply'))

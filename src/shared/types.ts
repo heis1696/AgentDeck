@@ -2,15 +2,12 @@
 
 export type TaskStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
 
-export type SquadPhase = 'planning' | 'executing' | 'synthesizing' | 'integrating' | 'done'
-
-export interface SquadInfo {
-  phase: SquadPhase
-  maxWorkers: number
+/** 领队任务的 git 集成结果 */
+export interface IntegrationInfo {
   /** 集成分支名（repo 任务用） */
-  integrationBranch?: string
+  branch?: string
   /** 集成结果说明（冲突等） */
-  integrationNote?: string
+  note?: string
 }
 
 export interface Task {
@@ -19,18 +16,16 @@ export interface Task {
   prompt: string
   /** 任务绑定的本地目录（agent 的工作目录）；空字符串表示无绑定 */
   workdir: string
-  /** 执行后端 id: zcode | claude | codex | opencode */
+  /** 执行后端 id: zcode | claude | codex | opencode | dsh */
   backend: string
   /** 执行队员（agent 身份）；空 = 默认 zcode 队员 */
   agentId?: string
-  /** single = 单任务；squad = 领队协同 */
-  mode: 'single' | 'squad'
-  /** squad worker 专用：指向领队任务 */
+  /** 委派子任务专用：指向领队任务 */
   parentTaskId?: string
-  /** squad worker 专用：序号（展示用） */
+  /** 委派子任务专用：序号（展示用） */
   workerIndex?: number
-  /** 领队任务专用：协同状态 */
-  squad?: SquadInfo
+  /** 领队任务专用：git 集成结果 */
+  integration?: IntegrationInfo
   status: TaskStatus
   createdAt: number
   startedAt?: number
@@ -72,7 +67,7 @@ export interface AppSettings {
   concurrency: number
   notifyOnDone: boolean
   mode: 'yolo' | 'build' | 'edit' | 'plan'
-  squadMaxWorkers: number
+  workerConcurrency: number
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -82,5 +77,5 @@ export const DEFAULT_SETTINGS: AppSettings = {
   concurrency: 1,
   notifyOnDone: true,
   mode: 'yolo',
-  squadMaxWorkers: 3
+  workerConcurrency: 3
 }
