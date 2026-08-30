@@ -12,6 +12,13 @@ const draft = {
 /** Ctrl+N 聚焦工作区输入框用的事件名 */
 export const FOCUS_WORKSPACE = 'agentdeck:focus-workspace'
 
+// 快捷示例：点击填入输入框（不直接发送）
+const SUGGESTIONS = [
+  '审查当前仓库的代码结构，给出重构建议',
+  '给这个项目补一份 README',
+  '找出现有的潜在 bug 并修复'
+]
+
 export function WorkspaceView({ onCreated }: { onCreated: (t: Task) => void }) {
   const [prompt, setPrompt] = useState(draft.prompt)
   const [workdir, setWorkdir] = useState(draft.workdir)
@@ -85,6 +92,13 @@ export function WorkspaceView({ onCreated }: { onCreated: (t: Task) => void }) {
       <div className="workspace-card">
         <div className="workspace-title">
           <span className="brand-mark">⚓</span> 要做点什么？
+        </div>
+        <div className="suggest-row">
+          {SUGGESTIONS.map((sg) => (
+            <button key={sg} className="suggest-chip" onClick={() => { setPrompt(sg); promptRef.current?.focus() }}>
+              {sg}
+            </button>
+          ))}
         </div>
         {agents.length > 0 ? (
           <div className="field">

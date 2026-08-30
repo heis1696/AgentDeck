@@ -7,6 +7,7 @@ import { TeamView } from './components/TeamView'
 import { UsageView } from './components/UsageView'
 import { WorkspaceView, FOCUS_WORKSPACE } from './components/WorkspaceView'
 import { TabBar } from './components/TabBar'
+import { ListTodo, Users, Gauge, Settings } from 'lucide-react'
 import type { Task } from '../../shared/types'
 
 type View = 'tasks' | 'team' | 'usage' | 'settings'
@@ -87,16 +88,16 @@ export function App() {
         </button>
         <nav className="nav">
           <button className={view === 'tasks' ? 'active' : ''} onClick={() => setView('tasks')}>
-            任务
+            <ListTodo /> 任务
           </button>
           <button className={view === 'team' ? 'active' : ''} onClick={() => setView('team')}>
-            队伍
+            <Users /> 队伍
           </button>
           <button className={view === 'usage' ? 'active' : ''} onClick={() => setView('usage')}>
-            用量
+            <Gauge /> 用量
           </button>
           <button className={view === 'settings' ? 'active' : ''} onClick={() => setView('settings')}>
-            设置
+            <Settings /> 设置
           </button>
         </nav>
         {view === 'tasks' && <TaskList tasks={tasks} selectedId={activeId} onSelect={openTask} />}

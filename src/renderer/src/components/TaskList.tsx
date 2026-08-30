@@ -16,10 +16,13 @@ function StatusDot({ status }: { status: Task['status'] }) {
 
 export function TaskList({ tasks, selectedId, onSelect }: { tasks: Task[]; selectedId: string | null; onSelect: (id: string) => void }) {
   const [query, setQuery] = useState('')
+  const [filter, setFilter] = useState<'active' | 'history' | 'all'>('all')
   const q = query.trim().toLowerCase()
   const match = (t: Task) => !q || t.title.toLowerCase().includes(q) || t.prompt.toLowerCase().includes(q) || t.workdir.toLowerCase().includes(q)
   const active = tasks.filter((t) => (t.status === 'running' || t.status === 'queued') && match(t))
   const finished = tasks.filter((t) => t.status !== 'running' && t.status !== 'queued' && match(t))
+  const shownActive = filter === 'history' ? [] : active
+  const shownFinished = filter === 'active' ? [] : finished
 
   const item = (t: Task) => {
     const kids = tasks.filter((x) => x.parentTaskId === t.id)
@@ -53,21 +56,32 @@ export function TaskList({ tasks, selectedId, onSelect }: { tasks: Task[]; selec
 
   return (
     <div className="task-list">
+      <div className="list-filter">
+        <button className={filter === 'active' ? 'active' : ''} onClick={() => setFilter('active')}>
+          进行中 {active.length || ''}
+        </button>
+        <button className={filter === 'history' ? 'active' : ''} onClick={() => setFilter('history')}>
+          历史 {finished.length || ''}
+        </button>
+        <button className={filter === 'all' ? 'active' : ''} onClick={() => setFilter('all')}>
+          全部
+        </button>
+      </div>
       <input
         className="list-search"
         value={query}
         onChange={(e) => setQuery(e.target.value)}
         placeholder="搜索任务…"
       />
-      {active.length > 0 && (
+      {shownActive.length > 0 && (
         <>
           <div className="list-group-label">进行中 / 排队</div>
-          {active.map(item)}
+          {shownActive.map(item)}
         </>
       )}
       <div className="list-group-label">历史</div>
-      {finished.length === 0 && <div className="list-empty">{q ? '无匹配任务' : '暂无历史任务'}</div>}
-      {finished.map(item)}
+      {shownFinished.length === 0 && <div className="list-empty">{q ? '无匹配任务' : '暂无历史任务'}</div>}
+      {shownFinished.map(item)}
     </div>
   )
 }
