@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { bridge, fmtDuration, fmtTokens } from '../api'
 import { Markdown } from './Markdown'
+import { DiffView } from './DiffView'
 import type { Task, TaskEvent } from '../../../shared/types'
 import type { PermissionRequest } from '../../../main/backends/types'
 
@@ -290,7 +291,10 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
                   )}
                   {turn.work.length > 0 && (
                     <details className="worklog">
-                      <summary>🔧 工作过程（{turn.work.filter((e) => e.kind === 'tool').length} 次工具调用）</summary>
+                      <summary>
+                        🔧 工作过程（{turn.work.filter((e) => e.kind === 'tool').length} 次工具调用）
+                        <ToolChips work={turn.work} />
+                      </summary>
                       <div className="worklog-body">
                         {turn.work.map((e) => (
                           <LogLine key={e.seq} e={e} />
@@ -330,7 +334,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
         {tab === 'git' && (
           <div className="git-pane">
             {task.gitStat && <pre className="git-stat">{task.gitStat}</pre>}
-            {task.gitDiff ? <pre className="git-diff">{task.gitDiff}</pre> : <div className="list-empty">无改动</div>}
+            {task.gitDiff ? <DiffView diff={task.gitDiff} /> : <div className="list-empty">无改动</div>}
           </div>
         )}
       </div>
@@ -370,6 +374,31 @@ interface Turn {
   text: string
   final: string | null
   usage: Record<string, unknown> | null
+}
+
+/** 工具调用分类（对标 Multica 转录的 Commands/Edits/Reads/Other） */
+function classifyTool(name: string): 'reads' | 'commands' | 'edits' | 'other' {
+  const n = name.toLowerCase()
+  if (/^(read|grep|glob|ls|find|search|view|cat|notebookread)/.test(n)) return 'reads'
+  if (/^(bash|shell|exec|run|terminal|command)/.test(n)) return 'commands'
+  if (/^(edit|write|multiedit|notebookedit|applypatch|apply_patch|replace)/.test(n)) return 'edits'
+  return 'other'
+}
+
+/** worklog 摘要里的分类 chips */
+function ToolChips({ work }: { work: TaskEvent[] }) {
+  const counts = { reads: 0, commands: 0, edits: 0, other: 0 } as Record<string, number>
+  for (const e of work) {
+    if (e.kind !== 'tool' || (e.data as { phase?: string } | undefined)?.phase === 'result') continue
+    counts[classifyTool(e.text || '')]++
+  }
+  const parts: string[] = []
+  if (counts.reads) parts.push(`读取 ${counts.reads}`)
+  if (counts.commands) parts.push(`命令 ${counts.commands}`)
+  if (counts.edits) parts.push(`编辑 ${counts.edits}`)
+  if (counts.other) parts.push(`其他 ${counts.other}`)
+  if (!parts.length) return null
+  return <span className="tool-chips"> · {parts.join(' · ')}</span>
 }
 
 /** 去掉 usage 里的空值，便于逐条合并 */

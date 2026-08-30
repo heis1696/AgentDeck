@@ -669,3 +669,30 @@ body {
   width: 16px; height: 16px; border-radius: 4px;
   font-size: 10px; color: #fff; margin-right: 6px; vertical-align: middle;
 }
+
+/* ---- diff 视图（P3） ---- */
+.diff-view { display: flex; flex-direction: column; gap: 12px; }
+.diff-file { border: 1px solid var(--border, #262b36); border-radius: 8px; overflow: hidden; }
+.diff-file-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid var(--border, #262b36);
+}
+.diff-file-name { font-family: ui-monospace, monospace; font-size: 12px; }
+.diff-count { font-size: 11px; padding: 0 6px; border-radius: 4px; }
+.diff-count.add { color: #4caf88; background: rgba(76, 175, 136, 0.12); }
+.diff-count.del { color: #e5655f; background: rgba(229, 101, 95, 0.12); }
+.diff-body {
+  margin: 0; padding: 8px 0;
+  font-family: ui-monospace, monospace; font-size: 11.5px; line-height: 1.5;
+  overflow-x: auto;
+}
+.dl { display: block; padding: 0 12px; white-space: pre; }
+.dl-meta { opacity: 0.45; }
+.dl-file { color: #9aa4b8; }
+.dl-hunk { color: #4f8cff; background: rgba(79, 140, 255, 0.07); }
+.dl-add { color: #7fd3ab; background: rgba(76, 175, 136, 0.08); }
+.dl-del { color: #ef8f8a; background: rgba(229, 101, 95, 0.08); }
+.dl-ctx { opacity: 0.75; }
+.tool-chips { opacity: 0.65; }
