@@ -7,8 +7,14 @@ import { app } from 'electron'
 export interface Agent {
   id: string
   name: string
-  /** 后端 id: zcode | claude | codex | opencode */
+  /** 后端 id: zcode | claude | codex | opencode | dsh */
   backend: string
+  /** 定位/头衔，如 领队、前端工程师 */
+  role?: string
+  /** 系统提示词：人设、专长、做事方式 */
+  systemPrompt?: string
+  /** 可驱使的队员（agent id 列表）——领队运行时可自行派发子任务 */
+  subordinates?: string[]
   /** 传给后端的模型（可空 = 后端默认） */
   model?: string
   note?: string
@@ -21,11 +27,11 @@ const file = () => path.join(app.getPath('userData'), 'agents.json')
 /** 预置队伍：每个可用后端一个默认队员 */
 export function defaultAgents(): Agent[] {
   return [
-    { id: 'ag_zcode', name: 'ZetCode', backend: 'zcode', color: '#4f8cff', note: 'GLM，常驻会话，全能主力' },
-    { id: 'ag_claude', name: 'Claude', backend: 'claude', color: '#d97757', note: 'Claude Code' },
-    { id: 'ag_codex', name: 'Codex', backend: 'codex', color: '#8b95a5', note: 'OpenAI Codex' },
-    { id: 'ag_opencode', name: 'OpenCode', backend: 'opencode', color: '#c084fc', note: 'OpenCode' },
-    { id: 'ag_dsh', name: 'DeepSeek', backend: 'dsh', color: '#4d6bfe', note: 'DeepSeek Harness，一次性无头' }
+    { id: 'ag_zcode', name: 'ZetCode', backend: 'zcode', color: '#4f8cff', role: '领队', systemPrompt: '你是开发领队，擅长拆解任务与统筹。小任务亲自做，需要并行或专业领域工作时派给队员。', subordinates: ['ag_claude', 'ag_codex', 'ag_opencode', 'ag_dsh'] },
+    { id: 'ag_claude', name: 'Claude', backend: 'claude', color: '#d97757', role: '工程师', systemPrompt: '你是资深全栈工程师，专注高质量代码实现。' },
+    { id: 'ag_codex', name: 'Codex', backend: 'codex', color: '#8b95a5', role: '工程师', systemPrompt: '你是务实的工程师，擅长按指令完成编码与文档任务。' },
+    { id: 'ag_opencode', name: 'OpenCode', backend: 'opencode', color: '#c084fc', role: '工程师', systemPrompt: '你是通用工程师。' },
+    { id: 'ag_dsh', name: 'DeepSeek', backend: 'dsh', color: '#4d6bfe', role: '分析员', systemPrompt: '你是分析员，擅长调研、分析与方案对比。' }
   ]
 }
 

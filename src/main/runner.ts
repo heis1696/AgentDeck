@@ -4,6 +4,7 @@ import type { Task, TaskEvent } from '../shared/types'
 import type { TaskStore } from './store'
 import type { AgentBackend, BackendSession, PermissionRequest } from './backends/types'
 import { snapshotGitAfter } from './git'
+import { buildAgentPrompt, buildDelegationBlock, runDelegationLoop, type AgentLike } from './delegate'
 
 function getWindows(): { send: (ch: string, v: unknown) => void }[] {
   try {
@@ -26,6 +27,7 @@ export class TaskRunner {
   private runningNormal = 0
   private runningWorkers = 0
   private squad: { run: (id: string) => Promise<void>; recover: () => Promise<void> } | null = null
+  private getTeam: (() => AgentLike[]) | null = null
   private pumping = false
 
   constructor(
@@ -161,6 +163,11 @@ export class TaskRunner {
     this.launchHandles.set(taskId, handle)
   }
 
+  /** 队伍提供者（agent 身份与委派名单） */
+  attachTeam(getTeam: () => AgentLike[]) {
+    this.getTeam = getTeam
+  }
+
   /** 执行一个任务（首回合）；squad 领队转交编排器且不占槽位 */
   private async run(taskId: string) {
     const task = this.store.get(taskId)
@@ -178,7 +185,7 @@ export class TaskRunner {
     this.pushTask(taskId)
     this.recordUser(taskId, task.prompt)
 
-    // squad 领队：编排本身不占并发槽（worker 用独立槽），立即释放并转交
+    // squad 领队（旧模式任务，仅存量恢复路径）：编排本身不占并发槽
     if (task.mode === 'squad' && this.squad) {
       if (isWorker) this.runningWorkers--
       else this.runningNormal--
@@ -201,9 +208,18 @@ export class TaskRunner {
       firstTurnDone = resolve
     })
 
+    // agent 身份注入：人设 + （领队时）委派协议
+    const team = this.getTeam?.() ?? []
+    const me = team.find((a) => a.id === task.agentId)
+    let prompt = buildAgentPrompt(me, task.prompt, team)
+    if (me?.subordinates?.length && task.backend !== 'dsh') {
+      const block = buildDelegationBlock(me, team)
+      if (block) prompt = `${prompt}\n\n${block}`
+    }
+
     try {
       const session = await backend.start({
-        prompt: task.prompt,
+        prompt,
         workdir: task.workdir,
         mode: this.opts().mode,
         events: this.makeEvents(taskId, (r) => firstTurnDone?.(r))
@@ -214,8 +230,21 @@ export class TaskRunner {
 
       const r = await firstTurnPromise
       if (r.ok) {
-        await this.finalizeDone(taskId, r.response)
-        if (this.opts().notify) this.notify(task, '完成', r.response)
+        // 领队：进入委派循环（截获 <delegate> 标记 → 并行子任务 → 回灌 → 继续）
+        let finalText = r.response
+        if (me?.subordinates?.length && task.backend !== 'dsh' && !isWorker) {
+          const outcome = await runDelegationLoop(taskId, session, r.response, {
+            store: this.store,
+            runner: this,
+            getTeam: () => this.getTeam?.() ?? [],
+            opts: () => ({ mode: this.opts().mode, notify: this.opts().notify, maxParallel: this.opts().squadMaxWorkers }),
+            pushTask: (id) => this.pushTask(id),
+            pushEvent: (id, e) => this.pushEvent(id, e)
+          })
+          finalText = outcome.finalText || r.response
+        }
+        await this.finalizeDone(taskId, finalText)
+        if (this.opts().notify) this.notify(task, '完成', finalText)
       } else {
         this.store.update(taskId, { status: 'failed', endedAt: Date.now(), error: r.error || '回合失败' })
         if (this.opts().notify) this.notify(task, '失败', r.error || '')
@@ -325,6 +354,10 @@ export class TaskRunner {
     const session = this.sessions.get(taskId)
     this.store.update(taskId, { status: 'cancelled', endedAt: Date.now() })
     this.pushTask(taskId)
+    // 级联取消子任务（领队被取消时，运行中/排队的子任务一并停）
+    for (const child of this.store.list().filter((t) => t.parentTaskId === taskId && (t.status === 'running' || t.status === 'queued'))) {
+      void this.cancel(child.id)
+    }
     // 先用启动句柄硬停（一次性 CLI 的 session 可能还没返回）
     this.launchHandles.get(taskId)?.stop()
     this.launchHandles.delete(taskId)

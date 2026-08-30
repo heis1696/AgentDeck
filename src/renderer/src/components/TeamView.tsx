@@ -8,6 +8,9 @@ interface Agent {
   model?: string
   note?: string
   color: string
+  role?: string
+  systemPrompt?: string
+  subordinates?: string[]
 }
 
 export function TeamView() {
@@ -50,9 +53,9 @@ export function TeamView() {
   }
   const remove = (id: string) => save(agents.filter((a) => a.id !== id))
   const add = () =>
-    setEditing({ id: `ag_${Date.now().toString(36)}`, name: '', backend: 'zcode', color: '#4f8cff', note: '' })
+    setEditing({ id: `ag_${Date.now().toString(36)}`, name: '', backend: 'zcode', color: '#4f8cff', note: '', role: '', systemPrompt: '', subordinates: [] })
 
-  const backends = ['zcode', 'claude', 'codex', 'opencode']
+  const backends = ['zcode', 'claude', 'codex', 'opencode', 'dsh']
 
   return (
     <div className="settings team">
@@ -76,14 +79,18 @@ export function TeamView() {
             </div>
             <div className="agent-info">
               <div className="agent-name">
-                {a.name} <span className="badge">{a.backend}</span>
+                {a.name} <span className="badge">{a.backend}</span>{a.role ? <span className="mini">{a.role}</span> : null}
                 {probes[a.backend] && (
                   <span className={probes[a.backend].ok ? 'probe-ok' : 'probe-fail'} title={probes[a.backend].detail}>
                     {probes[a.backend].ok ? '✓' : '✗'}
                   </span>
                 )}
               </div>
-              <div className="hint">{a.note || (probes[a.backend]?.detail ?? '')}</div>
+              <div className="hint">
+                {a.subordinates?.length
+                  ? `⚡ 可驱使 ${(a.subordinates ?? []).map((sid) => agents.find((x) => x.id === sid)?.name ?? '?').join('、')}（对话中自行派发）`
+                  : a.note || (probes[a.backend]?.detail ?? '')}
+              </div>
             </div>
             <button
               className="btn ghost agent-del"
@@ -117,7 +124,46 @@ export function TeamView() {
               </select>
             </label>
             <label className="field">
-              <span>说明（给领队看的专长描述）</span>
+              <span>定位（头衔：领队 / 工程师 / 审查员…）</span>
+              <input value={editing.role ?? ''} onChange={(e) => update(editing, { role: e.target.value })} placeholder="领队" />
+            </label>
+            <label className="field">
+              <span>系统提示词（人设/专长/做事方式，注入它的每个任务）</span>
+              <textarea
+                value={editing.systemPrompt ?? ''}
+                onChange={(e) => update(editing, { systemPrompt: e.target.value })}
+                rows={5}
+                placeholder="你是资深前端工程师，擅长 React/TS。写代码前先读现有实现…"
+              />
+            </label>
+            <label className="field">
+              <span>可驱使的队员（勾选后它成为领队：对话中可自行把子任务派给他们）</span>
+              <div className="agent-picker">
+                {agents.filter((o) => o.id !== editing.id).length === 0 && <span className="hint">（队里还没有其他队员）</span>}
+                {agents
+                  .filter((o) => o.id !== editing.id)
+                  .map((o) => (
+                    <button
+                      key={o.id}
+                      className={`agent-pick ${(editing.subordinates ?? []).includes(o.id) ? 'active' : ''}`}
+                      onClick={() =>
+                        update(editing, {
+                          subordinates: (editing.subordinates ?? []).includes(o.id)
+                            ? (editing.subordinates ?? []).filter((x) => x !== o.id)
+                            : [...(editing.subordinates ?? []), o.id]
+                        })
+                      }
+                    >
+                      <span className="agent-avatar sm" style={{ background: o.color }}>
+                        {o.name.slice(0, 1)}
+                      </span>
+                      {o.name}
+                    </button>
+                  ))}
+              </div>
+            </label>
+            <label className="field">
+              <span>备注（列表展示用）</span>
               <input value={editing.note ?? ''} onChange={(e) => update(editing, { note: e.target.value })} placeholder="如：擅长前端 React" />
             </label>
             <label className="field">
@@ -125,7 +171,7 @@ export function TeamView() {
               <input type="color" value={editing.color} onChange={(e) => update(editing, { color: e.target.value })} />
             </label>
             <div className="dialog-footer">
-              <span className="hint">squad 规划时领队会看到队员名单和说明，可指定队员执行子任务</span>
+              <span className="hint">勾选可驱使队员即成领队；委派在对话中自动发生，无需切模式</span>
               <button className="btn primary" onClick={commit} disabled={!editing.name.trim()}>
                 保存
               </button>

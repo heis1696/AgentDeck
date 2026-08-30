@@ -116,7 +116,7 @@ const backends = new Map([[backend.id, backend]])
 const runner = new TaskRunner(store, backends, () => ({ concurrency: 1, mode: 'yolo', notify: false, squadMaxWorkers: 3 }))
 const pushTask = () => {}
 const pushEvent = () => {}
-const squad = new SquadRunner({ store, runner, backends, opts: () => ({ concurrency: 1, mode: 'yolo', notify: false, squadMaxWorkers: 3 }), pushTask, pushEvent })
+const squad = new SquadRunner({ store, runner, backends, getAgents: () => [], opts: () => ({ concurrency: 1, mode: 'yolo', notify: false, squadMaxWorkers: 3 }), pushTask, pushEvent })
 runner.attachSquad(squad)
 
 console.log('[1] parsePlan 容错')

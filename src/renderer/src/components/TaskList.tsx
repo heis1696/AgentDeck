@@ -32,7 +32,7 @@ export function TaskList({ tasks, selectedId, onSelect }: { tasks: Task[]; selec
         <span className="task-item-title">{t.parentTaskId ? `└ ${t.title}` : t.title}</span>
       </div>
       <div className="task-item-row2">
-        {t.mode === 'squad' ? <span className="badge badge-squad">协同</span> : <span className="badge">{t.agentId ? t.backend : t.backend}</span>}
+        {t.squad ? <span className="badge badge-squad">⚡ 委派</span> : null}{' '}<span className="badge">{t.backend}</span>
         {t.squad && t.status === 'running' && (
           <span className="mini">
             {{ planning: '规划中', executing: '子任务执行中', synthesizing: '汇总中', integrating: '集成中', done: '' }[t.squad.phase] || ''}

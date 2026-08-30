@@ -1,6 +1,6 @@
 {
   "name": "agentdeck",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "本地任务看板 — 把任务派给本地 agent 执行",
   "main": "./out/main/index.js",
   "author": "agentdeck",
@@ -18,7 +18,9 @@
     "smoke:squad": "node scripts/smoke-squad.mjs",
     "e2e:squad": "node scripts/e2e-squad-real.mjs",
     "smoke:clis": "node scripts/smoke-cli-adapters.mjs",
-    "e2e:hetero": "node scripts/e2e-squad-hetero.mjs"
+    "e2e:hetero": "node scripts/e2e-squad-hetero.mjs",
+    "smoke:delegate": "node scripts/smoke-delegate.mjs",
+    "e2e:delegate": "node scripts/e2e-delegate-real.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

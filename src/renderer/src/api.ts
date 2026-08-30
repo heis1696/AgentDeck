@@ -8,7 +8,7 @@ interface Bridge {
     list: () => Promise<Task[]>
     get: (id: string) => Promise<Task | null>
     events: (id: string, afterSeq?: number) => Promise<TaskEvent[]>
-    create: (input: { title: string; prompt: string; workdir: string; backend?: string; mode?: 'single' | 'squad'; maxWorkers?: number }) => Promise<Task>
+    create: (input: { title: string; prompt: string; workdir: string; backend?: string; agentId?: string; mode?: 'single' | 'squad'; maxWorkers?: number }) => Promise<Task>
     cancel: (id: string) => Promise<{ ok: boolean; error?: string }>
     followUp: (id: string, content: string) => Promise<{ ok: boolean; error?: string }>
     delete: (id: string) => Promise<{ ok: boolean; error?: string }>

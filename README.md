@@ -26,27 +26,29 @@ npm run smoke        # 核心链路冒烟测试（不经 GUI）
 
 ### 队伍（Agents）
 
-侧栏「队伍」页管理队员：每个队员 = 名字 + 平台 + 专长说明 + 头像色。预置四名（ZetCode/Claude/Codex/OpenCode），可改名、加人（如"Claude 审查员"）、删除。领队规划时会看到队员名单和专长，据此派工。
+侧栏「队伍」页创建你的 agent：**名字、定位、系统提示词（人设/专长）、平台**（zcode/claude/codex/opencode/dsh）、头像色。勾选**可驱使的队员**即成为领队。预置五名队员，ZetCode 默认是领队。
 
-### 单任务
+### 委派（内置，无模式开关）
 
-`Ctrl+N` → 选执行队员 → 提示词 + 可选工作目录。实时日志含流式回复、工具调用、token 用量；完成后 Markdown 渲染结果 + git diff；可追问（zcode 支持重启后续聊，其他平台会话内续聊）。
-
-### 多 agent 协同（Squad）
-
-新建任务时切「⚡ 多 agent 协同」，选一名队员当领队：
+给领队发任务后，它**在对话中自行判断**要不要派子任务、派给谁：
 
 ```
-领队规划（看到全部队员名单，子任务可指定"agent": "claude" 等）
-  → 各 worker 在独立 git worktree + 分支并行执行（异构平台各干各的）
-  → 领队汇总各 worker 结果 → 综合报告
-  → 改动自动提交并合入 agentdeck/squad-<id> 集成分支（不动你的当前分支）
+你 → 领队：升级 utils.py 并补文档
+领队（思考）：两件事可并行 → 输出 <delegate to="Claude">改 utils.py</delegate> <delegate to="Codex">写 NOTES.md</delegate>
+  ├─ Claude 在隔离 worktree + 分支执行
+  └─ Codex 在另一个隔离副本执行（真并行）
+系统：结果汇报回领队 → 领队继续（可再派、可自己做收尾）→ 最终总结
+子任务改动自动提交合入 agentdeck/task-<id> 集成分支；你的当前分支不动
 ```
 
-### 其他
+- 委派完全由领队自主决策：小事它自己做，可并行/需要专长才派
+- 取消领队会级联取消运行中的子任务
+- 领队自己动手的改动保留在主目录工作区（不自动提交）
 
-- 权限模式 build/edit/plan 时敏感工具弹确认横幅；yolo 全自动
-- 侧栏搜索、任务复制、重跑；worker 并行数可设
+### 单任务 / 续聊 / 其他
+
+- 普通队员任务：实时日志（流式/工具/token）、Markdown 结果、git diff、追问（zcode 重启后可续聊；dsh 一次性不支持）
+- 权限模式 build/edit/plan 弹确认横幅；yolo 全自动
 
 ## 架构
 
@@ -78,6 +80,11 @@ src/
 
 实现 `src/main/backends/types.ts` 的 `AgentBackend` 接口并在 `src/main/index.ts` 注册。
 接口：`probe` / `start`（返回 `{sessionId, send, stop, close}`）。
+
+## 文档
+
+- [架构文档](docs/ARCHITECTURE.md) — 模块地图、数据流、可靠性设计、已知限制
+- [API 文档](docs/API.md) — IPC 桥、数据模型、后端适配器接口、委派协议、ZCode 协议要点
 
 ## 打包
 

@@ -80,6 +80,7 @@ app.whenReady().then(() => {
     pushTask: (id) => runner.pushTask(id),
     pushEvent: (id, e) => runner.pushEvent(id, e)
   })
+  runner.attachTeam(() => agents)
   runner.attachSquad(squad)
   void squad.recover()
 

@@ -137,7 +137,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
             </span>
             {task.mode === 'squad' && (
               <span className="badge badge-squad">
-                协同 · {{ planning: '规划中', executing: '子任务执行中', synthesizing: '汇总中', integrating: '集成中', done: '已完成' }[task.squad?.phase ?? 'planning']}
+                ⚡ 委派 · {{ planning: '规划中', executing: '子任务执行中', synthesizing: '汇总中', integrating: '集成中', done: '已完成' }[task.squad?.phase ?? 'planning']}
               </span>
             )}
             {parent && (

@@ -3,12 +3,24 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type { Task, TaskEvent, AppSettings } from '../shared/types'
 import type { PermissionRequest } from '../main/backends/types'
 
+interface AgentInfo {
+  id: string
+  name: string
+  backend: string
+  model?: string
+  note?: string
+  color: string
+  role?: string
+  systemPrompt?: string
+  subordinates?: string[]
+}
+
 const api = {
   tasks: {
     list: (): Promise<Task[]> => ipcRenderer.invoke('tasks:list'),
     get: (id: string): Promise<Task | null> => ipcRenderer.invoke('tasks:get', id),
     events: (id: string, afterSeq = 0): Promise<TaskEvent[]> => ipcRenderer.invoke('tasks:events', id, afterSeq),
-    create: (input: { title: string; prompt: string; workdir: string; backend?: string }) =>
+    create: (input: { title: string; prompt: string; workdir: string; backend?: string; agentId?: string; mode?: 'single' | 'squad'; maxWorkers?: number }) =>
       ipcRenderer.invoke('tasks:create', input) as Promise<Task>,
     cancel: (id: string) => ipcRenderer.invoke('tasks:cancel', id) as Promise<{ ok: boolean; error?: string }>,
     followUp: (id: string, content: string) =>
@@ -47,10 +59,10 @@ const api = {
   openPath: (target: string): Promise<void> => ipcRenderer.invoke('shell:open', target),
   notify: (title: string, body: string): void => ipcRenderer.send('notify', { title, body }),
   agents: {
-    list: (): Promise<Array<{ id: string; name: string; backend: string; model?: string; note?: string; color: string }>> =>
+    list: (): Promise<Array<AgentInfo>> =>
       ipcRenderer.invoke('agents:list'),
-    save: (list: Array<{ id: string; name: string; backend: string; model?: string; note?: string; color: string }>) =>
-      ipcRenderer.invoke('agents:save', list) as Promise<Array<{ id: string; name: string; backend: string; model?: string; note?: string; color: string }>>,
+    save: (list: Array<AgentInfo>) =>
+      ipcRenderer.invoke('agents:save', list) as Promise<Array<AgentInfo>>,
     probe: (): Promise<Record<string, { ok: boolean; detail: string }>> => ipcRenderer.invoke('agents:probe'),
     onProbeResult: (cb: (id: string, result: { ok: boolean; detail: string }) => void) => {
       const h = (_e: unknown, p: { id: string; result: { ok: boolean; detail: string } }) => cb(p.id, p.result)
