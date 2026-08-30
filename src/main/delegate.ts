@@ -5,7 +5,7 @@ import type { Task, TaskEvent } from '../shared/types'
 import type { TaskStore } from './store'
 import type { TaskRunner } from './runner'
 import type { BackendSession } from './backends/types'
-import { isGitRepo, createWorktree, mergeBranchInto, branchDiffSummary, currentBranch, commitAll } from './git'
+import { isGitRepo, createWorktree, mergeBranchInto, branchDiffSummary, currentBranch, commitAll, branchExists } from './git'
 
 export interface DelegateCall {
   to: string
@@ -112,6 +112,28 @@ export interface DelegationOutcome {
 }
 
 const MAX_ROUNDS = 6
+/** 全链共享轮数预算（二层委派：祖先已用轮数计入） */
+const MAX_TOTAL_ROUNDS = 8
+/** 委派层级上限（领队 → 子领队 → 队员，共 3 层） */
+const MAX_DEPTH = 3
+
+/** 沿 parentTaskId 上溯，返回祖先已用轮数总和、深度、祖先标识集（防环用） */
+function ancestorBudget(store: DelegationContext['store'], taskId: string): { inherited: number; depth: number; ancestors: Set<string> } {
+  let inherited = 0
+  let depth = 0
+  const ancestors = new Set<string>()
+  let pid = store.get(taskId)?.parentTaskId
+  while (pid && depth < 10) {
+    const t = store.get(pid)
+    if (!t) break
+    depth++
+    inherited += t.roundsUsed ?? 0
+    // 防环标识：优先 agentId；无 agentId 的任务用 @backend 兜底
+    ancestors.add(t.agentId ?? `@${t.backend}`)
+    pid = t.parentTaskId
+  }
+  return { inherited, depth, ancestors }
+}
 
 /**
  * 委派循环：在领队回合结束后执行。
@@ -140,11 +162,23 @@ export async function runDelegationLoop(
   const hasRepo = task.workdir ? await isGitRepo(task.workdir) : false
   const baseBranch = hasRepo && task.workdir ? await currentBranch(task.workdir) : ''
 
+  // ---- 二层委派的三道闸（0.7.0）----
+  const { inherited, depth, ancestors } = ancestorBudget(store, taskId)
+  const bail = (why: string): DelegationOutcome => {
+    note(`⚠ ${why}，本任务不再下派`)
+    return { rounds: 0, children: [], finalText: stripDelegates(firstResponse) }
+  }
+  if (depth >= MAX_DEPTH) return bail(`委派层级已达上限（${MAX_DEPTH} 层）`)
+  const budget = Math.min(MAX_ROUNDS, MAX_TOTAL_ROUNDS - inherited)
+  if (budget <= 0) return bail('全链委派轮数预算已耗尽')
+  // 自身也不许派给自己
+  ancestors.add(me?.id ?? `@${task.backend}`)
+
   let response = firstResponse
   let allChildren: string[] = []
   let round = 0
 
-  while (round < MAX_ROUNDS) {
+  while (round < budget) {
     const calls = parseDelegates(response)
     if (!calls.length) break
     round++
@@ -159,6 +193,12 @@ export async function runDelegationLoop(
         subs.find((a) => a.backend.toLowerCase() === call.to.toLowerCase())
       if (!target) {
         note(`⚠ 未找到可驱使的队员 "${call.to}"（不在你的队员名单里），跳过`)
+        continue
+      }
+      // 防环：目标已在祖先链上（或就是自己）→ 拒绝派发
+      const targetKey = target.id || `@${target.backend}`
+      if (ancestors.has(targetKey)) {
+        note(`⚠ 拒绝派给 ${call.to}：它在当前委派链上（防环），请改派他人或自己做`)
         continue
       }
       let workdir = task.workdir
@@ -228,16 +268,23 @@ export async function runDelegationLoop(
     for (const cid of allChildren) {
       idx++
       const c = store.get(cid)!
-      if (!c.gitStat || !c.workdir) continue
-      await commitAll(c.workdir, `agentdeck: ${c.title}`)
-      const r = await mergeBranchInto(task.workdir, integrationBranch, `agentdeck/${taskId}_c${idx}`)
-      if (!r.ok) {
-        allOk = false
-        problems.push(r.message)
-        if (r.conflict) break
-      } else {
-        mergedCount++
+      if (!c.workdir) continue
+      // 该子任务需要合入的分支：自己的工作分支（有改动时）+ 它作为子领队的集成分支（二层委派递归交付）
+      const ownBranch = c.gitStat ? `agentdeck/${taskId}_c${idx}` : ''
+      const subIntegration = await branchExists(task.workdir, `agentdeck/task-${cid}`) ? `agentdeck/task-${cid}` : ''
+      if (!ownBranch && !subIntegration) continue
+      if (ownBranch) await commitAll(c.workdir, `agentdeck: ${c.title}`)
+      for (const b of [ownBranch, subIntegration].filter(Boolean)) {
+        const r = await mergeBranchInto(task.workdir, integrationBranch, b!)
+        if (!r.ok) {
+          allOk = false
+          problems.push(r.message)
+          if (r.conflict) break
+        } else {
+          mergedCount++
+        }
       }
+      if (!allOk) break
     }
     if (allOk && mergedCount > 0) {
       const sum = await branchDiffSummary(task.workdir, baseBranch, integrationBranch)
@@ -260,7 +307,8 @@ export async function runDelegationLoop(
   store.update(taskId, {
     ...(integrationBranch ? { integration: { branch: integrationBranch, note: integrationNote } } : {}),
     gitDiff: gitDiff || undefined,
-    gitStat: gitStat || undefined
+    gitStat: gitStat || undefined,
+    roundsUsed: round
   } as Partial<Task>)
   pushTask(taskId)
 

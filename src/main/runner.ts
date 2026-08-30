@@ -211,8 +211,9 @@ export class TaskRunner {
       const r = await firstTurnPromise
       if (r.ok) {
         // 领队：进入委派循环（截获 <delegate> 标记 → 并行子任务 → 回灌 → 继续）
+        // 0.7.0 起 worker 也可以是子领队（带 subordinates 即生效；delegate 内有防环与层级/预算闸）
         let finalText = r.response
-        if (me?.subordinates?.length && task.backend !== 'dsh' && !isWorker) {
+        if (me?.subordinates?.length && task.backend !== 'dsh') {
           const outcome = await runDelegationLoop(taskId, session, r.response, {
             store: this.store,
             runner: this,

@@ -59,6 +59,8 @@ export interface Task {
   failure?: FailureInfo
   /** 自动重试次数（0/缺省 = 首次；仅 retryable 失败自动 +1，上限 2） */
   attempt?: number
+  /** 委派循环已用轮数（二层委派共享预算用） */
+  roundsUsed?: number
   /** zcode 会话 id，用于续聊 */
   sessionId?: string
   /** 完成时抓取的 git 改动 */

@@ -47,7 +47,7 @@
 
 ### 2.2 Task（任务）与委派
 
-子任务通过 `parentTaskId` 挂在领队下（侧栏缩进展示）；领队集成结果记 `Task.integration {branch, note}`（0.4.0 删除了旧 squad 双轨，存量自动迁移）。
+子任务通过 `parentTaskId` 挂在领队下（侧栏缩进展示）；领队集成结果记 `Task.integration {branch, note}`（0.4.0 删除了旧 squad 双轨，存量自动迁移）。0.7.0 起支持二层委派：队员带 subordinates 即为子领队，可继续下派——防环（祖先链检测）+ 层级上限 3 层 + 全链共享 8 轮预算；派工可带 reason 留痕；集成递归合入子领队的集成分支；worktree 一律归位主仓库根。
 没有"协同模式"开关——**委派是领队队员的内在能力**：
 
 ```

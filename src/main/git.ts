@@ -16,6 +16,13 @@ export async function isGitRepo(workdir: string): Promise<boolean> {
   return out.trim() === 'true'
 }
 
+/** 分支是否存在（二层委派集成时探测子任务的集成分支） */
+export async function branchExists(workdir: string, name: string): Promise<boolean> {
+  if (!workdir || !name) return false
+  // rev-parse --verify --quiet：存在 → 输出哈希；不存在 → 空输出
+  return (await git(workdir, ['rev-parse', '--verify', '--quiet', name])).trim() !== ''
+}
+
 export async function snapshotGitAfter(
   workdir: string
 ): Promise<{ diff: string; stat: string }> {
@@ -56,7 +63,9 @@ export async function currentBranch(workdir: string): Promise<string> {
   return out.trim()
 }
 
-/** 为 worker 创建隔离 worktree（含独立分支）；失败返回 null（回退共享目录） */
+/** 为 worker 创建隔离 worktree（含独立分支）；失败返回 null（回退共享目录）
+ *  worktree 一律放在主仓库根的 .agentdeck-worktrees 下——从 worktree 再开（二层委派）也归位主仓库，
+ *  避免嵌套进父级工作树污染其 status；exclude 也写进主 gitdir（worktree 间共享）。 */
 export async function createWorktree(
   repoDir: string,
   name: string,
@@ -64,7 +73,10 @@ export async function createWorktree(
 ): Promise<{ path: string; branch: string } | null> {
   if (!(await isGitRepo(repoDir))) return null
   const branch = `agentdeck/${name}`
-  const wtPath = path.join(repoDir, '.agentdeck-worktrees', name)
+  const gcd = (await git(repoDir, ['rev-parse', '--git-common-dir'])).trim()
+  const gitDir = gcd ? path.resolve(repoDir, gcd) : path.join(repoDir, '.git')
+  const root = path.dirname(gitDir)
+  const wtPath = path.join(root, '.agentdeck-worktrees', name)
   const out = await new Promise<string>((resolve) => {
     execFile(
       'git',
@@ -75,9 +87,10 @@ export async function createWorktree(
   })
   if (!out && !(await isGitRepo(wtPath))) return null
   // 把 worktree 目录从主仓库状态里排除，避免污染主目录的 status
-  const excludeFile = path.join(repoDir, '.git', 'info', 'exclude')
+  const excludeFile = path.join(gitDir, 'info', 'exclude')
   try {
     const fs = await import('node:fs')
+    fs.mkdirSync(path.dirname(excludeFile), { recursive: true })
     const cur = fs.existsSync(excludeFile) ? fs.readFileSync(excludeFile, 'utf8') : ''
     if (!cur.includes('.agentdeck-worktrees/')) {
       fs.appendFileSync(excludeFile, '\n.agentdeck-worktrees/\n')

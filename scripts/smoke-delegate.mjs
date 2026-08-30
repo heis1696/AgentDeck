@@ -130,5 +130,96 @@ assert(execSync(`git show ${ib}:a.txt`, { cwd: repo, encoding: 'utf8' }).include
 assert(execSync(`git show ${ib}:b.txt`, { cwd: repo, encoding: 'utf8' }).includes('by Beta'), 'b.txt 由 Beta 合入')
 assert(fs.readFileSync(path.join(repo, 'a.txt'), 'utf8').trim() === 'a v1', '用户工作区未动')
 
+// ================= 场景 B：二层委派 + 防环 + 递归集成（0.7.0） =================
+const repo2 = fs.mkdtempSync(path.join(os.tmpdir(), 'dele2-repo-'))
+fs.writeFileSync(path.join(repo2, 'c.txt'), 'c v1\n')
+execSync('git init -q -b main && git add -A && git -c user.email=t@t -c user.name=t commit -qm init', { cwd: repo2 })
+
+const team2 = [
+  { id: 'T', name: 'Top', backend: 'top', role: '总领队', systemPrompt: '', subordinates: ['M'] },
+  { id: 'M', name: 'Mid', backend: 'mid', role: '子领队', systemPrompt: '', subordinates: ['G'] },
+  // 恶意配置：Gamma 试图把活派回 Top（应被防环闸拒绝）
+  { id: 'G', name: 'Gamma', backend: 'gamma', role: '队员', systemPrompt: '', subordinates: ['T'] }
+]
+
+function delegatingBackend(id, firstText, finishText) {
+  return {
+    id, label: id,
+    async probe() { return { ok: true, detail: '' } },
+    async start({ events }) {
+      setTimeout(() => {
+        events.onEvent({ ts: Date.now(), kind: 'final', text: firstText })
+        events.onTurnEnd({ response: firstText, ok: true })
+      }, 30)
+      return {
+        sessionId: 's_' + id,
+        async send(content) {
+          setTimeout(() => {
+            const text = content.includes('结果汇报') ? finishText : '继续等待'
+            events.onEvent({ ts: Date.now(), kind: 'final', text })
+            events.onTurnEnd({ response: text, ok: true })
+          }, 30)
+          await new Promise((r) => setTimeout(r, 50))
+        },
+        async stop() {}, async close() {}
+      }
+    }
+  }
+}
+const gammaBackend = {
+  id: 'gamma', label: 'gamma',
+  async probe() { return { ok: true, detail: '' } },
+  async start({ prompt, workdir, events }) {
+    setTimeout(() => {
+      const m = prompt.match(/c\.txt/)
+      if (m) fs.writeFileSync(path.join(workdir, m[0]), 'c v2 by Gamma\n')
+      // 干完活后试图把活派回 Top（防环闸应拒绝，然后以正文收尾）
+      const text = '我改完了 c.txt。<delegate to="Top" reason="试图回派">你来收尾</delegate>'
+      events.onEvent({ ts: Date.now(), kind: 'final', text })
+      events.onTurnEnd({ response: text, ok: true })
+    }, 40)
+    return { sessionId: 's_gamma', async send() {}, async stop() {}, async close() {} }
+  }
+}
+
+const backends2 = new Map([
+  ['top', delegatingBackend('top',
+    '派给子领队。<delegate to="Mid" reason="需要二级统筹">把 c.txt 升级到 v2</delegate>',
+    '最终总结：全链完成。')],
+  ['mid', delegatingBackend('mid',
+    '下派给队员。<delegate to="Gamma" reason="具体改文件">把 c.txt 改成 v2 by Gamma</delegate>',
+    '子队完成。')],
+  ['gamma', gammaBackend]
+])
+const runner2 = new TaskRunner(store, backends2, () => ({ concurrency: 1, mode: 'yolo', notify: false, workerConcurrency: 3 }))
+runner2.attachTeam(() => team2)
+
+const top = store.create({ title: '二层委派', prompt: '升级 c', workdir: repo2, backend: 'top', agentId: 'T' })
+runner2.enqueue(top)
+const tB = Date.now()
+while (Date.now() - tB < 40000) {
+  const t = store.get(top.id)
+  if (t.status === 'done' || t.status === 'failed') break
+  await new Promise((r) => setTimeout(r, 200))
+}
+const finTop = store.get(top.id)
+assert(finTop.status === 'done', `顶层 done（${finTop.status}${finTop.error ? ' ' + finTop.error : ''}）`)
+const midTask = store.list().find((t) => t.parentTaskId === top.id)
+assert(!!midTask && midTask.agentId === 'M', '一层：Mid 子任务存在')
+const gammaTask = store.list().find((t) => t.parentTaskId === midTask.id)
+assert(!!gammaTask && gammaTask.agentId === 'G', '二层：Gamma 孙任务存在')
+assert(gammaTask.status === 'done', 'Gamma done（回派被拒后正常收尾）')
+const gammaEvents = store.readEvents(gammaTask.id).map((e) => e.text ?? '').join('\n')
+assert(gammaEvents.includes('拒绝派给 Top'), '防环闸拒绝了回派（事件留痕）')
+assert(!store.list().some((t) => t.agentId === 'T' && t.id !== top.id), '没有产生回到 Top 的环任务')
+assert(midTask.roundsUsed === 1 && gammaTask.roundsUsed === 1, `轮数记账（mid=${midTask.roundsUsed} gamma=${gammaTask.roundsUsed}）`)
+// 递归集成：Gamma 的改动应一路合到顶层的集成分支
+const ib2 = finTop.integration?.branch
+assert(!!ib2, `顶层集成分支 ${ib2 ?? '无'}`)
+if (ib2) {
+  assert(execSync(`git show ${ib2}:c.txt`, { cwd: repo2, encoding: 'utf8' }).includes('by Gamma'), 'Gamma 改动经 Mid 递归合入顶层集成分支')
+}
+assert(fs.readFileSync(path.join(repo2, 'c.txt'), 'utf8').trim() === 'c v1', '用户工作区未动（二层同理）')
+
 console.log('\n✅ DELEGATION SMOKE PASSED')
 process.exit(0)

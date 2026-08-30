@@ -74,6 +74,7 @@ interface Task {
   integration?: { branch?, note? }  // 领队任务的 git 集成结果（0.4.0 由 squad 更名）
   attempt?: number              // 自动重试计数（0.5.0，上限 2）
   usage?: TaskUsage             // 累计用量（0.4.0：input/output/totalTokens, costUsd, durationMs, turns）
+  roundsUsed?: number           // 委派已用轮数（0.7.0：全链共享预算记账）
   status: 'queued'|'running'|'done'|'failed'|'cancelled'
   createdAt; startedAt?; endedAt?
   result?: string               // 最终回复（委派任务已剥除 delegate 标记）
