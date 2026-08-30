@@ -6,6 +6,7 @@ import type { AgentBackend, BackendSession, PermissionRequest } from './backends
 import { snapshotGitAfter } from './git'
 import { buildAgentPrompt, buildDelegationBlock, runDelegationLoop, type AgentLike } from './delegate'
 import { classifyFailure } from './failure'
+import { aggregateUsage } from './usage'
 
 function getWindows(): { send: (ch: string, v: unknown) => void }[] {
   try {
@@ -102,13 +103,13 @@ export class TaskRunner {
     return { ok: true }
   }
 
-  /** 回合成功后的收尾：取最终结果 + git 快照 + 状态落盘 */
+  /** 回合成功后的收尾：取最终结果 + git 快照 + 用量聚合 + 状态落盘 */
   private async finalizeDone(taskId: string, directResult?: string) {
     const task = this.store.get(taskId)
     if (!task) return
     let result = directResult
+    const events = this.store.readEvents(taskId)
     if (result === undefined) {
-      const events = this.store.readEvents(taskId)
       const finals = events.filter((e) => e.kind === 'final')
       result = finals[finals.length - 1]?.text ?? ''
     }
@@ -118,7 +119,8 @@ export class TaskRunner {
       endedAt: Date.now(),
       result,
       gitDiff: diff || task.gitDiff,
-      gitStat: stat || task.gitStat
+      gitStat: stat || task.gitStat,
+      usage: aggregateUsage(events)
     })
     this.pushTask(taskId)
   }

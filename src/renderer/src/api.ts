@@ -97,3 +97,11 @@ export function fmtTime(ts?: number): string {
   const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
   return sameDay ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`
 }
+
+/** token 数人类可读（1234567 → 1.23M） */
+export function fmtTokens(n?: number): string {
+  if (!n) return '0'
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
+  return String(n)
+}

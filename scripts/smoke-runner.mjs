@@ -44,6 +44,7 @@ function makeFakeBackend() {
       emitter.onEvent({ ts: Date.now(), kind: 'text', text: `[followup:${content}]` })
       behavior.followupCount++
       setTimeout(() => {
+        emitter.onEvent({ ts: Date.now(), kind: 'usage', data: { tokenCount: 600, durationMs: 1500 } })
         emitter.onEvent({ ts: Date.now(), kind: 'final', text: '追问回复' })
         emitter.onTurnEnd({ response: '追问回复', ok: true })
       }, 30)
@@ -62,6 +63,7 @@ function makeFakeBackend() {
       // 异步完成首回合
       setTimeout(() => {
         events.onEvent({ ts: Date.now(), kind: 'text', text: '流式片段' })
+        events.onEvent({ ts: Date.now(), kind: 'usage', data: { input_tokens: 1200, output_tokens: 300, total_cost_usd: 0.012 } })
         events.onEvent({ ts: Date.now(), kind: 'final', text: `done:${prompt}` })
         events.onTurnEnd({ response: `done:${prompt}`, ok: true })
       }, 50)
@@ -104,6 +106,14 @@ assert(fu.ok, '续聊返回 ok')
 assert(cur.status === 'done', `续聊后 done (got ${cur.status})`)
 assert(cur.result === '追问回复', `续聊结果 (got ${cur.result})`)
 assert(backend.getBehavior().followupCount === 1, '后端收到追问')
+
+// 2b. 用量聚合：首回合 claude 形状 + 追问 zcode 形状 → Task.usage 累计
+const u = cur.usage
+assert(!!u, 'usage 已聚合落库')
+assert(u.inputTokens === 1200 && u.outputTokens === 300, `input/output 累计 (got ${u?.inputTokens}/${u?.outputTokens})`)
+assert(u.totalTokens === 600, `多态 totalTokens 累计 (got ${u?.totalTokens})`)
+assert(Math.abs(u.costUsd - 0.012) < 1e-9, `cost 累计 (got ${u?.costUsd})`)
+assert(u.durationMs === 1500 && u.turns === 2, `时长/回合数 (got ${u?.durationMs}/${u?.turns})`)
 
 // 3. 排队 + 取消排队
 const t2 = store.create({ title: '任务2', prompt: 'world', workdir: '', backend: 'fake' })

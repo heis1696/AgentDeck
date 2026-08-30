@@ -640,3 +640,32 @@ body {
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: #2a3140; border-radius: 5px; border: 2px solid var(--bg); }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ---- 用量页（P2） ---- */
+.usage-page { padding: 20px 24px; overflow-y: auto; }
+.page-head h2 { margin: 0 0 2px; font-size: 18px; }
+.page-head .hint { margin: 0 0 16px; }
+.usage-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-bottom: 18px; }
+.usage-card {
+  padding: 14px 16px;
+  background: var(--panel, #171a21);
+  border: 1px solid var(--border, #262b36);
+  border-radius: 10px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.usage-kpi { font-size: 20px; font-weight: 600; }
+.usage-label { font-size: 11px; opacity: 0.65; }
+.usage-table-wrap { margin-bottom: 18px; }
+.usage-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.usage-table th {
+  text-align: left; padding: 6px 10px; font-weight: 500; opacity: 0.6;
+  border-bottom: 1px solid var(--border, #262b36);
+}
+.usage-table td { padding: 7px 10px; border-bottom: 1px solid var(--border, #262b36); }
+.usage-table .list-empty { text-align: center; opacity: 0.5; padding: 18px; }
+.usage-chip { color: var(--accent, #4f8cff); }
+.agent-avatar.xs {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; border-radius: 4px;
+  font-size: 10px; color: #fff; margin-right: 6px; vertical-align: middle;
+}

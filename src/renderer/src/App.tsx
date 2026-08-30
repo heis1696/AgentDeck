@@ -4,10 +4,11 @@ import { TaskList } from './components/TaskList'
 import { TaskDetail } from './components/TaskDetail'
 import { SettingsView } from './components/SettingsView'
 import { TeamView } from './components/TeamView'
+import { UsageView } from './components/UsageView'
 import { WorkspaceView, FOCUS_WORKSPACE } from './components/WorkspaceView'
 import type { Task } from '../../shared/types'
 
-type View = 'tasks' | 'team' | 'settings'
+type View = 'tasks' | 'team' | 'usage' | 'settings'
 
 export function App() {
   const { tasks } = useTasks()
@@ -66,6 +67,9 @@ export function App() {
           <button className={view === 'team' ? 'active' : ''} onClick={() => setView('team')}>
             队伍
           </button>
+          <button className={view === 'usage' ? 'active' : ''} onClick={() => setView('usage')}>
+            用量
+          </button>
           <button className={view === 'settings' ? 'active' : ''} onClick={() => setView('settings')}>
             设置
           </button>
@@ -77,6 +81,8 @@ export function App() {
           <SettingsView />
         ) : view === 'team' ? (
           <TeamView />
+        ) : view === 'usage' ? (
+          <UsageView />
         ) : selected ? (
           <TaskDetail task={selected} tasks={tasks} onSelect={setSelectedId} />
         ) : (

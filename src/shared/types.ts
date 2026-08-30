@@ -20,6 +20,17 @@ export interface IntegrationInfo {
   note?: string
 }
 
+/** 任务累计用量（finalize 时从 events 聚合） */
+export interface TaskUsage {
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+  costUsd: number
+  durationMs: number
+  /** usage 事件条数（≈回合数） */
+  turns: number
+}
+
 export interface Task {
   id: string
   title: string
@@ -51,6 +62,8 @@ export interface Task {
   /** 完成时抓取的 git 改动 */
   gitDiff?: string
   gitStat?: string
+  /** 完成时聚合的累计用量 */
+  usage?: TaskUsage
   /** 事件条数（详情按需加载） */
   eventCount: number
 }

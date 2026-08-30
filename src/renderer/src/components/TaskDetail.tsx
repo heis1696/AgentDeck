@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { bridge, fmtDuration } from '../api'
+import { bridge, fmtDuration, fmtTokens } from '../api'
 import { Markdown } from './Markdown'
 import type { Task, TaskEvent } from '../../../shared/types'
 import type { PermissionRequest } from '../../../main/backends/types'
@@ -150,6 +150,15 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
               <a className="mini link" title={task.workdir} onClick={() => bridge.openPath(task.workdir)}>
                 📂 {task.workdir}
               </a>
+            )}
+            {task.usage && (
+              <span
+                className="mini usage-chip"
+                title={`输入 ${task.usage.inputTokens.toLocaleString()} / 输出 ${task.usage.outputTokens.toLocaleString()} tokens · ${task.usage.turns} 回合${task.usage.durationMs ? ` · 模型时长 ${fmtDuration(task.usage.durationMs)}` : ''}`}
+              >
+                ⚡ {fmtTokens(task.usage.inputTokens + task.usage.outputTokens)} tok
+                {task.usage.costUsd > 0 ? ` · $${task.usage.costUsd.toFixed(2)}` : ''}
+              </span>
             )}
             {task.sessionId && <span className="mini mono">{task.sessionId.slice(0, 18)}…</span>}
           </div>
