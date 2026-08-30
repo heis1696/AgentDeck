@@ -47,7 +47,7 @@
 
 ### 2.2 Task（任务）与委派
 
-任务一律 `mode: 'single'`；子任务通过 `parentTaskId` 挂在领队下（侧栏缩进展示）。
+子任务通过 `parentTaskId` 挂在领队下（侧栏缩进展示）；领队集成结果记 `Task.integration {branch, note}`（0.4.0 删除了旧 squad 双轨，存量自动迁移）。
 没有"协同模式"开关——**委派是领队队员的内在能力**：
 
 ```
@@ -148,7 +148,7 @@ delegate 标记 → 目标解析（限 subordinates，名字/平台 id 忽略大
 
 ### 4.4 重启恢复
 
-- 子任务全终态的旧 squad 领队：`squad.recover()` 续跑汇总+集成
+- 重启清扫（0.4.0）：加载时把悬挂的 running 任务（含旧 squad 存量）标为 failed 并提示重跑，不再永久"执行中"
 - 新委派任务重启后：领队任务标 failed（子任务结果已保留），可单看/重跑
 
 ---
@@ -185,9 +185,12 @@ delegate 标记 → 目标解析（限 subordinates，名字/平台 id 忽略大
 | runner 状态机 | `npm run smoke` | 12 项断言（完成/续聊/取消/失败/删除） |
 | zcode 适配器 | `npm run smoke:zcode` | 真实回合端到端 |
 | 三个 CLI 适配器 | `npm run smoke:clis` | claude/codex/opencode 真实回合 |
-| 旧 squad 编排 | `npm run smoke:squad` | 假后端+真实 git（存量兼容） |
+| 数据迁移 | `npm run smoke:migration` | 0.3.x→0.4 schema（mode/squad→integration、悬挂 running 清扫） |
+| 失败分类 | `npm run smoke:failure` | 11 类规则 + runner 落库 |
+| 自动重试 | `npm run smoke:retry` | 瞬态重试/非瞬态不重试/上限打满 |
+| diff 解析 | `npm run smoke:diff` | DiffView 解析器边界 |
 | 委派循环 | `npm run smoke:delegate` | 假后端：多轮派发/剥离/集成/取消语义 |
 | 真实委派 e2e | `npm run e2e:delegate` | GLM 领队自发派 Claude/OpenCode + 集成分支 |
-| 真实异构 e2e | `npm run e2e:hetero` | 旧 squad 路径异构验证 |
+| 真实异构 e2e | `npm run e2e:delegate` | zcode 领队 + claude/opencode 队员（领队自主决策） |
 
 打包：`npm run dist`（NSIS）；开发：`npm run dev`；类型：`npm run typecheck`。

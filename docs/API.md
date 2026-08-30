@@ -15,7 +15,7 @@ preload 以 `contextBridge` 暴露，全部经 `ipcRenderer.invoke/on` 与主进
 | `list` | `() => Promise<Task[]>` | 全量任务，按创建时间倒序 |
 | `get` | `(id) => Promise<Task \| null>` | 单个任务 |
 | `events` | `(id, afterSeq = 0) => Promise<TaskEvent[]>` | 增量读执行日志（seq > afterSeq，上限 5000 条） |
-| `create` | `(input) => Promise<Task>` | 创建并立即入队。`input: { title, prompt, workdir, backend?, agentId?, mode?, maxWorkers? }`。`agentId` 优先于 `backend`；领队身份由该 agent 的 `subordinates` 决定 |
+| `create` | `(input) => Promise<Task>` | 创建并立即入队。`input: { title, prompt, workdir, backend?, agentId? }`。`agentId` 优先于 `backend`；领队身份由该 agent 的 `subordinates` 决定 |
 | `cancel` | `(id) => Promise<{ok, error?}>` | 取消排队/运行中任务；**级联取消其运行中子任务** |
 | `followUp` | `(id, content) => Promise<{ok, error?}>` | 在已完成任务会话上追问；无活跃会话时走 resume；dsh 不支持（报错） |
 | `delete` | `(id) => Promise<{ok, error?}>` | 删除任务及日志；运行中拒绝 |
@@ -68,10 +68,12 @@ interface Task {
   workdir: string               // '' = 无绑定
   backend: string               // zcode | claude | codex | opencode | dsh
   agentId?: string              // 执行队员
-  mode: 'single' | 'squad'      // squad 仅存量旧任务；新任务一律 single
+  failure?: FailureInfo         // 失败分类（0.4.0）：code/title/hint/retryable
   parentTaskId?: string         // 委派产生的子任务指向领队
   workerIndex?: number
-  squad?: { phase, maxWorkers, integrationBranch?, integrationNote? }
+  integration?: { branch?, note? }  // 领队任务的 git 集成结果（0.4.0 由 squad 更名）
+  attempt?: number              // 自动重试计数（0.5.0，上限 2）
+  usage?: TaskUsage             // 累计用量（0.4.0：input/output/totalTokens, costUsd, durationMs, turns）
   status: 'queued'|'running'|'done'|'failed'|'cancelled'
   createdAt; startedAt?; endedAt?
   result?: string               // 最终回复（委派任务已剥除 delegate 标记）
@@ -120,11 +122,11 @@ settings.json                    # 设置
 
 ```ts
 { zcodePath, dshPath, nodePath, concurrency(默认1),
-  notifyOnDone(默认true), mode('yolo'|'build'|'edit'|'plan'), squadMaxWorkers(默认3) }
+  notifyOnDone(默认true), mode('yolo'|'build'|'edit'|'plan'), workerConcurrency(默认3，0.4.0 由 squadMaxWorkers 更名) }
 ```
 
 - `concurrency`：普通任务并行上限
-- `squadMaxWorkers`：委派子任务并行上限（两通道独立，领队编排不占普通槽）
+- `workerConcurrency`：委派子任务并行上限（两通道独立，领队编排不占普通槽）
 - `mode`：传给后端的权限模式；非 yolo 时交互确认
 
 ### 3.3 TaskRunner（`src/main/runner.ts`）
@@ -135,7 +137,7 @@ settings.json                    # 设置
   2. `backend.start(...)` → 等 `onTurnEnd`
   3. 领队且非 dsh → `runDelegationLoop(...)`
   4. `finalizeDone`：最终结果 + `snapshotGitAfter` 工作区 diff + 通知
-- `followUp` / `cancel`（级联）/ `resolvePermission` / `attachTeam` / `attachSquad`
+- `followUp` / `cancel`（级联）/ `resolvePermission` / `attachTeam` / `maybeAutoRetry`（0.5.0：retryable 失败自动重入队，≤2 次）
 - 启动句柄 `launchHandles`：一次性 CLI 在 session 返回前即可被取消
 
 ---
@@ -189,7 +191,7 @@ interface BackendSessionEvents {
 <delegate to="队员名">完整子任务指令（相对路径，自包含）</delegate>
 ```
 
-- 可多个，本轮并行执行；每轮上限 `squadMaxWorkers`
+- 可多个，本轮并行执行；每轮上限 `workerConcurrency`
 - 领队最终输出不应再含标记；对外结果经 `stripDelegates` 剥离
 
 ### 5.2 导出 API
