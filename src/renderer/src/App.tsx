@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useTasks } from './api'
+import { bridge, useTasks } from './api'
 import { TaskList } from './components/TaskList'
 import { TaskDetail } from './components/TaskDetail'
 import { NewTaskDialog } from './components/NewTaskDialog'
@@ -20,6 +20,11 @@ export function App() {
   useEffect(() => {
     // 通知由主进程 task:notify 推送，这里仅负责聚焦（v1 简化：不加监听）
   }, [])
+
+  // 删除任务后若正选中它，回到空状态
+  useEffect(() => bridge.tasks.onDeleted((id) => {
+    setSelectedId((cur) => (cur === id ? null : cur))
+  }), [])
 
   // 快捷键：Ctrl+N 新任务
   useEffect(() => {

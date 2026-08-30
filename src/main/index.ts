@@ -113,10 +113,24 @@ app.whenReady().then(() => {
   ipcMain.handle('agents:new-id', () => newAgentId())
   ipcMain.handle('agents:probe', async () => {
     const out: Record<string, { ok: boolean; detail: string }> = {}
-    for (const [id, b] of backends) {
-      const r = await b.probe()
-      out[id] = r
-    }
+    // 并行探测，单个完成后立刻推送 UI（避免慢后端拖住整体反馈）
+    await Promise.all(
+      [...backends].map(async ([id, b]) => {
+        let r: { ok: boolean; detail: string }
+        try {
+          r = await Promise.race([
+            b.probe(),
+            new Promise<{ ok: boolean; detail: string }>((res) =>
+              setTimeout(() => res({ ok: false, detail: '探测超时（20s）' }), 20000)
+            )
+          ])
+        } catch (e) {
+          r = { ok: false, detail: `探测失败: ${e instanceof Error ? e.message : String(e)}` }
+        }
+        out[id] = r
+        mainWindow?.webContents.send('agents:probe-result', { id, result: r })
+      })
+    )
     return out
   })
   ipcMain.handle('tasks:cancel', (_e, id) => runner.cancel(id))
@@ -125,10 +139,17 @@ app.whenReady().then(() => {
     runner.resolvePermission(requestId, optionId, decision === 'deny' ? 'deny' : 'allow')
   )
   ipcMain.handle('tasks:delete', (_e, id) => {
-    if (store.get(id)?.status === 'running') {
-      return { ok: false, error: '请先取消运行中的任务' }
+    const t = store.get(id)
+    if (!t) return { ok: false, error: '任务不存在' }
+    if (t.status === 'running') return { ok: false, error: '请先取消运行中的任务' }
+    // 级联删除 squad 子任务（父任务不在运行中时子任务不应仍在跑，若有则拒绝）
+    const kids = store.list().filter((x) => x.parentTaskId === id)
+    if (kids.some((k) => k.status === 'running')) {
+      return { ok: false, error: '请先取消运行中的子任务' }
     }
-    store.delete(id)
+    const deleted = [id, ...kids.map((k) => k.id)]
+    for (const d of deleted) store.delete(d)
+    for (const d of deleted) mainWindow?.webContents.send('task:deleted', d)
     return { ok: true }
   })
   ipcMain.handle('tasks:retry', (_e, id) => {

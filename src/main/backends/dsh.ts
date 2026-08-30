@@ -47,7 +47,6 @@ export function findDshBin(custom?: string): { node: string; bin: string } | nul
 }
 
 export function createDshBackend(getPaths: () => { dshPath: string }): AgentBackend {
-  const paths = getPaths()
   let live: { kill: () => void } | null = null
 
   const runOnce = (
@@ -55,7 +54,8 @@ export function createDshBackend(getPaths: () => { dshPath: string }): AgentBack
     workdir: string,
     events: BackendSessionEvents
   ): Promise<{ response: string; ok: boolean; error?: string }> => {
-    const dsh = findDshBin(paths.dshPath || undefined)
+    // 每次调用现取设置，设置页改路径后无需重启即可生效
+    const dsh = findDshBin(getPaths().dshPath || undefined)
     if (!dsh) return Promise.reject(new Error('找不到 dsh（DeepSeek Harness）。请在设置页指定 bin.js 路径'))
     let out = ''
     let settled = false
@@ -102,14 +102,21 @@ export function createDshBackend(getPaths: () => { dshPath: string }): AgentBack
     id: 'dsh',
     label: 'DeepSeek Harness',
     async probe() {
-      const dsh = findDshBin(paths.dshPath || undefined)
+      const dsh = findDshBin(getPaths().dshPath || undefined)
       if (!dsh) return { ok: false, detail: '找不到 deepseek-harness 安装（可指定 apps/cli/lib/bin.js 路径）' }
       const { execFile } = await import('node:child_process')
       return new Promise((resolve) => {
-        execFile(dsh.node, [dsh.bin, '--version'], { timeout: 15000, windowsHide: true }, (err, stdout) => {
-          if (err) resolve({ ok: false, detail: 'dsh 执行失败: ' + String(err.message).slice(0, 80) })
-          else resolve({ ok: true, detail: `dsh ${stdout.trim().slice(0, 40)} · headless 模式` })
-        })
+        // dsh.node 可能是 electron.exe 充当 node（findDshBin 的回退），
+        // 不加此标记会按 GUI 应用启动、不退出，探测只能靠超时收场
+        execFile(
+          dsh.node,
+          [dsh.bin, '--version'],
+          { timeout: 15000, windowsHide: true, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } },
+          (err, stdout) => {
+            if (err) resolve({ ok: false, detail: 'dsh 执行失败: ' + String(err.message).slice(0, 80) })
+            else resolve({ ok: true, detail: `dsh ${stdout.trim().slice(0, 40)} · headless 模式` })
+          }
+        )
       })
     },
     async start({ prompt, workdir, events }) {

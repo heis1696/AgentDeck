@@ -80,7 +80,8 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   }
   const doDelete = async () => {
     if (!confirm('删除该任务及其日志？')) return
-    await bridge.tasks.delete(task.id)
+    const r = await bridge.tasks.delete(task.id)
+    if (!r.ok) alert(r.error ?? '删除失败')
   }
   const doDuplicate = async () => {
     const t = await bridge.tasks.create({

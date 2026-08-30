@@ -4,6 +4,7 @@ import { bridge, useSettings } from '../api'
 export function SettingsView() {
   const { settings, update } = useSettings()
   const [probe, setProbe] = useState<{ ok: boolean; detail: string } | null>(null)
+  const [probing, setProbing] = useState(false)
   const [zcodePath, setZcodePath] = useState('')
   const [nodePath, setNodePath] = useState('')
   const [dshPath, setDshPath] = useState('')
@@ -19,9 +20,17 @@ export function SettingsView() {
   if (!settings) return <div className="empty">加载中…</div>
 
   const doProbe = async () => {
-    await update({ zcodePath: zcodePath.trim(), nodePath: nodePath.trim(), dshPath: dshPath.trim() })
-    const r = await bridge.settings.probe()
-    setProbe({ ok: r.ok, detail: r.detail })
+    if (probing) return
+    setProbing(true)
+    try {
+      await update({ zcodePath: zcodePath.trim(), nodePath: nodePath.trim(), dshPath: dshPath.trim() })
+      const r = await bridge.settings.probe()
+      setProbe({ ok: r.ok, detail: r.detail })
+    } catch (e) {
+      setProbe({ ok: false, detail: '检测失败: ' + (e instanceof Error ? e.message : String(e)) })
+    } finally {
+      setProbing(false)
+    }
   }
 
   return (
@@ -29,7 +38,11 @@ export function SettingsView() {
       <h2>设置</h2>
 
       <section className="settings-card">
-        <h3>执行后端 · ZCode</h3>
+        <h3>执行后端 · ZCode / DeepSeek Harness 路径</h3>
+        <p className="hint">
+          执行后端 = 实际执行任务的 CLI 程序（zcode、claude、codex、opencode、dsh）。zcode 与 dsh
+          不是标准 PATH 安装，需要在此指定路径；claude / codex / opencode 装在 PATH 上即可自动发现，无需配置，未安装也不影响 zcode 使用。
+        </p>
         <label className="field">
           <span>zcode.cjs 路径（留空 = 自动探测）</span>
           <input value={zcodePath} onChange={(e) => setZcodePath(e.target.value)} placeholder="D:\Program Files\ZCode\resources\glm\zcode.cjs" />
@@ -47,8 +60,8 @@ export function SettingsView() {
           />
         </label>
         <div className="row">
-          <button className="btn" onClick={doProbe}>
-            检测可用性
+          <button className="btn" onClick={doProbe} disabled={probing}>
+            {probing ? '检测中…' : '检测可用性'}
           </button>
           {probe && (
             <span className={probe.ok ? 'probe-ok' : 'probe-fail'}>

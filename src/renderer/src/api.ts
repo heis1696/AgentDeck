@@ -14,6 +14,7 @@ interface Bridge {
     delete: (id: string) => Promise<{ ok: boolean; error?: string }>
     retry: (id: string) => Promise<{ ok: boolean; error?: string }>
     onUpdated: (cb: (t: Task) => void) => () => void
+    onDeleted: (cb: (id: string) => void) => () => void
     onEvent: (cb: (taskId: string, e: TaskEvent) => void) => () => void
     onPermission: (cb: (taskId: string, req: PermissionRequest) => void) => () => void
     respondPermission: (requestId: string | number, optionId: string, decision: 'allow' | 'deny') => Promise<{ ok: boolean; error?: string }>
@@ -30,6 +31,7 @@ interface Bridge {
     list: () => Promise<AgentInfo[]>
     save: (list: AgentInfo[]) => Promise<AgentInfo[]>
     probe: () => Promise<Record<string, { ok: boolean; detail: string }>>
+    onProbeResult: (cb: (id: string, result: { ok: boolean; detail: string }) => void) => () => void
   }
 }
 
@@ -52,8 +54,12 @@ export function useTasks() {
   }, [])
   useEffect(() => {
     refresh()
-    const off = bridge.tasks.onUpdated(() => refresh())
-    return off
+    const off1 = bridge.tasks.onUpdated(() => refresh())
+    const off2 = bridge.tasks.onDeleted(() => refresh())
+    return () => {
+      off1()
+      off2()
+    }
   }, [refresh])
   return { tasks, refresh }
 }

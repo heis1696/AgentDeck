@@ -20,6 +20,11 @@ const api = {
       ipcRenderer.on('task:updated', h)
       return () => ipcRenderer.removeListener('task:updated', h)
     },
+    onDeleted: (cb: (id: string) => void) => {
+      const h = (_e: unknown, id: string) => cb(id)
+      ipcRenderer.on('task:deleted', h)
+      return () => ipcRenderer.removeListener('task:deleted', h)
+    },
     onEvent: (cb: (taskId: string, e: TaskEvent) => void) => {
       const h = (_e: unknown, payload: { taskId: string; event: TaskEvent }) => cb(payload.taskId, payload.event)
       ipcRenderer.on('task:event', h)
@@ -46,7 +51,12 @@ const api = {
       ipcRenderer.invoke('agents:list'),
     save: (list: Array<{ id: string; name: string; backend: string; model?: string; note?: string; color: string }>) =>
       ipcRenderer.invoke('agents:save', list) as Promise<Array<{ id: string; name: string; backend: string; model?: string; note?: string; color: string }>>,
-    probe: (): Promise<Record<string, { ok: boolean; detail: string }>> => ipcRenderer.invoke('agents:probe')
+    probe: (): Promise<Record<string, { ok: boolean; detail: string }>> => ipcRenderer.invoke('agents:probe'),
+    onProbeResult: (cb: (id: string, result: { ok: boolean; detail: string }) => void) => {
+      const h = (_e: unknown, p: { id: string; result: { ok: boolean; detail: string } }) => cb(p.id, p.result)
+      ipcRenderer.on('agents:probe-result', h)
+      return () => ipcRenderer.removeListener('agents:probe-result', h)
+    }
   }
 }
 

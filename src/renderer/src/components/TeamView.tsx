@@ -13,14 +13,28 @@ interface Agent {
 export function TeamView() {
   const [agents, setAgents] = useState<Agent[]>([])
   const [probes, setProbes] = useState<Record<string, { ok: boolean; detail: string }>>({})
+  const [probing, setProbing] = useState(false)
   const [editing, setEditing] = useState<Agent | null>(null)
 
   useEffect(() => {
     bridge.agents.list().then(setAgents)
   }, [])
 
+  // 主进程逐个推送探测结果，先到先显示（不被最慢的后端拖住）
+  useEffect(() => bridge.agents.onProbeResult((id, result) => {
+    setProbes((prev) => ({ ...prev, [id]: result }))
+  }), [])
+
   const probeAll = async () => {
-    setProbes(await bridge.agents.probe())
+    if (probing) return
+    setProbing(true)
+    try {
+      setProbes(await bridge.agents.probe())
+    } catch (e) {
+      alert('检测失败: ' + (e instanceof Error ? e.message : String(e)))
+    } finally {
+      setProbing(false)
+    }
   }
   const save = async (list: Agent[]) => {
     setAgents(await bridge.agents.save(list))
@@ -45,8 +59,8 @@ export function TeamView() {
       <div className="team-header">
         <h2>队伍（{agents.length} 名队员）</h2>
         <div className="row">
-          <button className="btn" onClick={probeAll}>
-            检测各平台可用性
+          <button className="btn" onClick={probeAll} disabled={probing}>
+            {probing ? '检测中…' : '检测各平台可用性'}
           </button>
           <button className="btn primary" onClick={add}>
             ＋ 加队员
