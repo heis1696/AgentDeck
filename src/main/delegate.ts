@@ -10,23 +10,33 @@ import { isGitRepo, createWorktree, mergeBranchInto, branchDiffSummary, currentB
 export interface DelegateCall {
   to: string
   prompt: string
+  /** 派工理由（领队自述，留痕展示用） */
+  reason?: string
+}
+
+/** 解析 delegate 标签的属性（属性顺序任意） */
+function tagAttr(attrs: string, name: string): string | undefined {
+  const m = attrs.match(new RegExp(`${name}\\s*=\\s*"([^"]*)"`, 'i'))
+  return m ? m[1].trim() : undefined
 }
 
 /** 从领队回复中提取 delegate 标记（容错：任意属性顺序、md fence 内） */
 export function parseDelegates(text: string): DelegateCall[] {
   const out: DelegateCall[] = []
-  const re = /<delegate\s+to\s*=\s*"([^"]+)"\s*>([\s\S]*?)<\/delegate>/g
+  const re = /<delegate\b([^>]*)>([\s\S]*?)<\/delegate>/g
   let m: RegExpExecArray | null
   while ((m = re.exec(text))) {
     const prompt = m[2].trim()
-    if (prompt) out.push({ to: m[1].trim(), prompt })
+    const to = tagAttr(m[1], 'to')
+    const reason = tagAttr(m[1], 'reason')
+    if (prompt && to) out.push({ to, prompt, ...(reason ? { reason } : {}) })
   }
   return out
 }
 
 /** 把 delegate 标记从对外展示文本中剥掉 */
 export function stripDelegates(text: string): string {
-  return text.replace(/<delegate\s+to\s*=\s*"[^"]+"\s*>[\s\S]*?<\/delegate>/g, '').trim()
+  return text.replace(/<delegate\b[^>]*>[\s\S]*?<\/delegate>/g, '').trim()
 }
 
 export interface AgentLike {
@@ -68,7 +78,8 @@ ${roster}
 
 【派发协议】
 需要队员帮忙时，在回复中输出如下标记（可多个，会并行执行；其余正文照常写）：
-<delegate to="队员名">完整子任务指令，必须自包含（队员看不到你的上下文）</delegate>
+<delegate to="队员名" reason="一句话说明为什么派它">完整子任务指令，必须自包含（队员看不到你的上下文）</delegate>
+reason 可省略但建议带上——它会展示在执行日志里，方便人理解你的调度决策。
 子任务指令中的文件一律用仓库相对路径（如 src/app.ts）——队员在仓库的隔离副本里工作，绝对路径会改错地方。
 系统会并行执行并把结果汇报给你，你继续推进；可多轮派发。
 判断原则：琐碎小事自己做；可并行或需要专长的才派发。全部完成时输出最终总结（不含任何 delegate 标记）。`
@@ -140,7 +151,7 @@ export async function runDelegationLoop(
     const batch = calls.slice(0, Math.max(1, ctx.opts().maxParallel))
     if (batch.length < calls.length) note(`⚠ 本轮仅取前 ${batch.length} 个派发（并行上限）`)
 
-    note(`第 ${round} 轮派发：${batch.map((c) => c.to).join(', ')}`)
+    note(`第 ${round} 轮派发：${batch.map((c) => `${c.to}${c.reason ? `（${c.reason}）` : ''}`).join('、')}`)
     const childIds: string[] = []
     for (const call of batch) {
       const target =

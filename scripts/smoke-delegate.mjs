@@ -99,6 +99,13 @@ const assert = (cond, msg) => { if (!cond) { console.error('❌', msg); process.
 // parseDelegates 单测
 assert(parseDelegates('x <delegate to="甲">任务A</delegate> y <delegate to="乙">任务B</delegate>').length === 2, 'parseDelegates 提取两个')
 assert(stripDelegates('前<delegate to="甲">A</delegate>后') === '前后', 'stripDelegates 剥离标记')
+// reason 属性（0.7.0）：属性顺序任意、可省略
+const withReason = parseDelegates('<delegate to="甲" reason="前端专长">改 UI</delegate>')[0]
+assert(withReason.reason === '前端专长' && withReason.to === '甲' && withReason.prompt === '改 UI', 'reason 属性提取')
+const reversed = parseDelegates('<delegate reason="调研在行" to="乙">查资料</delegate>')[0]
+assert(reversed.to === '乙' && reversed.reason === '调研在行', '属性顺序任意')
+assert(parseDelegates('<delegate to="甲">无理由</delegate>')[0].reason === undefined, 'reason 可省略')
+assert(stripDelegates('前<delegate to="甲" reason="x">A</delegate>后') === '前后', 'stripDelegates 兼容带 reason 的标记')
 
 // 主流程
 const leader = store.create({ title: '升级两文件', prompt: '升级 a 和 b', workdir: repo, backend: 'zcode', agentId: 'L1' })
