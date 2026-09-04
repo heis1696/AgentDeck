@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { bridge, type AgentInfo as Agent } from '../api'
+import { toast } from '../ui/Toasts'
+import { Menu } from '../ui/Menu'
 
 export function TeamView() {
   const [agents, setAgents] = useState<Agent[]>([])
@@ -22,7 +24,7 @@ export function TeamView() {
     try {
       setProbes(await bridge.agents.probe())
     } catch (e) {
-      alert('检测失败: ' + (e instanceof Error ? e.message : String(e)))
+      toast.error('检测失败: ' + (e instanceof Error ? e.message : String(e)))
     } finally {
       setProbing(false)
     }
@@ -103,13 +105,16 @@ export function TeamView() {
             </label>
             <label className="field">
               <span>平台 *</span>
-              <select value={editing.backend} onChange={(e) => update(editing, { backend: e.target.value })}>
-                {backends.map((b) => (
-                  <option key={b} value={b}>
-                    {b}
-                  </option>
-                ))}
-              </select>
+              <Menu
+                items={backends.map((b) => ({ value: b, label: b }))}
+                value={editing.backend}
+                onChange={(v) => update(editing, { backend: v })}
+                trigger={(cur, open) => (
+                  <button className="btn menu-trigger" type="button">
+                    {cur?.label ?? editing.backend} <span className="menu-caret">{open ? '▴' : '▾'}</span>
+                  </button>
+                )}
+              />
             </label>
             <label className="field">
               <span>定位（头衔：领队 / 工程师 / 审查员…）</span>

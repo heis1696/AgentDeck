@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { bridge, type AgentInfo } from '../api'
+import { toast } from '../ui/Toasts'
 import type { Task } from '../../../shared/types'
 
 // 草稿存模块级：切去任务详情再回来不丢输入（会话内存活）
@@ -69,7 +70,7 @@ export function WorkspaceView({ onCreated }: { onCreated: (t: Task) => void }) {
       if (promptRef.current) promptRef.current.style.height = 'auto'
       onCreated(t)
     } catch (e) {
-      alert(e instanceof Error ? e.message : String(e))
+      toast.error(e instanceof Error ? e.message : String(e))
     } finally {
       setBusy(false)
     }

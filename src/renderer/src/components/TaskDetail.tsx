@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { bridge, fmtDuration, fmtTokens } from '../api'
 import { Markdown } from './Markdown'
 import { DiffView } from './DiffView'
+import { confirmDialog } from '../ui/Confirm'
+import { toast } from '../ui/Toasts'
 import type { Task, TaskEvent } from '../../../shared/types'
 import type { PermissionRequest } from '../../../main/backends/types'
 
@@ -102,9 +104,9 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     setBusy(false)
   }
   const doDelete = async () => {
-    if (!confirm('删除该任务及其日志？')) return
+    if (!(await confirmDialog({ title: '删除该任务及其日志？', body: task.title, danger: true, confirmText: '删除' }))) return
     const r = await bridge.tasks.delete(task.id)
-    if (!r.ok) alert(r.error ?? '删除失败')
+    if (!r.ok) toast.error(r.error ?? '删除失败')
   }
   const doDuplicate = async () => {
     const t = await bridge.tasks.create({
@@ -122,7 +124,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     setFollowUp('')
     if (followRef.current) followRef.current.style.height = 'auto'
     const r = await bridge.tasks.followUp(task.id, content)
-    if (!r.ok) alert(r.error)
+    if (!r.ok) toast.error(r.error ?? '续聊失败')
     setBusy(false)
   }
 

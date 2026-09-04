@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { bridge, useTasks, useSettings } from './api'
 import { TaskList } from './components/TaskList'
 import { TaskDetail } from './components/TaskDetail'
@@ -9,6 +9,9 @@ import { WorkspaceView, FOCUS_WORKSPACE } from './components/WorkspaceView'
 import { TabBar } from './components/TabBar'
 import { BoardView } from './components/BoardView'
 import { ListTodo, Users, Gauge, Settings } from 'lucide-react'
+import { ToastHost, toast } from './ui/Toasts'
+import { ConfirmHost } from './ui/Confirm'
+import { Palette, type PaletteCommand } from './ui/Palette'
 import type { Task } from '../../shared/types'
 
 type View = 'tasks' | 'team' | 'usage' | 'settings'
@@ -17,7 +20,7 @@ const MAX_TABS = 8
 
 export function App() {
   const { tasks } = useTasks()
-  const { settings } = useSettings()
+  const { settings, update } = useSettings()
 
   // 主题：dark | light | system（跟随系统时监听变化）
   useEffect(() => {
@@ -34,6 +37,7 @@ export function App() {
     }
   }, [settings?.theme])
   const [view, setView] = useState<View>('tasks')
+  const [paletteOpen, setPaletteOpen] = useState(false)
   /** 任务页展示形态：列表 / 看板（记忆） */
   const [board, setBoard] = useState(() => localStorage.getItem('agentdeck:board') === '1')
   const toggleBoard = () => setBoard((b) => { localStorage.setItem('agentdeck:board', b ? '0' : '1'); return !b })
@@ -78,7 +82,10 @@ export function App() {
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       const mod = e.ctrlKey || e.metaKey
-      if (mod && e.key.toLowerCase() === 'n') {
+      if (mod && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        setPaletteOpen((o) => !o)
+      } else if (mod && e.key.toLowerCase() === 'n') {
         e.preventDefault()
         goWorkspace()
       } else if (mod && e.key.toLowerCase() === 'w') {
@@ -97,8 +104,27 @@ export function App() {
     openTask(t.id)
   }
 
+  const commands: PaletteCommand[] = useMemo(() => {
+    const cmds: PaletteCommand[] = [
+      { id: 'nav-tasks', group: '跳转', label: '任务', hint: '页面', run: () => setView('tasks') },
+      { id: 'nav-team', group: '跳转', label: '队伍', hint: '页面', run: () => setView('team') },
+      { id: 'nav-usage', group: '跳转', label: '用量', hint: '页面', run: () => setView('usage') },
+      { id: 'nav-settings', group: '跳转', label: '设置', hint: '页面', run: () => setView('settings') },
+      { id: 'act-new', group: '操作', label: '新建任务', hint: 'Ctrl+N', keywords: 'new create', run: goWorkspace },
+      { id: 'act-board', group: '操作', label: board ? '切换为列表视图' : '切换为看板视图', keywords: 'board list', run: toggleBoard },
+      { id: 'act-theme', group: '操作', label: `主题：切换为${(settings?.theme ?? 'dark') === 'dark' ? '浅色' : '深色'}`, keywords: 'theme light dark', run: () => { void update({ theme: (settings?.theme ?? 'dark') === 'dark' ? 'light' : 'dark' }) } }
+    ]
+    for (const t of tasks.slice(0, 20)) {
+      cmds.push({ id: `task-${t.id}`, group: '任务', label: t.title, hint: t.status, keywords: t.prompt, run: () => openTask(t.id) })
+    }
+    return cmds
+  }, [tasks, board, settings?.theme])
+
   return (
     <div className="app">
+      <ToastHost />
+      <ConfirmHost />
+      <Palette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={commands} />
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-mark">⚓</span> AgentDeck

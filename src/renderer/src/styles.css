@@ -1100,3 +1100,180 @@ html.light .status-failed { background: rgba(195, 63, 56, 0.1); color: #a83731; 
 html.light .status-queued { background: var(--bg-hover); color: var(--text-dim); }
 html.light .status-cancelled { background: var(--bg-hover); color: var(--text-faint); }
 html.light .dot { box-shadow: none; }
+
+/* ============================================================
+   0.11.0 交互套件：设计令牌 v2（对标 multica tokens.css）+
+   Menu/Toast/Confirm/Palette 组件样式
+   ============================================================ */
+
+/* ---- 令牌 v2：分层表面系统 + 双阴影 + 字阶 ---- */
+:root {
+  /* 表面四层：壳（最暗外框）→ 画布（内容区）→ 表面（内容组）→ 浮起（浮层）。
+     映射回既有变量名，全部既有样式自动继承新体系。 */
+  --app-shell: #080a0e;
+  --bg: #0d1016;            /* page-canvas */
+  --bg-raised: #141822;     /* surface */
+  --bg-hover: #1b2130;      /* surface-hover */
+  --bg-inset: #10141d;
+  --bg-selected: #232a3c;
+  --border: #202736;
+  --border-strong: #2c3547;
+  --menu-shadow: 0 10px 28px rgba(0, 0, 0, 0.32), 0 2px 8px rgba(0, 0, 0, 0.2);
+  --shadow-pop: 0 20px 48px rgba(0, 0, 0, 0.46), 0 4px 12px rgba(0, 0, 0, 0.28);
+
+  /* 字阶（角色命名，全站仅用这些步进） */
+  --text-micro: 11px;
+  --text-caption: 12px;
+  --text-label: 13px;
+  --text-body: 14px;
+  --text-title-sm: 16px;
+  --text-title: 18px;
+}
+html.light {
+  --app-shell: #eceef2;
+  --bg: #f6f7fa;
+  --bg-raised: #ffffff;
+  --bg-hover: #eef0f5;
+  --bg-inset: #fafbfd;
+  --bg-selected: #e7ecf7;
+  --border: #e3e6ec;
+  --border-strong: #d2d7e1;
+  --menu-shadow: 0 10px 28px rgba(30, 40, 70, 0.1), 0 2px 8px rgba(30, 40, 70, 0.06);
+  --shadow-pop: 0 20px 48px rgba(30, 40, 70, 0.14), 0 4px 12px rgba(30, 40, 70, 0.08);
+}
+
+/* ---- Menu 下拉 ---- */
+.menu-root { position: relative; display: inline-block; }
+.menu-panel {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 60;
+  min-width: 150px;
+  max-width: 280px;
+  padding: 4px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--menu-shadow);
+  animation: menu-in 0.1s ease;
+}
+.menu-panel.align-right { left: auto; right: 0; }
+@keyframes menu-in { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+.menu-item {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%;
+  border: none; background: transparent;
+  color: var(--text);
+  font-size: var(--text-label);
+  text-align: left;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.menu-item.active { background: var(--bg-hover); }
+.menu-item.selected { color: var(--accent); }
+.menu-item:disabled { opacity: 0.4; cursor: default; }
+.menu-check { width: 14px; flex-shrink: 0; color: var(--accent); font-size: 11px; }
+.menu-label { flex: 1; }
+.menu-hint { color: var(--text-faint); font-size: var(--text-micro); }
+.menu-caret { margin-left: 6px; font-size: 10px; opacity: 0.6; }
+.menu-trigger { min-width: 110px; text-align: left; }
+
+/* ---- Toast ---- */
+.toast-host {
+  position: fixed;
+  right: 16px; bottom: 16px;
+  z-index: 90;
+  display: flex; flex-direction: column; gap: 8px;
+  pointer-events: none;
+}
+.toast {
+  display: flex; align-items: center; gap: 9px;
+  max-width: 380px;
+  padding: 10px 14px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-pop);
+  font-size: var(--text-label);
+  cursor: pointer;
+  animation: toast-in 0.16s ease;
+  pointer-events: auto;
+}
+@keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.toast-icon { font-size: 12px; }
+.toast-success .toast-icon { color: var(--ok); }
+.toast-error .toast-icon { color: var(--err); }
+.toast-info .toast-icon { color: var(--accent); }
+.toast-error { border-color: rgba(229, 83, 75, 0.4); }
+
+/* ---- Confirm 对话框 ---- */
+.confirm-dialog { min-width: 340px; max-width: 440px; }
+.confirm-body { color: var(--text-dim); font-size: var(--text-label); margin: -4px 0 10px; word-break: break-all; }
+
+/* ---- 命令面板 Ctrl+K ---- */
+.palette-overlay { align-items: flex-start; padding-top: 12vh; }
+.palette {
+  width: 560px; max-width: 90vw;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-pop);
+  overflow: hidden;
+  animation: menu-in 0.12s ease;
+}
+.palette-input {
+  width: 100%;
+  border: none; outline: none;
+  background: transparent;
+  color: var(--text);
+  font-size: var(--text-body);
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.palette-input::placeholder { color: var(--text-faint); }
+.palette-list { max-height: 380px; overflow-y: auto; padding: 6px; }
+.palette-group {
+  font-size: 10px; font-weight: 600; letter-spacing: 0.8px; text-transform: uppercase;
+  color: var(--text-faint);
+  padding: 8px 10px 4px;
+}
+.palette-item {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%;
+  border: none; background: transparent;
+  color: var(--text);
+  font-size: var(--text-label);
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.palette-item.active { background: var(--bg-selected); }
+.palette-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.palette-hl { color: var(--accent); }
+.palette-empty { text-align: center; color: var(--text-faint); font-size: var(--text-label); padding: 22px 0; }
+.palette-foot {
+  display: flex; align-items: center; gap: 5px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--border);
+  color: var(--text-faint);
+  font-size: var(--text-micro);
+}
+.palette-foot kbd {
+  background: var(--bg-hover);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 0 5px;
+  font-size: 10px;
+  font-family: var(--mono);
+}
+
+/* ---- 字阶应用（覆盖既有散点字号） ---- */
+.detail-title { font-size: var(--text-title); }
+.workspace-title { font-size: var(--text-title); }
+.settings h2, .usage-page h2, .page-head h2 { font-size: var(--text-title); }
+.task-item-title, .board-card-title { font-size: var(--text-label); }
+.list-group-label { font-size: 10px; }
+.nav button { font-size: var(--text-label); }

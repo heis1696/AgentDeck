@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { bridge, useSettings } from '../api'
+import { Menu } from '../ui/Menu'
 
 export function SettingsView() {
   const { settings, update } = useSettings()
@@ -76,11 +77,20 @@ export function SettingsView() {
         <h3>外观</h3>
         <label className="field">
           <span>主题</span>
-          <select value={settings.theme ?? 'dark'} onChange={(e) => update({ theme: e.target.value as any })}>
-            <option value="dark">深色</option>
-            <option value="light">浅色</option>
-            <option value="system">跟随系统</option>
-          </select>
+          <Menu
+            items={[
+              { value: 'dark', label: '深色' },
+              { value: 'light', label: '浅色' },
+              { value: 'system', label: '跟随系统' }
+            ]}
+            value={settings.theme ?? 'dark'}
+            onChange={(v) => update({ theme: v as any })}
+            trigger={(cur, open) => (
+              <button className="btn menu-trigger" type="button">
+                {cur?.label ?? '深色'} <span className="menu-caret">{open ? '▴' : '▾'}</span>
+              </button>
+            )}
+          />
         </label>
       </section>
 
@@ -98,12 +108,21 @@ export function SettingsView() {
         </label>
         <label className="field">
           <span>权限模式</span>
-          <select value={settings.mode} onChange={(e) => update({ mode: e.target.value as any })}>
-            <option value="yolo">yolo（全自动，推荐）</option>
-            <option value="build">build（构建类操作自动放行）</option>
-            <option value="edit">edit（编辑需确认*）</option>
-            <option value="plan">plan（只读规划*）</option>
-          </select>
+          <Menu
+            items={[
+              { value: 'yolo', label: 'yolo', hint: '全自动，推荐' },
+              { value: 'build', label: 'build', hint: '构建类操作自动放行' },
+              { value: 'edit', label: 'edit', hint: '编辑需确认*' },
+              { value: 'plan', label: 'plan', hint: '只读规划*' }
+            ]}
+            value={settings.mode}
+            onChange={(v) => update({ mode: v as any })}
+            trigger={(cur, open) => (
+              <button className="btn menu-trigger" type="button">
+                {cur?.label ?? settings.mode} <span className="menu-caret">{open ? '▴' : '▾'}</span>
+              </button>
+            )}
+          />
           <span className="hint">* 当前版本确认请求也会自动放行，交互式确认在路线图上</span>
         </label>
         <label className="field row-field">
