@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { bridge, fmtDuration, fmtTokens, type AgentInfo } from '../api'
+import { Gauge } from 'lucide-react'
 import type { Task } from '../../../shared/types'
 
 interface Row {
@@ -65,9 +66,14 @@ export function UsageView() {
 
   return (
     <div className="usage-page">
-      <header className="page-head">
-        <h2>用量</h2>
-        <p className="hint">按队员与平台聚合全部任务的 token、成本与耗时（完成时从回合用量累计）。</p>
+      <header className="page-header-bar">
+        <div className="detail-title-wrap">
+          <div className="page-title-row">
+            <Gauge size={16} className="page-icon" />
+            <h2 className="page-title">用量</h2>
+            <span className="page-desc">按队员与平台聚合 token、成本与耗时（完成时累计）</span>
+          </div>
+        </div>
       </header>
 
       <div className="usage-cards">

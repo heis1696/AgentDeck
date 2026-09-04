@@ -132,13 +132,11 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
 
   return (
     <div className="detail">
-      <header className="detail-header">
+      <header className="detail-header page-header-bar">
         <div className="detail-title-wrap">
           <h1 className="detail-title">{task.title}</h1>
           <div className="detail-meta">
-            <span className={`status-chip status-${task.status}`}>
-              {{ queued: '排队中', running: '执行中', done: '完成', failed: '失败', cancelled: '已取消' }[task.status]}
-            </span>
+            <span className={`status-chip status-${task.status}`}>{STATUS_META[task.status]}</span>
             {workers.length > 0 && (
               <span className="badge badge-squad">
                 ⚡ 委派 {workers.filter((w) => w.status === 'done').length}/{workers.length}
@@ -152,22 +150,6 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
             {!!task.attempt && (
               <span className="mini retry-chip" title={`自动重试 ${task.attempt}/2`}>⟳ 重试 {task.attempt}/2</span>
             )}
-            {duration > 0 && <span className="mini">{fmtDuration(duration)}</span>}
-            {task.workdir && (
-              <a className="mini link" title={task.workdir} onClick={() => bridge.openPath(task.workdir)}>
-                📂 {task.workdir}
-              </a>
-            )}
-            {task.usage && (
-              <span
-                className="mini usage-chip"
-                title={`输入 ${task.usage.inputTokens.toLocaleString()} / 输出 ${task.usage.outputTokens.toLocaleString()} tokens · ${task.usage.turns} 回合${task.usage.durationMs ? ` · 模型时长 ${fmtDuration(task.usage.durationMs)}` : ''}`}
-              >
-                ⚡ {fmtTokens(task.usage.inputTokens + task.usage.outputTokens)} tok
-                {task.usage.costUsd > 0 ? ` · $${task.usage.costUsd.toFixed(2)}` : ''}
-              </span>
-            )}
-            {task.sessionId && <span className="mini mono">{task.sessionId.slice(0, 18)}…</span>}
           </div>
         </div>
         <div className="detail-actions">
@@ -194,6 +176,8 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
         </div>
       </header>
 
+      <div className="detail-columns">
+        <div className="detail-main">
       {task.status === 'failed' && task.error && (
         <div className="error-banner">
           {task.failure ? (
@@ -376,6 +360,72 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
           </button>
         </footer>
       )}
+        </div>
+
+        <aside className="detail-panel">
+          <div className="prop-row">
+            <span className="prop-label">状态</span>
+            <span className={`status-chip status-${task.status}`}>{STATUS_META[task.status]}</span>
+          </div>
+          <div className="prop-row">
+            <span className="prop-label">平台</span>
+            <span className="badge">{task.backend}</span>
+            {task.sessionId && <span className="mini mono" title={task.sessionId}>{task.sessionId.slice(0, 12)}…</span>}
+          </div>
+          <div className="prop-row">
+            <span className="prop-label">工作目录</span>
+            {task.workdir ? (
+              <a className="prop-value link" title={task.workdir} onClick={() => bridge.openPath(task.workdir)}>
+                {task.workdir.split(/[\/]/).pop()}
+              </a>
+            ) : (
+              <span className="prop-value dim">未绑定</span>
+            )}
+          </div>
+          <div className="prop-row">
+            <span className="prop-label">用时</span>
+            <span className="prop-value">{duration > 0 ? fmtDuration(duration) : '—'}</span>
+          </div>
+          <hr className="prop-sep" />
+          <div className="prop-group-label">用量</div>
+          {task.usage ? (
+            <>
+              <div className="prop-row">
+                <span className="prop-label">Tokens</span>
+                <span className="prop-value" title={`输入 ${task.usage.inputTokens.toLocaleString()} / 输出 ${task.usage.outputTokens.toLocaleString()}`}>
+                  {fmtTokens(task.usage.inputTokens)} / {fmtTokens(task.usage.outputTokens)}
+                </span>
+              </div>
+              <div className="prop-row">
+                <span className="prop-label">回合</span>
+                <span className="prop-value">{task.usage.turns}</span>
+              </div>
+              <div className="prop-row">
+                <span className="prop-label">成本</span>
+                <span className="prop-value">{task.usage.costUsd > 0 ? `$${task.usage.costUsd.toFixed(4)}` : '—'}</span>
+              </div>
+            </>
+          ) : (
+            <div className="prop-row"><span className="prop-value dim">完成后统计</span></div>
+          )}
+          {(task.integration?.branch || task.attempt) && <hr className="prop-sep" />}
+          {task.integration?.branch && (
+            <>
+              <div className="prop-group-label">集成</div>
+              <div className="prop-row">
+                <span className="prop-label">分支</span>
+                <span className="prop-value mono" title={task.integration.branch}>{task.integration.branch.replace('agentdeck/task-', '#')}</span>
+              </div>
+            </>
+          )}
+          {!!task.attempt && (
+            <div className="prop-row">
+              <span className="prop-label">重试</span>
+              <span className="prop-value retry-chip">⟳ {task.attempt}/2</span>
+            </div>
+          )}
+        </aside>
+      </div>
     </div>
   )
 }
@@ -389,6 +439,11 @@ interface Turn {
   text: string
   final: string | null
   usage: Record<string, unknown> | null
+}
+
+/** 状态中文（头部与属性栏共用） */
+const STATUS_META: Record<Task['status'], string> = {
+  queued: '排队中', running: '执行中', done: '完成', failed: '失败', cancelled: '已取消'
 }
 
 /** 需要可见展示的系统事件（委派轮次、防环拒绝、自动重试、集成结果、回灌） */

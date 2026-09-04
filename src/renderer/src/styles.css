@@ -1277,3 +1277,58 @@ html.light {
 .task-item-title, .board-card-title { font-size: var(--text-label); }
 .list-group-label { font-size: 10px; }
 .nav button { font-size: var(--text-label); }
+
+
+/* ============================================================
+   0.12.0 页面骨架语法（DESIGN-LANGUAGE.md §1.2/§1.3）
+   ============================================================ */
+
+/* ---- 页头条（所有页面共用：h-12 同檐、border-b、统一沟槽） ---- */
+.page-header-bar {
+  flex-shrink: 0;
+  display: flex; align-items: center; gap: 8px;
+  height: 48px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+}
+.page-title-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.page-icon { color: var(--text-dim); flex-shrink: 0; }
+.page-title { font-size: var(--text-body); font-weight: 550; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.page-count { font-family: var(--mono); font-size: var(--text-caption); color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.page-desc { color: var(--text-dim); font-size: var(--text-caption); margin-left: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 900px) { .page-desc { display: none; } }
+
+/* ---- 详情双栏（签名布局：主列 max-w-4xl 居中 + w-80 属性栏） ---- */
+.detail-columns { flex: 1; display: flex; min-height: 0; }
+.detail-main {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column;
+  overflow-y: auto;
+}
+/* 主列内容限宽居中：banner/tabs/body/followup 全部收进内层 */
+.detail-main > * { margin-left: auto; margin-right: auto; width: 100%; max-width: calc(896px + 40px); padding-left: 20px; padding-right: 20px; }
+.detail-main > .tabs, .detail-main > .detail-body { padding-left: 20px; padding-right: 20px; }
+.detail-body { max-width: none; }
+.log.chat { max-width: 856px; }
+.result { max-width: 856px; }
+.git-pane { max-width: 936px; }
+
+/* ---- 属性栏（w-80，border-l，行式 label+控件，hr 分组） ---- */
+.detail-panel {
+  width: 320px; flex-shrink: 0;
+  border-left: 1px solid var(--border);
+  padding: 16px;
+  overflow-y: auto;
+  display: flex; flex-direction: column; gap: 10px;
+}
+@media (max-width: 1000px) { .detail-panel { display: none; } }
+.prop-row { display: flex; align-items: center; gap: 10px; min-height: 24px; }
+.prop-label { width: 60px; flex-shrink: 0; color: var(--text-dim); font-size: var(--text-caption); }
+.prop-value { font-size: var(--text-label); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prop-value.mono, .prop-value.mono { font-family: var(--mono); font-size: var(--text-caption); }
+.prop-value.dim { color: var(--text-faint); }
+.prop-sep { border: none; border-top: 1px solid var(--border); margin: 2px 0; width: 100%; }
+.prop-group-label {
+  font-size: 10px; font-weight: 600; letter-spacing: 0.8px; text-transform: uppercase;
+  color: var(--text-faint);
+}

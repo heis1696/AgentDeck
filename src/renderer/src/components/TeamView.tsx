@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { bridge, type AgentInfo as Agent } from '../api'
+import { Users } from 'lucide-react'
 import { toast } from '../ui/Toasts'
 import { Menu } from '../ui/Menu'
 
@@ -49,9 +50,16 @@ export function TeamView() {
 
   return (
     <div className="settings team">
-      <div className="team-header">
-        <h2>队伍（{agents.length} 名队员）</h2>
-        <div className="row">
+      <header className="page-header-bar">
+        <div className="detail-title-wrap">
+          <div className="page-title-row">
+            <Users size={16} className="page-icon" />
+            <h2 className="page-title">队伍</h2>
+            {agents.length > 0 && <span className="page-count">{agents.length}</span>}
+            <span className="page-desc">给任务安排队员；勾选可驱使名单的队员会成为领队</span>
+          </div>
+        </div>
+        <div className="detail-actions">
           <button className="btn" onClick={probeAll} disabled={probing}>
             {probing ? '检测中…' : '检测各平台可用性'}
           </button>
@@ -59,7 +67,7 @@ export function TeamView() {
             ＋ 加队员
           </button>
         </div>
-      </div>
+      </header>
 
       <div className="agent-grid">
         {agents.map((a) => (

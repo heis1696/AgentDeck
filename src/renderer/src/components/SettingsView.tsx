@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { bridge, useSettings } from '../api'
+import { Settings } from 'lucide-react'
 import { Menu } from '../ui/Menu'
 
 export function SettingsView() {
@@ -36,7 +37,14 @@ export function SettingsView() {
 
   return (
     <div className="settings">
-      <h2>设置</h2>
+      <header className="page-header-bar">
+        <div className="detail-title-wrap">
+          <div className="page-title-row">
+            <Settings size={16} className="page-icon" />
+            <h2 className="page-title">设置</h2>
+          </div>
+        </div>
+      </header>
 
       <section className="settings-card">
         <h3>执行后端 · ZCode / DeepSeek Harness 路径</h3>
