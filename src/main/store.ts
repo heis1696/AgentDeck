@@ -64,7 +64,7 @@ export class TaskStore {
     fs.renameSync(tmp, this.indexFile())
   }
 
-  create(input: Pick<Task, 'title' | 'prompt' | 'workdir' | 'backend'> & Partial<Pick<Task, 'parentTaskId' | 'workerIndex' | 'integration' | 'agentId'>>): Task {
+  create(input: Pick<Task, 'title' | 'prompt' | 'workdir' | 'backend'> & Partial<Pick<Task, 'parentTaskId' | 'workerIndex' | 'integration' | 'agentId' | 'handoff' | 'parked'>>): Task {
     const task: Task = {
       id: `t_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
       title: input.title,
@@ -75,6 +75,8 @@ export class TaskStore {
       ...(input.parentTaskId ? { parentTaskId: input.parentTaskId } : {}),
       ...(input.workerIndex !== undefined ? { workerIndex: input.workerIndex } : {}),
       ...(input.integration ? { integration: input.integration } : {}),
+      ...(input.handoff ? { handoff: input.handoff } : {}),
+      ...(input.parked ? { parked: true } : {}),
       status: 'queued',
       createdAt: Date.now(),
       eventCount: 0

@@ -143,7 +143,7 @@ export class TaskRunner {
       const { concurrency, workerConcurrency } = this.opts()
       const queued = this.store
         .list()
-        .filter((t) => t.status === 'queued')
+        .filter((t) => t.status === 'queued' && !t.parked)
         .sort((a, b) => a.createdAt - b.createdAt)
       const normal = queued.filter((t) => !t.parentTaskId)
       const workers = queued.filter((t) => t.parentTaskId)
@@ -192,6 +192,12 @@ export class TaskRunner {
     const team = this.getTeam?.() ?? []
     const me = team.find((a) => a.id === task.agentId)
     let prompt = buildAgentPrompt(me, task.prompt, team)
+    if (task.handoff) {
+      prompt = `${prompt}
+
+【交接备注（本次执行重点，来自用户）】
+${task.handoff}`
+    }
     if (me?.subordinates?.length && task.backend !== 'dsh') {
       const block = buildDelegationBlock(me, team)
       if (block) prompt = `${prompt}\n\n${block}`

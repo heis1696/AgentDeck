@@ -20,13 +20,14 @@ const api = {
     list: (): Promise<Task[]> => ipcRenderer.invoke('tasks:list'),
     get: (id: string): Promise<Task | null> => ipcRenderer.invoke('tasks:get', id),
     events: (id: string, afterSeq = 0): Promise<TaskEvent[]> => ipcRenderer.invoke('tasks:events', id, afterSeq),
-    create: (input: { title: string; prompt: string; workdir: string; backend?: string; agentId?: string }) =>
+    create: (input: { title: string; prompt: string; workdir: string; backend?: string; agentId?: string; handoff?: string; startNow?: boolean }) =>
       ipcRenderer.invoke('tasks:create', input) as Promise<Task>,
     cancel: (id: string) => ipcRenderer.invoke('tasks:cancel', id) as Promise<{ ok: boolean; error?: string }>,
     followUp: (id: string, content: string) =>
       ipcRenderer.invoke('tasks:followup', id, content) as Promise<{ ok: boolean; error?: string }>,
     delete: (id: string) => ipcRenderer.invoke('tasks:delete', id) as Promise<{ ok: boolean; error?: string }>,
     retry: (id: string) => ipcRenderer.invoke('tasks:retry', id) as Promise<{ ok: boolean; error?: string }>,
+    start: (id: string) => ipcRenderer.invoke('tasks:start', id) as Promise<{ ok: boolean; error?: string }>,
     onUpdated: (cb: (t: Task) => void) => {
       const h = (_e: unknown, t: Task) => cb(t)
       ipcRenderer.on('task:updated', h)

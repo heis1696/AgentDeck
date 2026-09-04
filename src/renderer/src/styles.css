@@ -1332,3 +1332,33 @@ html.light {
   font-size: 10px; font-weight: 600; letter-spacing: 0.8px; text-transform: uppercase;
   color: var(--text-faint);
 }
+
+
+/* ---- 0.13.0 功能包：触发预览 / 交接备注 ---- */
+.trigger-preview {
+  margin: 6px 0 0;
+  font-size: var(--text-caption);
+  color: var(--text-dim);
+}
+.trigger-preview b { color: var(--accent); font-weight: 600; }
+.handoff-zone { margin-top: 6px; }
+.handoff-toggle {
+  background: none; border: none;
+  color: var(--text-faint);
+  font-size: var(--text-caption);
+  cursor: pointer;
+  padding: 2px 0;
+}
+.handoff-toggle:hover { color: var(--text-dim); }
+.handoff-input {
+  width: 100%;
+  margin-top: 6px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text);
+  font-size: var(--text-caption);
+  padding: 8px 10px;
+  resize: vertical;
+}
+.handoff-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); outline: none; }

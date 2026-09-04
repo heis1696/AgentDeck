@@ -71,7 +71,7 @@ app.whenReady().then(() => {
   ipcMain.handle('tasks:list', () => store.list())
   ipcMain.handle('tasks:get', (_e, id) => store.get(id) ?? null)
   ipcMain.handle('tasks:events', (_e, id: string, afterSeq: number) => store.readEvents(id, afterSeq))
-  ipcMain.handle('tasks:create', (_e, input: { title: string; prompt: string; workdir: string; backend?: string; agentId?: string }) => {
+  ipcMain.handle('tasks:create', (_e, input: { title: string; prompt: string; workdir: string; backend?: string; agentId?: string; handoff?: string; startNow?: boolean }) => {
     // agentId 优先；backend 兜底为 zcode
     const agent = agents.find((a) => a.id === input.agentId)
     const backend = agent?.backend ?? input.backend ?? 'zcode'
@@ -80,10 +80,25 @@ app.whenReady().then(() => {
       prompt: input.prompt,
       workdir: input.workdir || '',
       backend,
-      ...(agent ? { agentId: agent.id } : {})
+      ...(agent ? { agentId: agent.id } : {}),
+      ...(input.handoff?.trim() ? { handoff: input.handoff.trim() } : {}),
+      ...(input.startNow === false ? { parked: true } : {})
     })
+    if (input.startNow === false) {
+      mainWindow?.webContents.send('task:updated', store.get(task.id))
+      return task
+    }
     runner.enqueue(task)
     return task
+  })
+  // 暂不启动的任务：手动开始
+  ipcMain.handle('tasks:start', (_e, id: string) => {
+    const t = store.get(id)
+    if (!t) return { ok: false, error: '任务不存在' }
+    if (t.status !== 'queued' || !t.parked) return { ok: false, error: '任务不在待启动状态' }
+    store.update(id, { parked: undefined })
+    runner.enqueue(store.get(id)!)
+    return { ok: true }
   })
 
   // ---- Agent 队伍 ----

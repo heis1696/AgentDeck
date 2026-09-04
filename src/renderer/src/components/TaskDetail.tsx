@@ -117,6 +117,37 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     })
     if (t) onSelect(t.id)
   }
+  const doStart = async () => {
+    setBusy(true)
+    const r = await bridge.tasks.start(task.id)
+    if (!r.ok) toast.error(r.error ?? '启动失败')
+    setBusy(false)
+  }
+  /** 复制结果 Markdown（含属性与改动统计） */
+  const copyResult = async () => {
+    const parts = [`# ${task.title}`, '', task.result ?? '']
+    if (task.gitStat) parts.push('', '## 改动', '```', task.gitStat, '```')
+    if (task.integration?.branch) parts.push('', `集成分支：\`${task.integration.branch}\``)
+    await navigator.clipboard.writeText(parts.join('\n'))
+    toast.success('结果已复制为 Markdown')
+  }
+  /** 复制 PR 描述（标题 + 摘要 + 改动清单） */
+  const copyPrBody = async () => {
+    const branch = task.integration?.branch
+    const files = (task.gitStat || '').split('\n').filter((l) => l.includes('|')).length
+    const body = [
+      '## 摘要',
+      '',
+      (task.result ?? '').slice(0, 2000),
+      '',
+      '## 改动',
+      '',
+      files ? `${files} 个文件有改动。` : '见提交记录。',
+      branch ? `\n> 由 AgentDeck 队员在隔离分支 \`${branch}\` 上完成。` : ''
+    ].join('\n')
+    await navigator.clipboard.writeText(`**${task.title}**\n\n${body}`)
+    toast.success('PR 描述已复制（标题 + 摘要 + 改动）')
+  }
   const sendFollowUp = async () => {
     const content = followUp.trim()
     if (!content || busy) return
@@ -153,6 +184,21 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
           </div>
         </div>
         <div className="detail-actions">
+          {task.parked && task.status === 'queued' && (
+            <button className="btn primary" disabled={busy} onClick={doStart}>
+              ▶ 开始执行
+            </button>
+          )}
+          {task.status === 'done' && (
+            <>
+              <button className="btn" title="复制结果为 Markdown" disabled={busy || !task.result} onClick={() => void copyResult()}>
+                复制结果
+              </button>
+              <button className="btn" title="复制 PR 描述（标题+摘要+改动）" disabled={busy || !task.result} onClick={() => void copyPrBody()}>
+                复制 PR 描述
+              </button>
+            </>
+          )}
           {turnActive && (
             <button className="btn danger" disabled={busy} onClick={doCancel}>
               停止
@@ -372,6 +418,12 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
             <span className="badge">{task.backend}</span>
             {task.sessionId && <span className="mini mono" title={task.sessionId}>{task.sessionId.slice(0, 12)}…</span>}
           </div>
+          {task.handoff && (
+            <div className="prop-row" title={task.handoff}>
+              <span className="prop-label">交接备注</span>
+              <span className="prop-value" style={{ whiteSpace: 'normal' }}>{task.handoff}</span>
+            </div>
+          )}
           <div className="prop-row">
             <span className="prop-label">工作目录</span>
             {task.workdir ? (

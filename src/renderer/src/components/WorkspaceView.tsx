@@ -7,7 +7,8 @@ import type { Task } from '../../../shared/types'
 const draft = {
   prompt: '',
   workdir: '',
-  agentId: ''
+  agentId: '',
+  handoff: ''
 }
 
 /** Ctrl+N 聚焦工作区输入框用的事件名 */
@@ -24,6 +25,8 @@ export function WorkspaceView({ onCreated }: { onCreated: (t: Task) => void }) {
   const [prompt, setPrompt] = useState(draft.prompt)
   const [workdir, setWorkdir] = useState(draft.workdir)
   const [agentId, setAgentId] = useState(draft.agentId)
+  const [handoff, setHandoff] = useState(draft.handoff)
+  const [handoffOpen, setHandoffOpen] = useState(false)
   const [agents, setAgents] = useState<AgentInfo[]>([])
   const [busy, setBusy] = useState(false)
   const promptRef = useRef<HTMLTextAreaElement>(null)
@@ -49,13 +52,14 @@ export function WorkspaceView({ onCreated }: { onCreated: (t: Task) => void }) {
   useEffect(() => { draft.prompt = prompt }, [prompt])
   useEffect(() => { draft.workdir = workdir }, [workdir])
   useEffect(() => { draft.agentId = agentId }, [agentId])
+  useEffect(() => { draft.handoff = handoff }, [handoff])
 
   const pick = async () => {
     const dir = await bridge.pickDir()
     if (dir) setWorkdir(dir)
   }
 
-  const submit = async () => {
+  const submit = async (startNow = true) => {
     if (!prompt.trim() || busy) return
     setBusy(true)
     try {
@@ -63,11 +67,17 @@ export function WorkspaceView({ onCreated }: { onCreated: (t: Task) => void }) {
         title: prompt.trim().slice(0, 24),
         prompt: prompt.trim(),
         workdir,
-        agentId
-      } as any)
+        agentId,
+        handoff: handoff.trim() || undefined,
+        startNow
+      })
       draft.prompt = ''
       setPrompt('')
+      draft.handoff = ''
+      setHandoff('')
+      setHandoffOpen(false)
       if (promptRef.current) promptRef.current.style.height = 'auto'
+      if (!startNow) toast.info('已创建，暂不启动——在任务详情点「开始执行」')
       onCreated(t)
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e))
@@ -147,12 +157,41 @@ export function WorkspaceView({ onCreated }: { onCreated: (t: Task) => void }) {
           <button className="btn" onClick={pick}>
             浏览…
           </button>
-          <button className="btn primary" disabled={!canSubmit} onClick={submit}>
+          <button
+            className="btn"
+            disabled={!canSubmit}
+            title="创建但不启动；之后在任务详情点「开始执行」"
+            onClick={() => void submit(false)}
+          >
+            稍后
+          </button>
+          <button className="btn primary" disabled={!canSubmit} onClick={() => void submit(true)}>
             {busy ? '创建中…' : '开始执行'}
           </button>
         </div>
+        {selectedAgent && (
+          <p className="trigger-preview" title="触发预览">
+            ⚡ 将唤醒：<b>{selectedAgent.name}</b>（{selectedAgent.role || selectedAgent.backend}
+            {isLeader ? ` · 领队，可自行派工给 ${selectedAgent.subordinates?.length} 名队员` : ''}
+            {handoff.trim() ? ' · 含交接备注' : ''}）
+          </p>
+        )}
+        <div className="handoff-zone">
+          <button className="link handoff-toggle" onClick={() => setHandoffOpen((o) => !o)}>
+            {handoffOpen ? '▾' : '▸'} 交接备注{handoff.trim() ? '（已填写）' : '（可选）'}
+          </button>
+          {handoffOpen && (
+            <textarea
+              className="handoff-input"
+              value={handoff}
+              rows={2}
+              placeholder="本次执行的范围、顺序或重点（只对这一轮生效）…"
+              onChange={(e) => setHandoff(e.target.value)}
+            />
+          )}
+        </div>
         <p className="hint workspace-hint">
-          Enter 发送 · Shift+Enter 换行 · {selectedAgent ? `队员：${selectedAgent.name}${selectedAgent.role ? `（${selectedAgent.role}）` : ''}` : '队员：默认 zcode'} · 权限模式跟随设置
+          Enter 发送 · Shift+Enter 换行 · 权限模式跟随设置
         </p>
       </div>
     </div>

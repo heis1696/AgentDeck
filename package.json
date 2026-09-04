@@ -1,6 +1,6 @@
 {
   "name": "agentdeck",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "本地任务看板 — 把任务派给本地 agent 执行",
   "main": "./out/main/index.js",
   "author": "agentdeck",
@@ -21,7 +21,8 @@
     "smoke:migration": "node scripts/smoke-migration.mjs",
     "smoke:failure": "node scripts/smoke-failure.mjs",
     "smoke:diff": "node scripts/smoke-diff.mjs",
-    "smoke:retry": "node scripts/smoke-retry.mjs"
+    "smoke:retry": "node scripts/smoke-retry.mjs",
+    "smoke:flow": "node scripts/smoke-flow.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

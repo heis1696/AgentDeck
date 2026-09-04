@@ -61,6 +61,10 @@ export interface Task {
   attempt?: number
   /** 委派循环已用轮数（二层委派共享预算用） */
   roundsUsed?: number
+  /** 交接备注（本次执行重点，创建时填写，注入 prompt） */
+  handoff?: string
+  /** 暂不启动：创建后停放在队列外，等用户手动开始 */
+  parked?: boolean
   /** zcode 会话 id，用于续聊 */
   sessionId?: string
   /** 完成时抓取的 git 改动 */
