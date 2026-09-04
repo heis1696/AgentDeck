@@ -1041,3 +1041,62 @@ body { font-family: var(--font-ui); }
 .board-card-worker { font-size: 10px; color: var(--text-faint); }
 .board-card-title { font-size: 12.5px; font-weight: 550; margin: 2px 0 6px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .board-card-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+/* ============================================================
+   0.10.0 浅色主题：html.light 生效（设置页三选一，system 由
+   渲染层监听 matchMedia 决定加 light 类）
+   ============================================================ */
+html.light {
+  --bg: #f5f6f9;
+  --bg-raised: #ffffff;
+  --bg-hover: #eef0f5;
+  --bg-inset: #fafbfd;
+  --border: #e3e6ec;
+  --border-strong: #d2d7e1;
+  --text: #1a1d26;
+  --text-dim: #5b6474;
+  --text-faint: #9aa2b3;
+  --accent: #3d6fe0;
+  --accent-glow: rgba(61, 111, 224, 0.18);
+  --accent-soft: rgba(61, 111, 224, 0.1);
+  --shadow-pop: 0 8px 28px rgba(30, 40, 70, 0.12);
+}
+html.light body { background: var(--bg); color: var(--text); }
+html.light .app { background: linear-gradient(180deg, #f7f8fb 0%, #f2f4f8 100%); }
+html.light .sidebar { background: #ffffff; border-right-color: var(--border); }
+html.light .brand-mark { background: linear-gradient(135deg, #3d6fe0 0%, #6353e0 100%); }
+html.light .new-task-btn, html.light .btn.primary { background: linear-gradient(135deg, #3d6fe0 0%, #5061e0 100%); box-shadow: 0 2px 12px var(--accent-glow); }
+html.light .workspace-card {
+  background:
+    radial-gradient(1200px 300px at 20% -10%, rgba(61, 111, 224, 0.06), transparent 60%),
+    radial-gradient(800px 260px at 90% -20%, rgba(99, 83, 224, 0.05), transparent 55%),
+    #ffffff;
+}
+html.light .workspace-prompt, html.light .field input, html.light .field textarea, html.light .field select,
+html.light .followup textarea, html.light .list-search {
+  background: var(--bg-inset);
+  border-color: var(--border);
+  color: var(--text);
+}
+html.light .bubble.agent { background: #ffffff; box-shadow: 0 1px 6px rgba(30, 40, 70, 0.06); }
+html.light .bubble.user { background: var(--bg-raised); }
+html.light .btn { background: #ffffff; border-color: var(--border-strong); color: var(--text); }
+html.light .btn:hover { background: var(--bg-hover); }
+html.light .badge { background: var(--bg-hover); color: var(--text-dim); border-color: var(--border); }
+html.light .board-col { background: #ffffff; }
+html.light .board-card { background: #ffffff; }
+html.light .tab { background: var(--bg-inset); }
+html.light .tab.active { background: #ffffff; }
+html.light .worker-card { background: #ffffff; }
+html.light .sys-note { color: #3a5bbf; background: var(--accent-soft); }
+html.light .diff-body .dl-add { color: #1a7f4b; background: rgba(26, 127, 75, 0.09); }
+html.light .diff-body .dl-del { color: #c33f38; background: rgba(195, 63, 56, 0.08); }
+html.light .diff-body .dl-hunk { color: #3d6fe0; background: rgba(61, 111, 224, 0.07); }
+html.light ::-webkit-scrollbar-thumb { background: var(--border-strong); border-color: var(--bg); }
+html.light .usage-card { background: #ffffff; border-color: var(--border); }
+html.light .status-running { background: rgba(196, 145, 30, 0.12); color: #96690f; }
+html.light .status-done { background: rgba(26, 127, 75, 0.1); color: #17643c; }
+html.light .status-failed { background: rgba(195, 63, 56, 0.1); color: #a83731; }
+html.light .status-queued { background: var(--bg-hover); color: var(--text-dim); }
+html.light .status-cancelled { background: var(--bg-hover); color: var(--text-faint); }
+html.light .dot { box-shadow: none; }

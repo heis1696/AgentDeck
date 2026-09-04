@@ -73,6 +73,18 @@ export function SettingsView() {
       </section>
 
       <section className="settings-card">
+        <h3>外观</h3>
+        <label className="field">
+          <span>主题</span>
+          <select value={settings.theme ?? 'dark'} onChange={(e) => update({ theme: e.target.value as any })}>
+            <option value="dark">深色</option>
+            <option value="light">浅色</option>
+            <option value="system">跟随系统</option>
+          </select>
+        </label>
+      </section>
+
+      <section className="settings-card">
         <h3>执行</h3>
         <label className="field">
           <span>并发任务数：{settings.concurrency}</span>

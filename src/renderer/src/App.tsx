@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { bridge, useTasks } from './api'
+import { bridge, useTasks, useSettings } from './api'
 import { TaskList } from './components/TaskList'
 import { TaskDetail } from './components/TaskDetail'
 import { SettingsView } from './components/SettingsView'
@@ -17,6 +17,22 @@ const MAX_TABS = 8
 
 export function App() {
   const { tasks } = useTasks()
+  const { settings } = useSettings()
+
+  // 主题：dark | light | system（跟随系统时监听变化）
+  useEffect(() => {
+    const theme = settings?.theme ?? 'dark'
+    const mq = window.matchMedia('(prefers-color-scheme: light)')
+    const apply = () => {
+      const light = theme === 'light' || (theme === 'system' && mq.matches)
+      document.documentElement.classList.toggle('light', light)
+    }
+    apply()
+    if (theme === 'system') {
+      mq.addEventListener('change', apply)
+      return () => mq.removeEventListener('change', apply)
+    }
+  }, [settings?.theme])
   const [view, setView] = useState<View>('tasks')
   /** 任务页展示形态：列表 / 看板（记忆） */
   const [board, setBoard] = useState(() => localStorage.getItem('agentdeck:board') === '1')
