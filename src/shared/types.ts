@@ -107,7 +107,7 @@ export interface AppSettings {
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
-  theme: 'dark',
+  theme: 'light',
   zcodePath: '',
   dshPath: '',
   nodePath: '',
