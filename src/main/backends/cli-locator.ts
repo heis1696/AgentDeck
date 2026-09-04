@@ -20,6 +20,23 @@ export function findOnPath(name: string): string | null {
   return null
 }
 
+/**
+ * 找系统安装的 node.exe。Electron 应用里 process.execPath 是 GUI 的
+ * electron/exe，充当 node 跑第三方 CLI 时必须带 ELECTRON_RUN_AS_NODE=1，
+ * 且 Electron 内置 Node 版本可能与目标 CLI 的模块解析不兼容，
+ * 优先用系统 node，找不到才回退 process.execPath
+ */
+export function findSystemNode(): string | null {
+  const onPath = findOnPath('node')
+  if (onPath && onPath.endsWith('.exe')) return onPath
+  const roots = [process.env.ProgramFiles ?? 'C:\\Program Files', process.env['ProgramFiles(x86)']].filter(Boolean) as string[]
+  for (const root of roots) {
+    const full = path.join(root, 'nodejs', 'node.exe')
+    if (fs.existsSync(full)) return full
+  }
+  return null
+}
+
 export interface ResolvedCli {
   /** 可直接 spawn 的命令 */
   command: string

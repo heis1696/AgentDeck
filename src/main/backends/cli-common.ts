@@ -21,9 +21,12 @@ export function runCliJsonl(opts: {
   idleTimeoutMs?: number
   /** 总输出上限（默认 5MB，防退化循环） */
   maxTotalBytes?: number
+  /** 附加环境变量（默认继承主进程 env） */
+  env?: Record<string, string>
 }): CliJsonlRunner {
   const child = spawn(opts.command, [...opts.prefixArgs, ...opts.args], {
     cwd: opts.cwd,
+    ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}),
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true
   })

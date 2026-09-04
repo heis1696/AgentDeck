@@ -6,7 +6,7 @@ import path from 'node:path'
 import os from 'node:os'
 import type { AgentBackend, BackendSession, BackendSessionEvents } from './types'
 import { runCliJsonl } from './cli-common'
-import { resolveCli, findOnPath } from './cli-locator'
+import { resolveCli, findOnPath, findSystemNode } from './cli-locator'
 
 const DSH_BIN = path.join('apps', 'cli', 'lib', 'bin.js')
 
@@ -25,8 +25,11 @@ function dshRootCandidates(): string[] {
 }
 
 export function findDshBin(custom?: string): { node: string; bin: string } | null {
+  // node 优先用系统安装的：process.execPath（electron）充当 node 需要
+  // ELECTRON_RUN_AS_NODE 标记，且其内置 Node 版本可能解析不了 dsh 的依赖
+  const node = findSystemNode() ?? process.execPath
   // 1. 设置页指定
-  if (custom && fs.existsSync(custom)) return { node: process.execPath, bin: custom }
+  if (custom && fs.existsSync(custom)) return { node, bin: custom }
   // 2. PATH 上的 dsh（解析 npm 垫片到 bin.js）
   const onPath = findOnPath('dsh')
   if (onPath) {
@@ -34,14 +37,14 @@ export function findDshBin(custom?: string): { node: string; bin: string } | nul
     if (resolved) {
       const target = resolved.prefixArgs[0]
       if (target && fs.existsSync(target)) {
-        return { node: resolved.command, bin: target }
+        return { node: resolved.command === process.execPath ? node : resolved.command, bin: target }
       }
     }
   }
   // 3. 常见目录扫描
   for (const root of dshRootCandidates()) {
     const bin = path.join(root, DSH_BIN)
-    if (fs.existsSync(bin)) return { node: process.execPath, bin }
+    if (fs.existsSync(bin)) return { node, bin }
   }
   return null
 }
@@ -73,6 +76,9 @@ export function createDshBackend(getPaths: () => { dshPath: string }): AgentBack
       prefixArgs: [dsh.bin],
       args: ['--profile', 'headless', prompt],
       cwd: workdir || process.cwd(),
+      // node 可能是 electron 充当（findSystemNode 找不到时的回退）：
+      // 不加此标记会按 GUI 应用启动、不退出，子任务只能等看门狗超时
+      env: { ELECTRON_RUN_AS_NODE: '1' },
       onLine: () => {}, // 输出是纯文本非 JSON
       onRaw: (line) => {
         out += line + '\n'
