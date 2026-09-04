@@ -165,7 +165,7 @@ interface BackendSession {
 
 interface BackendSessionEvents {
   onEvent(e: Omit<TaskEvent,'seq'>)                           // 日志事件（ts 必填，seq 由 store 分配）
-  onTurnEnd(r: { response, ok, error?, tokenCount?, durationMs? })
+  onTurnEnd(r: { response, ok, error?, tokenCount?, durationMs?, delegationText? })
   onPermission?(req): Promise<{ optionId?, decision }>        // 可选；缺省自动放行
   onLaunch?(handle: { stop() })                               // 可选；进程拉起即注册取消句柄
 }
@@ -213,7 +213,7 @@ interface BackendSessionEvents {
   ├─ 无标记 → 结束（领队自己干完了）
   ├─ 有标记 → 逐个：解析队员（名字/平台 id，忽略大小写，限 subordinates 内）
   │           sanitizeChildPrompt → 建 worktree（仓库时）→ 建子任务入队
-  ├─ 等本轮子任务全部终态 → 结果格式化回灌 session.send
+  ├─ 等本轮子任务全部终态 → 结果格式化回灌并等待完整回合结果
   └─ 领队继续输出 → 再解析（最多 6 轮）
 结束 → 子任务分支 commitAll + 依序 merge 进 agentdeck/task-<领队id> 集成分支
        branchDiffSummary 生成总 diff；无实际合并时如实标注
