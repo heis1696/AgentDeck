@@ -16,12 +16,12 @@ function StatusDot({ status }: { status: Task['status'] }) {
 
 export function TaskList({ tasks, selectedId, onSelect }: { tasks: Task[]; selectedId: string | null; onSelect: (id: string) => void }) {
   const [query, setQuery] = useState('')
-  const [filter, setFilter] = useState<'active' | 'history' | 'all'>('all')
+  const [filter, setFilter] = useState<'active' | 'all'>('all')
   const q = query.trim().toLowerCase()
   const match = (t: Task) => !q || t.title.toLowerCase().includes(q) || t.prompt.toLowerCase().includes(q) || t.workdir.toLowerCase().includes(q)
   const active = tasks.filter((t) => (t.status === 'running' || t.status === 'queued') && match(t))
   const finished = tasks.filter((t) => t.status !== 'running' && t.status !== 'queued' && match(t))
-  const shownActive = filter === 'history' ? [] : active
+  const shownActive = active
   const shownFinished = filter === 'active' ? [] : finished
 
   const item = (t: Task) => {
@@ -32,6 +32,10 @@ export function TaskList({ tasks, selectedId, onSelect }: { tasks: Task[]; selec
         key={t.id}
         className={`task-item ${t.id === selectedId ? 'selected' : ''} status-${t.status} ${t.parentTaskId ? 'is-worker' : ''}`}
         onClick={() => onSelect(t.id)}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(t.id) } }}
+        role="button"
+        tabIndex={0}
+        aria-pressed={t.id === selectedId}
       >
         <div className="task-item-row1">
           <StatusDot status={t.status} />
@@ -60,9 +64,6 @@ export function TaskList({ tasks, selectedId, onSelect }: { tasks: Task[]; selec
         <button className={filter === 'active' ? 'active' : ''} onClick={() => setFilter('active')}>
           进行中 {active.length || ''}
         </button>
-        <button className={filter === 'history' ? 'active' : ''} onClick={() => setFilter('history')}>
-          历史 {finished.length || ''}
-        </button>
         <button className={filter === 'all' ? 'active' : ''} onClick={() => setFilter('all')}>
           全部
         </button>
@@ -79,7 +80,7 @@ export function TaskList({ tasks, selectedId, onSelect }: { tasks: Task[]; selec
           {shownActive.map(item)}
         </>
       )}
-      <div className="list-group-label">历史</div>
+      {filter === 'all' && <div className="list-group-label">已完成</div>}
       {shownFinished.length === 0 && <div className="list-empty">{q ? '无匹配任务' : '暂无历史任务'}</div>}
       {shownFinished.map(item)}
     </div>

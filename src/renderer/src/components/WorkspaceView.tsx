@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { bridge, type AgentInfo } from '../api'
 import { toast } from '../ui/Toasts'
 import type { Task } from '../../../shared/types'
+import { ArrowUpRight, Clock3, FolderOpen, Sparkles } from 'lucide-react'
 
 // 草稿存模块级：切去任务详情再回来不丢输入（会话内存活）
 const draft = {
@@ -21,9 +22,9 @@ const SUGGESTIONS = [
   '找出现有的潜在 bug 并修复'
 ]
 
-export function WorkspaceView({ onCreated }: { onCreated: (t: Task) => void }) {
+export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { onCreated: (t: Task) => void; workspaceDir: string; onPickWorkspace: () => void }) {
   const [prompt, setPrompt] = useState(draft.prompt)
-  const [workdir, setWorkdir] = useState(draft.workdir)
+  const [workdir, setWorkdir] = useState(workspaceDir || draft.workdir)
   const [agentId, setAgentId] = useState(draft.agentId)
   const [handoff, setHandoff] = useState(draft.handoff)
   const [handoffOpen, setHandoffOpen] = useState(false)
@@ -51,6 +52,7 @@ export function WorkspaceView({ onCreated }: { onCreated: (t: Task) => void }) {
   // 草稿回写（保持模块级副本最新）
   useEffect(() => { draft.prompt = prompt }, [prompt])
   useEffect(() => { draft.workdir = workdir }, [workdir])
+  useEffect(() => { if (workspaceDir && workspaceDir !== workdir) setWorkdir(workspaceDir) }, [workspaceDir])
   useEffect(() => { draft.agentId = agentId }, [agentId])
   useEffect(() => { draft.handoff = handoff }, [handoff])
 
@@ -64,7 +66,7 @@ export function WorkspaceView({ onCreated }: { onCreated: (t: Task) => void }) {
     setBusy(true)
     try {
       const t = await bridge.tasks.create({
-        title: prompt.trim().slice(0, 24),
+        title: prompt.trim().split(/\r?\n/)[0].trim().slice(0, 72),
         prompt: prompt.trim(),
         workdir,
         agentId,
@@ -102,8 +104,10 @@ export function WorkspaceView({ onCreated }: { onCreated: (t: Task) => void }) {
     <div className="workspace">
       <div className="workspace-card">
         <div className="workspace-title">
-          <span className="brand-mark">⚓</span> 要做点什么？
+          <span className="brand-mark" aria-hidden="true"><Sparkles size={15} /></span>
+          <span>开始一个任务</span>
         </div>
+        <p className="hint workspace-lead">描述目标、约束和验收标准，AgentDeck 会把执行过程集中到一个工作区。</p>
         <div className="suggest-row">
           {SUGGESTIONS.map((sg) => (
             <button key={sg} className="suggest-chip" onClick={() => { setPrompt(sg); promptRef.current?.focus() }}>
@@ -113,7 +117,7 @@ export function WorkspaceView({ onCreated }: { onCreated: (t: Task) => void }) {
         </div>
         {agents.length > 0 ? (
           <div className="field">
-            <span>执行队员{isLeader ? '（⚡ 领队：需要时会自行派工给其他队员）' : ''}</span>
+            <span>执行队员{isLeader ? '（领队可按需拆分任务）' : ''}</span>
             <div className="agent-picker">
               {agents.map((a) => (
                 <button
@@ -148,25 +152,21 @@ export function WorkspaceView({ onCreated }: { onCreated: (t: Task) => void }) {
           }}
           onKeyDown={onKeyDown}
         />
+        <div className="workspace-context">
+          <div><span className="context-label">当前工作区</span><strong title={workdir}>{workdir ? workdir.split(/[\\/]/).pop() : '尚未选择'}</strong></div>
+          <button className="btn" onClick={onPickWorkspace} title="选择工作区"><FolderOpen size={14} aria-hidden="true" /> 更换</button>
+        </div>
         <div className="workspace-row">
-          <input
-            value={workdir}
-            onChange={(e) => setWorkdir(e.target.value)}
-            placeholder="工作目录（可选，建议选 git 仓库；队员改动会各自隔离并合入集成分支）"
-          />
-          <button className="btn" onClick={pick}>
-            浏览…
-          </button>
           <button
             className="btn"
             disabled={!canSubmit}
             title="创建但不启动；之后在任务详情点「开始执行」"
             onClick={() => void submit(false)}
           >
-            稍后
+            <Clock3 size={14} aria-hidden="true" /> 稍后
           </button>
           <button className="btn primary" disabled={!canSubmit} onClick={() => void submit(true)}>
-            {busy ? '创建中…' : '开始执行'}
+            {busy ? '创建中…' : <><ArrowUpRight size={14} aria-hidden="true" /> 开始执行</>}
           </button>
         </div>
         {selectedAgent && (

@@ -15,7 +15,7 @@ export function TabBar({
   onClose: (id: string) => void
 }) {
   return (
-    <div className="tab-bar">
+    <div className="tab-bar" role="tablist" aria-label="已打开的任务">
       {tabs.map((id) => {
         const t = tasks.find((x) => x.id === id)
         if (!t) return null
@@ -24,6 +24,9 @@ export function TabBar({
             key={id}
             className={`tab ${id === activeId ? 'active' : ''}`}
             onClick={() => onSelect(id)}
+            role="tab"
+            aria-selected={id === activeId}
+            tabIndex={id === activeId ? 0 : -1}
             title={`${t.title}${t.parentTaskId ? '（子任务）' : ''}`}
           >
             <span className={`dot dot-${t.status}`} />
@@ -32,6 +35,7 @@ export function TabBar({
             <button
               className="tab-close"
               title="关闭（Ctrl+W）"
+              aria-label={`关闭任务 ${t.title}`}
               onClick={(e) => {
                 e.stopPropagation()
                 onClose(id)

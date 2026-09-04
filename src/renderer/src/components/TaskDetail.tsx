@@ -165,7 +165,9 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     <div className="detail">
       <header className="detail-header page-header-bar">
         <div className="detail-title-wrap">
+          <div className="detail-eyebrow">{parent ? '队员任务' : '工作任务'}</div>
           <h1 className="detail-title">{task.title}</h1>
+          <p className="detail-prompt">{task.prompt}</p>
           <div className="detail-meta">
             <span className={`status-chip status-${task.status}`}>{STATUS_META[task.status]}</span>
             {workers.length > 0 && (
@@ -174,7 +176,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
               </span>
             )}
             {parent && (
-              <a className="mini link" onClick={() => onSelect(parent.id)}>
+              <a className="mini link" role="button" tabIndex={0} onClick={() => onSelect(parent.id)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(parent.id) } }}>
                 ↩ 领队任务: {parent.title}
               </a>
             )}
@@ -249,7 +251,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
         <div className={`integration-banner ${task.integration.note.includes('未完成') ? 'warn' : ''}`}>
           🔀 {task.integration.note}
           {task.integration.branch && task.workdir && (
-            <a className="mini link" onClick={() => bridge.openPath(task.workdir)}>
+            <a className="mini link" role="button" tabIndex={0} onClick={() => bridge.openPath(task.workdir)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void bridge.openPath(task.workdir) } }}>
               打开仓库
             </a>
           )}
@@ -260,7 +262,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
         <div className="workers-pane">
           <div className="list-group-label">子任务（{workers.filter((w) => w.status === 'done').length}/{workers.length} 完成）</div>
           {workers.map((w) => (
-            <div key={w.id} className="worker-card" onClick={() => onSelect(w.id)}>
+            <div key={w.id} className="worker-card" role="button" tabIndex={0} onClick={() => onSelect(w.id)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(w.id) } }}>
               <span className={`dot dot-${w.status}`} />
               <span className="worker-title">{w.title}</span>
               <span className="mini">
@@ -382,7 +384,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
         )}
       </div>
 
-      {task.status === 'done' && task.sessionId && (
+      {task.sessionId && task.status !== 'queued' && (
         <footer className="followup">
           <textarea
             ref={followRef}
@@ -427,7 +429,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
           <div className="prop-row">
             <span className="prop-label">工作目录</span>
             {task.workdir ? (
-              <a className="prop-value link" title={task.workdir} onClick={() => bridge.openPath(task.workdir)}>
+              <a className="prop-value link" role="button" tabIndex={0} title={task.workdir} onClick={() => bridge.openPath(task.workdir)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void bridge.openPath(task.workdir) } }}>
                 {task.workdir.split(/[\/]/).pop()}
               </a>
             ) : (

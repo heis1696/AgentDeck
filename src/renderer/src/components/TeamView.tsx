@@ -71,7 +71,7 @@ export function TeamView() {
 
       <div className="agent-grid">
         {agents.map((a) => (
-          <div key={a.id} className="agent-card" onClick={() => setEditing(a)}>
+          <div key={a.id} className="agent-card" role="button" tabIndex={0} onClick={() => setEditing(a)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setEditing(a) } }}>
             <div className="agent-avatar" style={{ background: a.color }}>
               {a.name.slice(0, 1)}
             </div>

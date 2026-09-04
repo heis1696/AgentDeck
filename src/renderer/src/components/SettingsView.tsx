@@ -91,7 +91,7 @@ export function SettingsView() {
               { value: 'light', label: '浅色' },
               { value: 'system', label: '跟随系统' }
             ]}
-            value={settings.theme ?? 'dark'}
+            value={settings.theme ?? 'light'}
             onChange={(v) => update({ theme: v as any })}
             trigger={(cur, open) => (
               <button className="btn menu-trigger" type="button">
