@@ -4,6 +4,7 @@ import { Markdown } from './Markdown'
 import { DiffView } from './DiffView'
 import { confirmDialog } from '../ui/Confirm'
 import { toast } from '../ui/Toasts'
+import { FolderOpen } from 'lucide-react'
 import type { Task, TaskEvent } from '../../../shared/types'
 import type { PermissionRequest } from '../../../main/backends/types'
 
@@ -170,6 +171,12 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
           <p className="detail-prompt">{task.prompt}</p>
           <div className="detail-meta">
             <span className={`status-chip status-${task.status}`}>{STATUS_META[task.status]}</span>
+            {task.workdir && (
+              <button className="workspace-chip" type="button" title={task.workdir} onClick={() => void bridge.openPath(task.workdir)}>
+                <FolderOpen size={13} aria-hidden="true" />
+                <span>{task.workdir.split(/[\\/]/).filter(Boolean).pop()}</span>
+              </button>
+            )}
             {workers.length > 0 && (
               <span className="badge badge-squad">
                 ⚡ 委派 {workers.filter((w) => w.status === 'done').length}/{workers.length}

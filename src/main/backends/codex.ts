@@ -3,7 +3,7 @@
 // 事件：thread.started(id) → item.started/completed(command_execution|mcp_tool_call|agent_message) → turn.completed
 // 续聊：codex exec resume <id> --json ...
 // 注意：Windows 下 workspace-write 沙箱会废掉命令执行，必须 bypass（实测 exit -1）
-import type { AgentBackend, BackendSession, BackendSessionEvents } from './types'
+import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnResult } from './types'
 import type { TaskEvent } from '../../shared/types'
 import { runCliJsonl, toolEvent } from './cli-common'
 import { resolveCli, probeCli } from './cli-locator'
@@ -16,7 +16,7 @@ export function createCodexBackend(): AgentBackend {
     workdir: string,
     resumeSessionId: string | undefined,
     events: BackendSessionEvents
-  ): Promise<{ sessionId: string; response: string; ok: boolean; error?: string }> => {
+  ): Promise<{ sessionId: string } & BackendTurnResult> => {
     const emit = (e: Omit<TaskEvent, 'seq' | 'ts'>) => events.onEvent({ ...e, ts: Date.now() })
     const resolved = resolveCli('codex')
     if (!resolved) return Promise.reject(new Error('PATH 上找不到 codex'))
@@ -26,14 +26,19 @@ export function createCodexBackend(): AgentBackend {
       : ['exec', ...common, prompt]
     let sessionId = resumeSessionId ?? ''
     let finalText = ''
+    // Codex can emit multiple agent_message items in one turn. Keep all of
+    // them for protocol parsing while retaining the last one as the display
+    // response.
+    const messageTexts: string[] = []
     let settled = false
-    let settle!: (v: { sessionId: string; response: string; ok: boolean; error?: string }) => void
-    const done = new Promise<{ sessionId: string; response: string; ok: boolean; error?: string }>((r) => (settle = r))
+    let settle!: (v: { sessionId: string } & BackendTurnResult) => void
+    const done = new Promise<{ sessionId: string } & BackendTurnResult>((r) => (settle = r))
     const finish = (ok: boolean, response: string, error?: string) => {
       if (settled) return
       settled = true
-      events.onTurnEnd({ response, ok, error })
-      settle({ sessionId, response, ok, error })
+      const delegationText = messageTexts.join('\n')
+      events.onTurnEnd({ response, ok, error, delegationText })
+      settle({ sessionId, response, ok, error, delegationText })
     }
     const itemNames = new Map<string, string>()
 
@@ -58,6 +63,7 @@ export function createCodexBackend(): AgentBackend {
           const it = j.item ?? {}
           if (it.type === 'agent_message') {
             finalText = String(it.text ?? '')
+            if (finalText) messageTexts.push(finalText)
             emit({ kind: 'text', text: finalText })
             emit({ kind: 'final', text: finalText })
           } else if (it.type === 'command_execution' || it.type === 'mcp_tool_call') {

@@ -163,7 +163,7 @@ export function App() {
           </button>
         </nav>
         <div className="sidebar-section-label">工作台</div>
-        {view === 'tasks' && <TaskList tasks={tasks} selectedId={activeId} onSelect={openTask} />}
+        {view === 'tasks' && <TaskList tasks={tasks} selectedId={activeId} onSelect={openTask} onPickWorkspace={pickWorkspace} />}
         <div className="sidebar-footer"><span className="connection-dot" /> 本地引擎正常</div>
       </aside>
       <main className="main">

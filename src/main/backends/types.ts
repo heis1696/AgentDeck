@@ -15,11 +15,21 @@ export interface PermissionRequest {
 export interface BackendSessionEvents {
   onEvent: (e: Omit<TaskEvent, 'seq'>) => void
   /** 回合结束（一轮 prompt → 完整回复） */
-  onTurnEnd: (result: { response: string; ok: boolean; error?: string; tokenCount?: number; durationMs?: number }) => void
+  onTurnEnd: (result: BackendTurnResult) => void
   /** 权限确认；返回所选 optionId；未提供时自动放行 */
   onPermission?: (req: PermissionRequest) => Promise<{ optionId?: string; decision: 'allow' | 'deny' }>
   /** 进程/会话启动即回调（一次性 CLI 在 start resolve 前就要能被取消） */
   onLaunch?: (handle: { stop: () => void }) => void
+}
+
+/** One complete model turn. delegationText may contain assistant messages emitted before the final one. */
+export interface BackendTurnResult {
+  response: string
+  ok: boolean
+  error?: string
+  tokenCount?: number
+  durationMs?: number
+  delegationText?: string
 }
 
 export interface AgentBackend {

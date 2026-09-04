@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { bridge, useSettings } from '../api'
 import { Settings } from 'lucide-react'
 import { Menu } from '../ui/Menu'
+import { EmptyState } from '../ui/EmptyState'
 
 export function SettingsView() {
   const { settings, update } = useSettings()
@@ -19,7 +20,7 @@ export function SettingsView() {
     }
   }, [settings?.zcodePath, settings?.nodePath, settings?.dshPath])
 
-  if (!settings) return <div className="empty">加载中…</div>
+  if (!settings) return <EmptyState title="Loading settings" />
 
   const doProbe = async () => {
     if (probing) return

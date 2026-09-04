@@ -30,18 +30,27 @@ function makeLeaderBackend() {
       setTimeout(() => {
         const text = '我先派两个队员分头改文件。\n<delegate to="Alpha">把 a.txt 改成 v2</delegate>\n<delegate to="Beta">把 b.txt 改成 v2</delegate>'
         events.onEvent({ ts: Date.now(), kind: 'final', text })
-        events.onTurnEnd({ response: text, ok: true })
+        // Simulate Codex: the dispatch appears in an earlier agent_message,
+        // while the last display message is only a summary.
+        events.onTurnEnd({ response: '我会在队员完成后汇总。', delegationText: text, ok: true })
       }, 30)
       return {
         sessionId: sid,
         async send(content) {
           // 第二回合：收到结果汇报 → 收尾（不再派发）
           setTimeout(() => {
-            const text = content.includes('结果汇报')
-              ? '两个队员都完成了。任务结束，最终总结：a.txt 和 b.txt 已升级。'
-              : '继续等待'
+            const followup = '追问派工'
+            const text = content === followup
+              ? '追问已拆分。<delegate to="Alpha">复查 a.txt</delegate>'
+              : content.includes('结果汇报')
+                ? '两个队员都完成了。任务结束，最终总结：a.txt 和 b.txt 已升级。'
+                : '继续等待'
             events.onEvent({ ts: Date.now(), kind: 'final', text })
-            events.onTurnEnd({ response: text, ok: true })
+            events.onTurnEnd({
+              response: content === followup ? '追问将由队员处理。' : text,
+              delegationText: content === followup ? text : undefined,
+              ok: true
+            })
           }, 30)
           await new Promise((r) => setTimeout(r, 50))
         },
@@ -129,6 +138,11 @@ const ib = fin.integration.branch
 assert(execSync(`git show ${ib}:a.txt`, { cwd: repo, encoding: 'utf8' }).includes('by Alpha'), 'a.txt 由 Alpha 合入')
 assert(execSync(`git show ${ib}:b.txt`, { cwd: repo, encoding: 'utf8' }).includes('by Beta'), 'b.txt 由 Beta 合入')
 assert(fs.readFileSync(path.join(repo, 'a.txt'), 'utf8').trim() === 'a v1', '用户工作区未动')
+
+// Follow-up turns must use the same delegation path as the initial turn.
+const follow = await runner.followUp(leader.id, '追问派工')
+assert(follow.ok, '追问回合成功')
+assert(store.list().filter((t) => t.parentTaskId === leader.id).length === 3, '追问中的 delegate 也创建子任务')
 
 // ================= 场景 B：二层委派 + 防环 + 递归集成（0.7.0） =================
 const repo2 = fs.mkdtempSync(path.join(os.tmpdir(), 'dele2-repo-'))

@@ -2,7 +2,7 @@
 // 状态机：queued → running → done | failed | cancelled
 import type { Task, TaskEvent } from '../shared/types'
 import type { TaskStore } from './store'
-import type { AgentBackend, BackendSession, PermissionRequest } from './backends/types'
+import type { AgentBackend, BackendSession, PermissionRequest, BackendTurnResult } from './backends/types'
 import { snapshotGitAfter } from './git'
 import { buildAgentPrompt, buildDelegationBlock, runDelegationLoop, type AgentLike } from './delegate'
 import { classifyFailure } from './failure'
@@ -24,7 +24,7 @@ export class TaskRunner {
   private sessions = new Map<string, BackendSession>()
   /** 启动即注册的中止句柄（一次性 CLI 在 session 返回前就要能取消） */
   private launchHandles = new Map<string, { stop: () => void }>()
-  private pendingResume = new Map<string, (v: { ok: boolean; response: string; error?: string }) => void>()
+  private pendingResume = new Map<string, (v: BackendTurnResult) => void>()
   private pendingPermissions = new Map<string, { taskId: string; resolve: (v: { optionId?: string; decision: 'allow' | 'deny' }) => void; timer: NodeJS.Timeout }>()
   private runningNormal = 0
   private runningWorkers = 0
@@ -58,13 +58,13 @@ export class TaskRunner {
   }
 
   /** 事件管道：落盘 + 推 UI；onTurnEnd 可挂回调 */
-  private makeEvents(taskId: string, onTurnEnd?: (r: { ok: boolean; response: string; error?: string }) => void) {
+  private makeEvents(taskId: string, onTurnEnd?: (r: BackendTurnResult) => void) {
     return {
       onEvent: (e: Omit<TaskEvent, 'seq'>) => {
         const full = this.store.appendEvent(taskId, e)
         if (full) this.pushEvent(taskId, full)
       },
-      onTurnEnd: (r: { ok: boolean; response: string; error?: string }) => {
+      onTurnEnd: (r: BackendTurnResult) => {
         onTurnEnd?.(r)
         const waiter = this.pendingResume.get(taskId)
         if (waiter) {
@@ -165,6 +165,43 @@ export class TaskRunner {
     this.getTeam = getTeam
   }
 
+  /** Finish one successful turn, including any delegation emitted before the final message. */
+  private async completeTurn(taskId: string, session: BackendSession, r: BackendTurnResult): Promise<string> {
+    const task = this.store.get(taskId)!
+    const team = this.getTeam?.() ?? []
+    const me = team.find((a) => a.id === task.agentId)
+    let finalText = r.response
+    if (me?.subordinates?.length && task.backend !== 'dsh') {
+      const outcome = await runDelegationLoop(taskId, session, r.delegationText || r.response, {
+        store: this.store,
+        runner: this,
+        getTeam: () => this.getTeam?.() ?? [],
+        opts: () => ({ mode: this.opts().mode, notify: this.opts().notify, maxParallel: Math.max(1, this.opts().workerConcurrency ?? this.opts().concurrency) }),
+        pushTask: (id) => this.pushTask(id),
+        pushEvent: (id, e) => this.pushEvent(id, e)
+      })
+      finalText = outcome.finalText || r.response
+    }
+    await this.finalizeDone(taskId, finalText)
+    return finalText
+  }
+
+  /** Send one follow-up and return the exact turn payload, including prior messages. */
+  async sendTurn(taskId: string, session: BackendSession, content: string): Promise<BackendTurnResult> {
+    const turn = new Promise<BackendTurnResult>((resolve) => {
+      this.pendingResume.set(taskId, resolve)
+    })
+    try {
+      await session.send(content)
+      return await Promise.race([
+        turn,
+        new Promise<BackendTurnResult>((res) => setTimeout(() => res({ ok: false, response: '', error: '回合超时（120s）' }), 120000))
+      ])
+    } finally {
+      this.pendingResume.delete(taskId)
+    }
+  }
+
   /** 执行一个任务（首回合） */
   private async run(taskId: string) {
     const task = this.store.get(taskId)
@@ -183,8 +220,8 @@ export class TaskRunner {
     this.recordUser(taskId, task.prompt)
 
     // 首回合完成信号
-    let firstTurnDone: ((v: { ok: boolean; response: string; error?: string }) => void) | null = null
-    const firstTurnPromise = new Promise<{ ok: boolean; response: string; error?: string }>((resolve) => {
+    let firstTurnDone: ((v: BackendTurnResult) => void) | null = null
+    const firstTurnPromise = new Promise<BackendTurnResult>((resolve) => {
       firstTurnDone = resolve
     })
 
@@ -218,19 +255,7 @@ ${task.handoff}`
       if (r.ok) {
         // 领队：进入委派循环（截获 <delegate> 标记 → 并行子任务 → 回灌 → 继续）
         // 0.7.0 起 worker 也可以是子领队（带 subordinates 即生效；delegate 内有防环与层级/预算闸）
-        let finalText = r.response
-        if (me?.subordinates?.length && task.backend !== 'dsh') {
-          const outcome = await runDelegationLoop(taskId, session, r.response, {
-            store: this.store,
-            runner: this,
-            getTeam: () => this.getTeam?.() ?? [],
-            opts: () => ({ mode: this.opts().mode, notify: this.opts().notify, maxParallel: Math.max(1, this.opts().workerConcurrency ?? this.opts().concurrency) }),
-            pushTask: (id) => this.pushTask(id),
-            pushEvent: (id, e) => this.pushEvent(id, e)
-          })
-          finalText = outcome.finalText || r.response
-        }
-        await this.finalizeDone(taskId, finalText)
+        const finalText = await this.completeTurn(taskId, session, r)
         if (this.opts().notify) this.notify(task, '完成', finalText)
       } else {
         this.failTask(taskId, r.error || '回合失败')
@@ -320,7 +345,7 @@ ${task.handoff}`
       this.store.update(taskId, { status: 'running', endedAt: undefined, error: undefined, failure: undefined })
       this.pushTask(taskId)
       try {
-        const firstTurn = new Promise<{ ok: boolean; response: string; error?: string }>((resolve) => {
+        const firstTurn = new Promise<BackendTurnResult>((resolve) => {
           this.pendingResume.set(taskId, resolve)
         })
         session = await backend.start({
@@ -335,14 +360,16 @@ ${task.handoff}`
         this.pushTask(taskId)
         const r = await Promise.race([
           firstTurn,
-          new Promise<{ ok: boolean; response: string; error: string }>((res) =>
+          new Promise<BackendTurnResult>((res) =>
             setTimeout(() => res({ ok: false, response: '', error: 'resume 超时（120s）' }), 120000)
           )
         ])
         if (!r.ok) throw new Error(r.error || '续聊回合失败')
-        await this.finalizeDone(taskId)
+        const finalText = await this.completeTurn(taskId, session, r)
+        if (this.opts().notify) this.notify(task, '完成', finalText)
         return { ok: true }
       } catch (e) {
+        this.pendingResume.delete(taskId)
         const msg = e instanceof Error ? e.message : String(e)
         this.failTask(taskId, msg)
         this.pushTask(taskId)
@@ -352,9 +379,10 @@ ${task.handoff}`
     this.store.update(taskId, { status: 'running', endedAt: undefined, error: undefined, failure: undefined })
     this.pushTask(taskId)
     try {
-      await session.send(content)
-      // send resolve 即回合成功；结果已通过事件流记录
-      await this.finalizeDone(taskId)
+      const r = await this.sendTurn(taskId, session, content)
+      if (!r.ok) throw new Error(r.error || '续聊回合失败')
+      const finalText = await this.completeTurn(taskId, session, r)
+      if (this.opts().notify) this.notify(task, '完成', finalText)
       return { ok: true }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)

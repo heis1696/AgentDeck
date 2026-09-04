@@ -209,7 +209,7 @@ export async function runDelegationLoop(
       const childPrompt = sanitizeChildPrompt(call.prompt, task.workdir)
       const child = store.create({
         title: `${target.name}: ${call.prompt.slice(0, 40).replace(/\n/g, ' ')}`,
-        prompt: call.prompt,
+        prompt: childPrompt,
         workdir,
         backend: target.backend,
         ...(target.id ? { agentId: target.id } : {}),
@@ -243,11 +243,11 @@ export async function runDelegationLoop(
       .join('\n\n')
     note(`第 ${round} 轮结果已回灌，等待领队继续`)
     try {
-      await session.send(
+      const turn = await runner.sendTurn(taskId, session,
         `【系统】队员执行结果汇报：\n\n${report}\n\n请继续推进任务：需要再派发就继续用 <delegate> 标记；已全部完成就输出最终总结（不要再派发）。`
       )
-      const finals = store.readEvents(taskId).filter((e) => e.kind === 'final')
-      response = finals[finals.length - 1]?.text ?? ''
+      if (!turn.ok) throw new Error(turn.error || '回灌回合失败')
+      response = turn.delegationText || turn.response
     } catch (e) {
       note(`⚠ 回灌失败: ${e instanceof Error ? e.message : String(e)}`)
       break

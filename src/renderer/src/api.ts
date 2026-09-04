@@ -13,6 +13,7 @@ interface Bridge {
     followUp: (id: string, content: string) => Promise<{ ok: boolean; error?: string }>
     delete: (id: string) => Promise<{ ok: boolean; error?: string }>
     retry: (id: string) => Promise<{ ok: boolean; error?: string }>
+    move: (id: string, status: Task['status']) => Promise<{ ok: boolean; error?: string }>
     onUpdated: (cb: (t: Task) => void) => () => void
     onDeleted: (cb: (id: string) => void) => () => void
     onFocusTask: (cb: (id: string) => void) => () => void

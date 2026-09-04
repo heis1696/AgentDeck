@@ -27,6 +27,7 @@ const api = {
       ipcRenderer.invoke('tasks:followup', id, content) as Promise<{ ok: boolean; error?: string }>,
     delete: (id: string) => ipcRenderer.invoke('tasks:delete', id) as Promise<{ ok: boolean; error?: string }>,
     retry: (id: string) => ipcRenderer.invoke('tasks:retry', id) as Promise<{ ok: boolean; error?: string }>,
+    move: (id: string, status: Task['status']) => ipcRenderer.invoke('tasks:move', id, status) as Promise<{ ok: boolean; error?: string }>,
     start: (id: string) => ipcRenderer.invoke('tasks:start', id) as Promise<{ ok: boolean; error?: string }>,
     onUpdated: (cb: (t: Task) => void) => {
       const h = (_e: unknown, t: Task) => cb(t)

@@ -13,7 +13,7 @@ import { createOpencodeBackend } from './backends/opencode'
 import { createDshBackend } from './backends/dsh'
 import { probeCli } from './backends/cli-locator'
 import type { AgentBackend } from './backends/types'
-import type { AppSettings } from '../shared/types'
+import type { AppSettings, Task } from '../shared/types'
 
 let mainWindow: BrowserWindow | null = null
 let settings: AppSettings
@@ -155,6 +155,26 @@ app.whenReady().then(() => {
     if (t.status === 'running' || t.status === 'queued') return { ok: false, error: '任务已在队列/运行中' }
     store.update(id, { status: 'queued', error: undefined, failure: undefined, result: undefined, sessionId: undefined, attempt: undefined })
     runner.enqueue(store.get(id)!)
+    return { ok: true }
+  })
+  ipcMain.handle('tasks:move', (_e, id: string, status: Task['status']) => {
+    const allowed: Task['status'][] = ['queued', 'running', 'done', 'failed', 'cancelled']
+    if (!allowed.includes(status)) return { ok: false, error: '无效的任务状态' }
+    const t = store.get(id)
+    if (!t) return { ok: false, error: '任务不存在' }
+    if (t.status === status) return { ok: true }
+    if (t.status === 'running') return { ok: false, error: '请先取消运行中的任务' }
+    if (status === 'running') {
+      if (t.status !== 'queued') return { ok: false, error: '只有排队中的任务可以启动' }
+      store.update(id, { parked: undefined })
+      runner.enqueue(store.get(id)!)
+    } else if (status === 'queued') {
+      store.update(id, { status: 'queued', parked: true, error: undefined, failure: undefined, result: undefined, endedAt: undefined })
+      mainWindow?.webContents.send('task:updated', store.get(id))
+    } else {
+      store.update(id, { status, parked: undefined, endedAt: Date.now() })
+      mainWindow?.webContents.send('task:updated', store.get(id))
+    }
     return { ok: true }
   })
 
