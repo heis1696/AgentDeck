@@ -1,0 +1,150 @@
+/* ============================================================
+   AgentDeck 设计令牌 v2
+   用途：暗色/浅色主题完整令牌定义，供 styles.css 引用
+   约定：组件代码只引用令牌变量，不直接写色值
+   ============================================================ */
+
+/* ---- 暗色模式（默认）---- */
+:root {
+  /* 表面四层：壳 → 画布 → 表面 → 浮起 */
+  --app-shell: #080a0d;           /* 最外框，包裹整个应用 */
+  --bg: #0e1218;                  /* 页面画布（内容生活的地方）*/
+  --bg-raised: #161b23;           /* 表面（卡片/输入框）*/
+  --bg-hover: #1d242e;            /* 表面悬停 */
+  --bg-inset: #0b0f14;            /* 凹陷输入（文本框内部）*/
+  --bg-selected: #1a2535;         /* 选中态背景 */
+
+  /* 边框 */
+  --border: #1f2730;              /* 默认边框 */
+  --border-strong: #2a3240;       /* 强调边框（浮层/对话框）*/
+
+  /* 文字 */
+  --text: #e8ebf0;                /* 主文字 */
+  --text-dim: #8f97a8;            /* 次要文字 */
+  --text-faint: #5a6372;          /* 辅助文字（提示/标签）*/
+
+  /* 品牌色 */
+  --accent: #4d88ff;              /* 主强调色（链接/按钮/焦点）*/
+  --accent-soft: rgba(77, 136, 255, 0.12);  /* 柔和背景 */
+  --accent-glow: rgba(77, 136, 255, 0.24);  /* 光晕效果 */
+
+  /* 状态色：运行态光环的核心 */
+  --status-running: #4d88ff;      /* 运行中=蓝色电弧 */
+  --status-running-bg: rgba(77, 136, 255, 0.10);
+  --status-running-glow: rgba(77, 136, 255, 0.28);  /* 脉冲光晕 */
+
+  --status-queued: #d9a23c;       /* 排队=琥珀 */
+  --status-queued-bg: rgba(217, 162, 60, 0.12);
+  --status-queued-glow: rgba(217, 162, 60, 0.22);   /* 呼吸光晕 */
+
+  --status-done: #38b86f;         /* 成功=翠绿（不发光）*/
+  --status-done-bg: rgba(56, 184, 111, 0.12);
+
+  --status-failed: #e55c52;       /* 失败=红（不发光）*/
+  --status-failed-bg: rgba(229, 92, 82, 0.12);
+
+  --status-cancelled: #6b7280;    /* 已取消=灰（不发光）*/
+  --status-cancelled-bg: rgba(107, 114, 128, 0.10);
+
+  /* 功能色（向后兼容既有 --ok/--warn/--err）*/
+  --ok: #38b86f;
+  --warn: #d9a23c;
+  --err: #e55c52;
+
+  /* 阴影：双阴影系统（menu 轻 / pop 重）*/
+  --menu-shadow: 0 10px 30px rgba(0, 0, 0, 0.35), 0 2px 10px rgba(0, 0, 0, 0.22);
+  --shadow-pop: 0 22px 52px rgba(0, 0, 0, 0.50), 0 4px 14px rgba(0, 0, 0, 0.30);
+
+  /* 圆角 */
+  --radius-sm: 6px;    /* 小按钮、菜单项、徽标 */
+  --radius-md: 8px;    /* 输入框、卡片、对话框 */
+  --radius-lg: 12px;   /* 大卡片、浮层面板 */
+  --radius-pill: 999px; /* 胶囊按钮、状态芯片 */
+  --radius: 10px;      /* 向后兼容（等效 --radius-md，未来可废弃）*/
+
+  /* 字阶（角色命名，全站仅用这些步进）*/
+  --text-micro: 11px;       /* 角色：时间戳、辅助标签、键盘提示 */
+  --text-caption: 12px;     /* 角色：描述、次要信息、表格正文 */
+  --text-label: 13px;       /* 角色：列表项标题、按钮、输入框 */
+  --text-body: 14px;        /* 角色：正文、输入文本 */
+  --text-title-sm: 16px;    /* 角色：卡片标题、对话框标题 */
+  --text-title: 18px;       /* 角色：页面标题 */
+
+  /* 字体栈 */
+  --font-ui: -apple-system, 'Segoe UI', 'Microsoft YaHei UI', 'PingFang SC', sans-serif;
+  --font-mono: 'Cascadia Code', 'Cascadia Mono', Consolas, 'Courier New', monospace;
+  --mono: var(--font-mono);  /* 向后兼容别名 */
+
+  /* 动效令牌 */
+  --duration-quick: 0.10s;   /* 菜单展开、tooltip */
+  --duration-base: 0.12s;    /* 按钮悬停、边框变色、背景变色 */
+  --duration-slow: 0.16s;    /* 对话框入场、面板滑入 */
+  --duration-pulse: 1.4s;    /* 状态光环脉冲周期 */
+
+  --ease-out: cubic-bezier(0.2, 0, 0.3, 1);      /* 入场、展开 */
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);   /* 悬停、状态切换 */
+}
+
+/* ---- 浅色模式（完整令牌重映射，无组件级补丁）---- */
+html.light {
+  /* 表面四层 */
+  --app-shell: #eceef2;
+  --bg: #f6f8fb;
+  --bg-raised: #ffffff;
+  --bg-hover: #eef1f6;
+  --bg-inset: #fafbfd;
+  --bg-selected: #e5ebf5;
+
+  /* 边框 */
+  --border: #e0e4eb;
+  --border-strong: #cfd5e0;
+
+  /* 文字 */
+  --text: #18191d;
+  --text-dim: #5a6474;
+  --text-faint: #97a0b3;
+
+  /* 品牌色 */
+  --accent: #3862d8;
+  --accent-soft: rgba(56, 98, 216, 0.09);
+  --accent-glow: rgba(56, 98, 216, 0.18);
+
+  /* 状态色 */
+  --status-running: #3862d8;
+  --status-running-bg: rgba(56, 98, 216, 0.08);
+  --status-running-glow: rgba(56, 98, 216, 0.20);
+
+  --status-queued: #b8811c;
+  --status-queued-bg: rgba(184, 129, 28, 0.10);
+  --status-queued-glow: rgba(184, 129, 28, 0.18);
+
+  --status-done: #1a7d47;
+  --status-done-bg: rgba(26, 125, 71, 0.10);
+
+  --status-failed: #c73c34;
+  --status-failed-bg: rgba(199, 60, 52, 0.10);
+
+  --status-cancelled: #6b7280;
+  --status-cancelled-bg: rgba(107, 114, 128, 0.08);
+
+  /* 功能色 */
+  --ok: #1a7d47;
+  --warn: #b8811c;
+  --err: #c73c34;
+
+  /* 阴影 */
+  --menu-shadow: 0 10px 30px rgba(30, 42, 76, 0.11), 0 2px 10px rgba(30, 42, 76, 0.07);
+  --shadow-pop: 0 22px 52px rgba(30, 42, 76, 0.15), 0 4px 14px rgba(30, 42, 76, 0.09);
+
+  /* 圆角/字阶/字体/动效：继承暗色值，无需重定义 */
+}
+
+/* ---- 辅助功能：降低动画强度 ---- */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-quick: 0.01s;
+    --duration-base: 0.01s;
+    --duration-slow: 0.01s;
+    --duration-pulse: 0.01s;
+  }
+}
