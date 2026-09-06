@@ -29,7 +29,8 @@
     "smoke:issues": "node scripts/smoke-issues.mjs",
     "smoke:automation": "node scripts/smoke-automation.mjs",
     "smoke:runtime-analytics": "node scripts/smoke-runtime-analytics.mjs",
-    "smoke:taskflow": "node scripts/smoke-taskflow.mjs"
+    "smoke:taskflow": "node scripts/smoke-taskflow.mjs",
+    "smoke:model": "node scripts/smoke-model.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

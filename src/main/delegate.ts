@@ -39,6 +39,25 @@ export function stripDelegates(text: string): string {
   return text.replace(/<delegate\b[^>]*>[\s\S]*?<\/delegate>/g, '').trim()
 }
 
+/**
+ * 多源解析并按 to+prompt 去重。
+ * 标记可能只出现在回合文本的某一个来源里（终态全文/流式累计/最后一条消息互不包含），
+ * 任何单一来源都不能当完整代表；各来源重叠部分的重复解析由去重吸收。
+ */
+export function parseDelegatesMerged(...texts: string[]): DelegateCall[] {
+  const seen = new Set<string>()
+  const out: DelegateCall[] = []
+  for (const text of texts) {
+    for (const call of parseDelegates(text)) {
+      const key = `${call.to}\n${call.prompt}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push(call)
+    }
+  }
+  return out
+}
+
 export interface AgentLike {
   id: string
   name: string
@@ -138,8 +157,9 @@ function ancestorBudget(store: DelegationContext['store'], taskId: string): { in
 /**
  * 委派循环：在领队回合结束后执行。
  * session 已就绪；每轮解析 delegate 标记 → 生成子任务 → 等终态 → 结果回灌 session.send。
- * 标记解析用全量回合文本（delegationText，标记可能在任意中间消息）；
- * 最终结果只取每轮最后一条 assistant 消息（response），避免中间过程灌进 result/回灌上下文。
+ * 标记解析用回合文本的全部来源（终态全文/流式累计并集 + 最后一条消息，多源去重——
+ * 单一来源可能不含中间消息里的标记）；最终结果只取每轮最后一条 assistant 消息
+ * （response），避免中间过程灌进 result/回灌上下文。
  */
 export async function runDelegationLoop(
   taskId: string,
@@ -175,15 +195,15 @@ export async function runDelegationLoop(
   // 自身也不许派给自己
   ancestors.add(me?.id ?? `@${task.backend}`)
 
-  /** 标记解析用：全量回合文本 */
-  let scanText = first.delegationText || first.response
+  /** 标记解析用：回合文本的全部来源（终态全文/流式累计并集 + 最后一条消息） */
+  let scanTexts: string[] = [first.delegationText ?? '', first.response]
   /** 结果用：每轮最后一条 assistant 消息 */
   let finalResponse = first.response
   let allChildren: string[] = []
   let round = 0
 
   while (round < budget) {
-    const calls = parseDelegates(scanText)
+    const calls = parseDelegatesMerged(...scanTexts)
     if (!calls.length) break
     round++
     const batch = calls.slice(0, Math.max(1, ctx.opts().maxParallel))
@@ -251,7 +271,7 @@ export async function runDelegationLoop(
         `【系统】队员执行结果汇报：\n\n${report}\n\n请继续推进任务：需要再派发就继续用 <delegate> 标记；已全部完成就输出最终总结（不要再派发）。`
       )
       if (!turn.ok) throw new Error(turn.error || '回灌回合失败')
-      scanText = turn.delegationText || turn.response
+      scanTexts = [turn.delegationText ?? '', turn.response]
       finalResponse = turn.response
     } catch (e) {
       note(`⚠ 回灌失败: ${e instanceof Error ? e.message : String(e)}`)
@@ -317,5 +337,5 @@ export async function runDelegationLoop(
   } as Partial<Task>)
   pushTask(taskId)
 
-  return { rounds: round, children: allChildren, finalText: stripDelegates(finalResponse || scanText) }
+  return { rounds: round, children: allChildren, finalText: stripDelegates(finalResponse || scanTexts[0] || scanTexts[1]) }
 }

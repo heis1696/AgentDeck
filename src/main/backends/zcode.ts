@@ -285,6 +285,22 @@ function buildRuntimeModelFromCliConfig(): Record<string, unknown> | null {
   }
 }
 
+/**
+ * 委派解析用的回合文本来源合并。
+ * 终态全文（服务端完整回复，带消息分隔、可含未流式展示的思考内容）与流式累计
+ * （全部中间消息的裸拼接）都可能独占含有 <delegate> 标记，长度不能当完整性代理。
+ * 包含判断空白不敏感；互含时取终态全文（保真消息边界）；互不包含时拼接，重复
+ * 解析由 parseDelegatesMerged 按 to+prompt 去重。
+ */
+export function mergeTurnTexts(full: string, streamed: string): string {
+  if (!streamed) return full
+  if (!full) return streamed
+  const flat = (s: string) => s.replace(/\s+/g, '')
+  if (flat(full).includes(flat(streamed))) return full
+  if (flat(streamed).includes(flat(full))) return streamed
+  return `${streamed}\n${full}`
+}
+
 export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath: string }): AgentBackend {
   return {
     id: 'zcode',
@@ -338,8 +354,8 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
         const full = r.response
         const lastMsg = squash(lastSegment)
         const response = lastMsg && (full === currentText || squash(full).endsWith(lastMsg)) ? lastSegment : full
-        // 委派标记可能出现在任意中间消息里：解析用全量文本（服务端完整回复与流式累计中取更完整的）
-        const scan = full.length >= currentText.length ? full : currentText
+        // 委派标记可能只出现在终态全文或流式累计的其中一个里：合并两源（mergeTurnTexts）
+        const scan = mergeTurnTexts(full, currentText)
         const ended = { ...r, response, delegationText: scan || undefined }
         lastTurnEnd = ended
         emit({ kind: 'final', text: response || r.error || '' })
