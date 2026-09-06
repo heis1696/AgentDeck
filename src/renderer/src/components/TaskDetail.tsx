@@ -31,6 +31,8 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   const editingTitleRef = useRef(false)
   const navFrameRef = useRef(0)
   const workers = tasks.filter((t) => t.parentTaskId === task.id).sort((a, b) => (a.workerIndex ?? 0) - (b.workerIndex ?? 0))
+  /** 运行时关联：面板只跟未终态的队员；已结束的由 Issue/看板承载，不在这里重复定位 */
+  const activeWorkers = workers.filter((t) => t.status === 'running' || t.status === 'queued')
   const parent = task.parentTaskId ? tasks.find((t) => t.id === task.parentTaskId) : null
   const issueId = task.issueId ?? `iss_${task.id}`
 
@@ -159,6 +161,14 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
 
   const turnActive = task.status === 'running'
 
+  /** 实际滚动容器：现在布局由 .detail-main 滚动（log 自身不可滚），旧布局则相反——两者兼容 */
+  const scrollEl = (): HTMLElement | null => {
+    const el = logRef.current
+    if (!el) return null
+    if (el.scrollHeight > el.clientHeight + 1) return el
+    return el.closest<HTMLElement>('.detail-main') ?? el
+  }
+
   useEffect(() => {
     if (!turnActive) return
     const timer = window.setInterval(() => setClock((value) => value + 1), 1000)
@@ -167,16 +177,19 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
 
   // 自动滚底
   useEffect(() => {
-    if (tab === 'log' && logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
+    if (tab !== 'log') return
+    const el = scrollEl()
+    if (el) el.scrollTop = el.scrollHeight
   }, [events, tab, turns])
 
-  // ---- 对话导航：当前视口命中的回合（最后一个 offsetTop <= scrollTop + 80 的 .turn）----
+  // ---- 对话导航：当前视口命中的回合（最后一个顶边进入视口上部 80px 的 .turn）----
   const updateActiveNav = () => {
-    const el = logRef.current
+    const el = scrollEl()
     if (!el) return
+    const base = el.getBoundingClientRect().top
     let active = 0
     el.querySelectorAll<HTMLElement>('.turn').forEach((n, idx) => {
-      if (n.offsetTop <= el.scrollTop + 80) active = idx
+      if (n.getBoundingClientRect().top - base <= 80) active = idx
     })
     setActiveNav(active)
   }
@@ -191,12 +204,13 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     if (tab === 'log') updateActiveNav()
   }, [tab, turns.length])
 
-  /** 定位到某回合：在滚动容器内按 offsetTop 计算目标位置（不用 window 滚动） */
+  /** 定位到某回合：按目标与滚动容器的视口差计算（不依赖 offsetParent） */
   const scrollToTurn = (i: number) => {
-    const el = logRef.current
+    const el = scrollEl()
     const target = el?.querySelector<HTMLElement>(`#turn-${i}`)
     if (!el || !target) return
-    el.scrollTo({ top: Math.max(0, target.offsetTop - 8), behavior: 'smooth' })
+    const delta = target.getBoundingClientRect().top - el.getBoundingClientRect().top
+    el.scrollTo({ top: Math.max(0, el.scrollTop + delta - 8), behavior: 'smooth' })
     setActiveNav(i)
   }
 
@@ -421,7 +435,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
       </header>
 
       <div className="detail-columns">
-        <div className="detail-main">
+        <div className="detail-main" onScroll={onLogScroll}>
       {task.status === 'failed' && task.error && (
         <div className="error-banner">
           {task.failure ? (
@@ -454,11 +468,11 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
         </div>
       )}
 
-      {workers.length > 0 && (
+      {activeWorkers.length > 0 && (
         <div className="workers-pane">
-          <div className="list-group-label">子任务（{workers.filter((w) => w.status === 'done').length}/{workers.length} 完成）</div>
-          {workers.map((w) => (
-            <div key={w.id} className="worker-card" role="button" tabIndex={0} onClick={() => onSelect(w.id)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(w.id) } }}>
+          <div className="list-group-label">运行中的队员（{activeWorkers.length}）</div>
+          {activeWorkers.map((w) => (
+            <div key={w.id} className={`worker-card ${w.status === 'cancelled' ? 'is-cancelled' : ''}`} role="button" tabIndex={0} onClick={() => onSelect(w.id)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(w.id) } }}>
               <span className={`dot dot-${w.status}`} />
               <span className="worker-title">{w.title}</span>
               <span className="mini">
@@ -466,11 +480,13 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
                   ? '执行中…'
                   : w.status === 'queued'
                     ? '排队'
-                    : w.startedAt && w.endedAt
-                      ? fmtDuration(w.endedAt - w.startedAt)
-                      : w.status === 'done'
-                        ? '✓'
-                        : '✗'}
+                    : w.status === 'cancelled'
+                      ? '已取消'
+                      : w.status === 'failed'
+                        ? '✗ 失败'
+                        : w.startedAt && w.endedAt
+                          ? `✓ ${fmtDuration(w.endedAt - w.startedAt)}`
+                          : '✓'}
               </span>
               {w.gitStat ? <span className="mini dim">· 有改动</span> : null}
             </div>

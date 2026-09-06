@@ -2151,41 +2151,24 @@ html.light .followup textarea { background: #fff; border-color: #e4e4e7; }
 .issues-header { position: sticky; top: 0; z-index: 2; background: var(--bg); }
 .issues-toolbar { display: flex; align-items: center; gap: 10px; min-height: 52px; padding: 8px 18px; border-bottom: 1px solid var(--border); background: var(--bg); }
 .issues-scopes { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-inset); }
-.issues-scopes button, .issues-layout button { min-height: 28px; padding: 0 10px; border: 0; border-radius: 5px; background: transparent; color: var(--text-dim); cursor: pointer; font-size: 12px; }
-.issues-scopes button:hover, .issues-layout button:hover { color: var(--text); background: var(--bg-hover); }
-.issues-scopes button.active, .issues-layout button.active { background: var(--bg-selected); color: var(--text); font-weight: 600; }
+.issues-scopes button { min-height: 28px; padding: 0 10px; border: 0; border-radius: 5px; background: transparent; color: var(--text-dim); cursor: pointer; font-size: 12px; }
+.issues-scopes button:hover { color: var(--text); background: var(--bg-hover); }
+.issues-scopes button.active { background: var(--bg-selected); color: var(--text); font-weight: 600; }
 .issues-search { display: flex; align-items: center; gap: 7px; min-width: 180px; max-width: 360px; flex: 1; height: 30px; padding: 0 9px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-inset); color: var(--text-faint); }
 .issues-search:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 .issues-search input { width: 100%; border: 0; outline: 0; background: transparent; color: var(--text); font: inherit; }
 .issues-status-select { height: 30px; padding: 0 8px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-inset); color: var(--text-dim); font-size: 12px; }
-.issues-layout { display: inline-flex; gap: 2px; margin-left: auto; padding: 2px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-inset); }
-.issues-layout button { width: 30px; padding: 0; display: grid; place-items: center; }
 .issue-list-view { width: min(1100px, 100%); margin: 0 auto; padding: 12px 18px 64px; }
 .issue-list-group { margin-bottom: 18px; }
-.issue-list-group-head, .issue-column-head { display: flex; align-items: center; gap: 8px; min-height: 34px; color: var(--text-dim); }
-.issue-list-group-head strong, .issue-column-head strong { color: var(--text); font-size: 12px; }
-.issue-list-group-head span, .issue-column-head span { display: inline-grid; min-width: 20px; height: 20px; place-items: center; padding: 0 5px; border-radius: 5px; background: var(--bg-hover); color: var(--text-faint); font: 11px var(--mono); }
+.issue-list-group-head { display: flex; align-items: center; gap: 8px; min-height: 34px; color: var(--text-dim); }
+.issue-list-group-head strong { color: var(--text); font-size: 12px; }
+.issue-list-group-head span { display: inline-grid; min-width: 20px; height: 20px; place-items: center; padding: 0 5px; border-radius: 5px; background: var(--bg-hover); color: var(--text-faint); font: 11px var(--mono); }
 .issue-home-row { display: grid; grid-template-columns: 10px 64px minmax(180px, 1fr) 80px 100px 90px 110px; align-items: center; gap: 10px; min-height: 42px; padding: 5px 10px; border-top: 1px solid var(--border); cursor: pointer; transition: background var(--duration-base) var(--ease-in-out); }
 .issue-home-row:hover { background: var(--bg-hover); }
 .issue-home-row strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 560; }
-.issue-home-row select, .issue-card-actions select { max-width: 110px; padding: 4px 5px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--text-dim); font-size: 11px; }
-.issue-home-row select:hover, .issue-card-actions select:hover { border-color: var(--border); background: var(--bg-inset); color: var(--text); }
+.issue-home-row select { max-width: 110px; padding: 4px 5px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--text-dim); font-size: 11px; }
+.issue-home-row select:hover { border-color: var(--border); background: var(--bg-inset); color: var(--text); }
 .issue-row-state { color: var(--text-dim); font-size: 11px; white-space: nowrap; }
-.issue-board-grid { display: grid; grid-template-columns: repeat(7, minmax(190px, 1fr)); gap: 10px; min-width: 1350px; padding: 14px 18px 64px; }
-.issue-column { min-height: 390px; border: 1px solid var(--border); border-radius: var(--radius-md); background: color-mix(in srgb, var(--bg-raised) 75%, transparent); }
-.issue-column-head { padding: 8px 10px; border-bottom: 1px solid var(--border); }
-.issue-column-body { display: flex; flex-direction: column; gap: 6px; padding: 7px; }
-.issue-column-empty { display: block; padding: 22px 8px; color: var(--text-faint); text-align: center; font-size: 11px; }
-.issue-home-card { position: relative; min-height: 116px; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-raised); cursor: pointer; transition: border-color var(--duration-base) var(--ease-in-out), transform var(--duration-base) var(--ease-out); }
-.issue-home-card:hover { border-color: var(--border-strong); transform: translateY(-1px); }
-.issue-home-card-title { display: flex; gap: 4px; line-height: 1.35; font-size: 12px; font-weight: 600; }
-.issue-home-card p { display: -webkit-box; min-height: 30px; margin: 6px 0 8px; overflow: hidden; color: var(--text-dim); font-size: 11px; line-height: 1.35; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.issue-home-meta { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
-.issue-home-meta .badge { max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.issue-live { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); font-size: 10px; }
-.issue-live i { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-.issue-card-actions { display: flex; justify-content: flex-end; margin-top: 4px; }
-.issue-card-actions select { width: 100%; max-width: none; }
 @media (max-width: 760px) {
   .issues-toolbar { align-items: stretch; flex-wrap: wrap; }
   .issues-search { order: 3; flex-basis: 100%; max-width: none; }
@@ -2419,6 +2402,28 @@ html.light .settings-body > .page-header-bar { background: #fff; border-bottom-c
 .delegate-card-summary-label { flex-shrink: 0; }
 .delegate-card-excerpt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .delegate-card-body pre { margin: 0; padding: 10px 12px; max-height: 240px; overflow: auto; border-top: 1px solid var(--teal-line); background: var(--surface-inset); font: 11.5px/1.55 var(--mono); white-space: pre-wrap; word-break: break-word; }
+
+/* —— 委派来源徽章：agent 创建的 Issue/看板卡片上，与用户创建的一眼区分 —— */
+.badge-delegate {
+  display: inline-flex; align-items: center; gap: 3px;
+  flex-shrink: 0;
+  padding: 1px 7px; border-radius: 99px;
+  background: var(--teal-soft); border: 1px solid var(--teal-line); color: var(--teal);
+  font-size: 10px; font-weight: 650; letter-spacing: .3px;
+}
+.board-card-title .badge-delegate { margin-right: 5px; }
+.issue-home-row .badge-delegate { flex-shrink: 0; }
+
+/* —— 详情页 tab 栏（动态/执行记录/结果/Git）吸顶：高层导航不再随内容滚走 —— */
+.detail-main > .tabs { position: sticky; top: 0; z-index: 7; }
+
+/* —— 领队详情里被取消的子任务：保留记录但明显置灰 —— */
+.worker-card.is-cancelled { opacity: .5; }
+.worker-card.is-cancelled .worker-title { text-decoration: line-through; text-decoration-color: var(--ink-faint); }
+
+/* —— 看板列加宽（宽优于高）：委派徽章/标识符不再把卡片顶高，放不下就横向滚动 —— */
+.board .board-col { min-width: 300px; max-width: 352px; }
+html.light .board .board-col { min-width: 300px; max-width: 352px; }
 
 /* —— 回合回退按钮（user 气泡 hover 出现） —— */
 .bubble.user { position: relative; }

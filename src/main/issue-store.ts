@@ -49,6 +49,8 @@ export class IssueStore {
     for (const task of tasks) {
       if (task.suppressIssue) continue
       const existing = this.data.issues.find((issue) => issue.taskId === task.id || (!!task.issueId && issue.id === task.issueId))
+      // 委派子任务由 agent 创建：投影层打上来源标记，UI 才能和用户创建的区分
+      const isDelegated = !!task.parentTaskId
       const derivedStatus = issueStatus(task.status)
       const status = existingStatus(this.data.issues, task.id, task.status, derivedStatus, task.issueId)
       const isLatest = latestByIssue.get(task.issueId ?? `iss_${task.id}`)?.id === task.id
@@ -60,9 +62,9 @@ export class IssueStore {
           description: task.prompt,
           status,
           priority: 'none',
-          labels: [],
+          labels: isDelegated ? ['委派'] : [],
           position: task.createdAt,
-          createdBy: 'user',
+          createdBy: isDelegated ? 'agent' : 'user',
           createdAt: task.createdAt,
           updatedAt: task.endedAt ?? task.createdAt,
           taskId: task.id
@@ -82,6 +84,9 @@ export class IssueStore {
           }
         }
         if (isLatest && task.agentId && existing.assignee?.id !== task.agentId) patch.assignee = { type: 'agent', id: task.agentId }
+        // 旧数据回填：委派子任务的存量 Issue 补上来源标记
+        if (isDelegated && existing.createdBy !== 'agent') patch.createdBy = 'agent'
+        if (isDelegated && !existing.labels.includes('委派')) patch.labels = [...existing.labels, '委派']
         if (Object.keys(patch).length) { Object.assign(existing, patch, { updatedAt: Date.now() }); changed = true }
       }
       const issue = this.data.issues.find((item) => item.taskId === task.id)

@@ -54,7 +54,7 @@ export function App() {
 
   const openTask = (id: string) => { setTabs((current) => current.includes(id) ? current : [...current, id].slice(-MAX_TABS)); setActiveId(id); setView('detail') }
   const closeTab = (id: string) => { const next = tabs.filter((tab) => tab !== id); setTabs(next); if (activeId === id) setActiveId(next[next.length - 1] ?? null) }
-  const goWorkspace = () => { setActiveId(null); setView('create'); window.dispatchEvent(new Event(FOCUS_WORKSPACE)) }
+  const goWorkspace = () => { setView('create'); window.dispatchEvent(new Event(FOCUS_WORKSPACE)) }
   /** 切到某个最近用过的工作区：新任务默认目录随之变化 */
   const chooseWorkspace = (dir: string) => {
     if (!dir) return
@@ -96,11 +96,14 @@ export function App() {
     return () => window.removeEventListener('keydown', handler)
   }, [activeId, tabs])
 
-  const nav = (next: View) => { setActiveId(null); setView(next) }
-  const openSettings = (section?: string) => { if (section) setSettingsSection(section); setActiveId(null); setView('settings') }
+  // 视图切换不再清空当前 issue：Issue 主导航可回到最后浏览的详情（Chrome 返回按钮才显式退出）
+  const nav = (next: View) => { setView(next) }
+  /** Issue 导航：有正在浏览的 issue 就回到它的详情，否则进总览 */
+  const navIssues = () => { if (activeId && tasks.some((t) => t.id === activeId)) setView('detail'); else setView('issues') }
+  const openSettings = (section?: string) => { if (section) setSettingsSection(section); setView('settings') }
 
   const commands: PaletteCommand[] = useMemo(() => [
-    ...[['Issue', () => nav('issues')], ['看板', () => nav('board')], ['收件箱', () => setView('inbox')], ['自动化', () => nav('automation')], ['扩展中心', () => nav('market')], ['用量', () => nav('usage')], ['设置', () => openSettings('general')], ['设置 · 队伍', () => openSettings('team')], ['设置 · 运行时', () => openSettings('runtime')]].map(([label, run]) => ({ id: String(label), group: '跳转', label: String(label), run: run as () => void })),
+    ...[['Issue', navIssues], ['看板', () => nav('board')], ['收件箱', () => setView('inbox')], ['自动化', () => nav('automation')], ['扩展中心', () => nav('market')], ['用量', () => nav('usage')], ['设置', () => openSettings('general')], ['设置 · 队伍', () => openSettings('team')], ['设置 · 运行时', () => openSettings('runtime')]].map(([label, run]) => ({ id: String(label), group: '跳转', label: String(label), run: run as () => void })),
     { id: 'new', group: '操作', label: '新建任务', hint: 'Ctrl+N', run: goWorkspace },
     { id: 'theme', group: '操作', label: '切换深浅主题', run: () => void update({ theme: (settings?.theme ?? 'light') === 'dark' ? 'light' : 'dark' }) },
     ...tasks.slice(0, 20).map((task) => ({ id: task.id, group: '任务', label: task.title, hint: TASK_STATUS_LABELS[task.status], run: () => openTask(task.id) }))
@@ -114,7 +117,7 @@ export function App() {
       <WorkspaceSwitcher dir={workspaceDir} recent={recentWorkspaces} onChoose={chooseWorkspace} onPick={pickWorkspace} />
       <button className="new-task-btn" onClick={goWorkspace}><Plus size={15} /> 新建任务 <kbd>Ctrl+N</kbd></button>
       <nav className="nav" aria-label="主导航">
-        <button className={view === 'issues' || view === 'detail' ? 'active' : ''} onClick={() => nav('issues')}><ListTodo /><span className="nav-label">Issue</span></button>
+        <button className={view === 'issues' || view === 'detail' ? 'active' : ''} onClick={navIssues} title={activeId ? '回到当前 Issue（再点总览请用面包屑返回）' : undefined}><ListTodo /><span className="nav-label">Issue</span></button>
         <button className={view === 'board' ? 'active' : ''} onClick={() => nav('board')}><Kanban /><span className="nav-label">看板</span></button>
         <button className={view === 'inbox' ? 'active' : ''} onClick={() => nav('inbox')}><Inbox /><span className="nav-label">收件箱</span>{unreadCount > 0 && <span className="nav-count">{unreadCount > 99 ? '99+' : unreadCount}</span>}</button>
         <button className={view === 'automation' ? 'active' : ''} onClick={() => nav('automation')}><AlarmClock /><span className="nav-label">自动化</span></button>
@@ -125,7 +128,7 @@ export function App() {
       <div className="sidebar-footer"><span className="connection-dot" /> 本地引擎就绪</div>
     </aside>
     <main className="main">
-      {view === 'inbox' ? <InboxView onOpenIssue={openIssue} /> : view === 'automation' ? <AutomationView /> : view === 'market' ? <MarketView /> : view === 'settings' ? <SettingsView section={settingsSection} onSection={setSettingsSection} /> : view === 'usage' ? <UsageView /> : view === 'board' ? <Page title="看板" count={tasks.length}><BoardView tasks={tasks.filter((task) => !task.parentTaskId)} onOpen={openTask} /></Page> : view === 'detail' && selected ? <div className="tasks-column detail-page"><Chrome title={selected.title} onBack={() => nav('issues')} />{tabs.length > 0 && <TabBar tabs={tabs} tasks={tasks} activeId={activeId} onSelect={openTask} onClose={closeTab} />}<TaskDetail task={selected} tasks={tasks} onSelect={openTask} /></div> : view === 'create' ? <Page title="新建 Issue" count={0}><WorkspaceView onCreated={(task) => openTask(task.id)} workspaceDir={workspaceDir} onPickWorkspace={pickWorkspace} /></Page> : <IssuesView tasks={tasks} onOpen={openTask} onCreate={goWorkspace} />}
+      {view === 'inbox' ? <InboxView onOpenIssue={openIssue} /> : view === 'automation' ? <AutomationView /> : view === 'market' ? <MarketView /> : view === 'settings' ? <SettingsView section={settingsSection} onSection={setSettingsSection} /> : view === 'usage' ? <UsageView /> : view === 'board' ? <Page title="看板" count={tasks.length}><BoardView tasks={tasks} onOpen={openTask} /></Page> : view === 'detail' && selected ? <div className="tasks-column detail-page"><Chrome title={selected.title} onBack={() => { setActiveId(null); setView('issues') }} />{tabs.length > 0 && <TabBar tabs={tabs} tasks={tasks} activeId={activeId} onSelect={openTask} onClose={closeTab} />}<TaskDetail task={selected} tasks={tasks} onSelect={openTask} /></div> : view === 'create' ? <Page title="新建 Issue" count={0}><WorkspaceView onCreated={(task) => openTask(task.id)} workspaceDir={workspaceDir} onPickWorkspace={pickWorkspace} /></Page> : <IssuesView tasks={tasks} onOpen={openTask} onCreate={goWorkspace} />}
     </main>
   </div>
 }
