@@ -3,85 +3,61 @@ import { bridge, useSettings } from '../api'
 import { Settings } from 'lucide-react'
 import { Menu } from '../ui/Menu'
 import { EmptyState } from '../ui/EmptyState'
+import { RuntimeView } from './RuntimeView'
+import { TeamView } from './TeamView'
 
-export function SettingsView() {
-  const { settings, update } = useSettings()
-  const [probe, setProbe] = useState<{ ok: boolean; detail: string } | null>(null)
-  const [probing, setProbing] = useState(false)
-  const [zcodePath, setZcodePath] = useState('')
-  const [nodePath, setNodePath] = useState('')
-  const [dshPath, setDshPath] = useState('')
+/** 设置分区（侧栏导航用）；队伍与运行时页已并入设置 */
+type Section = 'general' | 'runtime' | 'team' | 'storage'
 
-  useEffect(() => {
-    if (settings) {
-      setZcodePath(settings.zcodePath)
-      setNodePath(settings.nodePath)
-      setDshPath(settings.dshPath ?? '')
-    }
-  }, [settings?.zcodePath, settings?.nodePath, settings?.dshPath])
+const SECTIONS: Array<{ group: string; items: Array<{ id: Section; label: string; desc: string }> }> = [
+  { group: '基础', items: [{ id: 'general', label: '常规', desc: '外观、执行与通知' }] },
+  { group: '执行', items: [{ id: 'runtime', label: '运行时', desc: '后端路径与健康状态' }, { id: 'team', label: '队伍', desc: '队员与可驱使名单' }] },
+  { group: '数据', items: [{ id: 'storage', label: '存储', desc: '数据落盘位置说明' }] }
+]
 
-  if (!settings) return <EmptyState title="Loading settings" />
-
-  const doProbe = async () => {
-    if (probing) return
-    setProbing(true)
-    try {
-      await update({ zcodePath: zcodePath.trim(), nodePath: nodePath.trim(), dshPath: dshPath.trim() })
-      const r = await bridge.settings.probe()
-      setProbe({ ok: r.ok, detail: r.detail })
-    } catch (e) {
-      setProbe({ ok: false, detail: '检测失败: ' + (e instanceof Error ? e.message : String(e)) })
-    } finally {
-      setProbing(false)
-    }
-  }
-
+export function SettingsView({ section, onSection }: { section: string; onSection: (s: string) => void }) {
+  const active = (SECTIONS.flatMap((g) => g.items).find((item) => item.id === section)?.id ?? 'general') as Section
+  const current = SECTIONS.flatMap((g) => g.items).find((item) => item.id === active)!
   return (
-    <div className="settings">
-      <header className="page-header-bar">
-        <div className="detail-title-wrap">
-          <div className="page-title-row">
-            <Settings size={16} className="page-icon" />
-            <h2 className="page-title">设置</h2>
+    <div className="settings-page">
+      <aside className="settings-nav">
+        <div className="settings-nav-head"><Settings size={15} /> 设置</div>
+        {SECTIONS.map((group) => (
+          <div className="settings-nav-group" key={group.group}>
+            <div className="settings-nav-group-label">{group.group}</div>
+            {group.items.map((item) => (
+              <button key={item.id} className={`settings-nav-item ${item.id === active ? 'active' : ''}`} onClick={() => onSection(item.id)}>
+                <span>{item.label}</span>
+                <small>{item.desc}</small>
+              </button>
+            ))}
           </div>
-        </div>
-      </header>
+        ))}
+      </aside>
+      <div className="settings-body">
+        <header className="page-header-bar">
+          <div className="detail-title-wrap">
+            <div className="page-title-row">
+              <h2 className="page-title">{current.label}</h2>
+              <span className="page-desc">{current.desc}</span>
+            </div>
+          </div>
+        </header>
+        {active === 'general' && <GeneralSection />}
+        {active === 'runtime' && <RuntimeSection />}
+        {active === 'team' && <TeamView embedded />}
+        {active === 'storage' && <StorageSection />}
+      </div>
+    </div>
+  )
+}
 
-      <section className="settings-card">
-        <h3>执行后端 · ZCode / DeepSeek Harness 路径</h3>
-        <p className="hint">
-          执行后端 = 实际执行任务的 CLI 程序（zcode、claude、codex、opencode、dsh）。zcode 与 dsh
-          不是标准 PATH 安装，需要在此指定路径；claude / codex / opencode 装在 PATH 上即可自动发现，无需配置，未安装也不影响 zcode 使用。
-        </p>
-        <label className="field">
-          <span>zcode.cjs 路径（留空 = 自动探测）</span>
-          <input value={zcodePath} onChange={(e) => setZcodePath(e.target.value)} placeholder="D:\Program Files\ZCode\resources\glm\zcode.cjs" />
-        </label>
-        <label className="field">
-          <span>Node 路径（留空 = 使用内置运行时）</span>
-          <input value={nodePath} onChange={(e) => setNodePath(e.target.value)} placeholder="C:\Program Files\nodejs\node.exe" />
-        </label>
-        <label className="field">
-          <span>DeepSeek Harness bin.js 路径（留空 = 自动扫描）</span>
-          <input
-            value={dshPath}
-            onChange={(e) => setDshPath(e.target.value)}
-            placeholder="D:\Program files\deepseek-harness\apps\cli\lib\bin.js"
-          />
-        </label>
-        <div className="row">
-          <button className="btn" onClick={doProbe} disabled={probing}>
-            {probing ? '检测中…' : '检测可用性'}
-          </button>
-          {probe && (
-            <span className={probe.ok ? 'probe-ok' : 'probe-fail'}>
-              {probe.ok ? '✓ ' : '✗ '}
-              {probe.detail}
-            </span>
-          )}
-        </div>
-      </section>
-
+/** 常规：外观 + 执行 + 通知 */
+function GeneralSection() {
+  const { settings, update } = useSettings()
+  if (!settings) return <EmptyState title="设置加载中" />
+  return (
+    <div className="settings-stack">
       <section className="settings-card">
         <h3>外观</h3>
         <label className="field">
@@ -139,7 +115,88 @@ export function SettingsView() {
           <span>任务完成/失败时弹系统通知</span>
         </label>
       </section>
+    </div>
+  )
+}
 
+/** 运行时：后端路径配置 + provider 健康（原独立 Runtimes 页并入） */
+function RuntimeSection() {
+  const { settings, update } = useSettings()
+  const [probe, setProbe] = useState<{ ok: boolean; detail: string } | null>(null)
+  const [probing, setProbing] = useState(false)
+  const [zcodePath, setZcodePath] = useState('')
+  const [nodePath, setNodePath] = useState('')
+  const [dshPath, setDshPath] = useState('')
+
+  useEffect(() => {
+    if (settings) {
+      setZcodePath(settings.zcodePath)
+      setNodePath(settings.nodePath)
+      setDshPath(settings.dshPath ?? '')
+    }
+  }, [settings?.zcodePath, settings?.nodePath, settings?.dshPath])
+
+  if (!settings) return <EmptyState title="设置加载中" />
+
+  const doProbe = async () => {
+    if (probing) return
+    setProbing(true)
+    try {
+      await update({ zcodePath: zcodePath.trim(), nodePath: nodePath.trim(), dshPath: dshPath.trim() })
+      const r = await bridge.settings.probe()
+      setProbe({ ok: r.ok, detail: r.detail })
+    } catch (e) {
+      setProbe({ ok: false, detail: '检测失败: ' + (e instanceof Error ? e.message : String(e)) })
+    } finally {
+      setProbing(false)
+    }
+  }
+
+  return (
+    <div className="settings-stack">
+      <section className="settings-card">
+        <h3>执行后端 · ZCode / DeepSeek Harness 路径</h3>
+        <p className="hint">
+          执行后端 = 实际执行任务的 CLI 程序（zcode、claude、codex、opencode、dsh）。zcode 与 dsh
+          不是标准 PATH 安装，需要在此指定路径；claude / codex / opencode 装在 PATH 上即可自动发现，无需配置，未安装也不影响 zcode 使用。
+        </p>
+        <label className="field">
+          <span>zcode.cjs 路径（留空 = 自动探测）</span>
+          <input value={zcodePath} onChange={(e) => setZcodePath(e.target.value)} placeholder="D:\Program Files\ZCode\resources\glm\zcode.cjs" />
+        </label>
+        <label className="field">
+          <span>Node 路径（留空 = 使用内置运行时）</span>
+          <input value={nodePath} onChange={(e) => setNodePath(e.target.value)} placeholder="C:\Program Files\nodejs\node.exe" />
+        </label>
+        <label className="field">
+          <span>DeepSeek Harness bin.js 路径（留空 = 自动扫描）</span>
+          <input
+            value={dshPath}
+            onChange={(e) => setDshPath(e.target.value)}
+            placeholder="D:\Program files\deepseek-harness\apps\cli\lib\bin.js"
+          />
+        </label>
+        <div className="row">
+          <button className="btn" onClick={doProbe} disabled={probing}>
+            {probing ? '检测中…' : '检测路径可用性'}
+          </button>
+          {probe && (
+            <span className={probe.ok ? 'probe-ok' : 'probe-fail'}>
+              {probe.ok ? '✓ ' : '✗ '}
+              {probe.detail}
+            </span>
+          )}
+        </div>
+      </section>
+      <RuntimeView embedded />
+    </div>
+  )
+}
+
+/** 存储说明 */
+function StorageSection() {
+  return (
+    <div className="settings-stack">
       <section className="settings-card">
         <h3>存储</h3>
         <p className="hint">

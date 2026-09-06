@@ -1,217 +1,174 @@
-import { useEffect, useMemo, useState } from 'react'
-import { bridge, useTasks, useSettings } from './api'
-import { TaskList } from './components/TaskList'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { bridge, useSettings, useTasks } from './api'
+import { TASK_STATUS_LABELS } from './labels'
 import { TaskDetail } from './components/TaskDetail'
 import { SettingsView } from './components/SettingsView'
-import { TeamView } from './components/TeamView'
 import { UsageView } from './components/UsageView'
 import { WorkspaceView, FOCUS_WORKSPACE } from './components/WorkspaceView'
 import { TabBar } from './components/TabBar'
 import { BoardView } from './components/BoardView'
-import { ListTodo, Kanban, Users, Gauge, Settings, Search, Plus, Command } from 'lucide-react'
-import { ToastHost, toast } from './ui/Toasts'
+import { AutomationView } from './components/AutomationView'
+import { MarketView } from './components/MarketView'
+import { InboxView } from './components/InboxView'
+import { IssuesView } from './components/IssuesView'
+import { ListTodo, Kanban, Gauge, Settings, Search, Plus, Command, FolderOpen, ChevronDown, AlarmClock, Blocks, Inbox } from 'lucide-react'
+import { ToastHost } from './ui/Toasts'
 import { ConfirmHost } from './ui/Confirm'
 import { Palette, type PaletteCommand } from './ui/Palette'
-import type { Task } from '../../shared/types'
+import type { Issue, Task } from '../../shared/types'
 
-type View = 'tasks' | 'board' | 'detail' | 'team' | 'usage' | 'settings'
-
+type View = 'issues' | 'create' | 'detail' | 'usage' | 'settings' | 'automation' | 'market' | 'inbox' | 'board'
 const MAX_TABS = 8
+/** 最近工作区列表的上限（切换器下拉里展示） */
+const MAX_RECENT_WORKSPACES = 8
 
 export function App() {
   const { tasks } = useTasks()
   const { settings, update } = useSettings()
+  const [view, setView] = useState<View>('issues')
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  const [workspaceDir, setWorkspaceDir] = useState(() => localStorage.getItem('agentdeck:workspace-dir') ?? '')
+  const [recentWorkspaces, setRecentWorkspaces] = useState<string[]>(() => {
+    try { return JSON.parse(localStorage.getItem('agentdeck:recent-workspaces') ?? '[]') as string[] } catch { return [] }
+  })
+  const [settingsSection, setSettingsSection] = useState('general')
+  const [tabs, setTabs] = useState<string[]>([])
+  const [activeId, setActiveId] = useState<string | null>(null)
+  const [unreadCount, setUnreadCount] = useState(0)
+  const selected = tasks.find((task) => task.id === activeId) ?? null
 
-  // 主题：dark | light | system（跟随系统时监听变化）
   useEffect(() => {
     const theme = settings?.theme ?? 'light'
     const mq = window.matchMedia('(prefers-color-scheme: light)')
-    const apply = () => {
-      const light = theme === 'light' || (theme === 'system' && mq.matches)
-      document.documentElement.classList.toggle('light', light)
-    }
+    const apply = () => document.documentElement.classList.toggle('light', theme === 'light' || (theme === 'system' && mq.matches))
     apply()
-    if (theme === 'system') {
-      mq.addEventListener('change', apply)
-      return () => mq.removeEventListener('change', apply)
-    }
+    if (theme === 'system') { mq.addEventListener('change', apply); return () => mq.removeEventListener('change', apply) }
   }, [settings?.theme])
-  const [view, setView] = useState<View>('tasks')
-  const [paletteOpen, setPaletteOpen] = useState(false)
-  const [workspaceDir, setWorkspaceDir] = useState(() => localStorage.getItem('agentdeck:workspace-dir') ?? '')
-  /** 任务页展示形态：列表 / 看板（记忆） */
-  /** 已打开的任务标签（taskId 列表，按打开顺序）；null 激活 = 工作区起始页 */
-  const [tabs, setTabs] = useState<string[]>([])
-  const [activeId, setActiveId] = useState<string | null>(null)
-  const selected = tasks.find((t) => t.id === activeId) ?? null
-
-  const openTask = (id: string) => {
-    setTabs((cur) => (cur.includes(id) ? cur : [...cur, id].slice(-MAX_TABS)))
-    setActiveId(id)
-    setView('detail')
-  }
-  const closeTab = (id: string) => {
-    const next = tabs.filter((x) => x !== id)
-    setTabs(next)
-    if (activeId === id) setActiveId(next[next.length - 1] ?? null)
-  }
-  const closeActive = () => {
-    if (activeId) closeTab(activeId)
-  }
-  const cycleTab = (dir: 1 | -1) => {
-    if (tabs.length < 2 || !activeId) return
-    const i = tabs.indexOf(activeId)
-    setActiveId(tabs[(i + dir + tabs.length) % tabs.length])
-  }
-
-  // 删除任务 → 关掉它的标签（正选中则回退到最后一个/工作区）
-  useEffect(() => bridge.tasks.onDeleted((id) => closeTab(id)), [tabs, activeId])
-
-  // 系统通知点击：聚焦对应任务
-  useEffect(() => bridge.tasks.onFocusTask((id) => openTask(id)), [])
-
-  /** 回到常驻工作区（Ctrl+N / 侧栏按钮） */
-  const goWorkspace = () => {
-    setActiveId(null)
-    setView('tasks')
-    window.dispatchEvent(new Event(FOCUS_WORKSPACE))
-  }
-  const pickWorkspace = async () => {
-    const dir = await bridge.pickDir()
-    if (dir) {
-      setWorkspaceDir(dir)
-      localStorage.setItem('agentdeck:workspace-dir', dir)
-    }
-  }
-
-  // 快捷键：Ctrl+N 新任务；Ctrl+W 关当前标签；Ctrl(+Shift)+Tab 切换标签
   useEffect(() => {
-    const h = (e: KeyboardEvent) => {
-      const mod = e.ctrlKey || e.metaKey
-      if (mod && e.key.toLowerCase() === 'k') {
-        e.preventDefault()
-        setPaletteOpen((o) => !o)
-      } else if (mod && e.key.toLowerCase() === 'n') {
-        e.preventDefault()
-        goWorkspace()
-      } else if (mod && e.key.toLowerCase() === 'w') {
-        e.preventDefault()
-        closeActive()
-      } else if (mod && e.key === 'Tab') {
-        e.preventDefault()
-        cycleTab(e.shiftKey ? -1 : 1)
-      }
-    }
-    window.addEventListener('keydown', h)
-    return () => window.removeEventListener('keydown', h)
-  }, [tabs, activeId])
+    let alive = true
+    const refresh = () => void bridge.issues.notifications(true).then((items) => { if (alive) setUnreadCount(items.length) })
+    refresh()
+    const off = bridge.issues.onUpdated(refresh)
+    return () => { alive = false; off() }
+  }, [])
 
-  const onCreated = (t: Task) => {
-    openTask(t.id)
+  const openTask = (id: string) => { setTabs((current) => current.includes(id) ? current : [...current, id].slice(-MAX_TABS)); setActiveId(id); setView('detail') }
+  const closeTab = (id: string) => { const next = tabs.filter((tab) => tab !== id); setTabs(next); if (activeId === id) setActiveId(next[next.length - 1] ?? null) }
+  const goWorkspace = () => { setActiveId(null); setView('create'); window.dispatchEvent(new Event(FOCUS_WORKSPACE)) }
+  /** 切到某个最近用过的工作区：新任务默认目录随之变化 */
+  const chooseWorkspace = (dir: string) => {
+    if (!dir) return
+    setWorkspaceDir(dir)
+    localStorage.setItem('agentdeck:workspace-dir', dir)
+    setRecentWorkspaces((current) => {
+      const next = [dir, ...current.filter((d) => d !== dir)].slice(0, MAX_RECENT_WORKSPACES)
+      localStorage.setItem('agentdeck:recent-workspaces', JSON.stringify(next))
+      return next
+    })
   }
-
-  const commands: PaletteCommand[] = useMemo(() => {
-    const cmds: PaletteCommand[] = [
-      { id: 'nav-tasks', group: '跳转', label: '任务', hint: '页面', run: () => setView('tasks') },
-      { id: 'nav-team', group: '跳转', label: '队伍', hint: '页面', run: () => setView('team') },
-      { id: 'nav-usage', group: '跳转', label: '用量', hint: '页面', run: () => setView('usage') },
-      { id: 'nav-settings', group: '跳转', label: '设置', hint: '页面', run: () => setView('settings') },
-      { id: 'act-new', group: '操作', label: '新建任务', hint: 'Ctrl+N', keywords: 'new create', run: goWorkspace },
-      { id: 'nav-board', group: '跳转', label: '看板', hint: '页面', keywords: 'board kanban', run: () => { setActiveId(null); setView('board') } },
-      { id: 'act-theme', group: '操作', label: `主题：切换为${(settings?.theme ?? 'light') === 'dark' ? '浅色' : '深色'}`, keywords: 'theme light dark', run: () => { void update({ theme: (settings?.theme ?? 'light') === 'dark' ? 'light' : 'dark' }) } }
-    ]
-    for (const t of tasks.slice(0, 20)) {
-      cmds.push({ id: `task-${t.id}`, group: '任务', label: t.title, hint: t.status, keywords: t.prompt, run: () => openTask(t.id) })
+  const pickWorkspace = async () => { const dir = await bridge.pickDir(); if (dir) chooseWorkspace(dir) }
+  // 任务里出现过的工作目录自动进最近列表（新装/清缓存后不用手动重选）
+  useEffect(() => {
+    const dirs = tasks.map((task) => task.workdir.trim()).filter(Boolean)
+    if (!dirs.length) return
+    setRecentWorkspaces((current) => {
+      const next = [...current]
+      let changed = false
+      for (const dir of dirs) if (!next.includes(dir)) { next.push(dir); changed = true }
+      if (!changed) return current
+      const capped = next.slice(0, MAX_RECENT_WORKSPACES)
+      localStorage.setItem('agentdeck:recent-workspaces', JSON.stringify(capped))
+      return capped
+    })
+  }, [tasks])
+  useEffect(() => bridge.tasks.onDeleted((id) => closeTab(id)), [tabs, activeId])
+  useEffect(() => bridge.tasks.onFocusTask((id) => openTask(id)), [])
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      const mod = event.ctrlKey || event.metaKey
+      if (mod && event.key.toLowerCase() === 'k') { event.preventDefault(); setPaletteOpen((value) => !value) }
+      else if (mod && event.key.toLowerCase() === 'n') { event.preventDefault(); goWorkspace() }
+      else if (!mod && !event.altKey && event.key.toLowerCase() === 'c' && !['INPUT', 'TEXTAREA', 'SELECT'].includes((event.target as HTMLElement)?.tagName ?? '')) { event.preventDefault(); goWorkspace() }
+      else if (mod && event.key.toLowerCase() === 'w' && activeId) { event.preventDefault(); closeTab(activeId) }
+      else if (mod && event.key === 'Tab' && tabs.length > 1) { event.preventDefault(); const index = tabs.indexOf(activeId ?? ''); setActiveId(tabs[((index + (event.shiftKey ? -1 : 1)) + tabs.length) % tabs.length]) }
     }
-    return cmds
-  }, [tasks, settings?.theme])
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [activeId, tabs])
 
+  const nav = (next: View) => { setActiveId(null); setView(next) }
+  const openSettings = (section?: string) => { if (section) setSettingsSection(section); setActiveId(null); setView('settings') }
+
+  const commands: PaletteCommand[] = useMemo(() => [
+    ...[['Issue', () => nav('issues')], ['看板', () => nav('board')], ['收件箱', () => setView('inbox')], ['自动化', () => nav('automation')], ['扩展中心', () => nav('market')], ['用量', () => nav('usage')], ['设置', () => openSettings('general')], ['设置 · 队伍', () => openSettings('team')], ['设置 · 运行时', () => openSettings('runtime')]].map(([label, run]) => ({ id: String(label), group: '跳转', label: String(label), run: run as () => void })),
+    { id: 'new', group: '操作', label: '新建任务', hint: 'Ctrl+N', run: goWorkspace },
+    { id: 'theme', group: '操作', label: '切换深浅主题', run: () => void update({ theme: (settings?.theme ?? 'light') === 'dark' ? 'light' : 'dark' }) },
+    ...tasks.slice(0, 20).map((task) => ({ id: task.id, group: '任务', label: task.title, hint: TASK_STATUS_LABELS[task.status], run: () => openTask(task.id) }))
+  ], [tasks, settings?.theme])
+
+  const openIssue = (issue: Issue) => { if (issue.taskId) openTask(issue.taskId) }
+  return <div className="app">
+    <ToastHost /><ConfirmHost /><Palette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={commands} />
+    <aside className="sidebar">
+      <div className="brand" aria-label="AgentDeck"><span className="brand-mark">A</span><span className="brand-name">AgentDeck</span><span className="brand-status" title="本地工作区已连接" /></div>
+      <WorkspaceSwitcher dir={workspaceDir} recent={recentWorkspaces} onChoose={chooseWorkspace} onPick={pickWorkspace} />
+      <button className="new-task-btn" onClick={goWorkspace}><Plus size={15} /> 新建任务 <kbd>Ctrl+N</kbd></button>
+      <nav className="nav" aria-label="主导航">
+        <button className={view === 'issues' || view === 'detail' ? 'active' : ''} onClick={() => nav('issues')}><ListTodo /><span className="nav-label">Issue</span></button>
+        <button className={view === 'board' ? 'active' : ''} onClick={() => nav('board')}><Kanban /><span className="nav-label">看板</span></button>
+        <button className={view === 'inbox' ? 'active' : ''} onClick={() => nav('inbox')}><Inbox /><span className="nav-label">收件箱</span>{unreadCount > 0 && <span className="nav-count">{unreadCount > 99 ? '99+' : unreadCount}</span>}</button>
+        <button className={view === 'automation' ? 'active' : ''} onClick={() => nav('automation')}><AlarmClock /><span className="nav-label">自动化</span></button>
+        <button className={view === 'market' ? 'active' : ''} onClick={() => nav('market')}><Blocks /><span className="nav-label">扩展</span></button>
+        <button className={view === 'usage' ? 'active' : ''} onClick={() => nav('usage')}><Gauge /><span className="nav-label">用量</span></button>
+        <button className={view === 'settings' ? 'active' : ''} onClick={() => openSettings()}><Settings /><span className="nav-label">设置</span></button>
+      </nav>
+      <div className="sidebar-footer"><span className="connection-dot" /> 本地引擎就绪</div>
+    </aside>
+    <main className="main">
+      {view === 'inbox' ? <InboxView onOpenIssue={openIssue} /> : view === 'automation' ? <AutomationView /> : view === 'market' ? <MarketView /> : view === 'settings' ? <SettingsView section={settingsSection} onSection={setSettingsSection} /> : view === 'usage' ? <UsageView /> : view === 'board' ? <Page title="看板" count={tasks.length}><BoardView tasks={tasks.filter((task) => !task.parentTaskId)} onOpen={openTask} /></Page> : view === 'detail' && selected ? <div className="tasks-column detail-page"><Chrome title={selected.title} onBack={() => nav('issues')} />{tabs.length > 0 && <TabBar tabs={tabs} tasks={tasks} activeId={activeId} onSelect={openTask} onClose={closeTab} />}<TaskDetail task={selected} tasks={tasks} onSelect={openTask} /></div> : view === 'create' ? <Page title="新建 Issue" count={0}><WorkspaceView onCreated={(task) => openTask(task.id)} workspaceDir={workspaceDir} onPickWorkspace={pickWorkspace} /></Page> : <IssuesView tasks={tasks} onOpen={openTask} onCreate={goWorkspace} />}
+    </main>
+  </div>
+}
+
+/** 工作区切换器：下拉列出最近工作区，点击即切换新任务的默认目录 */
+function WorkspaceSwitcher({ dir, recent, onChoose, onPick }: { dir: string; recent: string[]; onChoose: (dir: string) => void; onPick: () => void }) {
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const onDown = (event: MouseEvent) => { if (!rootRef.current?.contains(event.target as Node)) setOpen(false) }
+    window.addEventListener('mousedown', onDown)
+    return () => window.removeEventListener('mousedown', onDown)
+  }, [open])
+  const name = (d: string) => d.split(/[\\/]/).filter(Boolean).pop() ?? d
   return (
-    <div className="app">
-      <ToastHost />
-      <ConfirmHost />
-      <Palette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={commands} />
-      <aside className="sidebar">
-        <div className="brand" aria-label="AgentDeck">
-          <span className="brand-mark" aria-hidden="true">⚓</span>
-          <span className="brand-name">AgentDeck</span>
-          <span className="brand-status" title="本地工作区已连接" aria-label="本地工作区已连接" />
+    <div className="ws-switch" ref={rootRef}>
+      <button className="workspace-switcher" type="button" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+        <span className="workspace-glyph"><FolderOpen size={14} /></span>
+        <span><b>{dir ? name(dir) : '选择工作区'}</b><small>{dir || '新任务将默认在此目录执行'}</small></span>
+        <ChevronDown size={14} className={`workspace-caret ${open ? 'flip' : ''}`} />
+      </button>
+      {open && (
+        <div className="ws-menu" role="menu" aria-label="切换工作区">
+          <div className="ws-menu-label">最近工作区</div>
+          {recent.length === 0 && <div className="ws-menu-empty">还没有记录，先选一个目录</div>}
+          {recent.map((d) => (
+            <button key={d} className={`ws-menu-item ${d === dir ? 'current' : ''}`} role="menuitem" title={d} onClick={() => { onChoose(d); setOpen(false) }}>
+              <FolderOpen size={13} />
+              <span className="ws-menu-name">{name(d) || d}</span>
+              <small className="ws-menu-path">{d}</small>
+            </button>
+          ))}
+          <div className="ws-menu-sep" />
+          <button className="ws-menu-item" role="menuitem" onClick={() => { onPick(); setOpen(false) }}>
+            <Plus size={13} />
+            <span className="ws-menu-name">选择其他目录…</span>
+          </button>
         </div>
-        <button className="workspace-switcher" type="button" title="选择个人工作区" onClick={pickWorkspace}>
-          <span className="workspace-glyph">A</span>
-          <span><b>个人工作区</b><small>{workspaceDir ? workspaceDir.split(/[\\/]/).pop() : '选择工作目录'}</small></span>
-          <span className="workspace-caret">⌄</span>
-        </button>
-        <button className="new-task-btn" onClick={goWorkspace}>
-          <Plus size={15} aria-hidden="true" /> 新建任务 <kbd>Ctrl+N</kbd>
-        </button>
-        <nav className="nav" aria-label="主导航">
-          <button className={view === 'tasks' || view === 'detail' ? 'active' : ''} onClick={() => { setActiveId(null); setView('tasks') }} aria-current={view === 'tasks' || view === 'detail' ? 'page' : undefined}>
-            <ListTodo aria-hidden="true" /> <span className="nav-label">任务</span>
-          </button>
-          <button className={view === 'board' ? 'active' : ''} onClick={() => { setActiveId(null); setView('board') }} aria-current={view === 'board' ? 'page' : undefined}>
-            <Kanban aria-hidden="true" /> <span className="nav-label">看板</span>
-          </button>
-          <button className={view === 'team' ? 'active' : ''} onClick={() => { setActiveId(null); setView('team') }} aria-current={view === 'team' ? 'page' : undefined}>
-            <Users aria-hidden="true" /> <span className="nav-label">队伍</span>
-          </button>
-          <button className={view === 'usage' ? 'active' : ''} onClick={() => setView('usage')} aria-current={view === 'usage' ? 'page' : undefined}>
-            <Gauge aria-hidden="true" /> <span className="nav-label">用量</span>
-          </button>
-          <button className={view === 'settings' ? 'active' : ''} onClick={() => setView('settings')} aria-current={view === 'settings' ? 'page' : undefined}>
-            <Settings aria-hidden="true" /> <span className="nav-label">设置</span>
-          </button>
-        </nav>
-        <div className="sidebar-section-label">工作台</div>
-        {view === 'tasks' && <TaskList tasks={tasks} selectedId={activeId} onSelect={openTask} onPickWorkspace={pickWorkspace} />}
-        <div className="sidebar-footer"><span className="connection-dot" /> 本地引擎正常</div>
-      </aside>
-      <main className="main">
-        {view === 'settings' ? (
-          <SettingsView />
-        ) : view === 'team' ? (
-          <TeamView />
-        ) : view === 'usage' ? (
-          <UsageView />
-        ) : view === 'board' ? (
-          <div className="tasks-column board-page">
-            <div className="workspace-topbar">
-              <div className="breadcrumb"><span>个人工作区</span><i>/</i><strong>看板</strong></div>
-              <div className="topbar-actions">
-                <button className="command-trigger" type="button" onClick={() => setPaletteOpen(true)}><Search size={14} aria-hidden="true" /> 搜索任务 <kbd><Command size={10} /> K</kbd></button>
-                <button className="icon-btn" type="button" title="新建任务" onClick={goWorkspace}><Plus size={16} /></button>
-              </div>
-            </div>
-            <div className="tasks-toolbar"><div className="toolbar-title"><span className="toolbar-kicker">看板</span><span className="toolbar-count">{tasks.length}</span></div></div>
-            <BoardView tasks={tasks.filter((t) => !t.parentTaskId)} onOpen={openTask} />
-          </div>
-        ) : view === 'detail' && selected ? (
-          <div className="tasks-column detail-page">
-            <div className="workspace-topbar">
-              <div className="breadcrumb"><span>个人工作区</span><i>/</i><strong>{selected.title}</strong></div>
-              <div className="topbar-actions">
-                <button className="icon-btn" type="button" title="返回任务列表" onClick={() => { setActiveId(null); setView('tasks') }}><ListTodo size={16} /></button>
-              </div>
-            </div>
-            {tabs.length > 0 && <TabBar tabs={tabs} tasks={tasks} activeId={activeId} onSelect={(id) => { setActiveId(id); setView('detail') }} onClose={closeTab} />}
-            <TaskDetail task={selected} tasks={tasks} onSelect={openTask} />
-          </div>
-        ) : (
-          <div className="tasks-column">
-            <div className="workspace-topbar">
-              <div className="breadcrumb"><span>个人工作区</span><i>/</i><strong>任务</strong>{selected && <><i>/</i><span>{selected.title}</span></>}</div>
-              <div className="topbar-actions">
-                <button className="command-trigger" type="button" onClick={() => setPaletteOpen(true)}><Search size={14} aria-hidden="true" /> 搜索任务 <kbd><Command size={10} /> K</kbd></button>
-                <button className="icon-btn" type="button" title="新建任务" onClick={goWorkspace}><Plus size={16} /></button>
-              </div>
-            </div>
-            <div className="tasks-toolbar">
-              <div className="toolbar-title"><span className="toolbar-kicker">任务</span><span className="toolbar-count">{tasks.length}</span></div>
-            </div>
-            <WorkspaceView onCreated={onCreated} workspaceDir={workspaceDir} onPickWorkspace={pickWorkspace} />
-          </div>
-        )}
-      </main>
+      )}
     </div>
   )
 }
+
+function Chrome({ title, onBack }: { title: string; onBack: () => void }) { return <div className="workspace-topbar"><div className="breadcrumb"><span>个人工作区</span><i>/</i><strong>{title}</strong></div><button className="icon-btn" onClick={onBack} title="返回任务列表"><ListTodo size={16} /></button></div> }
+function Page({ title, count, children }: { title: string; count: number; children: React.ReactNode }) { return <div className="tasks-column"><div className="workspace-topbar"><div className="breadcrumb"><span>个人工作区</span><i>/</i><strong>{title}</strong></div><div className="topbar-actions"><button className="command-trigger" onClick={() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true }))}><Search size={14} /> 搜索任务 <kbd><Command size={10} /> K</kbd></button></div></div><div className="tasks-toolbar"><div className="toolbar-title"><span className="toolbar-kicker">{title}</span><span className="toolbar-count">{count}</span></div></div>{children}</div> }

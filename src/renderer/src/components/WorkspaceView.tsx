@@ -15,6 +15,13 @@ const draft = {
 /** Ctrl+N 聚焦工作区输入框用的事件名 */
 export const FOCUS_WORKSPACE = 'agentdeck:focus-workspace'
 
+/** 从首条消息自动起标题：取首行、剥掉 markdown 记号、压缩空白，截 72 字 */
+function deriveTitle(prompt: string): string {
+  const firstLine = prompt.trim().split(/\r?\n/)[0] ?? ''
+  const cleaned = firstLine.replace(/^#{1,6}\s*/, '').replace(/[*`~_>]+/g, '').replace(/\s+/g, ' ').trim()
+  return (cleaned || firstLine.trim()).slice(0, 72)
+}
+
 // 快捷示例：点击填入输入框（不直接发送）
 const SUGGESTIONS = [
   '审查当前仓库的代码结构，给出重构建议',
@@ -65,14 +72,17 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
     if (!prompt.trim() || busy) return
     setBusy(true)
     try {
-      const t = await bridge.tasks.create({
-        title: prompt.trim().split(/\r?\n/)[0].trim().slice(0, 72),
-        prompt: prompt.trim(),
+      const issue = await bridge.issues.create({
+        title: deriveTitle(prompt),
+        description: prompt.trim(),
         workdir,
         agentId,
         handoff: handoff.trim() || undefined,
-        startNow
+        startNow,
+        trigger: 'assignment'
       })
+      const t = await bridge.tasks.get(issue.taskId)
+      if (!t) throw new Error('Issue 创建成功，但执行记录尚未可用')
       draft.prompt = ''
       setPrompt('')
       draft.handoff = ''
@@ -99,10 +109,12 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
   const canSubmit = !!prompt.trim() && !busy
   const selectedAgent = agents.find((a) => a.id === agentId)
   const isLeader = !!selectedAgent?.subordinates?.length && selectedAgent.backend !== 'dsh'
+  const greeting = new Date().getHours() < 12 ? '早上好，开始一个新任务' : new Date().getHours() < 18 ? '下午好，继续推进工作' : '晚上好，收尾一个任务'
 
   return (
     <div className="workspace">
       <div className="workspace-card">
+        <div className="workspace-greeting">{greeting}</div>
         <div className="workspace-title">
           <span className="brand-mark" aria-hidden="true"><Sparkles size={15} /></span>
           <span>开始一个任务</span>
@@ -136,8 +148,9 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
             </div>
           </div>
         ) : (
-          <p className="hint hint">未配置队员，默认用 zcode 执行；可在「队伍」页添加。</p>
+          <p className="hint hint">未配置队员，默认用 zcode 执行；可在「设置 · 队伍」里添加。</p>
         )}
+        <div className="composer-label">描述目标、约束和验收标准</div>
         <textarea
           ref={promptRef}
           className="workspace-prompt"

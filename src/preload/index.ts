@@ -1,6 +1,6 @@
 // preload：向渲染层暴露类型安全的 IPC 桥
 import { contextBridge, ipcRenderer } from 'electron'
-import type { Task, TaskEvent, AppSettings } from '../shared/types'
+import type { Task, TaskEvent, AppSettings, Issue, Run, Comment, Notification, Automation, RuntimeSnapshot, AnalyticsSummary, IssuePriority, IssueStatus, RunTrigger } from '../shared/types'
 import type { PermissionRequest } from '../main/backends/types'
 
 interface AgentInfo {
@@ -20,7 +20,7 @@ const api = {
     list: (): Promise<Task[]> => ipcRenderer.invoke('tasks:list'),
     get: (id: string): Promise<Task | null> => ipcRenderer.invoke('tasks:get', id),
     events: (id: string, afterSeq = 0): Promise<TaskEvent[]> => ipcRenderer.invoke('tasks:events', id, afterSeq),
-    create: (input: { title: string; prompt: string; workdir: string; backend?: string; agentId?: string; handoff?: string; startNow?: boolean }) =>
+    create: (input: { title: string; prompt: string; workdir: string; backend?: string; agentId?: string; handoff?: string; startNow?: boolean; trigger?: RunTrigger }) =>
       ipcRenderer.invoke('tasks:create', input) as Promise<Task>,
     cancel: (id: string) => ipcRenderer.invoke('tasks:cancel', id) as Promise<{ ok: boolean; error?: string }>,
     followUp: (id: string, content: string) =>
@@ -29,6 +29,15 @@ const api = {
     retry: (id: string) => ipcRenderer.invoke('tasks:retry', id) as Promise<{ ok: boolean; error?: string }>,
     move: (id: string, status: Task['status']) => ipcRenderer.invoke('tasks:move', id, status) as Promise<{ ok: boolean; error?: string }>,
     start: (id: string) => ipcRenderer.invoke('tasks:start', id) as Promise<{ ok: boolean; error?: string }>,
+    rewind: (id: string, toSeq: number): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('tasks:rewind', id, toSeq),
+    rename: (id: string, title: string): Promise<Task | null> =>
+      ipcRenderer.invoke('tasks:rename', id, title),
+    onEventsInvalidated: (cb: (taskId: string) => void) => {
+      const h = (_e: unknown, payload: { taskId: string }) => cb(payload.taskId)
+      ipcRenderer.on('task:events-invalidated', h)
+      return () => ipcRenderer.removeListener('task:events-invalidated', h)
+    },
     onUpdated: (cb: (t: Task) => void) => {
       const h = (_e: unknown, t: Task) => cb(t)
       ipcRenderer.on('task:updated', h)
@@ -57,6 +66,29 @@ const api = {
     respondPermission: (requestId: string | number, optionId: string, decision: 'allow' | 'deny') =>
       ipcRenderer.invoke('tasks:permission-respond', String(requestId), optionId, decision) as Promise<{ ok: boolean; error?: string }>
   },
+  issues: {
+    list: (): Promise<Issue[]> => ipcRenderer.invoke('issues:list'),
+    get: (id: string): Promise<Issue | null> => ipcRenderer.invoke('issues:get', id),
+    create: (input: { title: string; description: string; workdir: string; agentId?: string; backend?: string; handoff?: string; startNow?: boolean; trigger?: RunTrigger }): Promise<Issue> => ipcRenderer.invoke('issues:create', input),
+    runs: (id: string): Promise<Run[]> => ipcRenderer.invoke('issues:runs', id),
+    comments: (id: string): Promise<Comment[]> => ipcRenderer.invoke('issues:comments', id),
+    update: (id: string, patch: { priority?: IssuePriority; labels?: string[]; dueDate?: number; status?: IssueStatus }): Promise<Issue | null> => ipcRenderer.invoke('issues:update', id, patch),
+    addComment: (id: string, content: string): Promise<Comment | null> => ipcRenderer.invoke('issues:add-comment', id, content),
+    notifications: (unreadOnly = false): Promise<Notification[]> => ipcRenderer.invoke('issues:notifications', unreadOnly),
+    markNotificationRead: (id: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('issues:notification-read', id),
+    onUpdated: (cb: (payload: { taskId: string; issueId: string; issue: Issue | null; run: Run | null }) => void) => {
+      const h = (_e: unknown, payload: { taskId: string; issueId: string; issue: Issue | null; run: Run | null }) => cb(payload)
+      ipcRenderer.on('issues:updated', h)
+      return () => ipcRenderer.removeListener('issues:updated', h)
+    }
+  },
+  automations: {
+    list: (): Promise<Automation[]> => ipcRenderer.invoke('automations:list'),
+    create: (input: Omit<Automation, 'id' | 'createdAt' | 'lastRunAt' | 'nextRunAt'>): Promise<Automation> => ipcRenderer.invoke('automations:create', input),
+    update: (id: string, patch: Partial<Automation>): Promise<Automation | null> => ipcRenderer.invoke('automations:update', id, patch),
+    delete: (id: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('automations:delete', id),
+    runNow: (id: string): Promise<{ ok: boolean; error?: string; task?: Task }> => ipcRenderer.invoke('automations:run-now', id)
+  },
   settings: {
     get: (): Promise<AppSettings> => ipcRenderer.invoke('settings:get'),
     set: (patch: Partial<AppSettings>): Promise<AppSettings> => ipcRenderer.invoke('settings:set', patch),
@@ -76,6 +108,12 @@ const api = {
       ipcRenderer.on('agents:probe-result', h)
       return () => ipcRenderer.removeListener('agents:probe-result', h)
     }
+  },
+  runtimes: {
+    snapshot: (): Promise<RuntimeSnapshot[]> => ipcRenderer.invoke('runtime:snapshot')
+  },
+  analytics: {
+    summary: (input?: { since?: number; until?: number }): Promise<AnalyticsSummary> => ipcRenderer.invoke('analytics:summary', input)
   }
 }
 

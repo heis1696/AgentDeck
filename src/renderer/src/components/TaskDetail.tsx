@@ -1,36 +1,70 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { bridge, fmtDuration, fmtTokens } from '../api'
+import { bridge, fmtDuration, fmtTime, fmtTokens } from '../api'
 import { Markdown } from './Markdown'
 import { DiffView } from './DiffView'
 import { confirmDialog } from '../ui/Confirm'
 import { toast } from '../ui/Toasts'
-import { FolderOpen } from 'lucide-react'
-import type { Task, TaskEvent } from '../../../shared/types'
+import { FolderOpen, History, MessageSquare, Pencil, Send, Undo2 } from 'lucide-react'
+import type { Comment, Issue, IssuePriority, IssueStatus, Run, Task, TaskEvent } from '../../../shared/types'
 import type { PermissionRequest } from '../../../main/backends/types'
 
-type Tab = 'log' | 'result' | 'git'
+type Tab = 'activity' | 'log' | 'result' | 'git'
 
 export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[]; onSelect: (id: string) => void }) {
   const [events, setEvents] = useState<TaskEvent[]>([])
-  const [tab, setTab] = useState<Tab>('log')
+  const [tab, setTab] = useState<Tab>('activity')
   const [followUp, setFollowUp] = useState('')
   const [busy, setBusy] = useState(false)
+  const [, setClock] = useState(0)
   const [permission, setPermission] = useState<PermissionRequest | null>(null)
+  const [comments, setComments] = useState<Comment[]>([])
+  const [runs, setRuns] = useState<Run[]>([])
+  const [commentDraft, setCommentDraft] = useState('')
+  const [issue, setIssue] = useState<Issue | null>(null)
+  const [labelsDraft, setLabelsDraft] = useState('')
+  const [editingTitle, setEditingTitle] = useState(false)
+  const [titleDraft, setTitleDraft] = useState('')
+  const [activeNav, setActiveNav] = useState(-1)
   const logRef = useRef<HTMLDivElement>(null)
   const followRef = useRef<HTMLTextAreaElement>(null)
   const lastSeqRef = useRef(0)
+  const editingTitleRef = useRef(false)
+  const navFrameRef = useRef(0)
   const workers = tasks.filter((t) => t.parentTaskId === task.id).sort((a, b) => (a.workerIndex ?? 0) - (b.workerIndex ?? 0))
   const parent = task.parentTaskId ? tasks.find((t) => t.id === task.parentTaskId) : null
+  const issueId = task.issueId ?? `iss_${task.id}`
 
   // 初载 + 切任务重置
-  useEffect(() => {
+  const refreshEvents = () => {
     setEvents([])
     lastSeqRef.current = 0
     bridge.tasks.events(task.id, 0).then((es) => {
       setEvents(es)
       lastSeqRef.current = es.length ? es[es.length - 1].seq : 0
     })
+  }
+  useEffect(() => { refreshEvents() }, [task.id])
+
+  // 回退等操作删除了事件：增量推送拿不到通知，收到失效广播后整段重拉
+  useEffect(() => {
+    const off = bridge.tasks.onEventsInvalidated((taskId) => {
+      if (taskId !== task.id) return
+      refreshEvents()
+    })
+    return off
   }, [task.id])
+
+  useEffect(() => {
+    let alive = true
+    Promise.all([bridge.issues.get(issueId), bridge.issues.comments(issueId), bridge.issues.runs(issueId)]).then(([nextIssue, nextComments, nextRuns]) => {
+      if (!alive) return
+      setIssue(nextIssue)
+      setLabelsDraft(nextIssue?.labels.join(', ') ?? '')
+      setComments(nextComments)
+      setRuns(nextRuns)
+    })
+    return () => { alive = false }
+  }, [issueId, task.status, task.result, task.eventCount])
 
   // 实时事件
   useEffect(() => {
@@ -63,36 +97,145 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   const turns = useMemo(() => {
     const list: Turn[] = []
     let cur: Turn | null = null
-    const open = (userText: string | null): Turn => {
-      cur = { userText, work: [], sysNotes: [], text: '', final: null, usage: null }
+    const open = (userText: string | null, firstSeq: number): Turn => {
+      cur = { userText, firstSeq, items: [], sysNotes: [], usage: null, done: false, streamed: '' }
       list.push(cur)
       return cur
     }
+    /** 工具等事件到达即定格末尾未关闭的 text 段（后续 text 另起气泡） */
+    const closeText = (t: Turn) => {
+      const last = t.items[t.items.length - 1]
+      if (last && last.type === 'text' && !last.closed) last.closed = true
+    }
+    /** 并入末尾的工作过程块（连续的 tool/status/error/raw 合并进同一块） */
+    const pushWork = (t: Turn, e: TaskEvent) => {
+      closeText(t)
+      const last = t.items[t.items.length - 1]
+      if (last && last.type === 'work') last.work.push(e)
+      else t.items.push({ type: 'work', work: [e] })
+    }
     for (const e of events) {
       if (e.kind === 'user') {
-        open(e.text ?? '')
+        open(e.text ?? '', e.seq)
         continue
       }
-      let t = cur ?? open(null)
-      if ((e.kind === 'text' || e.kind === 'final') && t.final !== null) t = open(null)
-      if (e.kind === 'text') t.text += e.text ?? ''
-      else if (e.kind === 'final') t.final = e.text ?? ''
-      else if (e.kind === 'usage') t.usage = { ...(t.usage ?? {}), ...cleanUsage(e.data) }
-      else if (e.kind === 'status' && SYS_NOTE_RE.test(e.text ?? '')) t.sysNotes.push(e.text ?? '')
-      else t.work.push(e)
+      let t = cur ?? open(null, e.seq)
+      // final 之后又来 text/final（异常流/旧数据）：另起回合
+      if ((e.kind === 'text' || e.kind === 'final') && t.done) t = open(null, e.seq)
+      if (e.kind === 'text') {
+        const last = t.items[t.items.length - 1]
+        t.streamed += e.text ?? ''
+        if (last && last.type === 'text' && !last.closed) last.text += e.text ?? ''
+        else t.items.push({ type: 'text', text: e.text ?? '', closed: false })
+      } else if (e.kind === 'tool') {
+        pushWork(t, e)
+      } else if (e.kind === 'final') {
+        // final ≈ 本回合最后一段 assistant 消息：升级末尾未关闭的 text 段为 Markdown 终段；没有则追加。
+        // 与整回合流式文本相同 = 后端全量回显（zcode 完整回合回复/旧数据）：中间回复已各自成泡，不再重复渲染
+        const replay = squashText(e.text ?? '') !== '' && squashText(e.text ?? '') === squashText(t.streamed)
+        const last = t.items[t.items.length - 1]
+        if (last && last.type === 'text' && !last.closed) {
+          t.items[t.items.length - 1] = { type: 'final', text: replay ? last.text : e.text ?? '' }
+        } else if (!replay) {
+          t.items.push({ type: 'final', text: e.text ?? '' })
+        }
+        t.done = true
+      } else if (e.kind === 'usage') {
+        t.usage = { ...(t.usage ?? {}), ...cleanUsage(e.data) }
+      } else if (e.kind === 'status' && SYS_NOTE_RE.test(e.text ?? '')) {
+        t.sysNotes.push(e.text ?? '')
+      } else {
+        pushWork(t, e)
+      }
     }
     // 旧任务（无 user 事件）的兜底：首回合用户气泡用 task.prompt 补
     if (list.length && list[0].userText == null) list[0].userText = task.prompt || null
-    if (!list.length && task.prompt) list.push({ userText: task.prompt, work: [], sysNotes: [], text: '', final: null, usage: null })
+    if (!list.length && task.prompt) list.push({ userText: task.prompt, firstSeq: 0, items: [], sysNotes: [], usage: null, done: false, streamed: '' })
     return list
   }, [events, task.prompt])
 
   const turnActive = task.status === 'running'
 
+  useEffect(() => {
+    if (!turnActive) return
+    const timer = window.setInterval(() => setClock((value) => value + 1), 1000)
+    return () => window.clearInterval(timer)
+  }, [turnActive, task.id])
+
   // 自动滚底
   useEffect(() => {
     if (tab === 'log' && logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
   }, [events, tab, turns])
+
+  // ---- 对话导航：当前视口命中的回合（最后一个 offsetTop <= scrollTop + 80 的 .turn）----
+  const updateActiveNav = () => {
+    const el = logRef.current
+    if (!el) return
+    let active = 0
+    el.querySelectorAll<HTMLElement>('.turn').forEach((n, idx) => {
+      if (n.offsetTop <= el.scrollTop + 80) active = idx
+    })
+    setActiveNav(active)
+  }
+  const onLogScroll = () => {
+    if (navFrameRef.current) return
+    navFrameRef.current = requestAnimationFrame(() => {
+      navFrameRef.current = 0
+      updateActiveNav()
+    })
+  }
+  useEffect(() => {
+    if (tab === 'log') updateActiveNav()
+  }, [tab, turns.length])
+
+  /** 定位到某回合：在滚动容器内按 offsetTop 计算目标位置（不用 window 滚动） */
+  const scrollToTurn = (i: number) => {
+    const el = logRef.current
+    const target = el?.querySelector<HTMLElement>(`#turn-${i}`)
+    if (!el || !target) return
+    el.scrollTo({ top: Math.max(0, target.offsetTop - 8), behavior: 'smooth' })
+    setActiveNav(i)
+  }
+
+  /** 回退到某回合：删除该回合及其之后的消息记录（本地日志，不影响后端会话上下文） */
+  const doRewind = async (index: number) => {
+    const turn = turns[index]
+    if (!turn || index === 0) return
+    const ok = await confirmDialog({
+      title: '回退到这里？',
+      body: `将删除第 ${index + 1} 回合及其之后的所有消息记录，并按剩余内容重算任务结果与用量。该操作只影响本地日志，不会改动后端会话上下文，且不可撤销。`,
+      danger: true,
+      confirmText: '回退'
+    })
+    if (!ok) return
+    const r = await bridge.tasks.rewind(task.id, turn.firstSeq - 1)
+    if (!r.ok) {
+      toast.error(r.error ?? '回退失败')
+      return
+    }
+    toast.success('已回退')
+    refreshEvents()
+  }
+
+  // ---- 标题重命名 ----
+  const beginTitleEdit = () => {
+    setTitleDraft(task.title)
+    editingTitleRef.current = true
+    setEditingTitle(true)
+  }
+  const cancelTitleEdit = () => {
+    editingTitleRef.current = false
+    setEditingTitle(false)
+  }
+  const saveTitle = async () => {
+    if (!editingTitleRef.current) return
+    editingTitleRef.current = false
+    setEditingTitle(false)
+    const name = titleDraft.trim()
+    if (!name || name === task.title) return
+    const next = await bridge.tasks.rename(task.id, name)
+    if (next) toast.success('标题已更新')
+  }
 
   const doCancel = async () => {
     setBusy(true)
@@ -160,6 +303,25 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     setBusy(false)
   }
 
+  const addComment = async () => {
+    const content = commentDraft.trim()
+    if (!content) return
+    const comment = await bridge.issues.addComment(issueId, content)
+    if (comment) {
+      setComments((current) => [...current, comment])
+      setCommentDraft('')
+    }
+  }
+
+  const updateIssue = async (patch: { priority?: IssuePriority; labels?: string[] }) => {
+    const next = await bridge.issues.update(issueId, patch)
+    if (next) { setIssue(next); setLabelsDraft(next.labels.join(', ')) }
+  }
+  const updateWorkflow = async (status: IssueStatus) => {
+    const next = await bridge.issues.update(issueId, { status })
+    if (next) setIssue(next)
+  }
+
   const duration = task.startedAt ? (task.endedAt ?? Date.now()) - task.startedAt : 0
 
   return (
@@ -167,10 +329,34 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
       <header className="detail-header page-header-bar">
         <div className="detail-title-wrap">
           <div className="detail-eyebrow">{parent ? '队员任务' : '工作任务'}</div>
-          <h1 className="detail-title">{task.title}</h1>
+          {editingTitle ? (
+            <input
+              className="title-edit-input"
+              value={titleDraft}
+              autoFocus
+              onChange={(e) => setTitleDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  void saveTitle()
+                } else if (e.key === 'Escape') {
+                  cancelTitleEdit()
+                }
+              }}
+              onBlur={() => void saveTitle()}
+            />
+          ) : (
+            <h1 className="detail-title">
+              {task.title}
+              <button className="title-edit" type="button" title="重命名" onClick={beginTitleEdit}>
+                <Pencil size={13} aria-hidden="true" />
+              </button>
+            </h1>
+          )}
           <p className="detail-prompt">{task.prompt}</p>
           <div className="detail-meta">
             <span className={`status-chip status-${task.status}`}>{STATUS_META[task.status]}</span>
+            {turnActive && <span className="active-duration" aria-live="polite">工作中 · {fmtDuration(Date.now() - (task.startedAt ?? Date.now()))}</span>}
             {task.workdir && (
               <button className="workspace-chip" type="button" title={task.workdir} onClick={() => void bridge.openPath(task.workdir)}>
                 <FolderOpen size={13} aria-hidden="true" />
@@ -179,7 +365,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
             )}
             {workers.length > 0 && (
               <span className="badge badge-squad">
-                ⚡ 委派 {workers.filter((w) => w.status === 'done').length}/{workers.length}
+                ⚡ 子任务 {workers.filter((w) => w.status === 'done').length}/{workers.length}
               </span>
             )}
             {parent && (
@@ -308,8 +494,11 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
       )}
 
       <div className="tabs">
+        <button className={tab === 'activity' ? 'active' : ''} onClick={() => setTab('activity')}>
+          动态
+        </button>
         <button className={tab === 'log' ? 'active' : ''} onClick={() => setTab('log')}>
-          对话
+          执行记录
         </button>
         <button className={tab === 'result' ? 'active' : ''} onClick={() => setTab('result')}>
           结果
@@ -320,56 +509,122 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
       </div>
 
       <div className="detail-body">
+        {tab === 'activity' && (
+          <div className="issue-timeline">
+            <div className="timeline-intro"><span className="badge">{issue?.identifier ?? 'Issue'}</span><strong>工作动态</strong><span className="mini">评论、状态变化与执行报告</span></div>
+            {runs.length === 0 && comments.length === 0 && <div className="list-empty">暂无动态。执行开始后，Run 和 Agent 汇报会出现在这里。</div>}
+            {[...runs.map((run) => ({ kind: 'run' as const, at: run.startedAt ?? 0, run })), ...comments.map((comment) => ({ kind: 'comment' as const, at: comment.createdAt, comment }))].sort((a, b) => a.at - b.at).map((item) => item.kind === 'run' ? (
+              <article className="timeline-item timeline-run" key={`run-${item.run.id}`}>
+                <span className={`timeline-marker dot-${item.run.status === 'completed' ? 'done' : item.run.status === 'running' ? 'running' : item.run.status === 'error' ? 'failed' : 'cancelled'}`} />
+                <div className="timeline-content"><div className="timeline-head"><strong>{item.run.status === 'completed' ? 'Run 完成' : item.run.status === 'running' ? 'Run 执行中' : item.run.status === 'error' ? 'Run 失败' : 'Run 已取消'}</strong><time>{item.run.startedAt ? fmtTime(item.run.startedAt) : '刚刚'}</time></div><p>{item.run.trigger === 'mention' ? '由 Issue 评论提及触发' : item.run.trigger === 'autopilot' ? '由自动化计划触发' : '由指派触发'}{item.run.durationMs ? ` · ${fmtDuration(item.run.durationMs)}` : ''}{item.run.usage ? ` · ${fmtTokens(item.run.usage.totalTokens)} tokens` : ''}</p>{item.run.taskId === task.id && <button className="link timeline-action" onClick={() => setTab('log')}>查看执行记录</button>}</div>
+              </article>
+            ) : (
+              <article className={`timeline-item timeline-comment ${item.comment.author.type}`} key={`comment-${item.comment.id}`}><span className="timeline-marker timeline-avatar">{item.comment.author.type === 'agent' ? 'A' : '我'}</span><div className="timeline-content"><div className="timeline-head"><strong>{item.comment.author.type === 'agent' ? `Agent · ${item.comment.author.id}` : '我'}</strong><time>{fmtTime(item.comment.createdAt)}</time></div><Markdown text={item.comment.content} /></div></article>
+            ))}
+          </div>
+        )}
         {tab === 'log' && (
-          <div className="log chat" ref={logRef}>
-            {turns.map((turn, i) => {
-              const isLast = i === turns.length - 1
-              const streaming = isLast && turnActive
-              const pending = isLast && task.status === 'queued'
-              const hasBubble = turn.final != null || !!turn.text || streaming || pending
-              return (
-                <div className="turn" key={i}>
-                  {turn.userText != null && (
-                    <div className="bubble user">
-                      <pre>{turn.userText}</pre>
-                    </div>
-                  )}
-                  {turn.sysNotes.length > 0 && (
-                    <div className="sys-strip">
-                      {turn.sysNotes.map((n, j) => (
-                        <div key={j} className="sys-note">⚡ {n}</div>
-                      ))}
-                    </div>
-                  )}
-                  {turn.work.length > 0 && (
-                    <details className="worklog" open={isLast && turnActive ? true : undefined}>
-                      <summary>
-                        🔧 工作过程（{turn.work.filter((e) => e.kind === 'tool').length} 次工具调用）
-                        <ToolChips work={turn.work} />
-                      </summary>
-                      <div className="worklog-body">
-                        {turn.work.map((e) => (
-                          <LogLine key={e.seq} e={e} />
+          <div className="chat-wrap">
+            {turns.length > 0 && (
+              <nav className="chat-nav">
+                <div className="chat-nav-head">对话导航<span className="chat-nav-count">{turns.length} 回合</span></div>
+                {turns.map((turn, i) => {
+                  const running = i === turns.length - 1 && turnActive
+                  return (
+                    <button key={i} type="button" className={`chat-nav-item${i === activeNav ? ' active' : ''}`} onClick={() => scrollToTurn(i)}>
+                      <span className="chat-nav-idx">{i + 1}</span>
+                      <span className="chat-nav-label">{navSummary(turn, i)}</span>
+                      {running ? (
+                        <span className="chat-nav-state running" aria-label="运行中" />
+                      ) : (
+                        <span className="chat-nav-state" aria-label="已完成">✓</span>
+                      )}
+                    </button>
+                  )
+                })}
+              </nav>
+            )}
+            <div className="log chat" ref={logRef} onScroll={onLogScroll}>
+              {turns.map((turn, i) => {
+                const isLast = i === turns.length - 1
+                const streaming = isLast && turnActive
+                const pending = isLast && task.status === 'queued'
+                const items = turn.items
+                const lastItem = items[items.length - 1]
+                const endsWithOpenText = !!lastItem && lastItem.type === 'text' && !lastItem.closed
+                const finalIdx = items.findIndex((it) => it.type === 'final')
+                let lastBubbleIdx = -1
+                let lastWorkIdx = -1
+                items.forEach((it, j) => {
+                  if (it.type === 'work') lastWorkIdx = j
+                  else lastBubbleIdx = j
+                })
+                return (
+                  <div className="turn" id={`turn-${i}`} key={i}>
+                    {turn.userText != null && (
+                      <div className="bubble user">
+                        <pre>{turn.userText}</pre>
+                        {i > 0 && (
+                          <button className="turn-rewind" type="button" title="回退到这里" onClick={() => void doRewind(i)}>
+                            <Undo2 size={12} aria-hidden="true" />
+                          </button>
+                        )}
+                      </div>
+                    )}
+                    {turn.sysNotes.length > 0 && (
+                      <div className="sys-strip">
+                        {turn.sysNotes.map((n, j) => (
+                          <div key={j} className="sys-note">⚡ {n}</div>
                         ))}
                       </div>
-                    </details>
-                  )}
-                  {hasBubble && (
-                    <div className="bubble agent">
-                      {turn.final != null ? (
-                        <Markdown text={turn.final} />
-                      ) : turn.text ? (
-                        <pre className="streaming">{turn.text}</pre>
-                      ) : null}
-                      {streaming && <div className="log-running">● 回复中…</div>}
-                      {pending && <div className="log-running">排队等待执行…</div>}
-                      {turn.usage && <UsageBadge usage={turn.usage} />}
-                    </div>
-                  )}
-                </div>
-              )
-            })}
-            {turns.length === 0 && <div className="list-empty">（无对话内容）</div>}
+                    )}
+                    {items.map((item, j) => {
+                      if (item.type === 'work') {
+                        return (
+                          <details className="worklog" key={j} open={streaming && j === lastWorkIdx ? true : undefined}>
+                            <summary>
+                              🔧 工作过程（{item.work.filter((e) => e.kind === 'tool').length} 次工具调用）
+                              <ToolChips work={item.work} />
+                            </summary>
+                            <div className="worklog-body">
+                              {item.work.map((e) => (
+                                <LogLine key={e.seq} e={e} />
+                              ))}
+                            </div>
+                          </details>
+                        )
+                      }
+                      if (item.type === 'final') {
+                        return (
+                          <div className="bubble agent" key={j}>
+                            <Markdown text={item.text} />
+                            {turn.usage && <UsageBadge usage={turn.usage} />}
+                          </div>
+                        )
+                      }
+                      return (
+                        <div className="bubble agent" key={j}>
+                          <pre className={item.closed ? 'seg-text' : 'streaming'}>{item.text}</pre>
+                          {streaming && !item.closed && <div className="log-running">● 回复中…</div>}
+                          {turn.usage && finalIdx < 0 && j === lastBubbleIdx && <UsageBadge usage={turn.usage} />}
+                        </div>
+                      )
+                    })}
+                    {streaming && !endsWithOpenText && (
+                      <div className="bubble agent">
+                        <div className="log-running">● 回复中…</div>
+                      </div>
+                    )}
+                    {pending && (
+                      <div className="bubble agent">
+                        <div className="log-running">排队等待执行…</div>
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+              {turns.length === 0 && <div className="list-empty">（无对话内容）</div>}
+            </div>
           </div>
         )}
         {tab === 'result' && (
@@ -418,6 +673,10 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
         </div>
 
         <aside className="detail-panel">
+          <div className="issue-meta-edit"><span className="prop-label">工作流</span><select value={issue?.status ?? 'todo'} onChange={(event) => void updateWorkflow(event.target.value as IssueStatus)}><option value="backlog">待梳理</option><option value="todo">待办</option><option value="in_progress">进行中</option><option value="in_review">审查中</option><option value="done">已完成</option><option value="blocked">受阻</option><option value="cancelled">已取消</option></select></div>
+          <div className="issue-meta-edit"><span className="prop-label">优先级</span><select value={issue?.priority ?? 'none'} onChange={(event) => void updateIssue({ priority: event.target.value as IssuePriority })}><option value="urgent">紧急</option><option value="high">高</option><option value="medium">中</option><option value="low">低</option><option value="none">无</option></select></div>
+          <div className="issue-meta-edit"><span className="prop-label">标签</span><input value={labelsDraft} placeholder="design, review" onChange={(event) => setLabelsDraft(event.target.value)} onBlur={() => void updateIssue({ labels: labelsDraft.split(',') })} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void updateIssue({ labels: labelsDraft.split(',') }) } }} /></div>
+          {issue?.labels.length ? <div className="issue-labels">{issue.labels.map((label) => <span className="badge" key={label}>{label}</span>)}</div> : null}
           <div className="prop-row">
             <span className="prop-label">状态</span>
             <span className={`status-chip status-${task.status}`}>{STATUS_META[task.status]}</span>
@@ -485,21 +744,57 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
               <span className="prop-value retry-chip">⟳ {task.attempt}/2</span>
             </div>
           )}
+          <hr className="prop-sep" />
+          <div className="prop-group-label"><History size={13} /> 执行记录 {runs.length ? `(${runs.length})` : ''}</div>
+          <div className="run-history">
+            {runs.length === 0 && <span className="mini dim">暂无执行记录</span>}
+            {runs.map((run) => (
+              <div className="run-history-row" key={run.id}>
+                <span className={`dot dot-${run.status === 'completed' ? 'done' : run.status === 'running' ? 'running' : run.status === 'error' ? 'failed' : 'cancelled'}`} />
+                <span className="run-history-main"><b>{run.status === 'completed' ? '已完成' : run.status === 'running' ? '执行中' : run.status === 'error' ? '失败' : '已取消'}</b><small>{run.startedAt ? new Date(run.startedAt).toLocaleString() : '排队中'}{run.durationMs ? ` · ${fmtDuration(run.durationMs)}` : ''}</small></span>
+                {run.usage && <span className="mini mono">{fmtTokens(run.usage.inputTokens + run.usage.outputTokens)}</span>}
+              </div>
+            ))}
+          </div>
+          <hr className="prop-sep" />
+          <div className="prop-group-label"><MessageSquare size={13} /> 讨论 {comments.length ? `(${comments.length})` : ''}</div>
+          <div className="issue-comments">
+            {comments.length === 0 && <span className="mini dim">暂无评论</span>}
+            {comments.slice(-4).map((comment) => <div className={`issue-comment ${comment.author.type}`} key={comment.id}><b>{comment.author.type === 'agent' ? comment.author.id : '我'}</b><span>{comment.content}</span></div>)}
+          </div>
+          <div className="comment-compose"><input value={commentDraft} onChange={(event) => setCommentDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void addComment() } }} placeholder="写评论…" /><button className="icon-btn" title="发送评论" disabled={!commentDraft.trim()} onClick={() => void addComment()}><Send size={13} /></button></div>
         </aside>
       </div>
     </div>
   )
 }
 
-/** 对话视图的一个回合：用户输入 → 系统条带（派工/重试/集成）→ 工作过程（折叠）→ 回复气泡（含用量角标） */
+/** 回合内按事件到达顺序交错的展示项 */
+type TurnItem =
+  | { type: 'text'; text: string; closed: boolean } // 模型流式输出的一段（工具调用到达即定格，后续 text 另起气泡）
+  | { type: 'final'; text: string } // 回合终态回复（Markdown 渲染）
+  | { type: 'work'; work: TaskEvent[] } // 连续的 tool/status/error/raw 事件（折叠的工作过程块）
+
+/** 对话视图的一个回合：用户输入 → 系统条带（派工/重试/集成）→ 交错的 text 段 / 工作过程 / 终段（含用量角标） */
 interface Turn {
   userText: string | null
-  work: TaskEvent[]
+  /** 本回合首个事件的 seq（user 事件优先；旧数据为首个落进来的事件）——回退锚点 */
+  firstSeq: number
+  items: TurnItem[]
   /** 委派/重试/集成等生命周期事件——提升为可见条带，不折叠 */
   sysNotes: string[]
-  text: string
-  final: string | null
   usage: Record<string, unknown> | null
+  /** 已收到 final（回合结束标志） */
+  done: boolean
+  /** 本回合流式文本累计（final 全量回显检测用） */
+  streamed: string
+}
+
+/** 导航条里的回合摘要：用户消息首行截断约 24 字；无 userText 时显示「初始任务」 */
+function navSummary(turn: Turn, index: number): string {
+  const first = (turn.userText ?? '').split('\n')[0].trim()
+  if (!first) return index === 0 ? '初始任务' : `回合 ${index + 1}`
+  return first.length > 24 ? first.slice(0, 24) + '…' : first
 }
 
 /** 状态中文（头部与属性栏共用） */
@@ -509,6 +804,9 @@ const STATUS_META: Record<Task['status'], string> = {
 
 /** 需要可见展示的系统事件（委派轮次、防环拒绝、自动重试、集成结果、回灌） */
 const SYS_NOTE_RE = /(第\s*\d+\s*轮|拒绝派给|未找到可驱使|自动重试|不再下派|回灌|集成)/
+
+/** 压平空白后比较，容忍消息拼接处的换行差异 */
+const squashText = (s: string) => s.replace(/\s+/g, ' ').trim()
 
 /** 工具调用分类（对标 Multica 转录的 Commands/Edits/Reads/Other） */
 function classifyTool(name: string): 'reads' | 'commands' | 'edits' | 'other' {

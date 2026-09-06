@@ -15,14 +15,21 @@
     "dist": "electron-vite build && electron-builder",
     "smoke": "node scripts/smoke-runner.mjs",
     "smoke:zcode": "node scripts/smoke-zcode.mjs",
+    "smoke:final-dedup": "node scripts/smoke-final-dedup.mjs",
     "smoke:clis": "node scripts/smoke-cli-adapters.mjs",
+    "smoke:cli-adapters": "node scripts/smoke-cli-adapters.mjs",
     "smoke:delegate": "node scripts/smoke-delegate.mjs",
     "e2e:delegate": "node scripts/e2e-delegate-real.mjs",
     "smoke:migration": "node scripts/smoke-migration.mjs",
     "smoke:failure": "node scripts/smoke-failure.mjs",
     "smoke:diff": "node scripts/smoke-diff.mjs",
     "smoke:retry": "node scripts/smoke-retry.mjs",
-    "smoke:flow": "node scripts/smoke-flow.mjs"
+    "smoke:flow": "node scripts/smoke-flow.mjs",
+    "smoke:resume": "node scripts/smoke-resume.mjs",
+    "smoke:issues": "node scripts/smoke-issues.mjs",
+    "smoke:automation": "node scripts/smoke-automation.mjs",
+    "smoke:runtime-analytics": "node scripts/smoke-runtime-analytics.mjs",
+    "smoke:taskflow": "node scripts/smoke-taskflow.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

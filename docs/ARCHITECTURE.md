@@ -24,13 +24,25 @@
                │ preload（contextBridge → window.agentdeck）
 ┌──────────────┴──────────────────────────────────────────────┐
 │ 渲染进程（React）                                             │
-│  App → 侧栏导航 → WorkspaceView（快速输入）/ TaskList /        │
+│  App → 侧栏导航 → WorkspaceView（快速输入）/                │
 │         TaskDetail（日志/结果/Git/子任务/权限横幅）/           │
 │         TeamView（队伍编辑）/ SettingsView                    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 无云端、无服务进程、无数据库——全部状态在 `userData/` 的 JSON/JSONL 文件里。
+
+## 1.1 产品级工作模型（Issue-first）
+
+AgentDeck 的用户工作单元是 **Issue**，不是无限增长的聊天会话：
+
+```
+Issue（目标、状态、负责人、评论时间线）
+  └─ Run × N（每次指派、提及、自动化或手动执行）
+       └─ Task（本地 CLI 执行兼容记录）
+```
+
+每个 Run 都保留独立的状态、触发来源、执行日志和用量。成功/失败结束后，IssueStore 将结果写成带 `runId` 的 Agent 报告评论，并创建收件箱通知；用户可以在同一 Issue 的评论中 `@agent`，触发新的 Run，而不会创建新的 Issue。Task 仍负责进程、事件流、会话恢复和 git 快照，作为本地执行层兼容契约。
 
 ---
 
@@ -107,7 +119,7 @@ src/
 ├── renderer/src/             React UI
 │   ├── App.tsx               视图路由（任务/队伍/设置）
 │   ├── api.ts                bridge 类型 + hooks（useTasks/useSettings）
-│   └── components/           WorkspaceView/TaskList/TaskDetail/TeamView/
+│   └── components/           WorkspaceView/TaskDetail/TeamView/
 │                             SettingsView/Markdown
 └── shared/types.ts           Task/TaskEvent/AppSettings 跨进程契约
 ```

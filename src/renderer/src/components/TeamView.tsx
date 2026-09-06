@@ -4,7 +4,8 @@ import { Users } from 'lucide-react'
 import { toast } from '../ui/Toasts'
 import { Menu } from '../ui/Menu'
 
-export function TeamView() {
+/** 队伍管理页；0.14 起作为设置分区嵌入（embedded 时不再渲染整页外壳） */
+export function TeamView({ embedded = false }: { embedded?: boolean }) {
   const [agents, setAgents] = useState<Agent[]>([])
   const [probes, setProbes] = useState<Record<string, { ok: boolean; detail: string }>>({})
   const [probing, setProbing] = useState(false)
@@ -47,28 +48,19 @@ export function TeamView() {
     setEditing({ id: `ag_${Date.now().toString(36)}`, name: '', backend: 'zcode', color: '#4f8cff', note: '', role: '', systemPrompt: '', subordinates: [] })
 
   const backends = ['zcode', 'claude', 'codex', 'opencode', 'dsh']
+  const actions = (
+    <div className="detail-actions">
+      <button className="btn" onClick={probeAll} disabled={probing}>
+        {probing ? '检测中…' : '检测各平台可用性'}
+      </button>
+      <button className="btn primary" onClick={add}>
+        ＋ 加队员
+      </button>
+    </div>
+  )
 
-  return (
-    <div className="settings team">
-      <header className="page-header-bar">
-        <div className="detail-title-wrap">
-          <div className="page-title-row">
-            <Users size={16} className="page-icon" />
-            <h2 className="page-title">队伍</h2>
-            {agents.length > 0 && <span className="page-count">{agents.length}</span>}
-            <span className="page-desc">给任务安排队员；勾选可驱使名单的队员会成为领队</span>
-          </div>
-        </div>
-        <div className="detail-actions">
-          <button className="btn" onClick={probeAll} disabled={probing}>
-            {probing ? '检测中…' : '检测各平台可用性'}
-          </button>
-          <button className="btn primary" onClick={add}>
-            ＋ 加队员
-          </button>
-        </div>
-      </header>
-
+  const grid = (
+    <>
       <div className="agent-grid">
         {agents.map((a) => (
           <div key={a.id} className="agent-card" role="button" tabIndex={0} onClick={() => setEditing(a)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setEditing(a) } }}>
@@ -180,6 +172,35 @@ export function TeamView() {
           </div>
         </div>
       )}
+    </>
+  )
+
+  if (embedded) {
+    return (
+      <div className="team-embedded">
+        <div className="team-embedded-head">
+          <div className="section-heading"><h3>队员{agents.length > 0 ? `（${agents.length}）` : ''}</h3><span>给任务安排队员；勾选可驱使名单的队员会成为领队</span></div>
+          {actions}
+        </div>
+        {grid}
+      </div>
+    )
+  }
+
+  return (
+    <div className="settings team">
+      <header className="page-header-bar">
+        <div className="detail-title-wrap">
+          <div className="page-title-row">
+            <Users size={16} className="page-icon" />
+            <h2 className="page-title">队伍</h2>
+            {agents.length > 0 && <span className="page-count">{agents.length}</span>}
+            <span className="page-desc">给任务安排队员；勾选可驱使名单的队员会成为领队</span>
+          </div>
+        </div>
+        {actions}
+      </header>
+      {grid}
     </div>
   )
 }

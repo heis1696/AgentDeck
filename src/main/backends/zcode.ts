@@ -316,6 +316,8 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
 
       let turnResolver: ((v: { response: string; ok: boolean; error?: string }) => void) | null = null
       let currentText = ''
+      /** 最后一条 assistant 消息：自上一次工具活动以来累计的文本增量 */
+      let lastSegment = ''
       let lastTurnEnd: { response: string; ok: boolean; error?: string } | null = null
       /** 流式看门狗：模型偶发无限生成循环（实测 10 分钟吐 1.5MB），超限强制停止 */
       let textOverflowed = false
@@ -325,17 +327,25 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
       /** 会话 id 容器（事件处理器在赋值前注册，经此读取） */
       const sessionIdHolder = { value: '' }
 
+      /** 压平空白后比较，容忍服务端拼接消息时的换行差异 */
+      const squash = (s: string) => s.replace(/\s+/g, ' ').trim()
       const handleTurnEnd = (r: { response: string; ok: boolean; error?: string }) => {
         // 协议每回合会发两种终态（完整回合回复 + 最后一条消息），只取首个完整版
         if (lastTurnEnd) return
-        lastTurnEnd = r
-        emit({ kind: 'final', text: r.response || r.error || '' })
+        // 首个终态的 response 是完整回合回复：包含本回合所有中间回复（已随 text 事件
+        // 流式展示过）。只保留最后一条 assistant 消息，避免 UI 终段全量回显、
+        // result 与委派回灌把中间回复再吃一遍上下文
+        const full = r.response
+        const lastMsg = squash(lastSegment)
+        const response = lastMsg && (full === currentText || squash(full).endsWith(lastMsg)) ? lastSegment : full
+        lastTurnEnd = { ...r, response }
+        emit({ kind: 'final', text: response || r.error || '' })
         if (turnResolver) {
           const res = turnResolver
           turnResolver = null
-          res(r)
+          res(lastTurnEnd)
         }
-        events.onTurnEnd(r)
+        events.onTurnEnd(lastTurnEnd)
       }
 
       conn.onMessage((m) => {
@@ -360,8 +370,10 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
           if (type === 'model.streaming') {
             const k: string = payload.kind ?? ''
             if (k === 'text_delta') {
-              currentText += payload.delta ?? ''
-              emit({ kind: 'text', text: payload.delta ?? '' })
+              const delta = payload.delta ?? ''
+              currentText += delta
+              lastSegment += delta
+              emit({ kind: 'text', text: delta })
               if (!textOverflowed && currentText.length > TEXT_LIMIT) {
                 textOverflowed = true
                 emit({ kind: 'status', text: `⚠ 输出超过 ${TEXT_LIMIT / 1000}KB，疑似模型生成循环，强制停止本回合` })
@@ -373,6 +385,8 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
                 })
               }
             } else if (k === 'tool_input_start') {
+              // 工具活动开始：此后的文本属于新的一条 assistant 消息
+              lastSegment = ''
               toolInputs.set(payload.toolCallId, { name: payload.toolName ?? '', args: '' })
             } else if (k === 'tool_input_delta') {
               const ti = toolInputs.get(payload.toolCallId)
@@ -382,6 +396,7 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
           } else if (type === 'tool.updated') {
             const k: string = payload.kind ?? ''
             if (k === 'started') {
+              lastSegment = ''
               const ti = toolInputs.get(payload.toolCallId)
               emit({
                 kind: 'tool',
@@ -393,6 +408,7 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
                 }
               })
             } else if (k === 'result') {
+              lastSegment = ''
               const res = payload.result ?? {}
               const preview =
                 typeof res.content === 'string'
@@ -526,6 +542,7 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
       sessionIdHolder.value = sessionId
       await conn.request('session/subscribe', { sessionId, deliveryKind: 'desktop-continuous' })
       currentText = ''
+      lastSegment = ''
       lastTurnEnd = null
       textOverflowed = false
       await conn.request('session/send', { sessionId, content: prompt })
@@ -534,6 +551,7 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
         sessionId,
         async send(content: string) {
           currentText = ''
+          lastSegment = ''
           lastTurnEnd = null
           textOverflowed = false
           const p = new Promise<void>((resolve, reject) => {

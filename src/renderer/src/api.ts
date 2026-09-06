@@ -1,6 +1,6 @@
 // 渲染层 API 封装：window.agentdeck 的类型 + 常用 hooks
 import { useEffect, useState, useCallback } from 'react'
-import type { Task, TaskEvent, AppSettings } from '../../shared/types'
+import type { Task, TaskEvent, AppSettings, Issue, Run, Comment, Notification, Automation, RuntimeSnapshot, AnalyticsSummary, IssuePriority, IssueStatus, RunTrigger } from '../../shared/types'
 import type { PermissionRequest } from '../../main/backends/types'
 
 interface Bridge {
@@ -8,7 +8,7 @@ interface Bridge {
     list: () => Promise<Task[]>
     get: (id: string) => Promise<Task | null>
     events: (id: string, afterSeq?: number) => Promise<TaskEvent[]>
-    create: (input: { title: string; prompt: string; workdir: string; backend?: string; agentId?: string; handoff?: string; startNow?: boolean }) => Promise<Task>
+    create: (input: { title: string; prompt: string; workdir: string; backend?: string; agentId?: string; handoff?: string; startNow?: boolean; trigger?: RunTrigger }) => Promise<Task>
     cancel: (id: string) => Promise<{ ok: boolean; error?: string }>
     followUp: (id: string, content: string) => Promise<{ ok: boolean; error?: string }>
     delete: (id: string) => Promise<{ ok: boolean; error?: string }>
@@ -18,9 +18,31 @@ interface Bridge {
     onDeleted: (cb: (id: string) => void) => () => void
     onFocusTask: (cb: (id: string) => void) => () => void
     start: (id: string) => Promise<{ ok: boolean; error?: string }>
+    rewind: (id: string, toSeq: number) => Promise<{ ok: boolean; error?: string }>
+    rename: (id: string, title: string) => Promise<Task | null>
+    onEventsInvalidated: (cb: (taskId: string) => void) => () => void
     onEvent: (cb: (taskId: string, e: TaskEvent) => void) => () => void
     onPermission: (cb: (taskId: string, req: PermissionRequest) => void) => () => void
     respondPermission: (requestId: string | number, optionId: string, decision: 'allow' | 'deny') => Promise<{ ok: boolean; error?: string }>
+  }
+  issues: {
+    list: () => Promise<Issue[]>
+    get: (id: string) => Promise<Issue | null>
+    create: (input: { title: string; description: string; workdir: string; agentId?: string; backend?: string; handoff?: string; startNow?: boolean; trigger?: RunTrigger }) => Promise<Issue>
+    runs: (id: string) => Promise<Run[]>
+    comments: (id: string) => Promise<Comment[]>
+    update: (id: string, patch: { priority?: IssuePriority; labels?: string[]; dueDate?: number; status?: IssueStatus }) => Promise<Issue | null>
+    addComment: (id: string, content: string) => Promise<Comment | null>
+    notifications: (unreadOnly?: boolean) => Promise<Notification[]>
+    markNotificationRead: (id: string) => Promise<{ ok: boolean }>
+    onUpdated: (cb: (payload: { taskId: string; issueId: string; issue: Issue | null; run: Run | null }) => void) => () => void
+  }
+  automations: {
+    list: () => Promise<Automation[]>
+    create: (input: Omit<Automation, 'id' | 'createdAt' | 'lastRunAt' | 'nextRunAt'>) => Promise<Automation>
+    update: (id: string, patch: Partial<Automation>) => Promise<Automation | null>
+    delete: (id: string) => Promise<{ ok: boolean }>
+    runNow: (id: string) => Promise<{ ok: boolean; error?: string; task?: Task }>
   }
   settings: {
     get: () => Promise<AppSettings>
@@ -35,6 +57,12 @@ interface Bridge {
     save: (list: AgentInfo[]) => Promise<AgentInfo[]>
     probe: () => Promise<Record<string, { ok: boolean; detail: string }>>
     onProbeResult: (cb: (id: string, result: { ok: boolean; detail: string }) => void) => () => void
+  }
+  runtimes: {
+    snapshot: () => Promise<RuntimeSnapshot[]>
+  }
+  analytics: {
+    summary: (input?: { since?: number; until?: number }) => Promise<AnalyticsSummary>
   }
 }
 
@@ -69,6 +97,20 @@ export function useTasks() {
     }
   }, [refresh])
   return { tasks, refresh }
+}
+
+/** Issue is the durable user-facing unit; tasks remain an execution detail. */
+export function useIssues() {
+  const [issues, setIssues] = useState<Issue[]>([])
+  const refresh = useCallback(async () => {
+    setIssues(await bridge.issues.list())
+  }, [])
+  useEffect(() => {
+    refresh()
+    const off = bridge.issues.onUpdated(() => refresh())
+    return off
+  }, [refresh])
+  return { issues, refresh }
 }
 
 export function useSettings() {

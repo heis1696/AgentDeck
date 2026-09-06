@@ -7,6 +7,7 @@ import { snapshotGitAfter } from './git'
 import { buildAgentPrompt, buildDelegationBlock, runDelegationLoop, type AgentLike } from './delegate'
 import { classifyFailure } from './failure'
 import { aggregateUsage } from './usage'
+import { canTransition } from '../shared/taskflow'
 
 function getWindows(): { send: (ch: string, v: unknown) => void }[] {
   try {
@@ -30,15 +31,18 @@ export class TaskRunner {
   private runningWorkers = 0
   private getTeam: (() => AgentLike[]) | null = null
   private pumping = false
+  private readonly onTaskChanged?: (task: Task) => void
 
   constructor(
     store: TaskStore,
     backends: Map<string, AgentBackend>,
-    opts: () => { concurrency: number; mode: string; notify: boolean; workerConcurrency?: number }
+    opts: () => { concurrency: number; mode: string; notify: boolean; workerConcurrency?: number },
+    onTaskChanged?: (task: Task) => void
   ) {
     this.store = store
     this.backends = backends
     this.opts = opts
+    this.onTaskChanged = onTaskChanged
   }
 
   private win(): { send: (ch: string, v: unknown) => void } | null {
@@ -46,7 +50,12 @@ export class TaskRunner {
   }
 
   pushTask(taskId: string) {
-    this.win()?.send('task:updated', this.store.get(taskId))
+    const task = this.store.get(taskId)
+    if (!task) return
+    // Keep projections in step with every runner lifecycle transition before
+    // notifying renderer consumers. The callback is optional for CLI/smoke use.
+    this.onTaskChanged?.(task)
+    this.win()?.send('task:updated', task)
   }
   /** 记录用户输入（首条 prompt / 追问），对话视图按 user 事件分气泡 */
   private recordUser(taskId: string, text: string) {
@@ -83,6 +92,11 @@ export class TaskRunner {
   askPermission(taskId: string, req: PermissionRequest): Promise<{ optionId?: string; decision: 'allow' | 'deny' }> {
     return new Promise((resolve) => {
       const key = String(req.requestId)
+      const previous = this.pendingPermissions.get(key)
+      if (previous) {
+        clearTimeout(previous.timer)
+        previous.resolve({ decision: 'deny' })
+      }
       const timer = setTimeout(() => {
         this.pendingPermissions.delete(key)
         resolve({ decision: 'deny' })
@@ -107,6 +121,7 @@ export class TaskRunner {
   private async finalizeDone(taskId: string, directResult?: string) {
     const task = this.store.get(taskId)
     if (!task) return
+    if (task.status !== 'running') return
     let result = directResult
     const events = this.store.readEvents(taskId)
     if (result === undefined) {
@@ -114,6 +129,12 @@ export class TaskRunner {
       result = finals[finals.length - 1]?.text ?? ''
     }
     const { diff, stat } = await snapshotGitAfter(task.workdir)
+    const current = this.store.get(taskId)
+    if (!current || !canTransition(current.status, 'done', 'runner')) {
+      if (current) this.store.update(taskId, { result, gitDiff: diff || current.gitDiff, gitStat: stat || current.gitStat, usage: aggregateUsage(events) })
+      this.pushTask(taskId)
+      return
+    }
     this.store.update(taskId, {
       status: 'done',
       endedAt: Date.now(),
@@ -127,7 +148,10 @@ export class TaskRunner {
 
   /** 失败落库：原始错误 + 分类解读（P1） */
   private failTask(taskId: string, error: string) {
+    const task = this.store.get(taskId)
+    if (!task || !canTransition(task.status, 'failed', 'runner')) return
     this.store.update(taskId, { status: 'failed', endedAt: Date.now(), error, failure: classifyFailure({ error }) })
+    this.pushTask(taskId)
   }
 
   enqueue(task: Task) {
@@ -163,6 +187,10 @@ export class TaskRunner {
   /** 队伍提供者（agent 身份与委派名单） */
   attachTeam(getTeam: () => AgentLike[]) {
     this.getTeam = getTeam
+  }
+
+  private newRunId(taskId: string) {
+    return `run_${taskId}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`
   }
 
   /** Finish one successful turn, including any delegation emitted before the final message. */
@@ -215,7 +243,7 @@ export class TaskRunner {
     const isWorker = !!task.parentTaskId
     if (isWorker) this.runningWorkers++
     else this.runningNormal++
-    this.store.update(taskId, { status: 'running', startedAt: Date.now(), error: undefined, failure: undefined })
+    this.store.update(taskId, { status: 'running', startedAt: Date.now(), runId: this.newRunId(taskId), error: undefined, failure: undefined })
     this.pushTask(taskId)
     this.recordUser(taskId, task.prompt)
 
@@ -294,6 +322,7 @@ ${task.handoff}`
     this.store.update(taskId, {
       status: 'queued',
       endedAt: undefined,
+      runId: undefined,
       attempt: next,
       ...(fresh ? { sessionId: undefined } : {})
     })
@@ -334,22 +363,26 @@ ${task.handoff}`
   async followUp(taskId: string, content: string): Promise<{ ok: boolean; error?: string }> {
     const task = this.store.get(taskId)
     if (!task) return { ok: false, error: '任务不存在' }
+    const message = content.trim()
+    if (!message) return { ok: false, error: '追问不能为空' }
+    if (task.status === 'running') return { ok: false, error: '任务正在运行' }
+    if (task.status !== 'done' && task.status !== 'failed') return { ok: false, error: '任务尚未完成' }
     let session = this.sessions.get(taskId)
     const backend = this.backends.get(task.backend)
     if (!backend) return { ok: false, error: '后端不可用' }
-    this.recordUser(taskId, content)
+    this.recordUser(taskId, message)
 
     if (!session) {
       // 应用重启后 session 丢失：用 zcode 的 session/resume 恢复
       if (!task.sessionId) return { ok: false, error: '无会话可恢复' }
-      this.store.update(taskId, { status: 'running', endedAt: undefined, error: undefined, failure: undefined })
+      this.store.update(taskId, { status: 'running', startedAt: Date.now(), runId: this.newRunId(taskId), endedAt: undefined, error: undefined, failure: undefined })
       this.pushTask(taskId)
       try {
         const firstTurn = new Promise<BackendTurnResult>((resolve) => {
           this.pendingResume.set(taskId, resolve)
         })
         session = await backend.start({
-          prompt: content,
+          prompt: message,
           workdir: task.workdir,
           mode: this.opts().mode,
           resumeSessionId: task.sessionId,
@@ -376,10 +409,10 @@ ${task.handoff}`
         return { ok: false, error: msg }
       }
     }
-    this.store.update(taskId, { status: 'running', endedAt: undefined, error: undefined, failure: undefined })
+    this.store.update(taskId, { status: 'running', startedAt: Date.now(), runId: this.newRunId(taskId), endedAt: undefined, error: undefined, failure: undefined })
     this.pushTask(taskId)
     try {
-      const r = await this.sendTurn(taskId, session, content)
+      const r = await this.sendTurn(taskId, session, message)
       if (!r.ok) throw new Error(r.error || '续聊回合失败')
       const finalText = await this.completeTurn(taskId, session, r)
       if (this.opts().notify) this.notify(task, '完成', finalText)
@@ -418,6 +451,12 @@ ${task.handoff}`
       await session?.close()
     } catch {}
     this.sessions.delete(taskId)
+    for (const [key, pending] of this.pendingPermissions) {
+      if (pending.taskId !== taskId) continue
+      clearTimeout(pending.timer)
+      pending.resolve({ decision: 'deny' })
+      this.pendingPermissions.delete(key)
+    }
     this.store.flushEvents(taskId)
     return { ok: true }
   }
@@ -429,6 +468,11 @@ ${task.handoff}`
       } catch {}
     }
     this.sessions.clear()
+    for (const [key, pending] of this.pendingPermissions) {
+      clearTimeout(pending.timer)
+      pending.resolve({ decision: 'deny' })
+      this.pendingPermissions.delete(key)
+    }
   }
 
   sessionCount() {

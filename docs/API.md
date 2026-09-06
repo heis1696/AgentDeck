@@ -6,6 +6,8 @@
 
 ## 1. 渲染层 IPC 桥（`window.agentdeck`）
 
+> 产品层以 Issue/Run 为中心；Task API 仍保留给本地执行器和旧数据兼容。一个 Issue 可以拥有多个 Run，Run 结束后会生成报告评论和收件箱通知。
+
 preload 以 `contextBridge` 暴露，全部经 `ipcRenderer.invoke/on` 与主进程通信。TypeScript 侧对应 `src/renderer/src/api.ts` 的 `Bridge` 接口。
 
 ### 1.1 任务 `bridge.tasks`
@@ -39,6 +41,17 @@ preload 以 `contextBridge` 暴露，全部经 `ipcRenderer.invoke/on` 与主进
 | `save` | `(list: Agent[]) => Promise<Agent[]>` | 整表保存（校验 name 与 backend 合法性），落 `userData/agents.json` |
 | `probe` | `() => Promise<Record<backendId, {ok, detail}>>` | 逐平台探测可用性 |
 | `onProbeResult` | `(id, result)` 订阅 | 探测结果逐个推送（不等最慢平台） |
+
+### 1.3 Issue / Run `bridge.issues`
+
+| 方法 | 说明 |
+|---|---|
+| `create` | 创建一个 Issue，并按 `startNow` 创建首个 assignment Run |
+| `list` / `get` | 读取 Issue 工作队列 |
+| `runs` / `comments` | 读取执行历史与 Issue 时间线 |
+| `update` | 更新工作流状态、优先级、标签或截止日期 |
+| `addComment` | 留下评论；内容中的 `@agent` 会在同一 Issue 上创建 mention Run |
+| `notifications` / `markNotificationRead` | 收件箱读取与已读状态 |
 
 `Agent`：`{ id, name, backend, role?, systemPrompt?, subordinates?: string[], model?, note?, color }`
 

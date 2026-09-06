@@ -1,168 +1,30 @@
 import { useEffect, useMemo, useState } from 'react'
-import { bridge, fmtDuration, fmtTokens, type AgentInfo } from '../api'
-import { Gauge } from 'lucide-react'
-import type { Task } from '../../../shared/types'
+import { AlertTriangle, Gauge, RefreshCw } from 'lucide-react'
+import { bridge, fmtDuration, fmtTokens } from '../api'
+import type { AnalyticsSummary, UsageAggregate } from '../../../shared/types'
 
-interface Row {
-  key: string
-  name: string
-  backend: string
-  color?: string
-  total: number
-  done: number
-  failed: number
-  inputTokens: number
-  outputTokens: number
-  costUsd: number
-  wallMs: number
-}
+const empty: UsageAggregate = { runs: 0, completed: 0, failed: 0, cancelled: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0, durationMs: 0 }
 
-function emptyRow(key: string, name: string, backend: string, color?: string): Row {
-  return { key, name, backend, color, total: 0, done: 0, failed: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, wallMs: 0 }
-}
-
-function fold(row: Row, t: Task) {
-  row.total++
-  if (t.status === 'done') row.done++
-  if (t.status === 'failed') row.failed++
-  const u = t.usage
-  if (u) {
-    row.inputTokens += u.inputTokens
-    row.outputTokens += u.outputTokens
-    row.costUsd += u.costUsd
-  }
-  if (t.startedAt && t.endedAt) row.wallMs += t.endedAt - t.startedAt
-}
-
-/** 用量聚合页：纯前端 reduce tasks（数据都已在 Task 上） */
 export function UsageView() {
-  const { tasks } = bridgeTasks()
-  const [agents, setAgents] = useState<AgentInfo[]>([])
-
-  useEffect(() => {
-    bridge.agents.list().then(setAgents)
-  }, [])
-
-  const { byAgent, byBackend, total } = useMemo(() => {
-    const agentMap = new Map<string, Row>()
-    const backendMap = new Map<string, Row>()
-    const sum = emptyRow('__total', '合计', '')
-    for (const t of tasks) {
-      const agent = agents.find((a) => a.id === t.agentId)
-      const ak = t.agentId ?? '_none'
-      if (!agentMap.has(ak)) agentMap.set(ak, emptyRow(ak, agent?.name ?? '（未指定队员）', t.backend, agent?.color))
-      const aRow = agentMap.get(ak)!
-      fold(aRow, t)
-      if (!backendMap.has(t.backend)) backendMap.set(t.backend, emptyRow(t.backend, t.backend, t.backend))
-      fold(backendMap.get(t.backend)!, t)
-      fold(sum, t)
-    }
-    return {
-      byAgent: [...agentMap.values()].sort((a, b) => b.costUsd - a.costUsd || b.total - a.total),
-      byBackend: [...backendMap.values()].sort((a, b) => b.total - a.total),
-      total: sum
-    }
-  }, [tasks, agents])
-
-  return (
-    <div className="usage-page">
-      <header className="page-header-bar">
-        <div className="detail-title-wrap">
-          <div className="page-title-row">
-            <Gauge size={16} className="page-icon" />
-            <h2 className="page-title">用量</h2>
-            <span className="page-desc">按队员与平台聚合 token、成本与耗时（完成时累计）</span>
-          </div>
-        </div>
-      </header>
-
-      <div className="usage-cards">
-        <div className="usage-card">
-          <span className="usage-kpi">{fmtTokens(total.inputTokens + total.outputTokens)}</span>
-          <span className="usage-label">tokens（入 {fmtTokens(total.inputTokens)} / 出 {fmtTokens(total.outputTokens)}）</span>
-        </div>
-        <div className="usage-card">
-          <span className="usage-kpi">{total.costUsd > 0 ? `$${total.costUsd.toFixed(2)}` : '—'}</span>
-          <span className="usage-label">估算成本</span>
-        </div>
-        <div className="usage-card">
-          <span className="usage-kpi">{total.total}</span>
-          <span className="usage-label">任务（{total.done} 完成 · {total.failed} 失败）</span>
-        </div>
-        <div className="usage-card">
-          <span className="usage-kpi">{total.wallMs ? fmtDuration(total.wallMs) : '—'}</span>
-          <span className="usage-label">累计执行时长</span>
-        </div>
-      </div>
-
-      <section className="usage-table-wrap">
-        <table className="usage-table">
-          <thead>
-            <tr>
-              <th>队员</th><th>平台</th><th>任务</th><th>完成/失败</th>
-              <th>输入 tok</th><th>输出 tok</th><th>成本</th><th>执行时长</th>
-            </tr>
-          </thead>
-          <tbody>
-            {byAgent.map((r) => (
-              <tr key={r.key}>
-                <td>
-                  <span className="agent-avatar xs" style={{ background: r.color ?? '#666' }}>{r.name.slice(0, 1)}</span> {r.name}
-                </td>
-                <td><span className="badge">{r.backend}</span></td>
-                <td>{r.total}</td>
-                <td className="mini">{r.done} / {r.failed}</td>
-                <td>{fmtTokens(r.inputTokens)}</td>
-                <td>{fmtTokens(r.outputTokens)}</td>
-                <td>{r.costUsd > 0 ? `$${r.costUsd.toFixed(2)}` : '—'}</td>
-                <td>{r.wallMs ? fmtDuration(r.wallMs) : '—'}</td>
-              </tr>
-            ))}
-            {byAgent.length === 0 && (
-              <tr><td colSpan={8} className="list-empty">暂无任务</td></tr>
-            )}
-          </tbody>
-        </table>
-      </section>
-
-      <section className="usage-table-wrap">
-        <div className="list-group-label">按平台</div>
-        <table className="usage-table">
-          <thead>
-            <tr><th>平台</th><th>任务</th><th>输入 tok</th><th>输出 tok</th><th>成本</th></tr>
-          </thead>
-          <tbody>
-            {byBackend.map((r) => (
-              <tr key={r.key}>
-                <td><span className="badge">{r.name}</span></td>
-                <td>{r.total}</td>
-                <td>{fmtTokens(r.inputTokens)}</td>
-                <td>{fmtTokens(r.outputTokens)}</td>
-                <td>{r.costUsd > 0 ? `$${r.costUsd.toFixed(2)}` : '—'}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
-    </div>
-  )
+  const [summary, setSummary] = useState<AnalyticsSummary | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [range, setRange] = useState<'7d' | '30d' | 'all'>('7d')
+  const since = useMemo(() => range === 'all' ? undefined : Date.now() - (range === '7d' ? 7 : 30) * 86_400_000, [range])
+  const refresh = async () => { setLoading(true); try { setSummary(await bridge.analytics.summary({ since })) } finally { setLoading(false) } }
+  useEffect(() => { void refresh(); const off = bridge.tasks.onUpdated(() => void refresh()); return off }, [since])
+  const total = summary?.totals ?? empty
+  const failureRate = total.runs ? Math.round(total.failed / total.runs * 100) : 0
+  return <div className="usage-page">
+    <header className="page-header-bar"><div className="page-title-row"><Gauge size={16} className="page-icon" /><h2 className="page-title">用量与错误</h2><span className="page-desc">token、成本、运行时长与失败情况的聚合统计。</span></div><button className="btn" onClick={() => void refresh()} disabled={loading}><RefreshCw size={14} className={loading ? 'spin' : ''} /> 刷新</button></header>
+    <div className="usage-range usage-range-top"><button className={range === '7d' ? 'active' : ''} onClick={() => setRange('7d')}>近 7 天</button><button className={range === '30d' ? 'active' : ''} onClick={() => setRange('30d')}>近 30 天</button><button className={range === 'all' ? 'active' : ''} onClick={() => setRange('all')}>全部</button></div>
+    {loading && !summary ? <div className="empty"><Gauge size={32} /><span>统计加载中…</span></div> : <>
+      <div className="usage-cards"><Kpi value={fmtTokens(total.inputTokens + total.outputTokens)} label={`tokens · 输入 ${fmtTokens(total.inputTokens)} / 输出 ${fmtTokens(total.outputTokens)}`} /><Kpi value={total.costUsd ? `$${total.costUsd.toFixed(2)}` : '—'} label="预估成本" /><Kpi value={String(total.runs)} label={`${total.completed} 次成功 · ${total.failed} 次失败`} /><Kpi value={`${failureRate}%`} label="失败率" danger={failureRate > 0} /></div>
+      <section className="usage-analytics"><div className="usage-analytics-head"><h3>失败构成</h3><span className="usage-subtle">{summary?.errors.length ?? 0} 类错误</span></div>{summary?.errors.length ? <div className="error-mix">{summary.errors.map((error) => <div className="error-mix-row" key={error.code}><span className="error-mix-title"><AlertTriangle size={13} />{error.title}</span><span className="error-mix-track"><i style={{ width: `${Math.max(5, error.count / Math.max(...summary.errors.map((item) => item.count)) * 100)}%` }} /></span><b>{error.count}</b><span className="mini">{error.retryable ? '可重试' : error.code}</span></div>)}</div> : <div className="list-empty">该时段没有失败记录。</div>}</section>
+      <section className="usage-analytics"><div className="usage-analytics-head"><h3>按运行时</h3><span className="usage-subtle">运行次数与 token 占比</span></div><AggregateRows rows={summary?.byBackend ?? []} total={total} /></section>
+      <section className="usage-table-wrap"><table className="usage-table"><thead><tr><th>队员</th><th>运行次数</th><th>成功</th><th>失败</th><th>Tokens</th><th>成本</th><th>用时</th></tr></thead><tbody>{summary?.byAgent.map((row) => <tr key={row.key}><td>{row.label}</td><td>{row.runs}</td><td>{row.completed}</td><td className={row.failed ? 'error-text' : ''}>{row.failed}</td><td>{fmtTokens(row.inputTokens + row.outputTokens)}</td><td>{row.costUsd ? `$${row.costUsd.toFixed(2)}` : '—'}</td><td>{row.durationMs ? fmtDuration(row.durationMs) : '—'}</td></tr>)}</tbody></table>{!summary?.byAgent.length && <div className="list-empty">该时段没有队员活动。</div>}</section>
+    </>}
+  </div>
 }
 
-/** 轻封装：任务列表 + 实时刷新（与 useTasks 一致，但避免双份请求竞争这里的聚合） */
-function bridgeTasks() {
-  const [tasks, setTasks] = useState<Task[]>([])
-  useEffect(() => {
-    let alive = true
-    const refresh = async () => {
-      const list = await bridge.tasks.list()
-      if (alive) setTasks(list)
-    }
-    void refresh()
-    const off = bridge.tasks.onUpdated(() => void refresh())
-    return () => {
-      alive = false
-      off()
-    }
-  }, [])
-  return { tasks }
-}
+function Kpi({ value, label, danger }: { value: string; label: string; danger?: boolean }) { return <div className="usage-card"><span className={`usage-kpi ${danger ? 'error-text' : ''}`}>{value}</span><span className="usage-label">{label}</span></div> }
+function AggregateRows({ rows, total }: { rows: Array<UsageAggregate & { key: string; label: string }>; total: UsageAggregate }) { return <div className="usage-model-list">{rows.length ? rows.map((row) => { const amount = row.inputTokens + row.outputTokens; const share = total.inputTokens + total.outputTokens ? Math.round(amount / (total.inputTokens + total.outputTokens) * 100) : 0; return <div className="usage-model-row" key={row.key}><span className="usage-model-name"><i />{row.label}</span><span className="usage-model-track"><i style={{ width: `${Math.max(share, 2)}%` }} /></span><b>{share}%</b><span>{fmtTokens(amount)}</span></div> }) : <div className="list-empty">该时段没有运行时活动。</div>}</div> }

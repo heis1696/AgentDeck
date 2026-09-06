@@ -3,6 +3,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { app } from 'electron'
+import { BACKEND_IDS, type BackendId } from '../shared/types'
 
 export interface Agent {
   id: string
@@ -22,6 +23,51 @@ export interface Agent {
   color: string
 }
 
+const BACKEND_SET = new Set<string>(BACKEND_IDS)
+
+/** Normalize persisted/user supplied agents before they cross the IPC boundary. */
+export function normalizeAgent(value: unknown, fallback?: Agent): Agent | null {
+  if (!value || typeof value !== 'object') return fallback ?? null
+  const raw = value as Partial<Agent>
+  const id = typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : fallback?.id
+  const name = typeof raw.name === 'string' ? raw.name.trim() : ''
+  const backend = typeof raw.backend === 'string' ? raw.backend.trim().toLowerCase() : ''
+  if (!id || !name || !BACKEND_SET.has(backend)) return fallback ?? null
+  const subordinates = Array.isArray(raw.subordinates)
+    ? [...new Set(raw.subordinates.filter((id): id is string => typeof id === 'string' && Boolean(id.trim()) && id !== raw.id).map((id) => id.trim()))]
+    : undefined
+  return {
+    id,
+    name,
+    backend: backend as BackendId,
+    ...(typeof raw.role === 'string' && raw.role.trim() ? { role: raw.role.trim() } : {}),
+    ...(typeof raw.systemPrompt === 'string' && raw.systemPrompt.trim() ? { systemPrompt: raw.systemPrompt.trim() } : {}),
+    ...(subordinates?.length ? { subordinates } : {}),
+    ...(typeof raw.model === 'string' && raw.model.trim() ? { model: raw.model.trim() } : {}),
+    ...(typeof raw.note === 'string' && raw.note.trim() ? { note: raw.note.trim() } : {}),
+    color: typeof raw.color === 'string' && raw.color.trim() ? raw.color.trim() : (fallback?.color ?? '#64748b')
+  }
+}
+
+export function normalizeAgents(values: unknown): Agent[] {
+  if (!Array.isArray(values)) return []
+  const out: Agent[] = []
+  const ids = new Set<string>()
+  for (const value of values) {
+    const agent = normalizeAgent(value)
+    if (!agent || ids.has(agent.id)) continue
+    ids.add(agent.id)
+    out.push(agent)
+  }
+  // Remove subordinate references to deleted agents and self references.
+  return out.map((agent) => ({
+    ...agent,
+    ...(agent.subordinates
+      ? { subordinates: agent.subordinates.filter((id) => id !== agent.id && ids.has(id)) }
+      : {})
+  }))
+}
+
 const file = () => path.join(app.getPath('userData'), 'agents.json')
 
 /** 预置队伍：每个可用后端一个默认队员 */
@@ -39,8 +85,8 @@ export function loadAgents(): Agent[] {
   let saved: Agent[] | null = null
   try {
     const raw = fs.readFileSync(file(), 'utf8')
-    const list = JSON.parse(raw)
-    if (Array.isArray(list) && list.length) saved = list
+    const list = normalizeAgents(JSON.parse(raw))
+    if (list.length) saved = list
   } catch {}
   if (!saved) return defaultAgents()
   // 迁移：补上保存文件里缺失的平台预置队员（如新增的 dsh）
@@ -50,6 +96,7 @@ export function loadAgents(): Agent[] {
 }
 
 export function saveAgents(agents: Agent[]): Agent[] {
+  agents = normalizeAgents(agents)
   fs.mkdirSync(path.dirname(file()), { recursive: true })
   fs.writeFileSync(file(), JSON.stringify(agents, null, 2))
   return agents

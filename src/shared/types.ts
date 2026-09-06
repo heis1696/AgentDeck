@@ -2,6 +2,144 @@
 
 export type TaskStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
 
+/** Backends shipped by the main process. Keep string compatibility at IPC boundaries. */
+export type BackendId = 'zcode' | 'claude' | 'codex' | 'opencode' | 'dsh'
+export const BACKEND_IDS: readonly BackendId[] = ['zcode', 'claude', 'codex', 'opencode', 'dsh']
+
+export function isTaskStatus(value: unknown): value is TaskStatus {
+  return value === 'queued' || value === 'running' || value === 'done' || value === 'failed' || value === 'cancelled'
+}
+
+/** Issue is the durable unit of work. A task is retained as the execution adapter during migration. */
+export type IssueStatus = 'backlog' | 'todo' | 'in_progress' | 'in_review' | 'done' | 'blocked' | 'cancelled'
+export type IssuePriority = 'urgent' | 'high' | 'medium' | 'low' | 'none'
+export type RunStatus = 'running' | 'completed' | 'cancelled' | 'error'
+export type RunTrigger = 'assignment' | 'mention' | 'autopilot' | 'manual'
+
+export interface IssueAssignee {
+  type: 'agent' | 'user'
+  id: string
+}
+
+export interface Issue {
+  id: string
+  identifier: string
+  title: string
+  description: string
+  status: IssueStatus
+  /** Human workflow override for terminal executions (for example in_review -> done). */
+  statusOverride?: IssueStatus
+  priority: IssuePriority
+  assignee?: IssueAssignee
+  parentIssueId?: string
+  projectId?: string
+  labels: string[]
+  dueDate?: number
+  position: number
+  createdBy: string
+  createdAt: number
+  updatedAt: number
+  /** Compatibility link to the task execution record. */
+  taskId: string
+}
+
+export interface Run {
+  id: string
+  issueId: string
+  taskId: string
+  agentId?: string
+  trigger: RunTrigger
+  prompt: string
+  status: RunStatus
+  startedAt?: number
+  finishedAt?: number
+  durationMs?: number
+  usage?: TaskUsage
+  transcriptEventCount: number
+}
+
+export interface Comment {
+  id: string
+  issueId: string
+  author: IssueAssignee
+  content: string
+  reactions: string[]
+  /** The execution that produced an agent report, when applicable. */
+  runId?: string
+  createdAt: number
+}
+
+export interface Notification {
+  id: string
+  userId: string
+  issueId: string
+  kind: 'reported' | 'mentioned' | 'status' | 'assigned'
+  runId?: string
+  read: boolean
+  createdAt: number
+}
+
+export interface Automation {
+  id: string
+  name: string
+  prompt: string
+  workdir: string
+  agentId?: string
+  scheduleMinutes: number
+  output: 'issue' | 'run_only'
+  enabled: boolean
+  createdAt: number
+  lastRunAt?: number
+  nextRunAt?: number
+}
+
+/** Runtime health snapshot exposed by the main process. A runtime maps to one
+ * registered backend/CLI provider and is intentionally independent from an
+ * agent, so several agents can share the same runtime. */
+export type RuntimeHealth = 'online' | 'offline' | 'degraded' | 'unknown'
+
+export interface RuntimeSnapshot {
+  id: string
+  label: string
+  backend: string
+  kind: 'local' | 'cloud'
+  health: RuntimeHealth
+  detail: string
+  version?: string
+  activeTaskCount: number
+  checkedAt: number
+}
+
+export interface UsageAggregate {
+  runs: number
+  completed: number
+  failed: number
+  cancelled: number
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+  costUsd: number
+  durationMs: number
+}
+
+export interface ErrorAggregate {
+  code: FailureInfo['code']
+  title: string
+  count: number
+  retryable: boolean
+  lastSeenAt?: number
+}
+
+export interface AnalyticsSummary {
+  since?: number
+  until: number
+  generatedAt: number
+  totals: UsageAggregate
+  byBackend: Array<UsageAggregate & { key: string; label: string }>
+  byAgent: Array<UsageAggregate & { key: string; label: string }>
+  errors: ErrorAggregate[]
+}
+
 /** 失败分类（main/failure.ts 产出；code 稳定，文案可变） */
 export interface FailureInfo {
   code:
@@ -41,6 +179,14 @@ export interface Task {
   backend: string
   /** 执行队员（agent 身份）；空 = 默认 zcode 队员 */
   agentId?: string
+  /** 触发这次执行的产品动作，映射到 Issue 的 Run。 */
+  trigger?: RunTrigger
+  /** Durable issue that owns this execution. Added in the issue/run migration. */
+  issueId?: string
+  /** Run-only automation executions stay in task logs without creating an Issue. */
+  suppressIssue?: boolean
+  /** Unique execution instance used to preserve Run history across retries/follow-ups. */
+  runId?: string
   /** 委派子任务专用：指向领队任务 */
   parentTaskId?: string
   /** 委派子任务专用：序号（展示用） */
