@@ -50,6 +50,7 @@ export function createCodexBackend(): AgentBackend {
       args,
       cwd: workdir,
       onLine: (j) => {
+        events.onHeartbeat?.() // 进程有任何输出即进展（含未映射成事件的行）：看门狗续命
         if (j.type === 'thread.started') {
           sessionId = j.thread_id ?? sessionId
           emit({ kind: 'status', text: `codex ${sessionId.slice(0, 8)}…` })

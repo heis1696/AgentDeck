@@ -238,7 +238,8 @@ export async function runDelegationLoop(
         backend: target.backend,
         ...(target.id ? { agentId: target.id } : {}),
         parentTaskId: taskId,
-        workerIndex: allChildren.length + childIds.length + 1
+        workerIndex: allChildren.length + childIds.length + 1,
+        titleAuto: true
       })
       childIds.push(child.id)
       runner.enqueue(store.get(child.id)!)

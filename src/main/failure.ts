@@ -62,9 +62,9 @@ const RULES: Rule[] = [
   },
   {
     code: 'timeout',
-    re: /超时|timed?\s?out|等待回合|30 分钟|120s|无输出/i,
+    re: /超时|timed?\s?out|等待回合|30 分钟|120s|无输出|无进展/i,
     title: '执行超时',
-    hint: '模型长时间无进展；可直接重试；频繁出现请缩小任务范围。',
+    hint: '长时间（10 分钟）无任何进展才触发，仍在输出的长任务不会被打断；可直接重试。',
     retryable: true
   },
   {

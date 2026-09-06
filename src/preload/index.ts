@@ -69,7 +69,7 @@ const api = {
   issues: {
     list: (): Promise<Issue[]> => ipcRenderer.invoke('issues:list'),
     get: (id: string): Promise<Issue | null> => ipcRenderer.invoke('issues:get', id),
-    create: (input: { title: string; description: string; workdir: string; agentId?: string; backend?: string; handoff?: string; startNow?: boolean; trigger?: RunTrigger }): Promise<Issue> => ipcRenderer.invoke('issues:create', input),
+    create: (input: { title: string; description: string; workdir: string; agentId?: string; backend?: string; handoff?: string; startNow?: boolean; trigger?: RunTrigger; titleAuto?: boolean }): Promise<Issue> => ipcRenderer.invoke('issues:create', input),
     runs: (id: string): Promise<Run[]> => ipcRenderer.invoke('issues:runs', id),
     comments: (id: string): Promise<Comment[]> => ipcRenderer.invoke('issues:comments', id),
     update: (id: string, patch: { priority?: IssuePriority; labels?: string[]; dueDate?: number; status?: IssueStatus }): Promise<Issue | null> => ipcRenderer.invoke('issues:update', id, patch),
@@ -92,6 +92,11 @@ const api = {
   settings: {
     get: (): Promise<AppSettings> => ipcRenderer.invoke('settings:get'),
     set: (patch: Partial<AppSettings>): Promise<AppSettings> => ipcRenderer.invoke('settings:set', patch),
+    onUpdated: (cb: (s: AppSettings) => void): (() => void) => {
+      const listener = (_e: unknown, s: AppSettings) => cb(s)
+      ipcRenderer.on('settings:updated', listener)
+      return () => ipcRenderer.removeListener('settings:updated', listener)
+    },
     probe: (): Promise<{ ok: boolean; detail: string; searched: string[] }> => ipcRenderer.invoke('settings:probe')
   },
   pickDir: (): Promise<string> => ipcRenderer.invoke('dialog:pick-dir'),

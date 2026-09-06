@@ -18,6 +18,20 @@ function getWindows(): { send: (ch: string, v: unknown) => void }[] {
   }
 }
 
+/**
+ * 回合空转上限：等待终态期间「没有任何事件」（文本增量/工具/状态）达到该时长才判超时。
+ * 有事件即续命——真实 agent 一个回合跑十几分钟很正常，固定总时长会把还在工作的回合误杀。
+ * 与一次性 CLI 后端（cli-common 10 分钟无输出看门狗）语义对齐。
+ * 可用 AGENTDECK_TURN_IDLE_MS 覆盖（测试加速用）。
+ */
+const TURN_IDLE_TIMEOUT_MS = Number(process.env.AGENTDECK_TURN_IDLE_MS) > 0
+  ? Number(process.env.AGENTDECK_TURN_IDLE_MS)
+  : 10 * 60 * 1000
+const turnTimeoutError = (): BackendTurnResult =>
+  ({ ok: false, response: '', error: `回合超时（${Math.round(TURN_IDLE_TIMEOUT_MS / 60000)} 分钟无进展，已停止本回合）` })
+/** 后端连接已死的特征：命中后丢弃内存会话、降级 resume 重建（不再需要重启应用） */
+const SESSION_DEAD_RE = /连接已关闭|进程退出|EPIPE|ENOTCONN|ECONNRESET|ECONNREFUSED|disconnected/i
+
 export class TaskRunner {
   private store: TaskStore
   private backends: Map<string, AgentBackend>
@@ -31,6 +45,10 @@ export class TaskRunner {
   private runningWorkers = 0
   private getTeam: (() => AgentLike[]) | null = null
   private pumping = false
+  /** 回合空转看门狗：等待终态期间任务有新事件即续命，长时间无进展才判超时 */
+  private turnWatchdogs = new Map<string, { timer: NodeJS.Timeout; expire: () => void }>()
+  /** 回合代号：防止已放弃回合的迟到终态误 resolve 新回合的等待 */
+  private turnGen = new Map<string, number>()
   private readonly onTaskChanged?: (task: Task) => void
 
   constructor(
@@ -70,9 +88,11 @@ export class TaskRunner {
   private makeEvents(taskId: string, onTurnEnd?: (r: BackendTurnResult) => void) {
     return {
       onEvent: (e: Omit<TaskEvent, 'seq'>) => {
+        this.touchWatchdog(taskId)
         const full = this.store.appendEvent(taskId, e)
         if (full) this.pushEvent(taskId, full)
       },
+      onHeartbeat: () => this.touchWatchdog(taskId),
       onTurnEnd: (r: BackendTurnResult) => {
         onTurnEnd?.(r)
         const waiter = this.pendingResume.get(taskId)
@@ -115,6 +135,60 @@ export class TaskRunner {
     this.pendingPermissions.delete(key)
     p.resolve({ optionId, decision })
     return { ok: true }
+  }
+
+  /**
+   * 空转哨兵：护送一个回合的等待。到点先停掉进行中的回合（会话仍可续聊，不留
+   * 僵尸 agent 继续在后台跑），再以超时错误裁决等待方。
+   * 在 backend.start 之前就可武装：会话尚未建立时用启动句柄硬杀，握手挂死同样
+   * 判败——否则任务会永久卡在 running 并占住并发槽，只能重启应用。
+   */
+  private idleSentinel(taskId: string, onFire?: () => void): { timeout: Promise<BackendTurnResult>; cancel: () => void } {
+    this.disarmWatchdog(taskId)
+    let fire: () => void = () => {}
+    const timeout = new Promise<BackendTurnResult>((resolve) => {
+      fire = () => resolve(turnTimeoutError())
+    })
+    const expire = () => {
+      this.turnWatchdogs.delete(taskId)
+      onFire?.()
+      const session = this.sessions.get(taskId)
+      if (session) {
+        void session.stop().catch(() => {})
+      } else {
+        this.launchHandles.get(taskId)?.stop()
+      }
+      fire()
+    }
+    const timer = setTimeout(expire, TURN_IDLE_TIMEOUT_MS)
+    this.turnWatchdogs.set(taskId, { timer, expire })
+    return { timeout, cancel: () => this.disarmWatchdog(taskId) }
+  }
+  /** 任务有新事件（任何种类）即视为有进展：看门狗重新计时 */
+  private touchWatchdog(taskId: string) {
+    const w = this.turnWatchdogs.get(taskId)
+    if (!w) return
+    clearTimeout(w.timer)
+    w.timer = setTimeout(w.expire, TURN_IDLE_TIMEOUT_MS)
+  }
+  private disarmWatchdog(taskId: string) {
+    const w = this.turnWatchdogs.get(taskId)
+    if (!w) return
+    clearTimeout(w.timer)
+    this.turnWatchdogs.delete(taskId)
+  }
+  private bumpTurnGen(taskId: string) {
+    const gen = (this.turnGen.get(taskId) ?? 0) + 1
+    this.turnGen.set(taskId, gen)
+    return gen
+  }
+
+  /** 关闭并移除内存会话（容错）：防止放弃的会话继续在后台跑、往任务日志里交错写事件 */
+  closeSession(taskId: string) {
+    const s = this.sessions.get(taskId)
+    if (!s) return
+    this.sessions.delete(taskId)
+    void s.close().catch(() => {})
   }
 
   /** 回合成功后的收尾：取最终结果 + git 快照 + 用量聚合 + 状态落盘 */
@@ -214,18 +288,56 @@ export class TaskRunner {
     return finalText
   }
 
-  /** Send one follow-up and return the exact turn payload, including prior messages. */
-  async sendTurn(taskId: string, session: BackendSession, content: string): Promise<BackendTurnResult> {
-    const turn = new Promise<BackendTurnResult>((resolve) => {
-      this.pendingResume.set(taskId, resolve)
-    })
+  /**
+   * 隐藏回合：让 agent 根据执行内容重起一个简短标题。
+   * 调用方需先把事件管道切到静默（titleMode），失败静默返回 false，不影响任务本体。
+   */
+  private async retitleByAgent(taskId: string, session: BackendSession): Promise<boolean> {
     try {
-      await session.send(content)
-      return await Promise.race([
-        turn,
-        new Promise<BackendTurnResult>((res) => setTimeout(() => res({ ok: false, response: '', error: '回合超时（120s）' }), 120000))
-      ])
+      const r = await this.sendTurn(
+        taskId,
+        session,
+        '【系统】请根据这次任务的执行内容，用不超过 24 个字重起一个简短标题（概括做了什么，不要复述指令原文）。只输出标题本身：不要编号、引号、书名号或任何解释。'
+      )
+      if (!r.ok) return false
+      const line = r.response
+        .split(/\r?\n/)
+        .map((s) => s.replace(/^[#>*\-\s]+/, '').replace(/["'「」《》`*]/g, '').trim())
+        .find((s) => s.length > 0)
+      if (!line) return false
+      this.store.update(taskId, { title: line.slice(0, 60), titleAuto: false })
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Send one follow-up and return the exact turn payload, including prior messages.
+   * 等待全程由空转看门狗护送：有事件就续命；真超时时先停回合再返回错误，
+   * 后端不会留一个还在跑的僵尸回合跟下一次操作抢会话。
+   */
+  async sendTurn(taskId: string, session: BackendSession, content: string): Promise<BackendTurnResult> {
+    const gen = this.bumpTurnGen(taskId)
+    let settleTurn: (v: BackendTurnResult) => void = () => {}
+    const turn = new Promise<BackendTurnResult>((resolve) => {
+      settleTurn = resolve
+      this.pendingResume.set(taskId, (v) => {
+        if ((this.turnGen.get(taskId) ?? 0) !== gen) return // 已放弃回合的迟到终态：丢弃，不污染新回合
+        resolve(v)
+      })
+    })
+    let idleFired = false
+    const { timeout, cancel } = this.idleSentinel(taskId, () => { idleFired = true })
+    try {
+      // send 不阻塞裁决：立即失败（连接已死等）要马上浮出，不能干等空转上限；
+      // 看门狗触发的 stop 会让 send 以 reject 收尾，统一按超时语义上报
+      void session.send(content).catch((e) => {
+        settleTurn(idleFired ? turnTimeoutError() : { ok: false, response: '', error: e instanceof Error ? e.message : String(e) })
+      })
+      return await Promise.race([turn, timeout])
     } finally {
+      cancel()
       this.pendingResume.delete(taskId)
     }
   }
@@ -268,34 +380,69 @@ ${task.handoff}`
       if (block) prompt = `${prompt}\n\n${block}`
     }
 
+    // 看门狗在 backend.start 之前武装：握手/建会话阶段挂死同样按空转判败并可硬杀，
+    // 不再永久卡住 running 状态与并发槽；启动期间的线级心跳照常续命
+    const sentinel = this.idleSentinel(taskId)
     try {
-      const session = await backend.start({
-        prompt,
-        workdir: task.workdir,
-        mode: this.opts().mode,
-        events: this.makeEvents(taskId, (r) => firstTurnDone?.(r))
+      // 标题回合的事件不进对话流（text/final/usage 静默），onTurnEnd 照常驱动 sendTurn
+      let titleMode = false
+      const baseEvents = this.makeEvents(taskId, (r) => firstTurnDone?.(r))
+      const session = await Promise.race([
+        backend.start({
+          prompt,
+          workdir: task.workdir,
+          mode: this.opts().mode,
+          events: {
+            ...baseEvents,
+            onEvent: (e) => {
+              this.touchWatchdog(taskId) // 静默事件（标题回合增量）不进日志，但同样是进展信号
+              if (titleMode && e.kind !== 'error') return
+              baseEvents.onEvent(e)
+            }
+          }
+        }).then((s) => ({ session: s })),
+        sentinel.timeout.then((r) => ({ timeout: r }))
+      ]).then((outcome) => {
+        if ('timeout' in outcome) throw new Error(outcome.timeout.error)
+        return outcome.session
       })
       this.sessions.set(taskId, session)
       this.store.update(taskId, { sessionId: session.sessionId })
       this.pushTask(taskId)
 
-      const r = await firstTurnPromise
+      // 首回合由同一哨兵继续护送：长时间无任何进展先停回合再判失败，不再无限等待
+      let r: BackendTurnResult
+      try {
+        r = await Promise.race([firstTurnPromise, sentinel.timeout])
+      } finally {
+        sentinel.cancel()
+      }
       if (r.ok) {
+        // 自动派生标题的任务：让 agent 总结重起标题（隐藏回合；worker/dsh 除外——前者会与回灌争用会话，后者不支持续聊）
+        if (task.titleAuto && !task.parentTaskId && task.backend !== 'dsh') {
+          titleMode = true
+          const titled = await this.retitleByAgent(taskId, session)
+          titleMode = false
+          if (titled) this.pushTask(taskId)
+        }
         // 领队：进入委派循环（截获 <delegate> 标记 → 并行子任务 → 回灌 → 继续）
         // 0.7.0 起 worker 也可以是子领队（带 subordinates 即生效；delegate 内有防环与层级/预算闸）
         const finalText = await this.completeTurn(taskId, session, r)
         if (this.opts().notify) this.notify(task, '完成', finalText)
       } else {
+        this.closeSession(taskId)
         this.failTask(taskId, r.error || '回合失败')
         this.maybeAutoRetry(taskId)
         if (this.opts().notify) this.notify(task, '失败', r.error || '')
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
+      this.closeSession(taskId)
       this.failTask(taskId, msg)
       this.maybeAutoRetry(taskId)
       if (this.opts().notify) this.notify(task, '失败', msg)
     } finally {
+      sentinel.cancel()
       this.store.flushEvents(taskId)
       this.launchHandles.delete(taskId)
       this.pushTask(taskId)
@@ -367,57 +514,89 @@ ${task.handoff}`
     if (!message) return { ok: false, error: '追问不能为空' }
     if (task.status === 'running') return { ok: false, error: '任务正在运行' }
     if (task.status !== 'done' && task.status !== 'failed') return { ok: false, error: '任务尚未完成' }
-    let session = this.sessions.get(taskId)
     const backend = this.backends.get(task.backend)
     if (!backend) return { ok: false, error: '后端不可用' }
+    if (!this.sessions.get(taskId) && !task.sessionId) return { ok: false, error: '无会话可恢复' }
     this.recordUser(taskId, message)
 
-    if (!session) {
-      // 应用重启后 session 丢失：用 zcode 的 session/resume 恢复
-      if (!task.sessionId) return { ok: false, error: '无会话可恢复' }
+    const beginRun = () => {
       this.store.update(taskId, { status: 'running', startedAt: Date.now(), runId: this.newRunId(taskId), endedAt: undefined, error: undefined, failure: undefined })
       this.pushTask(taskId)
+    }
+
+    // 1) 内存会话健在：直接续聊
+    let liveSession = this.sessions.get(taskId)
+    if (liveSession) {
+      beginRun()
       try {
-        const firstTurn = new Promise<BackendTurnResult>((resolve) => {
-          this.pendingResume.set(taskId, resolve)
+        const r = await this.sendTurn(taskId, liveSession, message)
+        if (!r.ok) throw new Error(r.error || '续聊回合失败')
+        const finalText = await this.completeTurn(taskId, liveSession, r)
+        if (this.opts().notify) this.notify(task, '完成', finalText)
+        return { ok: true }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        if (!SESSION_DEAD_RE.test(msg)) {
+          this.failTask(taskId, msg)
+          this.pushTask(taskId)
+          return { ok: false, error: msg }
+        }
+        // 后端连接已死（进程退出/管道断开）：丢弃内存会话，走下面的 resume 重建——
+        // 以前这种情况只能重启应用，现在等价于把重启后的恢复路径内置
+        this.closeSession(taskId)
+        liveSession = undefined
+      }
+    }
+
+    // 2) resume 路径：内存会话丢失（应用重启/连接死亡）时按 sessionId 重建
+    if (!task.sessionId) {
+      const msg = '无会话可恢复'
+      this.failTask(taskId, msg)
+      this.pushTask(taskId)
+      return { ok: false, error: msg }
+    }
+    beginRun()
+    let resumeSession: BackendSession
+    // 看门狗在 backend.start 之前武装：resume 重建阶段挂死同样按空转判败，
+    // 不永久卡住 running 状态（此前只能重启应用）
+    const sentinel = this.idleSentinel(taskId)
+    try {
+      const gen = this.bumpTurnGen(taskId)
+      const turn = new Promise<BackendTurnResult>((resolve) => {
+        this.pendingResume.set(taskId, (v) => {
+          if ((this.turnGen.get(taskId) ?? 0) !== gen) return
+          resolve(v)
         })
-        session = await backend.start({
+      })
+      resumeSession = await Promise.race([
+        backend.start({
           prompt: message,
           workdir: task.workdir,
           mode: this.opts().mode,
           resumeSessionId: task.sessionId,
           events: this.makeEvents(taskId)
-        })
-        this.sessions.set(taskId, session)
-        this.store.update(taskId, { sessionId: session.sessionId })
-        this.pushTask(taskId)
-        const r = await Promise.race([
-          firstTurn,
-          new Promise<BackendTurnResult>((res) =>
-            setTimeout(() => res({ ok: false, response: '', error: 'resume 超时（120s）' }), 120000)
-          )
-        ])
+        }).then((s) => ({ session: s })),
+        sentinel.timeout.then((r) => ({ timeout: r }))
+      ]).then((outcome) => {
+        if ('timeout' in outcome) throw new Error(outcome.timeout.error)
+        return outcome.session
+      })
+      this.sessions.set(taskId, resumeSession)
+      this.store.update(taskId, { sessionId: resumeSession.sessionId })
+      this.pushTask(taskId)
+      try {
+        const r = await Promise.race([turn, sentinel.timeout])
         if (!r.ok) throw new Error(r.error || '续聊回合失败')
-        const finalText = await this.completeTurn(taskId, session, r)
+        const finalText = await this.completeTurn(taskId, resumeSession, r)
         if (this.opts().notify) this.notify(task, '完成', finalText)
         return { ok: true }
-      } catch (e) {
+      } finally {
+        sentinel.cancel()
         this.pendingResume.delete(taskId)
-        const msg = e instanceof Error ? e.message : String(e)
-        this.failTask(taskId, msg)
-        this.pushTask(taskId)
-        return { ok: false, error: msg }
       }
-    }
-    this.store.update(taskId, { status: 'running', startedAt: Date.now(), runId: this.newRunId(taskId), endedAt: undefined, error: undefined, failure: undefined })
-    this.pushTask(taskId)
-    try {
-      const r = await this.sendTurn(taskId, session, message)
-      if (!r.ok) throw new Error(r.error || '续聊回合失败')
-      const finalText = await this.completeTurn(taskId, session, r)
-      if (this.opts().notify) this.notify(task, '完成', finalText)
-      return { ok: true }
     } catch (e) {
+      this.pendingResume.delete(taskId)
+      this.disarmWatchdog(taskId)
       const msg = e instanceof Error ? e.message : String(e)
       this.failTask(taskId, msg)
       this.pushTask(taskId)
@@ -457,6 +636,7 @@ ${task.handoff}`
       pending.resolve({ decision: 'deny' })
       this.pendingPermissions.delete(key)
     }
+    this.disarmWatchdog(taskId)
     this.store.flushEvents(taskId)
     return { ok: true }
   }

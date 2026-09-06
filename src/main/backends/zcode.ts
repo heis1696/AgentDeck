@@ -191,6 +191,9 @@ class ZcodeConnection {
       )
       for (const [, p] of this.pending) p.reject(err)
       this.pending.clear()
+      // 合成退出通知：让会话层把进行中的回合以错误收尾——否则调用方（runner）
+      // 等的事件永远不会来，任务会永久卡在 running
+      for (const h of [...this.handlers]) h({ method: 'zcode.exit', params: { code, stderr: detail.slice(-400) } })
     })
   }
 
@@ -328,6 +331,9 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
       const cwd = workdir && fs.existsSync(workdir) ? workdir : os.tmpdir()
       const node = resolveNodeRuntime(nodePath || undefined)
       const conn = new ZcodeConnection(node.path, bundle, cwd)
+      // 启动即注册硬停句柄：session/create 等握手请求挂死时（进程半死/连接无响应），
+      // 调用方在 start 返回前也有手段杀掉进程，不会永久占住任务与并发槽
+      events.onLaunch?.({ stop: () => conn.kill() })
       const emit = (e: Omit<TaskEvent, 'seq' | 'ts'>) => events.onEvent({ ...e, ts: Date.now() })
 
       let turnResolver: ((v: { response: string; ok: boolean; error?: string }) => void) | null = null
@@ -335,6 +341,22 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
       /** 最后一条 assistant 消息：自上一次工具活动以来累计的文本增量 */
       let lastSegment = ''
       let lastTurnEnd: { response: string; ok: boolean; error?: string } | null = null
+      /** 本回合是否仍在进行（send 串行化判断用） */
+      let turnActive = false
+      /**
+       * send 串行化期间：正在停掉被放弃的旧回合。它的收尾终态不再外发
+       * （final/onTurnEnd 都不发），否则会立刻 resolve 新回合在 runner 侧的
+       * 等待、并把旧回合的终段混进新回合的事件流。
+       */
+      let swallowingStaleTurnEnd = false
+      /** 等待旧回合终态的回调（send 串行化时挂起，终态到达即放行） */
+      const turnEndWaiters = new Set<() => void>()
+      const flushTurnEndWaiters = () => {
+        if (!turnEndWaiters.size) return
+        const waiters = [...turnEndWaiters]
+        turnEndWaiters.clear()
+        for (const w of waiters) w()
+      }
       /** 流式看门狗：模型偶发无限生成循环（实测 10 分钟吐 1.5MB），超限强制停止 */
       let textOverflowed = false
       const TEXT_LIMIT = 300_000
@@ -358,16 +380,33 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
         const scan = mergeTurnTexts(full, currentText)
         const ended = { ...r, response, delegationText: scan || undefined }
         lastTurnEnd = ended
-        emit({ kind: 'final', text: response || r.error || '' })
+        turnActive = false
         if (turnResolver) {
           const res = turnResolver
           turnResolver = null
           res(ended)
         }
+        flushTurnEndWaiters()
+        if (swallowingStaleTurnEnd) return
+        emit({ kind: 'final', text: response || r.error || '' })
         events.onTurnEnd(ended)
       }
 
       conn.onMessage((m) => {
+        // 任何线级消息都是进展信号（含被静默的思考增量/遥测/资源采样）：
+        // 模型长时间思考、子代理在后台跑等静默阶段靠它给上层看门狗续命，避免误判超时
+        events.onHeartbeat?.()
+        // 连接层合成的进程退出通知：回合仍在途时以错误收尾（lastTurnEnd 已置则本就无人在等）
+        if (m.method === 'zcode.exit') {
+          if (!lastTurnEnd) {
+            handleTurnEnd({
+              response: '',
+              ok: false,
+              error: `zcode app-server 进程退出${m.params?.code != null ? ` (code ${m.params.code})` : ''}${m.params?.stderr ? `：${String(m.params.stderr).slice(0, 300)}` : ''}`
+            })
+          }
+          return
+        }
         // 服务端 → 客户端 请求
         if (m.method === 'session/requestRuntimePreferences' && m.id !== undefined) {
           conn.respond(m.id, {
@@ -564,26 +603,67 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
       lastSegment = ''
       lastTurnEnd = null
       textOverflowed = false
+      turnActive = true
       await conn.request('session/send', { sessionId, content: prompt })
 
       const session: BackendSession = {
         sessionId,
         async send(content: string) {
+          // 串行化：上一回合仍在跑（调用方已放弃等待/被中断）时，先停掉它并等终态，
+          // 否则两个回合的流式事件与终态会互相错配——旧终态误 resolve 新等待、
+          // 新终态又被 lastTurnEnd 去重守卫吞掉
+          if (turnActive) {
+            swallowingStaleTurnEnd = true
+            try {
+              try {
+                await conn.request('session/stop', { sessionId })
+              } catch {}
+              await new Promise<void>((resolve) => {
+                const giveUp = setTimeout(resolve, 15000)
+                turnEndWaiters.add(() => {
+                  clearTimeout(giveUp)
+                  resolve()
+                })
+              })
+              turnActive = false
+            } finally {
+              swallowingStaleTurnEnd = false
+            }
+          }
           currentText = ''
           lastSegment = ''
           lastTurnEnd = null
           textOverflowed = false
+          turnActive = true
+          let timer: NodeJS.Timeout | undefined
           const p = new Promise<void>((resolve, reject) => {
-            const timer = setTimeout(() => {
+            timer = setTimeout(() => {
               turnResolver = null
+              turnActive = false
+              flushTurnEndWaiters()
               reject(new Error('等待回合结束超时（30 分钟）'))
             }, 30 * 60 * 1000)
             turnResolver = (r) => {
               clearTimeout(timer)
+              turnActive = false
+              flushTurnEndWaiters()
               r.ok ? resolve() : reject(new Error(r.error || '回合失败'))
             }
           })
-          await conn.request('session/send', { sessionId, content })
+          // 调用方可能已放弃等待（runner 超时/连接死亡时 send 提前失败或被中断），
+          // 这时 p 的 rejection 无人接——不挂兜底会以 unhandled rejection 打崩主进程
+          p.catch(() => {})
+          try {
+            await conn.request('session/send', { sessionId, content })
+          } catch (e) {
+            // send 请求本身失败：撤掉本回合的等待句柄——悬挂的 30 分钟定时器
+            // 之后触发时会误杀新回合的 turnResolver
+            if (timer) clearTimeout(timer)
+            turnResolver = null
+            turnActive = false
+            flushTurnEndWaiters()
+            throw e
+          }
           await p
         },
         async stop() {

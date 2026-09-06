@@ -50,6 +50,7 @@ export function createOpencodeBackend(): AgentBackend {
       args,
       cwd: workdir || process.cwd(),
       onLine: (j) => {
+        events.onHeartbeat?.() // 进程有任何输出即进展（含未映射成事件的行）：看门狗续命
         if (!sessionId && j.sessionID) {
           sessionId = String(j.sessionID)
           emit({ kind: 'status', text: `opencode ${sessionId.slice(0, 10)}…` })

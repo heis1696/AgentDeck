@@ -211,6 +211,8 @@ export interface Task {
   handoff?: string
   /** 暂不启动：创建后停放在队列外，等用户手动开始 */
   parked?: boolean
+  /** 标题由 prompt 首行自动派生（非用户拟定）：首轮完成后由 agent 总结重起，重命名后失效 */
+  titleAuto?: boolean
   /** zcode 会话 id，用于续聊 */
   sessionId?: string
   /** 完成时抓取的 git 改动 */

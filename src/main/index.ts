@@ -94,7 +94,7 @@ app.whenReady().then(() => {
   }), (task) => publishIssueUpdate(task))
   runner.attachTeam(() => agents)
 
-  type CreateInput = { title: string; prompt: string; workdir: string; backend?: string; agentId?: string; handoff?: string; startNow?: boolean; suppressIssue?: boolean; issueId?: string }
+  type CreateInput = { title: string; prompt: string; workdir: string; backend?: string; agentId?: string; handoff?: string; startNow?: boolean; suppressIssue?: boolean; issueId?: string; titleAuto?: boolean }
   /** Single creation path for user issues, automation runs, and legacy tasks. */
   const createTask = (input: CreateInput, trigger: RunTrigger = 'assignment') => {
     const agent = agents.find((a) => a.id === input.agentId)
@@ -109,7 +109,8 @@ app.whenReady().then(() => {
       ...(input.handoff?.trim() ? { handoff: input.handoff.trim() } : {}),
       ...(input.startNow === false ? { parked: true } : {}),
       ...(input.suppressIssue ? { suppressIssue: true } : {}),
-      ...(input.issueId ? { issueId: input.issueId } : {})
+      ...(input.issueId ? { issueId: input.issueId } : {}),
+      ...(input.titleAuto ? { titleAuto: true } : {})
     })
     if (!task.suppressIssue && !task.issueId) store.update(task.id, { issueId: `iss_${task.id}` })
     issueStore.sync(store.list())
@@ -160,8 +161,8 @@ app.whenReady().then(() => {
   // ---- Issue / Run projection (the product model for new UI) ----
   ipcMain.handle('issues:list', () => { issueStore.sync(store.list()); return issueStore.list() })
   ipcMain.handle('issues:get', (_e, id: string) => { issueStore.sync(store.list()); return issueStore.get(id) ?? null })
-  ipcMain.handle('issues:create', (_e, input: { title: string; description: string; workdir: string; agentId?: string; backend?: string; handoff?: string; startNow?: boolean; trigger?: RunTrigger }) => {
-    const task = createTask({ title: input.title, prompt: input.description, workdir: input.workdir, agentId: input.agentId, backend: input.backend, handoff: input.handoff, startNow: input.startNow }, input.trigger ?? 'assignment')
+  ipcMain.handle('issues:create', (_e, input: { title: string; description: string; workdir: string; agentId?: string; backend?: string; handoff?: string; startNow?: boolean; trigger?: RunTrigger; titleAuto?: boolean }) => {
+    const task = createTask({ title: input.title, prompt: input.description, workdir: input.workdir, agentId: input.agentId, backend: input.backend, handoff: input.handoff, startNow: input.startNow, titleAuto: input.titleAuto }, input.trigger ?? 'assignment')
     if (input.startNow === false) publishIssueUpdate(task)
     else runner.enqueue(task)
     const issue = issueStore.get(task.issueId ?? `iss_${task.id}`)
@@ -268,6 +269,8 @@ app.whenReady().then(() => {
     const t = store.get(id)
     if (!t) return { ok: false, error: '任务不存在' }
     if (t.status === 'running' || t.status === 'queued') return { ok: false, error: '任务已在队列/运行中' }
+    // 关掉可能还挂着的前一会话：重跑要开新会话，旧会话若还在跑会继续往同一任务日志交错写事件
+    runner.closeSession(id)
     store.update(id, { status: 'queued', error: undefined, failure: undefined, result: undefined, sessionId: undefined, attempt: undefined, runId: undefined })
     runner.enqueue(store.get(id)!)
     issueStore.sync(store.list())
@@ -291,7 +294,7 @@ app.whenReady().then(() => {
   ipcMain.handle('tasks:rename', (_e, id: string, title: string) => {
     const name = (title ?? '').trim()
     if (!name) return null
-    store.update(id, { title: name.slice(0, 120) })
+    store.update(id, { title: name.slice(0, 120), titleAuto: false })
     const next = store.get(id)
     if (next) runner.pushTask(id)
     return next ?? null
@@ -327,7 +330,10 @@ app.whenReady().then(() => {
   ipcMain.handle('settings:get', () => settings)
   ipcMain.handle('settings:set', (_e, patch: Partial<AppSettings>) => {
     settings = { ...settings, ...patch }
-    return saveSettings(settings)
+    const saved = saveSettings(settings)
+    // 广播到所有窗口：App 与设置页各持一份 useSettings 实例，靠事件同步（否则主题切换等不生效）
+    BrowserWindow.getAllWindows().forEach((w) => w.webContents.send('settings:updated', saved))
+    return saved
   })
   ipcMain.handle('settings:probe', async () => {
     const r = await zcode.probe()

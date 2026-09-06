@@ -28,7 +28,7 @@ interface Bridge {
   issues: {
     list: () => Promise<Issue[]>
     get: (id: string) => Promise<Issue | null>
-    create: (input: { title: string; description: string; workdir: string; agentId?: string; backend?: string; handoff?: string; startNow?: boolean; trigger?: RunTrigger }) => Promise<Issue>
+    create: (input: { title: string; description: string; workdir: string; agentId?: string; backend?: string; handoff?: string; startNow?: boolean; trigger?: RunTrigger; titleAuto?: boolean }) => Promise<Issue>
     runs: (id: string) => Promise<Run[]>
     comments: (id: string) => Promise<Comment[]>
     update: (id: string, patch: { priority?: IssuePriority; labels?: string[]; dueDate?: number; status?: IssueStatus }) => Promise<Issue | null>
@@ -47,6 +47,7 @@ interface Bridge {
   settings: {
     get: () => Promise<AppSettings>
     set: (patch: Partial<AppSettings>) => Promise<AppSettings>
+    onUpdated: (cb: (s: AppSettings) => void) => () => void
     probe: () => Promise<{ ok: boolean; detail: string; searched: string[] }>
   }
   pickDir: () => Promise<string>
@@ -117,6 +118,8 @@ export function useSettings() {
   const [settings, setSettings] = useState<AppSettings | null>(null)
   useEffect(() => {
     bridge.settings.get().then(setSettings)
+    // 订阅广播：App 与设置页各持一份实例，任何一处更新都要同步到全部实例（主题切换等）
+    return bridge.settings.onUpdated(setSettings)
   }, [])
   const update = useCallback(async (patch: Partial<AppSettings>) => {
     setSettings(await bridge.settings.set(patch))

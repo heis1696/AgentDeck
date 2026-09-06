@@ -370,7 +370,10 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
               </button>
             </h1>
           )}
-          <p className="detail-prompt">{task.prompt}</p>
+          <details className="detail-prompt">
+            <summary>原始指令</summary>
+            <p>{task.prompt}</p>
+          </details>
           <div className="detail-meta">
             <span className={`status-chip status-${task.status}`}>{STATUS_META[task.status]}</span>
             {turnActive && <span className="active-duration" aria-live="polite">工作中 · {fmtDuration(Date.now() - (task.startedAt ?? Date.now()))}</span>}

@@ -14,6 +14,12 @@ export interface PermissionRequest {
 
 export interface BackendSessionEvents {
   onEvent: (e: Omit<TaskEvent, 'seq'>) => void
+  /**
+   * 线级进展信号：连接上有任何消息（含未映射成事件的思考增量/遥测/资源采样）即回调。
+   * 供上层空转看门狗续命——模型长时间思考、子代理在后台跑等"静默但仍在工作"的
+   * 阶段不该被误判超时。不落日志、不推 UI。
+   */
+  onHeartbeat?: () => void
   /** 回合结束（一轮 prompt → 完整回复） */
   onTurnEnd: (result: BackendTurnResult) => void
   /** 权限确认；返回所选 optionId；未提供时自动放行 */

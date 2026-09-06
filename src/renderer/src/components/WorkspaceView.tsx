@@ -74,6 +74,7 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
     try {
       const issue = await bridge.issues.create({
         title: deriveTitle(prompt),
+        titleAuto: true,
         description: prompt.trim(),
         workdir,
         agentId,
