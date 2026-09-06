@@ -338,14 +338,17 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
         const full = r.response
         const lastMsg = squash(lastSegment)
         const response = lastMsg && (full === currentText || squash(full).endsWith(lastMsg)) ? lastSegment : full
-        lastTurnEnd = { ...r, response }
+        // 委派标记可能出现在任意中间消息里：解析用全量文本（服务端完整回复与流式累计中取更完整的）
+        const scan = full.length >= currentText.length ? full : currentText
+        const ended = { ...r, response, delegationText: scan || undefined }
+        lastTurnEnd = ended
         emit({ kind: 'final', text: response || r.error || '' })
         if (turnResolver) {
           const res = turnResolver
           turnResolver = null
-          res(lastTurnEnd)
+          res(ended)
         }
-        events.onTurnEnd(lastTurnEnd)
+        events.onTurnEnd(ended)
       }
 
       conn.onMessage((m) => {

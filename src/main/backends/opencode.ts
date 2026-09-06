@@ -29,12 +29,17 @@ export function createOpencodeBackend(): AgentBackend {
     ]
     let sessionId = resumeSessionId ?? ''
     let finalText = ''
+    /** text part 快照去重：同一 part 的更新只补发增长增量，跨 part 全量发 */
+    let textPartId = ''
+    let textShown = ''
     let settled = false
     let settle!: (v: { sessionId: string; response: string; ok: boolean; error?: string }) => void
     const done = new Promise<{ sessionId: string; response: string; ok: boolean; error?: string }>((r) => (settle = r))
     const finish = (ok: boolean, response: string, error?: string) => {
       if (settled) return
       settled = true
+      // final 只在回合终态发一次；中间文本走 text 事件流式展示
+      if (response) emit({ kind: 'final', text: response })
       events.onTurnEnd({ response, ok, error })
       settle({ sessionId, response, ok, error })
     }
@@ -59,9 +64,20 @@ export function createOpencodeBackend(): AgentBackend {
             emit(toolEvent('result', name, { ok: state !== 'error', preview: String(part.state?.output ?? part.title ?? '').slice(0, 300) }))
           }
         } else if (j.type === 'text' && part.text) {
-          // 最后一条 text 即最终回复（一次性 run 模型）
-          finalText = String(part.text)
-          emit({ kind: 'final', text: finalText })
+          // 最后一条 text 即最终回复；中间 text 走 text 事件流式展示
+          const text = String(part.text)
+          finalText = text
+          const pid = part.id ? String(part.id) : ''
+          if (pid && pid === textPartId) {
+            // 同一 part 的增长快照：只补发增量，避免整段重复成泡
+            if (text.length > textShown.length && text.startsWith(textShown)) {
+              emit({ kind: 'text', text: text.slice(textShown.length) })
+            }
+          } else {
+            emit({ kind: 'text', text })
+            textPartId = pid
+          }
+          textShown = text
         }
       }
     })

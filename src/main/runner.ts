@@ -200,7 +200,7 @@ export class TaskRunner {
     const me = team.find((a) => a.id === task.agentId)
     let finalText = r.response
     if (me?.subordinates?.length && task.backend !== 'dsh') {
-      const outcome = await runDelegationLoop(taskId, session, r.delegationText || r.response, {
+      const outcome = await runDelegationLoop(taskId, session, r, {
         store: this.store,
         runner: this,
         getTeam: () => this.getTeam?.() ?? [],

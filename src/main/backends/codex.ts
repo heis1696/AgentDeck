@@ -36,6 +36,8 @@ export function createCodexBackend(): AgentBackend {
     const finish = (ok: boolean, response: string, error?: string) => {
       if (settled) return
       settled = true
+      // final 只在回合终态发一次：每条 agent_message 一个会把回合在 UI 里拆成多个假回合
+      if (response) emit({ kind: 'final', text: response })
       const delegationText = messageTexts.join('\n')
       events.onTurnEnd({ response, ok, error, delegationText })
       settle({ sessionId, response, ok, error, delegationText })
@@ -65,7 +67,6 @@ export function createCodexBackend(): AgentBackend {
             finalText = String(it.text ?? '')
             if (finalText) messageTexts.push(finalText)
             emit({ kind: 'text', text: finalText })
-            emit({ kind: 'final', text: finalText })
           } else if (it.type === 'command_execution' || it.type === 'mcp_tool_call') {
             const name = itemNames.get(it.id) ?? (it.type === 'command_execution' ? 'Bash' : 'mcp')
             emit(

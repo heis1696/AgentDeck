@@ -132,12 +132,15 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
       } else if (e.kind === 'final') {
         // final ≈ 本回合最后一段 assistant 消息：升级末尾未关闭的 text 段为 Markdown 终段；没有则追加。
         // 与整回合流式文本相同 = 后端全量回显（zcode 完整回合回复/旧数据）：中间回复已各自成泡，不再重复渲染
-        const replay = squashText(e.text ?? '') !== '' && squashText(e.text ?? '') === squashText(t.streamed)
+        const finalTxt = squashText(e.text ?? '')
+        const replay = finalTxt !== '' && finalTxt === squashText(t.streamed)
         const last = t.items[t.items.length - 1]
         if (last && last.type === 'text' && !last.closed) {
           t.items[t.items.length - 1] = { type: 'final', text: replay ? last.text : e.text ?? '' }
-        } else if (!replay) {
-          t.items.push({ type: 'final', text: e.text ?? '' })
+        } else if (finalTxt !== '' && !replay) {
+          // 无未关闭段时：与回合内任一已渲染文本段相同 = 单条消息重复回显（终态追认已展示内容），跳过
+          const dup = t.items.some((it) => (it.type === 'text' || it.type === 'final') && squashText(it.text) === finalTxt)
+          if (!dup) t.items.push({ type: 'final', text: e.text ?? '' })
         }
         t.done = true
       } else if (e.kind === 'usage') {
@@ -604,7 +607,9 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
                       }
                       return (
                         <div className="bubble agent" key={j}>
-                          <pre className={item.closed ? 'seg-text' : 'streaming'}>{item.text}</pre>
+                          {/* 已关闭的段同样走 Markdown（与终段一致，委派卡片等特殊渲染才能在中间消息出现）；
+                              流式中的段保持纯文本，避免半截语法闪烁 */}
+                          {item.closed ? <Markdown text={item.text} /> : <pre className="streaming">{item.text}</pre>}
                           {streaming && !item.closed && <div className="log-running">● 回复中…</div>}
                           {turn.usage && finalIdx < 0 && j === lastBubbleIdx && <UsageBadge usage={turn.usage} />}
                         </div>

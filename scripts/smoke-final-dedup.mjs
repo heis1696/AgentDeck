@@ -88,6 +88,7 @@ const finalEvent = events.find((e) => e.kind === 'final')
 check('回合 ok', r.ok === true, r)
 check('终态只含最后一条消息', r.response === '第二段最终汇报。', r.response)
 check('final 事件只含最后一条消息', finalEvent?.text === '第二段最终汇报。', finalEvent?.text)
+check('delegationText 保留全量（标记解析用）', r.delegationText === '第一段中间回复。\n\n第二段最终汇报。', r.delegationText)
 check('中间回复仍随 text 事件流式展示', events.filter((e) => e.kind === 'text').map((e) => e.text).join('') === '第一段中间回复。第二段最终汇报。', events.filter((e) => e.kind === 'text'))
 
 try { await sessionHolder?.close() } catch {}

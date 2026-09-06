@@ -4,7 +4,7 @@
 import type { Task, TaskEvent } from '../shared/types'
 import type { TaskStore } from './store'
 import type { TaskRunner } from './runner'
-import type { BackendSession } from './backends/types'
+import type { BackendSession, BackendTurnResult } from './backends/types'
 import { isGitRepo, createWorktree, mergeBranchInto, branchDiffSummary, currentBranch, commitAll, branchExists } from './git'
 
 export interface DelegateCall {
@@ -138,12 +138,13 @@ function ancestorBudget(store: DelegationContext['store'], taskId: string): { in
 /**
  * 委派循环：在领队回合结束后执行。
  * session 已就绪；每轮解析 delegate 标记 → 生成子任务 → 等终态 → 结果回灌 session.send。
- * 返回最终（已剥标记）文本与全部子任务 id。
+ * 标记解析用全量回合文本（delegationText，标记可能在任意中间消息）；
+ * 最终结果只取每轮最后一条 assistant 消息（response），避免中间过程灌进 result/回灌上下文。
  */
 export async function runDelegationLoop(
   taskId: string,
   session: BackendSession,
-  firstResponse: string,
+  first: BackendTurnResult,
   ctx: DelegationContext
 ): Promise<DelegationOutcome> {
   const { store, runner, pushTask, pushEvent } = ctx
@@ -151,7 +152,7 @@ export async function runDelegationLoop(
   const team = ctx.getTeam()
   const me = team.find((a) => a.id === task.agentId)
   const subs = (me?.subordinates ?? []).map((id) => team.find((a) => a.id === id)).filter(Boolean) as AgentLike[]
-  if (!subs.length) return { rounds: 0, children: [], finalText: firstResponse }
+  if (!subs.length) return { rounds: 0, children: [], finalText: first.response }
 
   const note = (text: string) => {
     const e = { ts: Date.now(), kind: 'status' as const, text }
@@ -166,7 +167,7 @@ export async function runDelegationLoop(
   const { inherited, depth, ancestors } = ancestorBudget(store, taskId)
   const bail = (why: string): DelegationOutcome => {
     note(`⚠ ${why}，本任务不再下派`)
-    return { rounds: 0, children: [], finalText: stripDelegates(firstResponse) }
+    return { rounds: 0, children: [], finalText: stripDelegates(first.response) }
   }
   if (depth >= MAX_DEPTH) return bail(`委派层级已达上限（${MAX_DEPTH} 层）`)
   const budget = Math.min(MAX_ROUNDS, MAX_TOTAL_ROUNDS - inherited)
@@ -174,12 +175,15 @@ export async function runDelegationLoop(
   // 自身也不许派给自己
   ancestors.add(me?.id ?? `@${task.backend}`)
 
-  let response = firstResponse
+  /** 标记解析用：全量回合文本 */
+  let scanText = first.delegationText || first.response
+  /** 结果用：每轮最后一条 assistant 消息 */
+  let finalResponse = first.response
   let allChildren: string[] = []
   let round = 0
 
   while (round < budget) {
-    const calls = parseDelegates(response)
+    const calls = parseDelegates(scanText)
     if (!calls.length) break
     round++
     const batch = calls.slice(0, Math.max(1, ctx.opts().maxParallel))
@@ -247,7 +251,8 @@ export async function runDelegationLoop(
         `【系统】队员执行结果汇报：\n\n${report}\n\n请继续推进任务：需要再派发就继续用 <delegate> 标记；已全部完成就输出最终总结（不要再派发）。`
       )
       if (!turn.ok) throw new Error(turn.error || '回灌回合失败')
-      response = turn.delegationText || turn.response
+      scanText = turn.delegationText || turn.response
+      finalResponse = turn.response
     } catch (e) {
       note(`⚠ 回灌失败: ${e instanceof Error ? e.message : String(e)}`)
       break
@@ -312,5 +317,5 @@ export async function runDelegationLoop(
   } as Partial<Task>)
   pushTask(taskId)
 
-  return { rounds: round, children: allChildren, finalText: stripDelegates(response) }
+  return { rounds: round, children: allChildren, finalText: stripDelegates(finalResponse || scanText) }
 }
