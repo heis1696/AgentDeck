@@ -341,7 +341,9 @@ export class TaskRunner {
    * 剥掉标记防止外漏，并在结果末尾留指向。
    */
   private handleContinue(taskId: string, task: Task, scanTexts: string[], finalText: string): string {
-    const cont = task.parentTaskId || !task.issueId ? null : parseContinueMerged(...scanTexts)
+    const issueId = task.issueId
+    if (task.parentTaskId || !issueId) return finalText
+    const cont = parseContinueMerged(...scanTexts)
     if (!cont) return finalText
     const stripped = stripContinue(finalText)
     const note = (text: string) => {
@@ -356,7 +358,7 @@ export class TaskRunner {
     }
     let ok = false
     try {
-      ok = !!this.onContinue?.({ sourceTaskId: taskId, issueId: task.issueId, brief: cont.brief, start: cont.start })
+      ok = !!this.onContinue?.({ sourceTaskId: taskId, issueId, brief: cont.brief, start: cont.start })
     } catch (e) {
       note(`⚠ 阶段接力创建失败：${e instanceof Error ? e.message : String(e)}`)
       return stripped

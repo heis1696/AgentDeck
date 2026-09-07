@@ -143,6 +143,8 @@ Workspace（容器：人 + agent 在同一工作区协作）
 
 ### 4.3 Squads —— 领队派工（与 AgentDeck 委派同构，机制值得对照）
 
+> 本节为文档口径；源码级逐字提取与提示词设计分析见 [MULTICA-PROMPTS.md](MULTICA-PROMPTS.md)。
+
 - 组成：**Leader 必须是 agent**（自动成为成员）+ 成员（agent 或人）+ 每成员**角色描述**（只给 leader 看的路由提示，不授权）+ **Squad instructions**（路由规则/协作规范，只注入 leader）
 - 指派 issue 给 squad → **只唤醒 leader**。leader 每 run 的 prompt 附加三块（docs/squads）：
   1. **Squad Operating Protocol**（系统硬编码：读 issue→**用精确 mention markdown 派工** `[@Name](mention://agent/<uuid>)`→简洁→**每轮记录评估**（`multica squad activity … --reason`）→**派发后即停，父 issue 保持 in_progress**→整体达标才移 in_review；@ 别人的 squad issue 不许动状态）

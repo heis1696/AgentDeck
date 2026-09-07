@@ -4,8 +4,10 @@ import type { ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
-// 委派标记切分（属性顺序不定，reason 可省略；出现在代码块内也统一卡片化，简单处理）
-const DELEGATE_RE = /<delegate\b([^>]*)>([\s\S]*?)<\/delegate>/g
+// 委派标记切分（属性顺序不定，reason 可省略；出现在代码块内也统一卡片化，简单处理）。
+// 开标签必须带 to 才构成匹配（与 delegate.ts 解析同规则）：无 to 的裸标记字样不当卡片，
+// 否则非贪婪体会延伸到后方真实派单的闭合标签，把正文一并吞进卡片（幻影配对）。
+const DELEGATE_RE = /<delegate\b(?=[^>]*\bto\s*=)([^>]*)>([\s\S]*?)<\/delegate>/g
 const DELEGATE_TO_RE = /\bto\s*=\s*"([^"]*)"/
 const DELEGATE_REASON_RE = /\breason\s*=\s*"([^"]*)"/
 const EXCERPT_MAX = 60
