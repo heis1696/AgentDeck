@@ -15,6 +15,14 @@ interface AgentInfo {
   subordinates?: string[]
 }
 
+/** 模型目录（agents:models 返回）：zcode 有本地 catalog，其余平台 freeform */
+interface AgentModelCatalog {
+  backend: string
+  source: 'catalog' | 'freeform'
+  default?: string
+  models: string[]
+}
+
 const api = {
   tasks: {
     list: (): Promise<Task[]> => ipcRenderer.invoke('tasks:list'),
@@ -107,12 +115,8 @@ const api = {
       ipcRenderer.invoke('agents:list'),
     save: (list: Array<AgentInfo>) =>
       ipcRenderer.invoke('agents:save', list) as Promise<Array<AgentInfo>>,
-    probe: (): Promise<Record<string, { ok: boolean; detail: string }>> => ipcRenderer.invoke('agents:probe'),
-    onProbeResult: (cb: (id: string, result: { ok: boolean; detail: string }) => void) => {
-      const h = (_e: unknown, p: { id: string; result: { ok: boolean; detail: string } }) => cb(p.id, p.result)
-      ipcRenderer.on('agents:probe-result', h)
-      return () => ipcRenderer.removeListener('agents:probe-result', h)
-    }
+    models: (backend: string): Promise<AgentModelCatalog> =>
+      ipcRenderer.invoke('agents:models', backend)
   },
   runtimes: {
     snapshot: (): Promise<RuntimeSnapshot[]> => ipcRenderer.invoke('runtime:snapshot')

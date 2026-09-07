@@ -4,14 +4,13 @@ import { Settings } from 'lucide-react'
 import { Menu } from '../ui/Menu'
 import { EmptyState } from '../ui/EmptyState'
 import { RuntimeView } from './RuntimeView'
-import { TeamView } from './TeamView'
 
-/** 设置分区（侧栏导航用）；队伍与运行时页已并入设置 */
-type Section = 'general' | 'runtime' | 'team' | 'storage'
+/** 设置分区（侧栏导航用）；队伍已提级为顶级 Agent tab，运行时页并入设置 */
+type Section = 'general' | 'runtime' | 'storage'
 
 const SECTIONS: Array<{ group: string; items: Array<{ id: Section; label: string; desc: string }> }> = [
   { group: '基础', items: [{ id: 'general', label: '常规', desc: '外观、执行与通知' }] },
-  { group: '执行', items: [{ id: 'runtime', label: '运行时', desc: '后端路径与健康状态' }, { id: 'team', label: '队伍', desc: '队员与可驱使名单' }] },
+  { group: '执行', items: [{ id: 'runtime', label: '运行时', desc: '后端路径与健康状态' }] },
   { group: '数据', items: [{ id: 'storage', label: '存储', desc: '数据落盘位置说明' }] }
 ]
 
@@ -45,7 +44,6 @@ export function SettingsView({ section, onSection }: { section: string; onSectio
         </header>
         {active === 'general' && <GeneralSection />}
         {active === 'runtime' && <RuntimeSection />}
-        {active === 'team' && <TeamView embedded />}
         {active === 'storage' && <StorageSection />}
       </div>
     </div>

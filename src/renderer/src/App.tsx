@@ -11,13 +11,14 @@ import { AutomationView } from './components/AutomationView'
 import { MarketView } from './components/MarketView'
 import { InboxView } from './components/InboxView'
 import { IssuesView } from './components/IssuesView'
-import { ListTodo, Kanban, Gauge, Settings, Search, Plus, Command, FolderOpen, ChevronDown, AlarmClock, Blocks, Inbox } from 'lucide-react'
+import { AgentsView } from './components/AgentsView'
+import { ListTodo, Kanban, Gauge, Settings, Search, Plus, Command, FolderOpen, ChevronDown, AlarmClock, Blocks, Inbox, Users } from 'lucide-react'
 import { ToastHost } from './ui/Toasts'
 import { ConfirmHost } from './ui/Confirm'
 import { Palette, type PaletteCommand } from './ui/Palette'
 import type { Issue, Task } from '../../shared/types'
 
-type View = 'issues' | 'create' | 'detail' | 'usage' | 'settings' | 'automation' | 'market' | 'inbox' | 'board'
+type View = 'issues' | 'create' | 'detail' | 'usage' | 'settings' | 'automation' | 'market' | 'inbox' | 'board' | 'agents'
 const MAX_TABS = 8
 /** 最近工作区列表的上限（切换器下拉里展示） */
 const MAX_RECENT_WORKSPACES = 8
@@ -103,7 +104,7 @@ export function App() {
   const openSettings = (section?: string) => { if (section) setSettingsSection(section); setView('settings') }
 
   const commands: PaletteCommand[] = useMemo(() => [
-    ...[['Issue', navIssues], ['看板', () => nav('board')], ['收件箱', () => setView('inbox')], ['自动化', () => nav('automation')], ['扩展中心', () => nav('market')], ['用量', () => nav('usage')], ['设置', () => openSettings('general')], ['设置 · 队伍', () => openSettings('team')], ['设置 · 运行时', () => openSettings('runtime')]].map(([label, run]) => ({ id: String(label), group: '跳转', label: String(label), run: run as () => void })),
+    ...[['Issue', navIssues], ['看板', () => nav('board')], ['Agent 管理', () => nav('agents')], ['收件箱', () => setView('inbox')], ['自动化', () => nav('automation')], ['扩展中心', () => nav('market')], ['用量', () => nav('usage')], ['设置', () => openSettings('general')], ['设置 · 运行时', () => openSettings('runtime')]].map(([label, run]) => ({ id: String(label), group: '跳转', label: String(label), run: run as () => void })),
     { id: 'new', group: '操作', label: '新建任务', hint: 'Ctrl+N', run: goWorkspace },
     { id: 'theme', group: '操作', label: '切换深浅主题', run: () => void update({ theme: (settings?.theme ?? 'light') === 'dark' ? 'light' : 'dark' }) },
     ...tasks.slice(0, 20).map((task) => ({ id: task.id, group: '任务', label: task.title, hint: TASK_STATUS_LABELS[task.status], run: () => openTask(task.id) }))
@@ -119,6 +120,7 @@ export function App() {
       <nav className="nav" aria-label="主导航">
         <button className={view === 'issues' || view === 'detail' ? 'active' : ''} onClick={navIssues} title={activeId ? '回到当前 Issue（再点总览请用面包屑返回）' : undefined}><ListTodo /><span className="nav-label">Issue</span></button>
         <button className={view === 'board' ? 'active' : ''} onClick={() => nav('board')}><Kanban /><span className="nav-label">看板</span></button>
+        <button className={view === 'agents' ? 'active' : ''} onClick={() => nav('agents')}><Users /><span className="nav-label">Agent</span></button>
         <button className={view === 'inbox' ? 'active' : ''} onClick={() => nav('inbox')}><Inbox /><span className="nav-label">收件箱</span>{unreadCount > 0 && <span className="nav-count">{unreadCount > 99 ? '99+' : unreadCount}</span>}</button>
         <button className={view === 'automation' ? 'active' : ''} onClick={() => nav('automation')}><AlarmClock /><span className="nav-label">自动化</span></button>
         <button className={view === 'market' ? 'active' : ''} onClick={() => nav('market')}><Blocks /><span className="nav-label">扩展</span></button>
@@ -128,7 +130,7 @@ export function App() {
       <div className="sidebar-footer"><span className="connection-dot" /> 本地引擎就绪</div>
     </aside>
     <main className="main">
-      {view === 'inbox' ? <InboxView onOpenIssue={openIssue} /> : view === 'automation' ? <AutomationView /> : view === 'market' ? <MarketView /> : view === 'settings' ? <SettingsView section={settingsSection} onSection={setSettingsSection} /> : view === 'usage' ? <UsageView /> : view === 'board' ? <Page title="看板" count={tasks.length}><BoardView tasks={tasks} onOpen={openTask} /></Page> : view === 'detail' && selected ? <div className="tasks-column detail-page"><Chrome title={selected.title} onBack={() => { setActiveId(null); setView('issues') }} />{tabs.length > 0 && <TabBar tabs={tabs} tasks={tasks} activeId={activeId} onSelect={openTask} onClose={closeTab} />}<TaskDetail task={selected} tasks={tasks} onSelect={openTask} /></div> : view === 'create' ? <Page title="新建 Issue" count={0}><WorkspaceView onCreated={(task) => openTask(task.id)} workspaceDir={workspaceDir} onPickWorkspace={pickWorkspace} /></Page> : <IssuesView tasks={tasks} onOpen={openTask} onCreate={goWorkspace} />}
+      {view === 'inbox' ? <InboxView onOpenIssue={openIssue} /> : view === 'agents' ? <AgentsView /> : view === 'automation' ? <AutomationView /> : view === 'market' ? <MarketView /> : view === 'settings' ? <SettingsView section={settingsSection} onSection={setSettingsSection} /> : view === 'usage' ? <UsageView /> : view === 'board' ? <Page title="看板" count={tasks.length}><BoardView tasks={tasks} onOpen={openTask} /></Page> : view === 'detail' && selected ? <div className="tasks-column detail-page"><Chrome title={selected.title} onBack={() => { setActiveId(null); setView('issues') }} />{tabs.length > 0 && <TabBar tabs={tabs} tasks={tasks} activeId={activeId} onSelect={openTask} onClose={closeTab} />}<TaskDetail task={selected} tasks={tasks} onSelect={openTask} /></div> : view === 'create' ? <Page title="新建 Issue" count={0}><WorkspaceView onCreated={(task) => openTask(task.id)} workspaceDir={workspaceDir} onPickWorkspace={pickWorkspace} /></Page> : <IssuesView tasks={tasks} onOpen={openTask} onCreate={goWorkspace} />}
     </main>
   </div>
 }

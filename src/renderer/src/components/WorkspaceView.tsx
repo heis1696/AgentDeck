@@ -130,26 +130,27 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
         </div>
         {agents.length > 0 ? (
           <div className="field">
-            <span>执行队员{isLeader ? '（领队可按需拆分任务）' : ''}</span>
+            <span>执行 Agent{isLeader ? '（领队可按需拆分任务）' : ''}</span>
             <div className="agent-picker">
               {agents.map((a) => (
                 <button
                   key={a.id}
                   className={`agent-pick ${a.id === agentId ? 'active' : ''}`}
                   onClick={() => setAgentId(a.id)}
-                  title={`${a.role ? a.role + ' · ' : ''}${a.note || a.backend}`}
+                  title={`${a.role ? a.role + ' · ' : ''}${a.model ? a.model + ' · ' : ''}${a.note || a.backend}`}
                 >
                   <span className="agent-avatar sm" style={{ background: a.color }}>
                     {a.name.slice(0, 1)}
                   </span>
                   {a.name}
                   <span className="badge">{a.backend}</span>
+                  {a.model ? <span className="badge">{a.model}</span> : null}
                 </button>
               ))}
             </div>
           </div>
         ) : (
-          <p className="hint hint">未配置队员，默认用 zcode 执行；可在「设置 · 队伍」里添加。</p>
+          <p className="hint hint">未配置 Agent，默认用 zcode 执行；可在左侧「Agent」页添加。</p>
         )}
         <div className="composer-label">描述目标、约束和验收标准</div>
         <textarea

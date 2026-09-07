@@ -401,6 +401,7 @@ body {
   flex-shrink: 0;
 }
 .agent-avatar.sm { width: 20px; height: 20px; border-radius: 6px; font-size: 11px; }
+.avatar-stack { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
 .agent-info { min-width: 0; flex: 1; }
 .agent-name { font-weight: 600; display: flex; align-items: center; gap: 6px; }
 .agent-name .badge { flex-shrink: 0; }

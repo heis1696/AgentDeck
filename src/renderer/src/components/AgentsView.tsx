@@ -1,36 +1,32 @@
 import { useEffect, useState } from 'react'
-import { bridge, type AgentInfo as Agent } from '../api'
+import { bridge, type AgentInfo as Agent, type AgentModelCatalog } from '../api'
 import { Users } from 'lucide-react'
-import { toast } from '../ui/Toasts'
 import { Menu } from '../ui/Menu'
+import { BACKEND_IDS } from '../../../shared/types'
 
-/** 队伍管理页；0.14 起作为设置分区嵌入（embedded 时不再渲染整页外壳） */
-export function TeamView({ embedded = false }: { embedded?: boolean }) {
+/** Agent 管理页（0.15 起从设置"队伍"分区提级为顶级 tab）。
+ *  同一平台可建多个 Agent，各自钉死不同模型（Agent.model 会话级注入，执行层不走全局配置）。
+ *  平台可用性检测归设置-运行时分区，本页只管身份与配置。 */
+export function AgentsView() {
   const [agents, setAgents] = useState<Agent[]>([])
-  const [probes, setProbes] = useState<Record<string, { ok: boolean; detail: string }>>({})
-  const [probing, setProbing] = useState(false)
   const [editing, setEditing] = useState<Agent | null>(null)
+  const [catalog, setCatalog] = useState<AgentModelCatalog | null>(null)
 
   useEffect(() => {
     bridge.agents.list().then(setAgents)
   }, [])
 
-  // 主进程逐个推送探测结果，先到先显示（不被最慢的后端拖住）
-  useEffect(() => bridge.agents.onProbeResult((id, result) => {
-    setProbes((prev) => ({ ...prev, [id]: result }))
-  }), [])
+  // 模型目录随平台切换刷新（zcode 有本地目录，其余平台自由填写 + 预设）
+  useEffect(() => {
+    if (!editing) return
+    let alive = true
+    bridge.agents
+      .models(editing.backend)
+      .then((c) => { if (alive) setCatalog(c) })
+      .catch(() => { if (alive) setCatalog(null) })
+    return () => { alive = false }
+  }, [editing?.backend])
 
-  const probeAll = async () => {
-    if (probing) return
-    setProbing(true)
-    try {
-      setProbes(await bridge.agents.probe())
-    } catch (e) {
-      toast.error('检测失败: ' + (e instanceof Error ? e.message : String(e)))
-    } finally {
-      setProbing(false)
-    }
-  }
   const save = async (list: Agent[]) => {
     setAgents(await bridge.agents.save(list))
   }
@@ -45,16 +41,12 @@ export function TeamView({ embedded = false }: { embedded?: boolean }) {
   }
   const remove = (id: string) => save(agents.filter((a) => a.id !== id))
   const add = () =>
-    setEditing({ id: `ag_${Date.now().toString(36)}`, name: '', backend: 'zcode', color: '#4f8cff', note: '', role: '', systemPrompt: '', subordinates: [] })
+    setEditing({ id: `ag_${Date.now().toString(36)}`, name: '', backend: 'zcode', color: '#4f8cff', note: '', role: '', systemPrompt: '', subordinates: [], model: '' })
 
-  const backends = ['zcode', 'claude', 'codex', 'opencode', 'dsh']
   const actions = (
     <div className="detail-actions">
-      <button className="btn" onClick={probeAll} disabled={probing}>
-        {probing ? '检测中…' : '检测各平台可用性'}
-      </button>
       <button className="btn primary" onClick={add}>
-        ＋ 加队员
+        ＋ 新建 Agent
       </button>
     </div>
   )
@@ -69,17 +61,12 @@ export function TeamView({ embedded = false }: { embedded?: boolean }) {
             </div>
             <div className="agent-info">
               <div className="agent-name">
-                {a.name} <span className="badge">{a.backend}</span>{a.role ? <span className="mini">{a.role}</span> : null}
-                {probes[a.backend] && (
-                  <span className={probes[a.backend].ok ? 'probe-ok' : 'probe-fail'} title={probes[a.backend].detail}>
-                    {probes[a.backend].ok ? '✓' : '✗'}
-                  </span>
-                )}
+                {a.name} <span className="badge">{a.backend}</span>{a.model ? <span className="badge">{a.model}</span> : null}{a.role ? <span className="mini">{a.role}</span> : null}
               </div>
               <div className="hint">
                 {a.subordinates?.length
                   ? `⚡ 可驱使 ${(a.subordinates ?? []).map((sid) => agents.find((x) => x.id === sid)?.name ?? '?').join('、')}（对话中自行派发）`
-                  : a.note || (probes[a.backend]?.detail ?? '')}
+                  : a.note || '（无备注）'}
               </div>
             </div>
             <button
@@ -98,7 +85,7 @@ export function TeamView({ embedded = false }: { embedded?: boolean }) {
       {editing && (
         <div className="overlay" onClick={(e) => e.target === e.currentTarget && setEditing(null)}>
           <div className="dialog">
-            <h2>{agents.some((a) => a.id === editing.id) ? '编辑队员' : '新队员'}</h2>
+            <h2>{agents.some((a) => a.id === editing.id) ? '编辑 Agent' : '新建 Agent'}</h2>
             <label className="field">
               <span>名字 *</span>
               <input value={editing.name} onChange={(e) => update(editing, { name: e.target.value })} autoFocus />
@@ -106,7 +93,7 @@ export function TeamView({ embedded = false }: { embedded?: boolean }) {
             <label className="field">
               <span>平台 *</span>
               <Menu
-                items={backends.map((b) => ({ value: b, label: b }))}
+                items={BACKEND_IDS.map((b) => ({ value: b, label: b }))}
                 value={editing.backend}
                 onChange={(v) => update(editing, { backend: v })}
                 trigger={(cur, open) => (
@@ -115,6 +102,28 @@ export function TeamView({ embedded = false }: { embedded?: boolean }) {
                   </button>
                 )}
               />
+            </label>
+            <label className="field">
+              <span>模型（空 = 平台默认；同平台多个 Agent 可各钉不同模型，执行时按会话注入）</span>
+              <input
+                value={editing.model ?? ''}
+                onChange={(e) => update(editing, { model: e.target.value })}
+                placeholder={catalog?.source === 'catalog' ? catalog.default ?? '平台默认' : '如 glm-5.3 / sonnet / gpt-5.5（自由填写）'}
+              />
+              {catalog && catalog.models.length > 0 && (
+                <div className="agent-picker">
+                  {catalog.models.map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      className={`agent-pick ${(editing.model ?? '') === m ? 'active' : ''}`}
+                      onClick={() => update(editing, { model: (editing.model ?? '') === m ? '' : m })}
+                    >
+                      {m}{catalog.default === m ? ' · 默认' : ''}
+                    </button>
+                  ))}
+                </div>
+              )}
             </label>
             <label className="field">
               <span>定位（头衔：领队 / 工程师 / 审查员…）</span>
@@ -130,9 +139,9 @@ export function TeamView({ embedded = false }: { embedded?: boolean }) {
               />
             </label>
             <label className="field">
-              <span>可驱使的队员（勾选后它成为领队/子领队：对话中可自行把子任务派给他们；领队→子领队→队员最多 3 层）</span>
+              <span>可驱使的 Agent（勾选后它成为领队/子领队：对话中可自行把子任务派给他们；领队→子领队→队员最多 3 层）</span>
               <div className="agent-picker">
-                {agents.filter((o) => o.id !== editing.id).length === 0 && <span className="hint">（队里还没有其他队员）</span>}
+                {agents.filter((o) => o.id !== editing.id).length === 0 && <span className="hint">（还没有其他 Agent）</span>}
                 {agents
                   .filter((o) => o.id !== editing.id)
                   .map((o) => (
@@ -150,7 +159,7 @@ export function TeamView({ embedded = false }: { embedded?: boolean }) {
                       <span className="agent-avatar sm" style={{ background: o.color }}>
                         {o.name.slice(0, 1)}
                       </span>
-                      {o.name}
+                      {o.name}{o.model ? <span className="mini">{o.model}</span> : null}
                     </button>
                   ))}
               </div>
@@ -164,7 +173,7 @@ export function TeamView({ embedded = false }: { embedded?: boolean }) {
               <input type="color" value={editing.color} onChange={(e) => update(editing, { color: e.target.value })} />
             </label>
             <div className="dialog-footer">
-              <span className="hint">勾选可驱使队员即成领队（队员也可以是子领队）；委派在对话中自动发生，无需切模式</span>
+              <span className="hint">重名会自动加后缀（委派按名字匹配）；平台检测在设置-运行时</span>
               <button className="btn primary" onClick={commit} disabled={!editing.name.trim()}>
                 保存
               </button>
@@ -175,27 +184,15 @@ export function TeamView({ embedded = false }: { embedded?: boolean }) {
     </>
   )
 
-  if (embedded) {
-    return (
-      <div className="team-embedded">
-        <div className="team-embedded-head">
-          <div className="section-heading"><h3>队员{agents.length > 0 ? `（${agents.length}）` : ''}</h3><span>给任务安排队员；勾选可驱使名单的队员会成为领队</span></div>
-          {actions}
-        </div>
-        {grid}
-      </div>
-    )
-  }
-
   return (
     <div className="settings team">
       <header className="page-header-bar">
         <div className="detail-title-wrap">
           <div className="page-title-row">
             <Users size={16} className="page-icon" />
-            <h2 className="page-title">队伍</h2>
+            <h2 className="page-title">Agent</h2>
             {agents.length > 0 && <span className="page-count">{agents.length}</span>}
-            <span className="page-desc">给任务安排队员；勾选可驱使名单的队员会成为领队</span>
+            <span className="page-desc">同一平台可建多个 Agent，各钉不同模型；勾选可驱使名单的 Agent 成为领队。</span>
           </div>
         </div>
         {actions}

@@ -56,8 +56,7 @@ interface Bridge {
   agents: {
     list: () => Promise<AgentInfo[]>
     save: (list: AgentInfo[]) => Promise<AgentInfo[]>
-    probe: () => Promise<Record<string, { ok: boolean; detail: string }>>
-    onProbeResult: (cb: (id: string, result: { ok: boolean; detail: string }) => void) => () => void
+    models: (backend: string) => Promise<AgentModelCatalog>
   }
   runtimes: {
     snapshot: () => Promise<RuntimeSnapshot[]>
@@ -78,6 +77,14 @@ export interface AgentInfo {
   role?: string
   systemPrompt?: string
   subordinates?: string[]
+}
+
+/** 模型目录（agents:models 返回）：zcode 有本地 catalog，其余平台 freeform */
+export interface AgentModelCatalog {
+  backend: string
+  source: 'catalog' | 'freeform'
+  default?: string
+  models: string[]
 }
 
 export const bridge: Bridge = (window as any).agentdeck

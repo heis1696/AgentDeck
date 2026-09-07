@@ -232,28 +232,6 @@ app.whenReady().then(() => {
     const presets: Record<string, string[]> = { claude: ['sonnet', 'opus', 'haiku'], codex: ['gpt-5.5', 'gpt-5.2-codex'], opencode: [], dsh: [] }
     return { backend: backendId, source: 'freeform', models: presets[backendId] ?? [] }
   })
-  ipcMain.handle('agents:probe', async () => {
-    const out: Record<string, { ok: boolean; detail: string }> = {}
-    // 并行探测，单个完成后立刻推送 UI（避免慢后端拖住整体反馈）
-    await Promise.all(
-      [...backends].map(async ([id, b]) => {
-        let r: { ok: boolean; detail: string }
-        try {
-          r = await Promise.race([
-            b.probe(),
-            new Promise<{ ok: boolean; detail: string }>((res) =>
-              setTimeout(() => res({ ok: false, detail: '探测超时（20s）' }), 20000)
-            )
-          ])
-        } catch (e) {
-          r = { ok: false, detail: `探测失败: ${e instanceof Error ? e.message : String(e)}` }
-        }
-        out[id] = r
-        mainWindow?.webContents.send('agents:probe-result', { id, result: r })
-      })
-    )
-    return out
-  })
   ipcMain.handle('tasks:cancel', (_e, id) => { const result = runner.cancel(id); issueStore.sync(store.list()); return result })
   ipcMain.handle('tasks:followup', (_e, id, content) => runner.followUp(id, content))
   ipcMain.handle('tasks:permission-respond', (_e, requestId: string, optionId: string, decision: string) =>
