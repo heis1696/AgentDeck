@@ -157,6 +157,47 @@ interface Agent { id; name; backend; role?; systemPrompt?; subordinates?; model?
 - **cc-switch 导入器**（亮点）：读 `~/.cc-switch/cc-switch.db` 的 providers 表，按 app_type 映射平台，每个 provider 生成一个 agent（name + settings_config 里的 model/env）。用户已积累的 22 个 provider 配置一键变成 22 个 agent——这是 cc-switch 数据模型的直接复用，也是对"切换器"到"编排器"升级的最好注脚。
 - dsh profile 映射；模型用量/成本（cc-switch 的 model-pricing.json 思路）。
 
+### Phase 5：阶段接力 `<continue>`（上下文硬切）
+
+> 动机：agentdeck 是调度工具，不该让多阶段施工任务在单个会话里无限拉长上下文。
+> 用户回复"执行下一阶段"时，agent 自主判定是否硬切：**同 issue 新建一个 run（新会话）**，
+> 阶段简报作为唯一携带物。2026-09-07 会话实测：研究 + Phase 0 + Phase 1 全在一个
+> zcode 会话里完成，靠 docs/ 本方案当外部记忆才没失控——本节把该模式产品化。
+
+**明确不做**（设计修正，勿走弯路）：
+
+- ❌ 不复用 `<delegate>` 自派：防环闸显式拒绝（`delegate.ts` ancestors 含自己）；且委派语义是并行子任务（worktree 隔离、轮数预算、三层深度），阶段接力是串行后继，进委派链会误触隔离与预算闸。这是独立原语。
+- ❌ 默认不开新 issue：Issue 是持久工作单元、Run 是执行（架构既定）。同 issue 新 run 保留时间线/评论/收件箱连续性，上下文照样硬切。`issue="new"`（建 sub-issue，`parentIssueId` 关联已实现）留作标记属性可选。
+
+**标记协议**：
+
+```
+<continue start="auto|parked">阶段简报（自包含：方案文档路径 + 阶段号 + 上阶段 commit hash + 关键 file:line + 约束）</continue>
+```
+
+- `start` 默认 `auto`：用户的"执行下一阶段"回复本身即授权；`parked` 供 agent 主动备好下一阶段等用户点开（TaskDetail 已有 parked "▶ 开始执行" 按钮，`tasks:start` IPC 现成）。
+- 命名与并行会话新增的 `<round outcome=.../>` 评估标记无冲突，协议文本上可衔接（round 评估后跟 continue = 本轮收尾、切新执行）。
+
+**拦截与创建**（全部复用现有件）：
+
+1. 解析：`delegate.ts` 新增 `parseContinue(text)` / `stripContinue(text)`；**多源解析**（Phase 0 教训直接适用）——从 `delegationText ∪ response` 合并解析，禁止只看单一来源。
+2. 拦截点：`runner.completeTurn()`（`runner.ts:271`，新任务 :431 / followUp 内存会话 :535 / followUp resume :594 三处调用的共同汇合点），在委派循环返回之后处理——一个先并行派工再交接的阶段自然成立。
+3. 创建：`createTask` 闭包在 `index.ts`，runner 无引用——按现有 `(task) => publishIssueUpdate(task)` 回调模式，给 TaskRunner 构造函数加 `onContinue?: (taskId, brief, opts) => Task | null`，index.ts 侧接到 `createTask`：
+   `{ title: 原任务标题（titleAuto 续用）, prompt: 简报正文, workdir: 同当前任务, backend/agentId: 同当前, issueId: 同当前, trigger: 'handoff', startNow: start==='auto' }`。
+   `Task.handoff` 字段与 runner 的【交接备注】注入机制已存在——简报正文直接走 prompt，次级注意事项可走 handoff，实现时二选一，勿双写。
+4. `RunTrigger` 加 `'handoff'`：纯透传（`issue-store.ts:105` `task.trigger ?? 'assignment'`），渲染层无 trigger 标签消费，零阻力。
+5. 收尾：当前 run 的 finalText 追加一行指向后继（"→ 下一阶段已切换为该 Issue 的新执行"）+ 状态事件留痕；`stripContinue` 防标记外漏。
+
+**护栏**：
+
+- 自继链上限：同 issue 上 `trigger === 'handoff'` 的任务数 ≥ 8 时拒绝并留痕（防无限自我接力）。
+- 仅限非委派子任务（`!task.parentTaskId`）：worker 的 worktree 生命周期归委派循环管，不参与接力。
+- 用户未回复场景下 agent 自发 `<continue>` 必须 `start="parked"`——这条写进协议注入文本，靠提示词约束 + UI 默认值双保险。
+
+**协议注入**：领队经 `buildDelegationBlock` 追加一段 continue 说明；非领队任务在 `run()` prompt 组装处追加一行简版（会话 resume 后历史里已含协议文本，followUp 回合自然可用）。
+
+**UI（最小）**：runs 时间线（`TaskDetail.tsx:537`）与执行记录（`:772`）天然展示新 run；parked 后继出现在任务列表走既有启动按钮。可选增强：当前 run 详情显示"→ 后继执行"链接（run 间无引用字段，v1 用 issue 内排序即可，不强求跳转）。
+
 ---
 
 ## 4. 验收
@@ -167,6 +208,10 @@ interface Agent { id; name; backend; role?; systemPrompt?; subordinates?; model?
   1. 单测 `buildRuntimeModelFromCliConfig('glm-5.2')` → `model.modelId === 'glm-5.2'`、provider 与 config 一致；`'x/y'` 形式拆分正确；目录缺项时被 push。
   2. claude 后端带 `model: 'sonnet'` 起一轮，status 事件里出现的模型名非空即通过（探测本机无 claude 时跳过）。
   3. `parseDelegatesMerged`：full 不含标记、currentText 含标记的构造样例 → 解析出 1 个调用（Phase 0 回归）。
+- Phase 5 追加（`scripts/smoke-continue.mjs`，仿 smoke-delegate 的假后端模式）：
+  1. `parseContinue` 单测：属性解析、多源合并（Phase 0 同款构造样例）、`stripContinue`。
+  2. e2e：假后端首回合输出 `<continue start="parked">Phase 2 简报…</continue>` → 断言同 issue 出现 trigger='handoff' 的新任务、parked 状态、workdir/agentId 继承、原任务 finalText 含指向行且无标记外漏。
+  3. 护栏：预置 8 个 handoff 任务后标记被拒（事件留痕）；委派子任务（parentTaskId 非空）发标记被拒。
 - 现有冒烟全绿：`smoke:delegate`、`smoke:final-dedup`、`smoke:clis`、`smoke:issues`、`smoke:flow`；`npm run typecheck`。
 
 ### 4.2 手工验收场景
@@ -177,6 +222,7 @@ interface Agent { id; name; backend; role?; systemPrompt?; subordinates?; model?
 4. **自动化**：automation 绑定非默认 agent，产出 run 的 agent/model 正确。
 5. **设置瘦身**：设置里无"队伍"分区、无检测按钮；Agent tab 可增删改、重名被拦/加后缀；运行时分区检测正常。
 6. **删除探针无残留**：DevTools 无 `agents:probe` 相关报错。
+7. **阶段接力**（Phase 5）：真实多阶段任务（如本方案 Phase 2 施工）中，完成任务回复"执行下一阶段"，领队输出 `<continue>` → 同 issue 出现新 run 且新会话（事件流从零开始）、时间线连续、收件箱收到新 run 的报告；parked 变体走"▶ 开始执行"。
 
 ### 4.3 提交切分
 
@@ -186,6 +232,7 @@ interface Agent { id; name; backend; role?; systemPrompt?; subordinates?; model?
 | 2 | Phase 1 主进程管道 + `agents:models` + smoke-model 其余用例 | — |
 | 3 | Phase 2 UI（tab 提级、表单、删 probe IPC 同 commit 清理 preload/api） | 2 |
 | 4 | Phase 3 文案/文档清理 | 3 |
+| 5 | Phase 5 阶段接力（`<continue>`：delegate.ts 解析 + runner.completeTurn 拦截 + onContinue 回调 + RunTrigger 'handoff' + smoke-continue） | 1；建议排在 3 之后，与并行会话的 round 协议改造协调命名落地 |
 
 ---
 
@@ -197,4 +244,5 @@ interface Agent { id; name; backend; role?; systemPrompt?; subordinates?; model?
 | 改 agent 模型后续聊换模型 | 表单 hint 明示；协议层支持，非数据损坏 |
 | 委派重名歧义 | agents:save 重名校验（§2.2） |
 | 删 `agents:probe` 遗漏引用 | 同 commit 清 preload/api/TeamView；grep 验收项 6 |
+| Phase 5 自继失控 / 简报不自包含导致后继断粮 | 同 issue handoff 计数 ≥8 硬闸；worker（parentTaskId）禁用；`start="parked"` 默认值 + 提示词双保险；简报要求含文档路径与 commit 指针（外部记忆模式） |
 | 回滚成本 | 数据零迁移（agents.json 兼容），各 commit 独立可 revert；UI 提级 commit 单独成粒度即为回滚单元 |
