@@ -121,6 +121,25 @@ app.whenReady().then(() => {
     return store.get(task.id)!
   }
 
+  // 阶段接力（<continue>）：同一 Issue 上创建后继执行——新会话硬切，简报为唯一携带物
+  runner.attachContinue(({ sourceTaskId, issueId, brief, start }) => {
+    const source = store.get(sourceTaskId)
+    if (!source) return null
+    const title = brief.split(/\r?\n/).map((l) => l.trim()).find(Boolean)?.slice(0, 40) ?? `${source.title}（下一阶段）`
+    const task = createTask({
+      title: `▶ ${title}`,
+      prompt: brief,
+      workdir: source.workdir,
+      agentId: source.agentId,
+      backend: source.backend,
+      issueId,
+      startNow: start !== 'parked'
+    }, 'handoff')
+    if (start !== 'parked') runner.enqueue(store.get(task.id)!)
+    else publishIssueUpdate(store.get(task.id)!)
+    return store.get(task.id)!
+  })
+
   const runAutomation = (id: string) => {
     const automation = automationStore.get(id)
     if (!automation || !automation.enabled || !automation.prompt.trim()) return null

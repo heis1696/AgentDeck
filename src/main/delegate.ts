@@ -58,6 +58,42 @@ export function parseDelegatesMerged(...texts: string[]): DelegateCall[] {
   return out
 }
 
+
+// ---- 阶段接力（<continue>）：多阶段任务在阶段边界硬切新会话，简报为唯一携带物 ----
+
+export interface ContinueCall {
+  /** 下一阶段简报（自包含：目标/方案文档路径/上阶段成果/关键文件:行号/约束） */
+  brief: string
+  /** auto = 用户已明确要求继续，立即执行；parked = agent 备好等用户启动 */
+  start: 'auto' | 'parked'
+}
+
+/** 解析 <continue start="auto|parked">简报</continue>；start 缺省 auto */
+export function parseContinue(text: string): ContinueCall[] {
+  const out: ContinueCall[] = []
+  const re = /<continue([^>]*)>([sS]*?)</continue>/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(text))) {
+    const brief = m[2].trim()
+    if (!brief) continue
+    const start = tagAttr(m[1], 'start') === 'parked' ? 'parked' : 'auto'
+    out.push({ brief, start })
+  }
+  return out
+}
+
+/** 多源取最后一个 continue（跨来源按序扫描，后者覆盖前者 = 最新意图） */
+export function parseContinueMerged(...texts: string[]): ContinueCall | null {
+  let found: ContinueCall | null = null
+  for (const text of texts) for (const c of parseContinue(text)) found = c
+  return found
+}
+
+/** 把 continue 标记从对外展示文本中剥掉 */
+export function stripContinue(text: string): string {
+  return text.replace(/<continue[^>]*>[sS]*?</continue>/g, '').trim()
+}
+
 export interface AgentLike {
   id: string
   name: string
@@ -132,6 +168,8 @@ export interface DelegationOutcome {
   rounds: number
   children: string[]
   finalText: string
+  /** 各回合标记解析文本（终态全文/流式累计），供 <continue> 接力解析（delegate 与 continue 同源） */
+  scanTexts: string[]
 }
 
 const MAX_ROUNDS = 6
@@ -176,7 +214,7 @@ export async function runDelegationLoop(
   const team = ctx.getTeam()
   const me = team.find((a) => a.id === task.agentId)
   const subs = (me?.subordinates ?? []).map((id) => team.find((a) => a.id === id)).filter(Boolean) as AgentLike[]
-  if (!subs.length) return { rounds: 0, children: [], finalText: first.response }
+  if (!subs.length) return { rounds: 0, children: [], finalText: first.response, scanTexts: [first.delegationText ?? '', first.response] }
 
   const note = (text: string) => {
     const e = { ts: Date.now(), kind: 'status' as const, text }
@@ -191,7 +229,7 @@ export async function runDelegationLoop(
   const { inherited, depth, ancestors } = ancestorBudget(store, taskId)
   const bail = (why: string): DelegationOutcome => {
     note(`⚠ ${why}，本任务不再下派`)
-    return { rounds: 0, children: [], finalText: stripDelegates(first.response) }
+    return { rounds: 0, children: [], finalText: stripDelegates(first.response), scanTexts: [first.delegationText ?? '', first.response] }
   }
   if (depth >= MAX_DEPTH) return bail(`委派层级已达上限（${MAX_DEPTH} 层）`)
   const budget = Math.min(MAX_ROUNDS, MAX_TOTAL_ROUNDS - inherited)
@@ -342,5 +380,5 @@ export async function runDelegationLoop(
   } as Partial<Task>)
   pushTask(taskId)
 
-  return { rounds: round, children: allChildren, finalText: stripDelegates(finalResponse || scanTexts[0] || scanTexts[1]) }
+  return { rounds: round, children: allChildren, finalText: stripDelegates(finalResponse || scanTexts[0] || scanTexts[1]), scanTexts }
 }

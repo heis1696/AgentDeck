@@ -14,7 +14,7 @@ export function isTaskStatus(value: unknown): value is TaskStatus {
 export type IssueStatus = 'backlog' | 'todo' | 'in_progress' | 'in_review' | 'done' | 'blocked' | 'cancelled'
 export type IssuePriority = 'urgent' | 'high' | 'medium' | 'low' | 'none'
 export type RunStatus = 'running' | 'completed' | 'cancelled' | 'error'
-export type RunTrigger = 'assignment' | 'mention' | 'autopilot' | 'manual'
+export type RunTrigger = 'assignment' | 'mention' | 'autopilot' | 'manual' | 'handoff'
 
 export interface IssueAssignee {
   type: 'agent' | 'user'

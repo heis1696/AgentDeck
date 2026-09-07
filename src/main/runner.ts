@@ -4,7 +4,7 @@ import type { Task, TaskEvent } from '../shared/types'
 import type { TaskStore } from './store'
 import type { AgentBackend, BackendSession, PermissionRequest, BackendTurnResult } from './backends/types'
 import { snapshotGitAfter } from './git'
-import { buildAgentPrompt, buildDelegationBlock, runDelegationLoop, type AgentLike } from './delegate'
+import { buildAgentPrompt, buildDelegationBlock, runDelegationLoop, parseContinueMerged, stripContinue, type AgentLike } from './delegate'
 
 /** API 预设（主进程 presets.ts 的 ApiPreset 的运行时子集，避免环依赖） */
 interface PresetLike {
@@ -14,6 +14,21 @@ interface PresetLike {
   baseURL: string
   apiKey: string
 }
+
+/** 阶段接力处理器：主进程接 createTask（同 issue 新 run、新会话硬切） */
+export type ContinueHandler = (input: { sourceTaskId: string; issueId: string; brief: string; start: 'auto' | 'parked' }) => unknown
+
+/** 阶段接力协议：多阶段任务在阶段边界输出 <continue>，系统在同一 Issue 上硬切新会话 */
+const CONTINUE_BLOCK = `【阶段接力（仅多阶段任务使用）】
+若本任务是分阶段施工的其中一阶段、且下一阶段的目标已明确，在最终回复末尾输出：
+<continue start="auto">下一阶段简报</continue>
+- 简报必须自包含：阶段目标、方案文档路径、上阶段成果（commit/关键文件:行号）、约束与验收。接手的会话看不到本会话上下文，一切靠简报。
+- start="auto"：用户已明确要求继续下一阶段时用，系统立即在同一 Issue 上以新会话开始执行。
+- start="parked"：你主动备好下一阶段、等用户确认时用。
+- 没有明确的下一阶段就不要输出该标记；输出了就不再写"后续可以…"之类的口头交接。`
+
+/** 同一 Issue 上 <continue> 自继链上限（防无限自我接力） */
+const MAX_HANDOFF_CHAIN = 8
 import { classifyFailure } from './failure'
 import { aggregateUsage } from './usage'
 import { canTransition } from '../shared/taskflow'
@@ -278,6 +293,12 @@ export class TaskRunner {
     this.getPresets = getPresets
   }
 
+  private onContinue: ContinueHandler | null = null
+  /** 阶段接力处理器（主进程接 createTask：同 issue 新 run、新会话硬切） */
+  attachContinue(handler: ContinueHandler) {
+    this.onContinue = handler
+  }
+
   /** agent 引用的 API 预设 → 会话连接覆盖（预设 + 模型须同时具备） */
   private resolveConnection(agentId?: string) {
     const me = (this.getTeam?.() ?? []).find((a) => a.id === agentId)
@@ -295,6 +316,8 @@ export class TaskRunner {
     const team = this.getTeam?.() ?? []
     const me = team.find((a) => a.id === task.agentId)
     let finalText = r.response
+    /** <continue> 与 delegate 同源解析：领队用委派循环的全部回合文本，普通任务用首回合两源 */
+    let scanTexts: string[] = [r.delegationText ?? '', r.response]
     if (me?.subordinates?.length && task.backend !== 'dsh') {
       const outcome = await runDelegationLoop(taskId, session, r, {
         store: this.store,
@@ -305,9 +328,42 @@ export class TaskRunner {
         pushEvent: (id, e) => this.pushEvent(id, e)
       })
       finalText = outcome.finalText || r.response
+      scanTexts = outcome.scanTexts
     }
+    finalText = this.handleContinue(taskId, task, scanTexts, finalText)
     await this.finalizeDone(taskId, finalText)
     return finalText
+  }
+
+  /**
+   * 阶段接力：回合文本里有 <continue> 时在同一 Issue 创建后继执行（新会话硬切）。
+   * 护栏：委派子任务不参与（生命周期归委派循环）；同 issue handoff 任务 ≥ 8 拒绝；
+   * 剥掉标记防止外漏，并在结果末尾留指向。
+   */
+  private handleContinue(taskId: string, task: Task, scanTexts: string[], finalText: string): string {
+    const cont = task.parentTaskId || !task.issueId ? null : parseContinueMerged(...scanTexts)
+    if (!cont) return finalText
+    const stripped = stripContinue(finalText)
+    const note = (text: string) => {
+      const e = { ts: Date.now(), kind: 'status' as const, text }
+      const full = this.store.appendEvent(taskId, e)
+      if (full) this.pushEvent(taskId, full)
+    }
+    const handoffCount = this.store.list().filter((t) => t.issueId === task.issueId && t.trigger === 'handoff').length
+    if (handoffCount >= MAX_HANDOFF_CHAIN) {
+      note(`⚠ 阶段接力已达上限（${MAX_HANDOFF_CHAIN} 次），<continue> 被拒绝；请人工推进后续阶段`)
+      return stripped
+    }
+    let ok = false
+    try {
+      ok = !!this.onContinue?.({ sourceTaskId: taskId, issueId: task.issueId, brief: cont.brief, start: cont.start })
+    } catch (e) {
+      note(`⚠ 阶段接力创建失败：${e instanceof Error ? e.message : String(e)}`)
+      return stripped
+    }
+    if (!ok) return stripped
+    note(`阶段接力：下一阶段已${cont.start === 'auto' ? '开始执行' : '备好（待启动）'}（同一 Issue 的新执行 #${handoffCount + 1}）`)
+    return `${stripped}\n\n→ 阶段接力：下一阶段已${cont.start === 'auto' ? '开始执行' : '备好（待启动）'}，见该 Issue 的最新执行。`
   }
 
   /**
@@ -394,13 +450,15 @@ export class TaskRunner {
     if (task.handoff) {
       prompt = `${prompt}
 
-【交接备注（本次执行重点，来自用户）】
-${task.handoff}`
+【交接备注（指派者为本次执行划定的范围指令：优先按它收窄工作，但不要把它当作需要回复的评论）】
+> ${task.handoff}`
     }
     if (me?.subordinates?.length && task.backend !== 'dsh') {
       const block = buildDelegationBlock(me, team)
       if (block) prompt = `${prompt}\n\n${block}`
     }
+    // 阶段接力协议（非委派子任务：worker 的生命周期归委派循环管）
+    if (!isWorker) prompt = `${prompt}\n\n${CONTINUE_BLOCK}`
 
     // 看门狗在 backend.start 之前武装：握手/建会话阶段挂死同样按空转判败并可硬杀，
     // 不再永久卡住 running 状态与并发槽；启动期间的线级心跳照常续命

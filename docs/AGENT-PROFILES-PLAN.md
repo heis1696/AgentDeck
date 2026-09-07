@@ -157,12 +157,17 @@ interface Agent { id; name; backend; role?; systemPrompt?; subordinates?; model?
 - **cc-switch 导入器**（亮点）：读 `~/.cc-switch/cc-switch.db` 的 providers 表，按 app_type 映射平台，每个 provider 生成一个 agent（name + settings_config 里的 model/env）。用户已积累的 22 个 provider 配置一键变成 22 个 agent——这是 cc-switch 数据模型的直接复用，也是对"切换器"到"编排器"升级的最好注脚。
 - dsh profile 映射；模型用量/成本（cc-switch 的 model-pricing.json 思路）。
 
-### Phase 5：阶段接力 `<continue>`（上下文硬切）
+### Phase 5：阶段接力 `<continue>`（上下文硬切）✅ 已实施（commit：feat: phase handoff）
 
 > 动机：agentdeck 是调度工具，不该让多阶段施工任务在单个会话里无限拉长上下文。
 > 用户回复"执行下一阶段"时，agent 自主判定是否硬切：**同 issue 新建一个 run（新会话）**，
 > 阶段简报作为唯一携带物。2026-09-07 会话实测：研究 + Phase 0 + Phase 1 全在一个
 > zcode 会话里完成，靠 docs/ 本方案当外部记忆才没失控——本节把该模式产品化。
+> 实施记录：`parseContinue/parseContinueMerged/stripContinue`（delegate.ts）、
+> `completeTurn` 拦截 + `handleContinue`（runner.ts，`MAX_HANDOFF_CHAIN=8`）、
+> `ContinueHandler` → index.ts `createTask`（同 issue、trigger='handoff'、
+> auto 立即入队 / parked 停放）、协议块 `CONTINUE_BLOCK` 注入非 worker 任务首条消息。
+> 验证：`npm run smoke:continue`（19 项：解析/多源/parked/护栏/worker 禁用/不外漏）。
 
 **明确不做**（设计修正，勿走弯路）：
 
