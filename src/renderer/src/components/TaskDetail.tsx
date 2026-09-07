@@ -4,7 +4,7 @@ import { Markdown } from './Markdown'
 import { DiffView } from './DiffView'
 import { confirmDialog } from '../ui/Confirm'
 import { toast } from '../ui/Toasts'
-import { FolderOpen, History, MessageSquare, Pencil, Send, Undo2 } from 'lucide-react'
+import { FolderOpen, History, MessageSquare, Pencil, Send, Undo2, Waypoints } from 'lucide-react'
 import type { Comment, Issue, IssuePriority, IssueStatus, Run, Task, TaskEvent } from '../../../shared/types'
 import type { PermissionRequest } from '../../../main/backends/types'
 
@@ -35,6 +35,21 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   const activeWorkers = workers.filter((t) => t.status === 'running' || t.status === 'queued')
   const parent = task.parentTaskId ? tasks.find((t) => t.id === task.parentTaskId) : null
   const issueId = task.issueId ?? `iss_${task.id}`
+  // 阶段接力链：continuesFrom 上溯计阶段序号，successor 正向可跳
+  const relayPred = task.continuesFrom ? tasks.find((t) => t.id === task.continuesFrom) : null
+  const relaySucc = tasks.find((t) => t.continuesFrom === task.id)
+  const relayStage = (() => {
+    let n = 1
+    let cursor = relayPred
+    const seen = new Set<string>([task.id])
+    while (cursor && !seen.has(cursor.id)) {
+      seen.add(cursor.id)
+      n++
+      cursor = cursor.continuesFrom ? tasks.find((t) => t.id === cursor!.continuesFrom) ?? null : null
+    }
+    return n
+  })()
+  const isRelay = task.trigger === 'handoff' || !!relayPred || !!relaySucc
 
   // 初载 + 切任务重置
   const refreshEvents = () => {
@@ -538,7 +553,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
             {[...runs.map((run) => ({ kind: 'run' as const, at: run.startedAt ?? 0, run })), ...comments.map((comment) => ({ kind: 'comment' as const, at: comment.createdAt, comment }))].sort((a, b) => a.at - b.at).map((item) => item.kind === 'run' ? (
               <article className="timeline-item timeline-run" key={`run-${item.run.id}`}>
                 <span className={`timeline-marker dot-${item.run.status === 'completed' ? 'done' : item.run.status === 'running' ? 'running' : item.run.status === 'error' ? 'failed' : 'cancelled'}`} />
-                <div className="timeline-content"><div className="timeline-head"><strong>{item.run.status === 'completed' ? 'Run 完成' : item.run.status === 'running' ? 'Run 执行中' : item.run.status === 'error' ? 'Run 失败' : 'Run 已取消'}</strong><time>{item.run.startedAt ? fmtTime(item.run.startedAt) : '刚刚'}</time></div><p>{item.run.trigger === 'mention' ? '由 Issue 评论提及触发' : item.run.trigger === 'autopilot' ? '由自动化计划触发' : '由指派触发'}{item.run.durationMs ? ` · ${fmtDuration(item.run.durationMs)}` : ''}{item.run.usage ? ` · ${fmtTokens(item.run.usage.totalTokens)} tokens` : ''}</p>{item.run.taskId === task.id && <button className="link timeline-action" onClick={() => setTab('log')}>查看执行记录</button>}</div>
+                <div className="timeline-content"><div className="timeline-head"><strong>{item.run.status === 'completed' ? 'Run 完成' : item.run.status === 'running' ? 'Run 执行中' : item.run.status === 'error' ? 'Run 失败' : 'Run 已取消'}</strong>{item.run.trigger === 'handoff' && <span className="badge badge-handoff">⇥ 接力</span>}<time>{item.run.startedAt ? fmtTime(item.run.startedAt) : '刚刚'}</time></div><p>{item.run.trigger === 'mention' ? '由 Issue 评论提及触发' : item.run.trigger === 'autopilot' ? '由自动化计划触发' : item.run.trigger === 'handoff' ? '由上一阶段接力触发（同 Issue 新会话硬切）' : '由指派触发'}{item.run.durationMs ? ` · ${fmtDuration(item.run.durationMs)}` : ''}{item.run.usage ? ` · ${fmtTokens(item.run.usage.totalTokens)} tokens` : ''}</p>{item.run.taskId === task.id && <button className="link timeline-action" onClick={() => setTab('log')}>查看执行记录</button>}</div>
               </article>
             ) : (
               <article className={`timeline-item timeline-comment ${item.comment.author.type}`} key={`comment-${item.comment.id}`}><span className="timeline-marker timeline-avatar">{item.comment.author.type === 'agent' ? 'A' : '我'}</span><div className="timeline-content"><div className="timeline-head"><strong>{item.comment.author.type === 'agent' ? `Agent · ${item.comment.author.id}` : '我'}</strong><time>{fmtTime(item.comment.createdAt)}</time></div><Markdown text={item.comment.content} /></div></article>
@@ -769,13 +784,31 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
             </div>
           )}
           <hr className="prop-sep" />
+          {isRelay && (
+            <>
+              <div className="prop-group-label"><Waypoints size={13} /> 阶段接力<span className="mini dim">阶段 {relayStage}</span></div>
+              {relayPred && (
+                <div className="prop-row">
+                  <span className="prop-label">接力自</span>
+                  <span className="prop-value"><a className="mini link" role="button" tabIndex={0} title={relayPred.title} onClick={() => onSelect(relayPred.id)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(relayPred.id) } }}>▶ {relayPred.title.slice(0, 26)}{relayPred.title.length > 26 ? '…' : ''}</a></span>
+                </div>
+              )}
+              {relaySucc && (
+                <div className="prop-row">
+                  <span className="prop-label">已接力 →</span>
+                  <span className="prop-value"><a className="mini link" role="button" tabIndex={0} title={relaySucc.title} onClick={() => onSelect(relaySucc!.id)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(relaySucc!.id) } }}>{relaySucc.status === 'queued' && relaySucc.parked ? '⏸ ' : '▶ '}{relaySucc.title.replace(/^▶ /, '').slice(0, 24)}{relaySucc.title.length > 24 ? '…' : ''}</a></span>
+                </div>
+              )}
+              {!relayPred && <div className="prop-row"><span className="prop-label">触发</span><span className="prop-value">上一阶段接力（同 Issue 新会话）</span></div>}
+            </>
+          )}
           <div className="prop-group-label"><History size={13} /> 执行记录 {runs.length ? `(${runs.length})` : ''}</div>
           <div className="run-history">
             {runs.length === 0 && <span className="mini dim">暂无执行记录</span>}
             {runs.map((run) => (
               <div className="run-history-row" key={run.id}>
                 <span className={`dot dot-${run.status === 'completed' ? 'done' : run.status === 'running' ? 'running' : run.status === 'error' ? 'failed' : 'cancelled'}`} />
-                <span className="run-history-main"><b>{run.status === 'completed' ? '已完成' : run.status === 'running' ? '执行中' : run.status === 'error' ? '失败' : '已取消'}</b><small>{run.startedAt ? new Date(run.startedAt).toLocaleString() : '排队中'}{run.durationMs ? ` · ${fmtDuration(run.durationMs)}` : ''}</small></span>
+                <span className="run-history-main"><b>{run.status === 'completed' ? '已完成' : run.status === 'running' ? '执行中' : run.status === 'error' ? '失败' : '已取消'}</b>{run.trigger === 'handoff' && <span className="badge badge-handoff">⇥ 接力</span>}<small>{run.startedAt ? new Date(run.startedAt).toLocaleString() : '排队中'}{run.durationMs ? ` · ${fmtDuration(run.durationMs)}` : ''}</small></span>
                 {run.usage && <span className="mini mono">{fmtTokens(run.usage.inputTokens + run.usage.outputTokens)}</span>}
               </div>
             ))}

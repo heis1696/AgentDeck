@@ -98,7 +98,7 @@ app.whenReady().then(() => {
   presets = loadPresets()
   runner.attachPresets(() => presets)
 
-  type CreateInput = { title: string; prompt: string; workdir: string; backend?: string; agentId?: string; handoff?: string; startNow?: boolean; suppressIssue?: boolean; issueId?: string; titleAuto?: boolean }
+  type CreateInput = { title: string; prompt: string; workdir: string; backend?: string; agentId?: string; handoff?: string; startNow?: boolean; suppressIssue?: boolean; issueId?: string; titleAuto?: boolean; continuesFrom?: string }
   /** Single creation path for user issues, automation runs, and legacy tasks. */
   const createTask = (input: CreateInput, trigger: RunTrigger = 'assignment') => {
     const agent = agents.find((a) => a.id === input.agentId)
@@ -133,6 +133,7 @@ app.whenReady().then(() => {
       agentId: source.agentId,
       backend: source.backend,
       issueId,
+      continuesFrom: sourceTaskId,
       startNow: start !== 'parked'
     }, 'handoff')
     if (start !== 'parked') runner.enqueue(store.get(task.id)!)

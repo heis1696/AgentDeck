@@ -73,7 +73,7 @@ runner.attachTeam(() => team)
 runner.attachContinue(({ sourceTaskId, issueId, brief, start }) => {
   const source = store.get(sourceTaskId)
   if (!source) return null
-  const t = store.create({ title: '▶ ' + brief.split(/\r?\n/)[0].slice(0, 40), prompt: brief, workdir: source.workdir, backend: source.backend, agentId: source.agentId, issueId, trigger: 'handoff', ...(start === 'parked' ? { parked: true } : {}) })
+  const t = store.create({ title: '▶ ' + brief.split(/\r?\n/)[0].slice(0, 40), prompt: brief, workdir: source.workdir, backend: source.backend, agentId: source.agentId, issueId, trigger: 'handoff', continuesFrom: sourceTaskId, ...(start === 'parked' ? { parked: true } : {}) })
   created.push(t.id)
   return store.get(t.id)
 })
@@ -91,6 +91,7 @@ assert(succA?.parked === true, '场景 A：parked 后继（未自动启动）')
 assert(succA?.issueId === 'iss_A', '场景 A：同一 Issue')
 assert(succA?.trigger === 'handoff', '场景 A：trigger=handoff')
 assert(succA?.agentId === 'L' && succA?.backend === 'lead', '场景 A：继承 agent/platform')
+assert(succA?.continuesFrom === a.id, '场景 A：continuesFrom 指向前一阶段')
 assert(store.get(a.id).result.includes('阶段接力') && !store.get(a.id).result.includes('<continue'), '场景 A：结果含指向行、无标记外漏')
 
 // 场景 B：auto 接力 + 自继链上限护栏

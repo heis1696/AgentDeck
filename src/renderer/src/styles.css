@@ -2414,6 +2414,18 @@ html.light .settings-body > .page-header-bar { background: #fff; border-bottom-c
 }
 .board-card-title .badge-delegate { margin-right: 5px; }
 .issue-home-row .badge-delegate { flex-shrink: 0; }
+/* 阶段接力（<continue> 硬切的后继执行） */
+.badge-handoff {
+  display: inline-flex; align-items: center; gap: 3px;
+  flex-shrink: 0;
+  padding: 1px 7px; border-radius: 99px;
+  background: var(--violet-soft, rgba(139, 92, 246, .12)); border: 1px solid var(--violet-line, rgba(139, 92, 246, .35)); color: var(--violet, #8b5cf6);
+  font-size: 10px; font-weight: 650; letter-spacing: .3px;
+}
+.board-card-title .badge-handoff { margin-right: 5px; }
+.issue-home-row .badge-handoff { flex-shrink: 0; }
+.timeline-head .badge-handoff { margin: 0 6px; }
+.run-history-main { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
 
 /* —— 详情页 tab 栏（动态/执行记录/结果/Git）吸顶：高层导航不再随内容滚走 —— */
 .detail-main > .tabs { position: sticky; top: 0; z-index: 7; }
