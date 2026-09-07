@@ -8,6 +8,7 @@ interface AgentInfo {
   name: string
   backend: string
   model?: string
+  presetId?: string
   note?: string
   color: string
   role?: string
@@ -15,12 +16,22 @@ interface AgentInfo {
   subordinates?: string[]
 }
 
-/** 模型目录（agents:models 返回）：zcode 有本地 catalog，其余平台 freeform */
+/** 模型目录（agents:models / presets:models 返回）：zcode 与预设是 catalog，其余 freeform */
 interface AgentModelCatalog {
   backend: string
   source: 'catalog' | 'freeform'
   default?: string
   models: string[]
+}
+
+interface PresetInfo {
+  id: string
+  name: string
+  backend: string
+  baseURL: string
+  apiKey: string
+  note?: string
+  createdAt: number
 }
 
 const api = {
@@ -117,6 +128,12 @@ const api = {
       ipcRenderer.invoke('agents:save', list) as Promise<Array<AgentInfo>>,
     models: (backend: string): Promise<AgentModelCatalog> =>
       ipcRenderer.invoke('agents:models', backend)
+  },
+  presets: {
+    list: (): Promise<Array<PresetInfo>> => ipcRenderer.invoke('presets:list'),
+    save: (list: Array<PresetInfo>) => ipcRenderer.invoke('presets:save', list) as Promise<Array<PresetInfo>>,
+    newId: (): Promise<string> => ipcRenderer.invoke('presets:new-id'),
+    models: (presetId: string): Promise<AgentModelCatalog> => ipcRenderer.invoke('presets:models', presetId)
   },
   runtimes: {
     snapshot: (): Promise<RuntimeSnapshot[]> => ipcRenderer.invoke('runtime:snapshot')

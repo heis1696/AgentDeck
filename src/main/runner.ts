@@ -5,6 +5,15 @@ import type { TaskStore } from './store'
 import type { AgentBackend, BackendSession, PermissionRequest, BackendTurnResult } from './backends/types'
 import { snapshotGitAfter } from './git'
 import { buildAgentPrompt, buildDelegationBlock, runDelegationLoop, type AgentLike } from './delegate'
+
+/** API 预设（主进程 presets.ts 的 ApiPreset 的运行时子集，避免环依赖） */
+interface PresetLike {
+  id: string
+  name: string
+  backend: string
+  baseURL: string
+  apiKey: string
+}
 import { classifyFailure } from './failure'
 import { aggregateUsage } from './usage'
 import { canTransition } from '../shared/taskflow'
@@ -263,6 +272,19 @@ export class TaskRunner {
     this.getTeam = getTeam
   }
 
+  private getPresets: (() => PresetLike[]) | null = null
+  /** API 预设提供者（agent 引用的连接覆盖） */
+  attachPresets(getPresets: () => PresetLike[]) {
+    this.getPresets = getPresets
+  }
+
+  /** agent 引用的 API 预设 → 会话连接覆盖（预设 + 模型须同时具备） */
+  private resolveConnection(agentId?: string) {
+    const me = (this.getTeam?.() ?? []).find((a) => a.id === agentId)
+    const preset = me?.presetId ? this.getPresets?.().find((p) => p.id === me.presetId) : undefined
+    return me?.model && preset ? { name: preset.name, baseURL: preset.baseURL, apiKey: preset.apiKey } : undefined
+  }
+
   private newRunId(taskId: string) {
     return `run_${taskId}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`
   }
@@ -393,6 +415,7 @@ ${task.handoff}`
           workdir: task.workdir,
           mode: this.opts().mode,
           model: me?.model,
+          connection: this.resolveConnection(task.agentId),
           events: {
             ...baseEvents,
             onEvent: (e) => {
@@ -577,6 +600,7 @@ ${task.handoff}`
           workdir: task.workdir,
           mode: this.opts().mode,
           model: me?.model,
+          connection: this.resolveConnection(task.agentId),
           resumeSessionId: task.sessionId,
           events: this.makeEvents(taskId)
         }).then((s) => ({ session: s })),

@@ -16,7 +16,8 @@ export function createClaudeBackend(): AgentBackend {
     workdir: string,
     resumeSessionId: string | undefined,
     events: BackendSessionEvents,
-    model?: string
+    model?: string,
+    connection?: { name: string; baseURL: string; apiKey: string }
   ): Promise<{ sessionId: string; response: string; ok: boolean; error?: string }> => {
     const emit = (e: Omit<TaskEvent, 'seq' | 'ts'>) => events.onEvent({ ...e, ts: Date.now() })
     const resolved = resolveCli('claude')
@@ -48,6 +49,8 @@ export function createClaudeBackend(): AgentBackend {
       prefixArgs: resolved.prefixArgs,
       args,
       cwd: workdir,
+      // API 预设连接覆盖：与 cc-switch 同机制（env 快照），但不写全局 settings.json
+      ...(connection ? { env: { ANTHROPIC_BASE_URL: connection.baseURL, ANTHROPIC_AUTH_TOKEN: connection.apiKey } } : {}),
       onLine: (j) => {
         events.onHeartbeat?.() // 进程有任何输出即进展（含未映射成事件的行）：看门狗续命
         if (j.type === 'system' && j.subtype === 'init') {
@@ -113,9 +116,9 @@ export function createClaudeBackend(): AgentBackend {
       const p = await probeCli('claude')
       return p.ok ? { ok: true, detail: `claude ${p.version}` } : { ok: false, detail: p.error ?? '未安装' }
     },
-    async start({ prompt, workdir, events, resumeSessionId, model }) {
+    async start({ prompt, workdir, events, resumeSessionId, model, connection }) {
       const dir = workdir || process.cwd()
-      const first = runOnce(prompt, dir, resumeSessionId, events, model)
+      const first = runOnce(prompt, dir, resumeSessionId, events, model, connection)
       const sidPromise = first.then((r) => r.sessionId).catch(() => '')
       // start() 在回合结束后才 resolve 与 zcode 语义不同——但接口允许：
       // session.send 的续聊发生在 start resolve 之后，天然串行。
@@ -125,7 +128,7 @@ export function createClaudeBackend(): AgentBackend {
       const session: BackendSession = {
         sessionId: sid,
         async send(content) {
-          const res = await runOnce(content, dir, sid, events, model)
+          const res = await runOnce(content, dir, sid, events, model, connection)
           if (!res.ok) throw new Error(res.error || '回合失败')
         },
         async stop() {

@@ -54,6 +54,8 @@ export interface AgentBackend {
     mode: string
     /** agent 钉死的模型覆盖（形如 glm-5.2 或 providerId/modelId）；空 = 平台默认 */
     model?: string
+    /** API 预设连接覆盖（与 model 同时提供时生效）：baseURL/apiKey 按会话内存注入，不写全局配置 */
+    connection?: { name: string; baseURL: string; apiKey: string }
     resumeSessionId?: string
     events: BackendSessionEvents
   }) => Promise<BackendSession>

@@ -67,6 +67,8 @@ export interface AgentLike {
   subordinates?: string[]
   /** agent 钉死的模型覆盖（Agent.model 透传给 backend.start） */
   model?: string
+  /** API 预设 id（连接覆盖，runner 解析为 connection 传入 backend.start） */
+  presetId?: string
   note?: string
 }
 

@@ -58,6 +58,12 @@ interface Bridge {
     save: (list: AgentInfo[]) => Promise<AgentInfo[]>
     models: (backend: string) => Promise<AgentModelCatalog>
   }
+  presets: {
+    list: () => Promise<ApiPresetInfo[]>
+    save: (list: ApiPresetInfo[]) => Promise<ApiPresetInfo[]>
+    newId: () => Promise<string>
+    models: (presetId: string) => Promise<AgentModelCatalog>
+  }
   runtimes: {
     snapshot: () => Promise<RuntimeSnapshot[]>
   }
@@ -72,11 +78,23 @@ export interface AgentInfo {
   name: string
   backend: string
   model?: string
+  presetId?: string
   note?: string
   color: string
   role?: string
   systemPrompt?: string
   subordinates?: string[]
+}
+
+/** API 预设（连接档案）——与主进程 presets.ts 的 ApiPreset 对齐 */
+export interface ApiPresetInfo {
+  id: string
+  name: string
+  backend: string
+  baseURL: string
+  apiKey: string
+  note?: string
+  createdAt: number
 }
 
 /** 模型目录（agents:models 返回）：zcode 有本地 catalog，其余平台 freeform */

@@ -18,6 +18,8 @@ export interface Agent {
   subordinates?: string[]
   /** 传给后端的模型（可空 = 后端默认） */
   model?: string
+  /** API 预设 id（连接覆盖：baseURL/apiKey 按会话内存注入；可空 = 平台默认连接） */
+  presetId?: string
   note?: string
   /** 主题色（UI 头像） */
   color: string
@@ -44,6 +46,7 @@ export function normalizeAgent(value: unknown, fallback?: Agent): Agent | null {
     ...(typeof raw.systemPrompt === 'string' && raw.systemPrompt.trim() ? { systemPrompt: raw.systemPrompt.trim() } : {}),
     ...(subordinates?.length ? { subordinates } : {}),
     ...(typeof raw.model === 'string' && raw.model.trim() ? { model: raw.model.trim() } : {}),
+    ...(typeof raw.presetId === 'string' && raw.presetId.trim() ? { presetId: raw.presetId.trim() } : {}),
     ...(typeof raw.note === 'string' && raw.note.trim() ? { note: raw.note.trim() } : {}),
     color: typeof raw.color === 'string' && raw.color.trim() ? raw.color.trim() : (fallback?.color ?? '#64748b')
   }

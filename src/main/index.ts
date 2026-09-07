@@ -8,6 +8,7 @@ import { IssueStore } from './issue-store'
 import { AutomationStore } from './automation-store'
 import { loadSettings, saveSettings } from './settings'
 import { loadAgents, saveAgents, newAgentId, type Agent } from './agents'
+import { loadPresets, savePresets, newPresetId, fetchPresetModels, type ApiPreset } from './presets'
 import { createZcodeBackend, findZcodeBundle, ensureZcodeCliConfig, zcodeDefaultPaths, listZcodeModels } from './backends/zcode'
 import { createClaudeBackend } from './backends/claude'
 import { createCodexBackend } from './backends/codex'
@@ -29,6 +30,7 @@ let issueStore: IssueStore
 let automationStore: AutomationStore
 let automationTimer: NodeJS.Timeout | undefined
 let agents: Agent[]
+let presets: ApiPreset[]
 const backends = new Map<string, AgentBackend>()
 
 /** Sync the durable projection and notify issue/run consumers for one task. */
@@ -93,6 +95,8 @@ app.whenReady().then(() => {
     workerConcurrency: settings.workerConcurrency
   }), (task) => publishIssueUpdate(task))
   runner.attachTeam(() => agents)
+  presets = loadPresets()
+  runner.attachPresets(() => presets)
 
   type CreateInput = { title: string; prompt: string; workdir: string; backend?: string; agentId?: string; handoff?: string; startNow?: boolean; suppressIssue?: boolean; issueId?: string; titleAuto?: boolean }
   /** Single creation path for user issues, automation runs, and legacy tasks. */
@@ -223,6 +227,20 @@ app.whenReady().then(() => {
     return saveAgents(agents)
   })
   ipcMain.handle('agents:new-id', () => newAgentId())
+  // ---- API 预设（连接档案；agent 引用后按会话内存注入，零全局切换） ----
+  ipcMain.handle('presets:list', () => presets)
+  ipcMain.handle('presets:save', (_e, list: ApiPreset[]) => {
+    presets = savePresets(list)
+    return presets
+  })
+  ipcMain.handle('presets:new-id', () => newPresetId())
+  // 从预设在线拉取模型目录（OpenAI/Anthropic 风格自适应）
+  ipcMain.handle('presets:models', async (_e, presetId: string) => {
+    const preset = presets.find((p) => p.id === presetId)
+    if (!preset) throw new Error('预设不存在')
+    const models = await fetchPresetModels(preset)
+    return { backend: preset.backend, source: 'catalog', models } as const
+  })
   // 模型目录：zcode 有本地真目录（cli config），其余平台自由填写 + 常用预设
   ipcMain.handle('agents:models', (_e, backendId: string) => {
     if (backendId === 'zcode') {

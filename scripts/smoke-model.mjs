@@ -75,6 +75,17 @@ const rmCustom = buildRuntimeModelFromCliConfig('glm-9.9')
 assert(rmCustom?.model?.modelId === 'glm-9.9' && rmCustom.provider?.models?.some((m) => m.modelId === 'glm-9.9'), '目录缺项时补录模型')
 assert(buildRuntimeModelFromCliConfig('nope/m1') === null, 'provider 不存在返回 null')
 
+// API 预设连接覆盖：provider 整体来自预设（不读 config），模型取 ref 尾段
+const conn = { name: '某中转站', baseURL: 'https://relay.example/v1', apiKey: 'sk-relay' }
+const rmPreset = buildRuntimeModelFromCliConfig('glm-5.2', conn)
+assert(rmPreset?.model?.providerId === 'preset' && rmPreset.model.modelId === 'glm-5.2', '预设+模型：providerId=preset，模型取 ref')
+assert(rmPreset?.provider?.baseURL === 'https://relay.example/v1' && rmPreset.provider?.apiKey?.value === 'sk-relay' && rmPreset.provider?.label === '某中转站', '预设 provider 携带预设连接（baseURL/apiKey/label）')
+assert(rmPreset.provider?.models?.some((m) => m.modelId === 'glm-5.2'), '预设模型目录含钉选模型')
+const rmPresetSlash = buildRuntimeModelFromCliConfig('prov/glm-x', conn)
+assert(rmPresetSlash?.model?.modelId === 'glm-x', '预设+prov/model 形式：取尾段 modelId')
+const rmConnNoModel = buildRuntimeModelFromCliConfig(undefined, conn)
+assert(rmConnNoModel?.model?.providerId === 'zai' && rmConnNoModel.model.modelId === 'glm-5.3', '预设无模型：忽略连接，走平台默认（zai/glm-5.3）')
+
 const catalog = listZcodeModels()
 assert(catalog.models.length === 4 && catalog.models.includes('glm-x') && catalog.defaultModel === 'glm-5.3', `模型目录并集 + 默认（${catalog.models.join(',')}）`)
 
