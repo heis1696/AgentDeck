@@ -131,4 +131,26 @@ assert(store.get(c.id)?.status === 'done', '场景 C：worker done')
 assert(!created.includes('SHOULD-NOT-CREATE'), '场景 C：worker 的 continue 被忽略')
 
 console.log('\n✅ CONTINUE SMOKE PASSED')
+
+// ---- 场景 D：追问"执行下一阶段" = 确定性接力入口（无需 agent 自发输出） ----
+const runnerD = new TaskRunner(store, new Map([['lead', continueBackend('lead', '本阶段完成。', '好。<continue start="auto">阶段2：按 docs/plan.md 实施 UI；阶段1 已完成数据层（commit abc）；验收：构建通过</continue>')]]), () => ({ concurrency: 1, mode: 'yolo', notify: false, workerConcurrency: 2 }), () => {})
+runnerD.attachTeam(() => team)
+let dSucc = null
+runnerD.attachContinue(({ sourceTaskId, issueId, brief, start }) => {
+  const source = store.get(sourceTaskId)
+  dSucc = store.create({ title: '▶ ' + brief.slice(0, 20), prompt: brief, workdir: source.workdir, backend: source.backend, agentId: source.agentId, issueId, trigger: 'handoff', continuesFrom: sourceTaskId })
+  runnerD.enqueue(store.get(dSucc.id))
+  return store.get(dSucc.id)
+})
+const d = store.create({ title: '阶段一 D', prompt: '干活', workdir: '', backend: 'lead', agentId: 'L', issueId: 'iss_D' })
+runnerD.enqueue(d)
+const t3 = Date.now()
+while (Date.now() - t3 < 15000 && store.get(d.id)?.status !== 'done') await new Promise((r) => setTimeout(r, 100))
+assert(store.get(d.id)?.status === 'done', '场景 D：首轮 done（无自发标记）')
+const fu = await runnerD.followUp(d.id, '执行下一阶段')
+assert(fu.ok, '场景 D：追问成功')
+assert(!!dSucc && dSucc.trigger === 'handoff' && !dSucc.parked, '场景 D：追问触发 auto 接力（后继已创建并启动）')
+assert(dSucc.continuesFrom === d.id && dSucc.issueId === 'iss_D', '场景 D：continuesFrom/issue 正确')
+assert(!store.get(d.id).result.includes('<continue'), '场景 D：标记不外漏')
+console.log('')
 process.exit(0)

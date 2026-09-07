@@ -25,10 +25,14 @@ const CONTINUE_BLOCK = `【阶段接力（仅多阶段任务使用）】
 - 简报必须自包含：阶段目标、方案文档路径、上阶段成果（commit/关键文件:行号）、约束与验收。接手的会话看不到本会话上下文，一切靠简报。
 - start="auto"：用户已明确要求继续下一阶段时用，系统立即在同一 Issue 上以新会话开始执行。
 - start="parked"：你主动备好下一阶段、等用户确认时用。
-- 没有明确的下一阶段就不要输出该标记；输出了就不再写"后续可以…"之类的口头交接。`
+- 没有明确的下一阶段就不要输出该标记；输出了就不再写"后续可以…"之类的口头交接。
+- 示例：<continue start="auto">阶段2：按 docs/plan.md §3 实现模型选择 UI；阶段1 已完成数据管道（commit 09a47a4，src/main/presets.ts）；验收：两个不同模型的 agent 并发执行成功</continue>`
 
 /** 同一 Issue 上 <continue> 自继链上限（防无限自我接力） */
 const MAX_HANDOFF_CHAIN = 8
+
+/** 用户在追问里表达"进入下一阶段"时注入的合成指令：把意图翻译成协议标记（确定性触发路径） */
+const HANDOFF_CUE = `【系统】用户要求进入下一阶段。请立即按【阶段接力】协议输出一个 <continue start="auto">…</continue> 标记：简报必须自包含（下一阶段目标、方案文档/计划路径、本阶段成果与 commit、关键文件:行号、约束与验收——接手会话看不到本会话上下文）。若确实不存在明确的下一阶段，直接说明原因，不要输出标记。`
 import { classifyFailure } from './failure'
 import { aggregateUsage } from './usage'
 import { canTransition } from '../shared/taskflow'
@@ -602,6 +606,10 @@ export class TaskRunner {
     if (!backend) return { ok: false, error: '后端不可用' }
     if (!this.sessions.get(taskId) && !task.sessionId) return { ok: false, error: '无会话可恢复' }
     this.recordUser(taskId, message)
+    // "下一阶段"类追问 = 确定性接力入口：把用户意图翻译成协议标记指令（recordUser 仍记原话）
+    const wantsHandoff = !task.parentTaskId && /下一阶段|下个阶段|nexts*phase/i.test(message)
+    const turnContent = wantsHandoff ? `${HANDOFF_CUE}
+（用户原话：${message}）` : message
 
     const beginRun = () => {
       this.store.update(taskId, { status: 'running', startedAt: Date.now(), runId: this.newRunId(taskId), endedAt: undefined, error: undefined, failure: undefined })
@@ -613,7 +621,7 @@ export class TaskRunner {
     if (liveSession) {
       beginRun()
       try {
-        const r = await this.sendTurn(taskId, liveSession, message)
+        const r = await this.sendTurn(taskId, liveSession, turnContent)
         if (!r.ok) throw new Error(r.error || '续聊回合失败')
         const finalText = await this.completeTurn(taskId, liveSession, r)
         if (this.opts().notify) this.notify(task, '完成', finalText)
@@ -656,7 +664,7 @@ export class TaskRunner {
       })
       resumeSession = await Promise.race([
         backend.start({
-          prompt: message,
+          prompt: turnContent,
           workdir: task.workdir,
           mode: this.opts().mode,
           model: me?.model,

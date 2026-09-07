@@ -324,8 +324,8 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     await navigator.clipboard.writeText(`**${task.title}**\n\n${body}`)
     toast.success('PR 描述已复制（标题 + 摘要 + 改动）')
   }
-  const sendFollowUp = async () => {
-    const content = followUp.trim()
+  const sendFollowUp = async (preset?: string) => {
+    const content = (preset ?? followUp).trim()
     if (!content || busy) return
     setBusy(true)
     setFollowUp('')
@@ -704,7 +704,10 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
               }
             }}
           />
-          <button className="btn primary" disabled={busy || !followUp.trim()} onClick={sendFollowUp}>
+          <button className="btn" disabled={busy || !!task.parentTaskId || (task.status !== 'done' && task.status !== 'failed')} title={task.parentTaskId ? '委派子任务不参与阶段接力' : '让本执行交出下一阶段简报，并在同一 Issue 上硬切新会话'} onClick={() => void sendFollowUp('执行下一阶段')}>
+            ⇥ 接力下一阶段
+          </button>
+          <button className="btn primary" disabled={busy || !followUp.trim()} onClick={() => void sendFollowUp()}>
             发送
           </button>
         </footer>
