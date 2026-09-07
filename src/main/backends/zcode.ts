@@ -252,13 +252,27 @@ function compactArgs(args?: string): string {
  * 从 cli config 构造 runtimeModel（provider registry 快照）。
  * resume 旧会话必须带：服务端用它重新解析会话的历史模型，否则 send 会报
  * ZCODE_RUNTIME_MODEL_UNAVAILABLE（"历史任务使用的模型已不可用"）。
+ * modelRef 为 agent 钉死的模型覆盖：'providerId/modelId' 拆两者，裸 modelId 沿用
+ * config 默认 provider；目录缺该模型时补录（服务端按目录校验）。
  */
-function buildRuntimeModelFromCliConfig(): Record<string, unknown> | null {
+export function buildRuntimeModelFromCliConfig(modelRef?: string): Record<string, unknown> | null {
   try {
     const home = os.homedir()
     const cfg = JSON.parse(fs.readFileSync(path.join(home, '.zcode', 'cli', 'config.json'), 'utf8'))
     const mainRef = String(cfg?.model?.main ?? '')
-    const [providerId, modelId] = mainRef.split('/')
+    const [mainProvider, mainModel] = mainRef.split('/')
+    let providerId = mainProvider
+    let modelId = mainModel
+    const ref = modelRef?.trim()
+    if (ref) {
+      const slash = ref.indexOf('/')
+      if (slash > 0 && slash < ref.length - 1) {
+        providerId = ref.slice(0, slash)
+        modelId = ref.slice(slash + 1)
+      } else {
+        modelId = ref
+      }
+    }
     const prov = cfg?.provider?.[providerId]
     if (!prov || !modelId) return null
     const models = Object.entries(prov.models ?? {}).map(([id, m]: [string, any]) => ({
@@ -304,6 +318,18 @@ export function mergeTurnTexts(full: string, streamed: string): string {
   return `${streamed}\n${full}`
 }
 
+/** zcode 模型目录（Agent 管理的模型下拉用）：cli config 各 provider 的模型键并集 + 默认模型 */
+export function listZcodeModels(): { models: string[]; defaultModel?: string } {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.zcode', 'cli', 'config.json'), 'utf8'))
+    const models = [...new Set(Object.values(cfg?.provider ?? {}).flatMap((p: any) => Object.keys(p?.models ?? {})))]
+    const defaultModel = String(cfg?.model?.main ?? '').split('/').pop()
+    return { models, ...(defaultModel ? { defaultModel } : {}) }
+  } catch {
+    return { models: [] }
+  }
+}
+
 export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath: string }): AgentBackend {
   return {
     id: 'zcode',
@@ -321,7 +347,7 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
       if (!cfg.ok) return { ok: false, detail: `${cfg.detail} · ${nodeNote}` }
       return { ok: node.source !== 'fallback-electron', detail: `${bundle} · ${cfg.detail} · ${nodeNote}` }
     },
-    async start({ prompt, workdir, mode, events, resumeSessionId }) {
+    async start({ prompt, workdir, mode, model, events, resumeSessionId }) {
       const { nodePath, zcodePath } = getPaths()
       const bundle = findZcodeBundle(zcodePath || undefined)
       if (!bundle) throw new Error('找不到 zcode.cjs')
@@ -581,7 +607,7 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
       emit({ kind: 'status', text: 'starting app-server' })
       let sessionId: string
       if (resumeSessionId) {
-        const runtimeModel = buildRuntimeModelFromCliConfig()
+        const runtimeModel = buildRuntimeModelFromCliConfig(model)
         const resumed = await conn.request<any>('session/resume', {
           sessionId: resumeSessionId,
           workspace: { workspaceKey: cwd, workspacePath: cwd },
@@ -590,9 +616,12 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
         sessionId = resumed?.session?.sessionId ?? resumeSessionId
         emit({ kind: 'status', text: runtimeModel ? '会话已恢复' : '会话已恢复（未带模型注册表）' })
       } else {
+        // agent 指定模型时 create 也带 runtimeModel；默认路径不带，保持历史行为
+        const runtimeModel = model?.trim() ? buildRuntimeModelFromCliConfig(model) : null
         const created = await conn.request<any>('session/create', {
           workspace: { workspaceKey: cwd, workspacePath: cwd },
-          mode: mode || 'yolo'
+          mode: mode || 'yolo',
+          ...(runtimeModel ? { runtimeModel } : {})
         })
         sessionId = created?.session?.sessionId
       }

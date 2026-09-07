@@ -8,7 +8,7 @@ import { IssueStore } from './issue-store'
 import { AutomationStore } from './automation-store'
 import { loadSettings, saveSettings } from './settings'
 import { loadAgents, saveAgents, newAgentId, type Agent } from './agents'
-import { createZcodeBackend, findZcodeBundle, ensureZcodeCliConfig, zcodeDefaultPaths } from './backends/zcode'
+import { createZcodeBackend, findZcodeBundle, ensureZcodeCliConfig, zcodeDefaultPaths, listZcodeModels } from './backends/zcode'
 import { createClaudeBackend } from './backends/claude'
 import { createCodexBackend } from './backends/codex'
 import { createOpencodeBackend } from './backends/opencode'
@@ -223,6 +223,15 @@ app.whenReady().then(() => {
     return saveAgents(agents)
   })
   ipcMain.handle('agents:new-id', () => newAgentId())
+  // 模型目录：zcode 有本地真目录（cli config），其余平台自由填写 + 常用预设
+  ipcMain.handle('agents:models', (_e, backendId: string) => {
+    if (backendId === 'zcode') {
+      const { models, defaultModel } = listZcodeModels()
+      if (models.length) return { backend: backendId, source: 'catalog', default: defaultModel, models }
+    }
+    const presets: Record<string, string[]> = { claude: ['sonnet', 'opus', 'haiku'], codex: ['gpt-5.5', 'gpt-5.2-codex'], opencode: [], dsh: [] }
+    return { backend: backendId, source: 'freeform', models: presets[backendId] ?? [] }
+  })
   ipcMain.handle('agents:probe', async () => {
     const out: Record<string, { ok: boolean; detail: string }> = {}
     // 并行探测，单个完成后立刻推送 UI（避免慢后端拖住整体反馈）

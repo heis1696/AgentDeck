@@ -65,6 +65,8 @@ export interface AgentLike {
   role?: string
   systemPrompt?: string
   subordinates?: string[]
+  /** agent 钉死的模型覆盖（Agent.model 透传给 backend.start） */
+  model?: string
   note?: string
 }
 

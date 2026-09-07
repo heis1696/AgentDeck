@@ -15,15 +15,17 @@ export function createCodexBackend(): AgentBackend {
     prompt: string,
     workdir: string,
     resumeSessionId: string | undefined,
-    events: BackendSessionEvents
+    events: BackendSessionEvents,
+    model?: string
   ): Promise<{ sessionId: string } & BackendTurnResult> => {
     const emit = (e: Omit<TaskEvent, 'seq' | 'ts'>) => events.onEvent({ ...e, ts: Date.now() })
     const resolved = resolveCli('codex')
     if (!resolved) return Promise.reject(new Error('PATH 上找不到 codex'))
     const common = ['--json', '--dangerously-bypass-approvals-and-sandbox', '--skip-git-repo-check']
+    const modelArgs = model ? ['-m', model] : []
     const args = resumeSessionId
-      ? ['exec', 'resume', resumeSessionId, ...common, prompt]
-      : ['exec', ...common, prompt]
+      ? ['exec', 'resume', resumeSessionId, ...modelArgs, ...common, prompt]
+      : ['exec', ...modelArgs, ...common, prompt]
     let sessionId = resumeSessionId ?? ''
     let finalText = ''
     // Codex can emit multiple agent_message items in one turn. Keep all of
@@ -109,15 +111,15 @@ export function createCodexBackend(): AgentBackend {
       const p = await probeCli('codex')
       return p.ok ? { ok: true, detail: `codex ${p.version}` } : { ok: false, detail: p.error ?? '未安装' }
     },
-    async start({ prompt, workdir, events, resumeSessionId }) {
+    async start({ prompt, workdir, events, resumeSessionId, model }) {
       const dir = workdir || process.cwd()
-      const r = await runOnce(prompt, dir, resumeSessionId, events)
+      const r = await runOnce(prompt, dir, resumeSessionId, events, model)
       if (!r.ok && r.error) throw new Error(r.error)
       const sid = r.sessionId
       return {
         sessionId: sid,
         async send(content) {
-          const res = await runOnce(content, dir, sid, events)
+          const res = await runOnce(content, dir, sid, events, model)
           if (!res.ok) throw new Error(res.error || '回合失败')
         },
         async stop() {

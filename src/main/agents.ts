@@ -92,11 +92,26 @@ export function loadAgents(): Agent[] {
   // 迁移：补上保存文件里缺失的平台预置队员（如新增的 dsh）
   const have = new Set(saved.map((a) => a.backend))
   const missing = defaultAgents().filter((d) => !have.has(d.backend))
-  return missing.length ? [...saved, ...missing] : saved
+  const merged = missing.length ? dedupeAgentNames([...saved, ...missing]) : dedupeAgentNames(saved)
+  return merged
+}
+
+/**
+ * 队内重名消解：委派按名字匹配队员（delegate.ts），重名会产生歧义。
+ * 同名者（不区分大小写）自动追加 " 2"/"3" 后缀；保存与加载都过一遍。
+ */
+export function dedupeAgentNames(agents: Agent[]): Agent[] {
+  const seen = new Map<string, number>()
+  return agents.map((a) => {
+    const key = a.name.toLowerCase()
+    const n = (seen.get(key) ?? 0) + 1
+    seen.set(key, n)
+    return n === 1 ? a : { ...a, name: `${a.name} ${n}` }
+  })
 }
 
 export function saveAgents(agents: Agent[]): Agent[] {
-  agents = normalizeAgents(agents)
+  agents = dedupeAgentNames(normalizeAgents(agents))
   fs.mkdirSync(path.dirname(file()), { recursive: true })
   fs.writeFileSync(file(), JSON.stringify(agents, null, 2))
   return agents

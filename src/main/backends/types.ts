@@ -52,6 +52,8 @@ export interface AgentBackend {
     prompt: string
     workdir: string
     mode: string
+    /** agent 钉死的模型覆盖（形如 glm-5.2 或 providerId/modelId）；空 = 平台默认 */
+    model?: string
     resumeSessionId?: string
     events: BackendSessionEvents
   }) => Promise<BackendSession>

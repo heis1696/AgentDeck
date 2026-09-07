@@ -392,6 +392,7 @@ ${task.handoff}`
           prompt,
           workdir: task.workdir,
           mode: this.opts().mode,
+          model: me?.model,
           events: {
             ...baseEvents,
             onEvent: (e) => {
@@ -556,6 +557,8 @@ ${task.handoff}`
       return { ok: false, error: msg }
     }
     beginRun()
+    // 续聊沿用 agent 钉死的模型（zcode resume 每次重传 runtimeModel；CLI --model 与 --resume 正交）
+    const me = (this.getTeam?.() ?? []).find((a) => a.id === task.agentId)
     let resumeSession: BackendSession
     // 看门狗在 backend.start 之前武装：resume 重建阶段挂死同样按空转判败，
     // 不永久卡住 running 状态（此前只能重启应用）
@@ -573,6 +576,7 @@ ${task.handoff}`
           prompt: message,
           workdir: task.workdir,
           mode: this.opts().mode,
+          model: me?.model,
           resumeSessionId: task.sessionId,
           events: this.makeEvents(taskId)
         }).then((s) => ({ session: s })),

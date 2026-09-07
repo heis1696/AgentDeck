@@ -14,7 +14,8 @@ export function createOpencodeBackend(): AgentBackend {
     prompt: string,
     workdir: string,
     resumeSessionId: string | undefined,
-    events: BackendSessionEvents
+    events: BackendSessionEvents,
+    model?: string
   ): Promise<{ sessionId: string; response: string; ok: boolean; error?: string }> => {
     const emit = (e: Omit<TaskEvent, 'seq' | 'ts'>) => events.onEvent({ ...e, ts: Date.now() })
     const resolved = resolveCli('opencode')
@@ -23,6 +24,7 @@ export function createOpencodeBackend(): AgentBackend {
       'run',
       '--format', 'json',
       '--dangerously-skip-permissions',
+      ...(model ? ['--model', model] : []),
       ...(workdir ? ['--dir', workdir] : []),
       ...(resumeSessionId ? ['-s', resumeSessionId] : []),
       prompt
@@ -106,14 +108,14 @@ export function createOpencodeBackend(): AgentBackend {
       const p = await probeCli('opencode')
       return p.ok ? { ok: true, detail: `opencode ${p.version}` } : { ok: false, detail: p.error ?? '未安装' }
     },
-    async start({ prompt, workdir, events, resumeSessionId }) {
-      const r = await runOnce(prompt, workdir, resumeSessionId, events)
+    async start({ prompt, workdir, events, resumeSessionId, model }) {
+      const r = await runOnce(prompt, workdir, resumeSessionId, events, model)
       if (!r.ok && r.error) throw new Error(r.error)
       const sid = r.sessionId
       return {
         sessionId: sid,
         async send(content) {
-          const res = await runOnce(content, workdir, sid, events)
+          const res = await runOnce(content, workdir, sid, events, model)
           if (!res.ok) throw new Error(res.error || '回合失败')
         },
         async stop() {
