@@ -60,25 +60,34 @@ Renderer 组件通过 `src/renderer/src/task-service.ts` 调用任务命令；�
 - `backend ∈ { zcode, claude, codex, opencode, dsh }`
 - `subordinates` 非空 → 领队（获得委派能力）
 
-### 1.4 Goal mode (`bridge.goals`)
+### 1.4 目标模式 Goal mode（`bridge.goals`）
 
-Goal is a durable long-running objective attached to one Issue. Each
-continuation creates another GoalRun/Task under that Issue. Terminal runs leave
-one GoalCheckpoint; repeated TaskChanged notifications are idempotent by run id.
+Goal 是绑定**真实 Issue** 的持久长时程目标（v2 起不再创建独立「目标」或合成 Issue）。在 Issue 详情内开启目标模式后，agent 每轮结束自动续聊自省推进，直到完成条件全部达成或护栏触发；执行复用 TaskRunner、权限、workdir 边界与委派协议。
 
-| Method | Description |
+| 方法 | 说明 |
 |---|---|
-| `list` / `get` | Read goals persisted in `userData/goals/index.json` |
-| `create(input)` | Create completion/stop conditions plus run and duration budgets; `startNow` controls the first run |
-| `runs(id)` / `checkpoints(id)` | Read phase history and durable checkpoint summaries |
-| `start` / `pause` / `continue` / `resume` / `cancel` | Lifecycle commands checked by the shared goal state machine |
-| `checkpoint(id, input)` | Persist a user-provided checkpoint for the current phase |
+| `list` / `get` | 读取 `userData/goals/index.json` 中的目标 |
+| `create(input)` | `GoalCreateInput.issueId` **必填**（空串报错）；创建后「收养」该 Issue 现有最新 Task 作为阶段任务（无 Task 则建首个并注入目标模式块），不再合成伪 Issue；`startNow` 控制首个阶段任务是否立即启动 |
+| `runs(id)` / `checkpoints(id)` | 读取轮次记录与每轮 checkpoint（状态脊柱） |
+| `start` / `pause` / `continue` / `resume` / `cancel` | 共享目标状态机校验的生命周期命令；`continue` 对最新 Task 触发续轮（优先同会话续聊） |
+| `checkpoint(id, input)` | 持久化当前阶段的人工 checkpoint |
 
-An active goal is never resumed silently after restart. Recovery moves it to
-`waiting_user` and requires an explicit continuation. Goal execution reuses the
-existing TaskRunner, permission broker, workdir boundary and delegation protocol.
+契约：`GoalCreateInput` 新增必填 `issueId: string`；`Goal` 新增可选 `failures?: number`（连续非重试失败次数，自动续轮上限判断用）；其余 `goals:*` IPC 面不变。
 
-### 1.3 设置与工具
+自动推进语义：每轮 Task 终态（含失败/取消）→ 解析 checkpoint envelope 落盘（runId 幂等）→ 预算/停止条件/连续失败护栏决策 → 续轮**优先同会话续聊回灌**（`runner.followUp`，不重开上下文）；后端未注入续聊或 Task 无 `sessionId` 时**兜底新建 Task**（prompt = 目标块 + checkpoint 简报）。完成条件逐条对照原文全部达成 → goal completed、Issue 自动归档 done。重启恢复：active → `waiting_user`，需显式 continue，绝不静默续跑。
+
+委派单审核（maker/checker）：委派结果回灌后，领队须对每个 done 单输出审核标记 `<review of="#单号" verdict="pass|fail" note="…"/>`——pass → 对应 Issue 看板自动归档 done；fail → 标 blocked 并由领队改派/修复；未出结论的单保持人工审核（不改状态）。匹配与剥离规则见 §5。
+
+**协议标记一览**（委派/目标模式共用的协议标记）：
+
+| 标记 | 用途 |
+|---|---|
+| `<delegate to="…" reason="…">…</delegate>` | 委派子任务（领队能力协议，详见 §5.1） |
+| `<round outcome="…" reason="…"/>` | 每轮收尾自评，运行时截获留痕并从展示文本剥除 |
+| `<continue>…</continue>` | 阶段边界换新会话接力（简报自包含），一般推进不硬切会话 |
+| `<review of="#单号" verdict="pass\|fail" note="…"/>` | 委派单审核结论（v2）：pass → 看板归档 done；fail → blocked（详见 §5.1） |
+
+### 1.5 设置与工具
 
 | 方法 | 说明 |
 |---|---|
@@ -241,12 +250,25 @@ interface BackendSessionEvents {
 - 可多个，本轮并行执行；每轮上限 `workerConcurrency`
 - 领队最终输出不应再含标记；对外结果经 `stripDelegates` 剥离
 
+委派单审核结论标记（v2，maker/checker）：
+
+```
+<review of="#单号" verdict="pass|fail" note="一句话：通过理由或退回原因"/>
+```
+
+- 队员是 maker、领队是 checker：对回灌报告里每个状态为 done 的单给出一条结论
+- pass → 对应 Issue 看板自动归档为已完成；fail → 标记受阻，由领队下一轮改派或自行修复；未出结论的单保留人工审核，不改状态
+- `of` 按 `#序号` 精确匹配，兜底按队员名/标题子串；回灌报告带单号（`### 队员 X 的结果（done，单号 #1）`）
+- 对外文本（`finalText`）剥除 review 标记（`stripReviews`）；`scanTexts` 不剥，供多源解析
+
 ### 5.2 导出 API
 
 | 导出 | 用途 |
 |---|---|
 | `parseDelegates(text): DelegateCall[]` | 提取 `{to, prompt}[]` |
 | `stripDelegates(text): string` | 剥除标记 |
+| `parseReviews(text): Array<{of, verdict, note?}>` | 提取委派单审核结论（v2，`<review>` 解析） |
+| `stripReviews(text): string` | 剥除 `<review>` 标记（v2，展示文本用；`scanTexts` 不剥） |
 | `buildAgentPrompt(agent, userPrompt, team)` | 身份注入（人设+定位） |
 | `buildDelegationBlock(agent, team)` | 领队能力说明（名单+协议） |
 | `sanitizeChildPrompt(prompt, repoDir)` | 子任务指令绝对路径→相对（防改错目录） |
@@ -259,13 +281,15 @@ interface BackendSessionEvents {
   ├─ 无标记 → 结束（领队自己干完了）
   ├─ 有标记 → 逐个：解析队员（名字/平台 id，忽略大小写，限 subordinates 内）
   │           sanitizeChildPrompt → 建 worktree（仓库时）→ 建子任务入队
-  ├─ 等本轮子任务全部终态 → 结果格式化回灌并等待完整回合结果
+  ├─ 等本轮子任务全部终态 → 结果格式化回灌（报告带单号）并等待完整回合结果
+  ├─ 领队对报告里每个 done 单输出 <review> 审核结论
+  │      pass → 看板归档 done / fail → blocked / 无结论 → 不动状态留人工审核
   └─ 领队继续输出 → 再解析（最多 6 轮）
 结束 → 子任务分支 commitAll + 依序 merge 进 agentdeck/task-<领队id> 集成分支
        branchDiffSummary 生成总 diff；无实际合并时如实标注
 ```
 
-约束：取消领队级联取消子任务；领队自己的改动留在主工作区不自动提交；dsh 不能当领队（无 send）。
+约束：取消领队级联取消子任务；领队自己的改动留在主工作区不自动提交；dsh 不能当领队（无 send）；子任务未绑定 Issue 时审核结论只留痕、不写看板状态。
 
 ---
 

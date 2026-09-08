@@ -16,7 +16,7 @@ for (const [src, out] of [
 }
 const { TaskRunner } = await import(pathToFileURL(path.join(root, 'out/sd-runner.cjs')).href)
 const { TaskStore } = await import(pathToFileURL(path.join(root, 'out/sd-store.cjs')).href)
-const { parseDelegates, stripDelegates } = await import(pathToFileURL(path.join(root, 'out/sd-delegate.cjs')).href)
+const { parseDelegates, stripDelegates, parseReviews, stripReviews } = await import(pathToFileURL(path.join(root, 'out/sd-delegate.cjs')).href)
 
 // ---- 假后端：领队 zcode 风格（send 续聊），worker claude 风格 ----
 function makeLeaderBackend() {
@@ -115,6 +115,15 @@ const reversed = parseDelegates('<delegate reason="调研在行" to="乙">查资
 assert(reversed.to === '乙' && reversed.reason === '调研在行', '属性顺序任意')
 assert(parseDelegates('<delegate to="甲">无理由</delegate>')[0].reason === undefined, 'reason 可省略')
 assert(stripDelegates('前<delegate to="甲" reason="x">A</delegate>后') === '前后', 'stripDelegates 兼容带 reason 的标记')
+
+// parseReviews 单测（v2 审核流）
+assert(parseReviews('<review of="#1" verdict="pass" note="ok"/>').length === 1, 'parseReviews 提取 review')
+const r1 = parseReviews('<review of="#1" verdict="pass" note="looks good"/>')[0]
+assert(r1.of === '#1' && r1.verdict === 'pass' && r1.note === 'looks good', 'review 属性解析')
+const r2 = parseReviews('<review of="Alpha" verdict="fail" note="retry"/>')[0]
+assert(r2.of === 'Alpha' && r2.verdict === 'fail', 'review 兜底按名字匹配')
+assert(parseReviews('<review of="#1" verdict="maybe"/>').length === 0, 'review 非 pass/fail 不匹配')
+assert(stripReviews('前<review of="#1" verdict="pass" note="x"/>后') === '前后', 'stripReviews 剥离标记')
 
 // 主流程
 const leader = store.create({ title: '升级两文件', prompt: '升级 a 和 b', workdir: repo, backend: 'zcode', agentId: 'L1' })
@@ -260,8 +269,13 @@ const streamLeader = {
       sessionId: 's_stream',
       async send(content) {
         sentToLeader.push(content)
-        events.onEvent({ ts: Date.now(), kind: 'final', text: '全部完成。' })
-        events.onTurnEnd({ response: '全部完成。最终总结：d.txt 已升级。', ok: true })
+        // 回归（生产事故：同一任务派两次）：领队在回灌回合复述已派发过的同一标记，
+        // 嗅探与循环都必须凭 seenKeys 识别为已派单，绝不重复建单
+        const requote = content.includes('结果汇报')
+          ? '本轮评估：<round outcome="action" reason="队员已完成"/>\n已派过的工作不再重复：<delegate to="Solo">把 d.txt 改成 v2</delegate>\n全部完成。最终总结：d.txt 已升级。'
+          : '全部完成。最终总结：d.txt 已升级。'
+        events.onEvent({ ts: Date.now(), kind: 'final', text: requote })
+        events.onTurnEnd({ response: requote, ok: true })
       },
       async stop() {}, async close() {}
     }
@@ -298,5 +312,98 @@ assert(earlyChildren[0]?.status === 'done', '场景 C：提前单已跑完')
 assert(sentToLeader.some((c) => c.includes('队员 Solo 的结果')), '场景 C：结果仍在回合末回灌给领队')
 assert(execSync(`git show ${finC.integration?.branch}:d.txt`, { cwd: repo3, encoding: 'utf8' }).includes('by Solo'), '场景 C：提前单改动照常合入集成分支')
 
-console.log('\n✅ DELEGATION SMOKE PASSED')
+// ================= 场景 D：审核流（maker/checker，v2） =================
+const repo4 = fs.mkdtempSync(path.join(os.tmpdir(), 'dele4-repo-'))
+fs.writeFileSync(path.join(repo4, 'e.txt'), 'e v1\n')
+execSync('git init -q -b main && git add -A && git -c user.email=t@t -c user.name=t commit -qm init', { cwd: repo4 })
+
+const team4 = [
+  { id: 'L4', name: 'Boss4', backend: 'review', role: '领队', systemPrompt: '', subordinates: ['W4a', 'W4b'] },
+  { id: 'W4a', name: 'Worker4a', backend: 'w4a', role: '队员A', systemPrompt: '' },
+  { id: 'W4b', name: 'Worker4b', backend: 'w4b', role: '队员B', systemPrompt: '' }
+]
+const reviewResults = []
+const reviewLeader = {
+  id: 'review', label: 'review',
+  async probe() { return { ok: true, detail: '' } },
+  async start({ events }) {
+    setTimeout(() => {
+      const text = '派两个。\n<delegate to="Worker4a">任务 A</delegate>\n<delegate to="Worker4b">任务 B</delegate>'
+      events.onEvent({ ts: Date.now(), kind: 'final', text })
+      events.onTurnEnd({ response: text, ok: true })
+    }, 30)
+    return {
+      sessionId: 's_review',
+      async send(content) {
+        setTimeout(() => {
+          // 回灌报告应带单号（#1、#2）；审核协议已追加
+          if (content.includes('单号 #1') && content.includes('单号 #2') && content.includes('<review of=')) {
+            // 领队给出审核结论：#1 pass，#2 fail
+            const text = '<review of="#1" verdict="pass" note="A ok"/>\n<review of="#2" verdict="fail" note="B retry"/>\n全部审核完成。'
+            events.onEvent({ ts: Date.now(), kind: 'final', text })
+            events.onTurnEnd({ response: text, ok: true })
+          } else {
+            events.onTurnEnd({ response: '等待', ok: true })
+          }
+        }, 30)
+        await new Promise((r) => setTimeout(r, 50))
+      },
+      async stop() {}, async close() {}
+    }
+  }
+}
+const w4aBackend = {
+  id: 'w4a', label: 'w4a',
+  async probe() { return { ok: true, detail: '' } },
+  async start({ workdir, events }) {
+    setTimeout(() => {
+      fs.writeFileSync(path.join(workdir, 'e.txt'), 'e v2 by A\n')
+      const response = '已改 e.txt'
+      events.onEvent({ ts: Date.now(), kind: 'final', text: response })
+      events.onTurnEnd({ response, ok: true })
+    }, 40)
+    return { sessionId: 's_w4a', async send() {}, async stop() {}, async close() {} }
+  }
+}
+const w4bBackend = {
+  id: 'w4b', label: 'w4b',
+  async probe() { return { ok: true, detail: '' } },
+  async start({ workdir, events }) {
+    setTimeout(() => {
+      fs.writeFileSync(path.join(workdir, 'e.txt'), 'e v2 by B\n')
+      const response = '已改 e.txt'
+      events.onEvent({ ts: Date.now(), kind: 'final', text: response })
+      events.onTurnEnd({ response, ok: true })
+    }, 40)
+    return { sessionId: 's_w4b', async send() {}, async stop() {}, async close() {} }
+  }
+}
+const runner4 = new TaskRunner(store, new Map([['review', reviewLeader], ['w4a', w4aBackend], ['w4b', w4bBackend]]), () => ({ concurrency: 1, mode: 'yolo', notify: false, workerConcurrency: 3 }))
+runner4.attachTeam(() => team4)
+runner4.attachIssueOps({ reviewStatus: (childId, verdict, note) => { reviewResults.push({ childId, verdict, note }) } })
+
+const reviewTask = store.create({ title: '审核测试', prompt: '并行任务', workdir: repo4, backend: 'review', agentId: 'L4' })
+runner4.enqueue(reviewTask)
+const tD = Date.now()
+while (Date.now() - tD < 30000) {
+  const t = store.get(reviewTask.id)
+  if (t.status === 'done' || t.status === 'failed') break
+  await new Promise((r) => setTimeout(r, 150))
+}
+const finD = store.get(reviewTask.id)
+assert(finD.status === 'done', `场景 D：审核流领队 done（${finD.status}${finD.error ? ' ' + finD.error : ''}）`)
+const childrenD = store.list().filter((t) => t.parentTaskId === reviewTask.id)
+assert(childrenD.length === 2, `场景 D：两个子任务（${childrenD.length}）`)
+assert(reviewResults.length === 2, `场景 D：applyReview 调用两次（${reviewResults.length}）`)
+const passReview = reviewResults.find((r) => r.verdict === 'pass')
+const failReview = reviewResults.find((r) => r.verdict === 'fail')
+assert(passReview && passReview.note === 'A ok', '场景 D：pass 审核结论正确')
+assert(failReview && failReview.note === 'B retry', '场景 D：fail 审核结论正确')
+assert(!finD.result.includes('<review'), '场景 D：finalText 剥离 review 标记')
+const eventsD = store.readEvents(reviewTask.id).map((e) => e.text ?? '').join('\n')
+// 回灌报告格式：「队员 X 的结果（状态，单号 #N）」；审核留痕：「单 #N 审核X」
+assert((eventsD.includes('单号 #1') || eventsD.includes('单 #1')) && (eventsD.includes('单号 #2') || eventsD.includes('单 #2')), '场景 D：回灌报告带单号')
+assert(eventsD.includes('审核通过') && eventsD.includes('审核退回'), '场景 D：事件留痕审核结果')
+
+console.log('\n✅ DELEGATION SMOKE PASSED (v2 + review flow)')
 process.exit(0)

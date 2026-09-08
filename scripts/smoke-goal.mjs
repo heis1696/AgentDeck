@@ -1,3 +1,5 @@
+// smoke-goal.mjs：目标模式 v2 冒烟
+// 按 docs/GOAL-AUTOPILOT-REDESIGN.md §6 重写
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -32,6 +34,9 @@ const ok = (condition, label) => {
 const userData = path.join(outDir, 'user-data')
 const tasks = []
 const queued = []
+let finalizeCalls = []
+let continueCalls = []
+
 const controller = new GoalController(new GoalStore(userData), {
   createTask: (input) => {
     const task = {
@@ -54,116 +59,210 @@ const controller = new GoalController(new GoalStore(userData), {
     return task
   },
   enqueueTask: (task) => queued.push(task),
-  listTasks: () => tasks
+  listTasks: () => tasks,
+  continueTask: (taskId, content) => { continueCalls.push({ taskId, content }); return Promise.resolve({ ok: true }) },
+  finalizeIssue: (issueId) => { finalizeCalls.push(issueId) }
 })
 
-const goal = controller.create({
+// === 场景 1：Issue 收养（无 Task 建单 / 有 done Task 续聊不新建）===
+const issue1 = 'iss_adopt_test_1'
+const adopt1 = controller.create({
   text: 'Ship the feature',
-  completionConditions: ['tests pass', 'docs updated'],
-  stopConditions: ['needs approval'],
+  issueId: issue1,
+  completionConditions: ['tests pass'],
+  stopConditions: [],
   maxRuns: 3,
   maxDurationMs: 60_000,
   workdir: userData,
   startNow: true
 })
-ok(goal.status === 'active' && tasks.length === 1 && queued.length === 1, 'create starts first goal run')
-ok(goal.issueId.startsWith('iss_'), 'goal keeps one Issue relation')
+ok(adopt1.issueId === issue1 && tasks.length === 1, 'create no existing Task: build first Task')
+ok(adopt1.status === 'active' && queued.length === 1, 'create start immediately if startNow')
 
-const first = tasks[0]
-first.status = 'done'
-first.startedAt = first.createdAt
-first.endedAt = first.createdAt + 100
-first.result = JSON.stringify({ summary: 'Tests pass; docs updated', completedConditions: ['tests pass', 'docs updated'], incompleteConditions: [], nextPlan: '', blockers: [] })
-first.usage = { durationMs: 100, inputTokens: 2, outputTokens: 3, totalTokens: 5 }
-const decision = controller.onTaskChanged(first)
-ok(decision?.complete === true && controller.get(goal.id)?.status === 'completed', 'completion conditions move goal to completed')
-ok(controller.runs(goal.id).length === 1 && controller.checkpoints(goal.id).length === 1, 'terminal run and checkpoint are persisted')
-
-// Duplicate terminal notifications must be idempotent.
-controller.onTaskChanged(first)
-ok(controller.runs(goal.id).length === 1 && controller.checkpoints(goal.id).length === 1, 'duplicate TaskChanged does not duplicate run/checkpoint')
-
-const paused = controller.create({
-  text: 'Prepare release',
-  completionConditions: ['release ready'],
+// 有 done Task：收养不新建
+const issue2 = 'iss_adopt_test_2'
+const doneTask = {
+  id: 'task_existing',
+  title: 'Existing',
+  prompt: 'orig',
+  issueId: issue2,
+  status: 'done',
+  createdAt: Date.now(),
+  sessionId: 'sess_1',
+  eventCount: 0
+}
+tasks.push(doneTask)
+const adopt2 = controller.create({
+  text: 'Continue work',
+  issueId: issue2,
+  completionConditions: ['ready'],
   stopConditions: [],
   maxRuns: 2,
-  maxDurationMs: 1_000,
+  maxDurationMs: 10_000,
   workdir: userData,
   startNow: true
 })
-const second = tasks.at(-1)
-second.status = 'failed'
-second.error = 'transient failure'
-second.startedAt = second.createdAt
-second.endedAt = second.createdAt + 200
-controller.onTaskChanged(second)
-ok(controller.get(paused.id)?.status === 'failed', 'failed run pauses goal with a reason')
-const continued = controller.continue(paused.id)
-ok(continued.ok && tasks.length === 3 && queued.length === 3, 'continue creates a new run on the same goal')
-ok(tasks.at(-1)?.issueId === paused.issueId && tasks.at(-1)?.phaseIndex === 1, 'continued run reuses Issue and advances phase')
-ok(!controller.continue(paused.id).ok, 'active goal cannot be continued twice')
-const resumedStore = new GoalStore(userData)
-const resumed = new GoalController(resumedStore, { createTask: () => { throw new Error('not expected') }, listTasks: () => tasks })
-const recovered = resumed.recover(tasks)
-ok(recovered.length === 1 && resumed.get(paused.id)?.status === 'waiting_user', 'restart recovery requires explicit user continuation')
-const last = tasks.at(-1)
-last.status = 'done'
-last.startedAt = last.createdAt
-last.endedAt = last.createdAt + 900
-last.result = ''
-controller.onTaskChanged(last)
-ok(controller.get(paused.id)?.status === 'blocked' && controller.checkpoints(paused.id).length === 2, 'run budget exhaustion blocks after the final checkpoint')
-ok(controller.checkpoints(paused.id).at(-1)?.summary === 'Run ended without a checkpoint', 'empty terminal result still persists a checkpoint')
+ok(adopt2.issueId === issue2 && tasks.filter((t) => t.issueId === issue2).length === 1, 'create with existing done Task: adopt not build')
+await new Promise((r) => setTimeout(r, 50))
+ok(continueCalls.some((c) => c.taskId === 'task_existing'), 'create startNow on done Task triggers continueTask')
 
+// === 场景 2：envelope 完成判定 + finalizeIssue 调用 ===
+const issue3 = 'iss_complete_test'
+const compGoal = controller.create({
+  text: 'Complete test',
+  issueId: issue3,
+  completionConditions: ['code done', 'docs done'],
+  stopConditions: [],
+  maxRuns: 2,
+  maxDurationMs: 10_000,
+  workdir: userData,
+  startNow: false
+})
+const compTask = tasks.at(-1)
+compTask.status = 'done'
+compTask.startedAt = compTask.createdAt
+compTask.endedAt = compTask.createdAt + 100
+compTask.result = JSON.stringify({ summary: 'All done', completedConditions: ['code done', 'docs done'], incompleteConditions: [], nextPlan: '', blockers: [] })
+compTask.usage = { durationMs: 100, inputTokens: 2, outputTokens: 3, totalTokens: 5 }
+controller.onTaskChanged(compTask)
+ok(controller.get(compGoal.id)?.status === 'completed', 'envelope all conditions met → completed')
+ok(finalizeCalls.includes(issue3), 'completed goal calls finalizeIssue')
+
+// === 场景 3：预算耗尽 blocked ===
+const issue4 = 'iss_budget_test'
+const budgetGoal = controller.create({
+  text: 'Budget test',
+  issueId: issue4,
+  completionConditions: ['never'],
+  stopConditions: [],
+  maxRuns: 1,
+  maxDurationMs: 10_000,
+  workdir: userData,
+  startNow: true
+})
+const budgetTask = tasks.at(-1)
+budgetTask.status = 'done'
+budgetTask.startedAt = budgetTask.createdAt
+budgetTask.endedAt = budgetTask.createdAt + 100
+budgetTask.result = ''
+controller.onTaskChanged(budgetTask)
+ok(controller.get(budgetGoal.id)?.status === 'blocked' && controller.get(budgetGoal.id)?.blockedReason?.includes('budget'), 'runCount exhausted → blocked')
+
+// === 场景 4：非重试失败自动续轮（failures 上限 2）===
+const issue5 = 'iss_fail_test'
+const failGoal = controller.create({
+  text: 'Fail test',
+  issueId: issue5,
+  completionConditions: ['goal'],
+  stopConditions: [],
+  maxRuns: 5,
+  maxDurationMs: 100_000,
+  workdir: userData,
+  startNow: true
+})
+const failTask = tasks.at(-1)
+failTask.issueId = issue5
+failTask.sessionId = 'sess_fail_1'
+failTask.status = 'failed'
+failTask.error = 'oops'
+failTask.failure = { code: 'unknown', title: 'Unknown', hint: '', retryable: false }
+failTask.startedAt = failTask.createdAt
+failTask.endedAt = failTask.createdAt + 100
+controller.onTaskChanged(failTask)
+ok(controller.get(failGoal.id)?.failures === 1 && controller.get(failGoal.id)?.status === 'active', 'first non-retry failure → failures=1, auto-continue')
+await new Promise((r) => setTimeout(r, 100))
+const failContent = continueCalls.find((c) => c.taskId === failTask.id)?.content
+ok(failContent && (failContent.includes('失败') || failContent.includes('自动续轮')), 'auto-continue sends feedbackContext')
+// 第二次失败（续轮同任务，但 runId 不同以表示新的执行）
+failTask.runId = 'run_fail_2'
+failTask.status = 'failed'
+failTask.error = 'oops again'
+failTask.failure = { code: 'unknown', title: 'Unknown', hint: '', retryable: false }
+failTask.startedAt = failTask.createdAt + 200
+failTask.endedAt = failTask.createdAt + 300
+controller.onTaskChanged(failTask)
+const g = controller.get(failGoal.id)
+ok(g?.failures === 2 && g?.status === 'failed', 'second non-retry failure → failed, no auto-continue')
+
+// === 场景 5：stop 条件 waiting_user ===
+const issue6 = 'iss_stop_test'
+const stopGoal = controller.create({
+  text: 'Stop test',
+  issueId: issue6,
+  completionConditions: ['never'],
+  stopConditions: ['user review'],
+  maxRuns: 3,
+  maxDurationMs: 10_000,
+  workdir: userData,
+  startNow: true
+})
+const stopTask = tasks.at(-1)
+stopTask.status = 'done'
+stopTask.startedAt = stopTask.createdAt
+stopTask.endedAt = stopTask.createdAt + 100
+stopTask.result = JSON.stringify({ summary: 'Need user review', blockers: ['user review needed'], completedConditions: [], incompleteConditions: ['never'], nextPlan: '' })
+controller.onTaskChanged(stopTask)
+ok(controller.get(stopGoal.id)?.status === 'waiting_user' && controller.get(stopGoal.id)?.blockedReason?.includes('Stop condition'), 'stop condition → waiting_user')
+
+// === 场景 6：重启恢复 waiting_user ===
+// 创建一个 active 状态的目标来测试 recover
+const issue6b = 'iss_recover_test'
+const recoverGoal = controller.create({
+  text: 'Recover test',
+  issueId: issue6b,
+  completionConditions: ['x'],
+  stopConditions: [],
+  maxRuns: 2,
+  maxDurationMs: 10_000,
+  workdir: userData,
+  startNow: true
+})
+const recoverTask = tasks.at(-1)
+recoverTask.issueId = issue6b
+recoverTask.status = 'running'
+// 模拟重启：目标是 active，任务是 running
+const resumeStore = new GoalStore(userData)
+const resumed = new GoalController(resumeStore, { createTask: () => { throw new Error('not expected') }, listTasks: () => tasks })
+const recovered = resumed.recover(tasks)
+ok(recovered.some((g) => g.id === recoverGoal.id) && resumed.get(recoverGoal.id)?.status === 'waiting_user', 'recover sets active goal to waiting_user')
+
+// === 场景 7：无 continueTask 时新任务兜底 ===
+const issue7 = 'iss_fallback_test'
+const fbGoal = controller.create({
+  text: 'Fallback test',
+  issueId: issue7,
+  completionConditions: ['done'],
+  stopConditions: [],
+  maxRuns: 3,
+  maxDurationMs: 10_000,
+  workdir: userData,
+  startNow: true
+})
+const fbController = new GoalController(new GoalStore(path.join(outDir, 'fb-data')), {
+  createTask: (input) => { const task = { id: 'fb_task', issueId: input.issueId, goalId: input.goalId, phaseIndex: input.phaseIndex, status: 'queued', createdAt: Date.now(), prompt: input.prompt, title: input.title, workdir: input.workdir, eventCount: 0 }; tasks.push(task); return task },
+  enqueueTask: () => {},
+  listTasks: () => tasks,
+  finalizeIssue: () => {}
+})
+const fbGoal2 = fbController.create({ text: 'No continue', issueId: 'iss_fb2', completionConditions: ['x'], stopConditions: [], maxRuns: 3, maxDurationMs: 10_000, workdir: userData, startNow: true })
+const fbTask = tasks.at(-1)
+fbTask.status = 'done'
+fbTask.startedAt = fbTask.createdAt
+fbTask.endedAt = fbTask.createdAt + 100
+fbTask.result = ''
+const beforeCount = tasks.length
+fbController.onTaskChanged(fbTask)
+await new Promise((r) => setTimeout(r, 100))
+ok(tasks.length > beforeCount, 'no continueTask → launchNext fallback creates new task')
+
+// === 场景 8：envelope 解析单测 ===
 ok(parseCheckpoint('{"summary":"ok","completedConditions":["release ready"]}', ['release ready'])?.completedConditions.length === 1, 'checkpoint envelope parser is deterministic')
 
-const parkedTasks = []
-const parked = new GoalController(new GoalStore(path.join(outDir, 'parked-data')), {
-  createTask: (input) => { const task = { id: `parked_task_${parkedTasks.length + 1}`, title: input.title, prompt: input.prompt, workdir: input.workdir, backend: 'zcode', issueId: input.issueId, goalId: input.goalId, phaseIndex: input.phaseIndex, trigger: input.trigger, status: 'queued', parked: !input.startNow, createdAt: Date.now() + parkedTasks.length, eventCount: 0 }; parkedTasks.push(task); return task },
-  startTask: (task) => { delete task.parked; return task },
-  enqueueTask: (task) => queued.push(task),
-  listTasks: () => parkedTasks
-})
-const parkedGoal = parked.create({ text: 'Parked goal', completionConditions: ['ready'], stopConditions: [], maxRuns: 1, maxDurationMs: 1_000, workdir: userData, startNow: false })
-ok(parkedGoal.status === 'draft', 'create can leave a goal parked')
-const parkedStart = parked.start(parkedGoal.id)
-ok(parkedStart.ok && parkedTasks.length === 1 && parkedTasks[0].parked === undefined, 'starting a parked goal un-parks the existing run')
-
-const cancelTasks = []
-const cancellable = new GoalController(new GoalStore(path.join(outDir, 'cancel-data')), {
-  createTask: (input) => { const task = { id: 'cancel_task', title: input.title, prompt: input.prompt, workdir: input.workdir, backend: 'zcode', issueId: input.issueId, goalId: input.goalId, phaseIndex: input.phaseIndex, trigger: input.trigger, status: 'queued', createdAt: Date.now(), eventCount: 0 }; cancelTasks.push(task); return task },
-  cancelTask: (id) => { const task = cancelTasks.find((item) => item.id === id); if (task) task.status = 'cancelled'; return { ok: true } },
-  listTasks: () => cancelTasks
-})
-const cancelledGoal = cancellable.create({ text: 'Cancel me', completionConditions: ['done'], stopConditions: [], maxRuns: 1, maxDurationMs: 1_000, workdir: userData, startNow: true })
-ok(cancellable.cancel(cancelledGoal.id).ok, 'user can cancel an active goal')
-cancelTasks[0].status = 'cancelled'
-cancellable.onTaskChanged(cancelTasks[0])
-ok(cancellable.get(cancelledGoal.id)?.status === 'cancelled' && cancellable.checkpoints(cancelledGoal.id).length === 1, 'late task cancellation does not resurrect the goal')
-
-const retryGoal = controller.create({ text: 'Retry transient work', completionConditions: ['ready'], stopConditions: [], maxRuns: 1, maxDurationMs: 10_000, workdir: userData, startNow: true })
-const retryTask = tasks.at(-1)
-retryTask.status = 'failed'
-retryTask.attempt = 0
-retryTask.failure = { code: 'rate_limit', title: 'Rate limited', hint: 'retry', retryable: true }
-retryTask.error = '429'
-controller.onTaskChanged(retryTask)
-ok(controller.get(retryGoal.id)?.status === 'active' && controller.get(retryGoal.id)?.runCount === 0 && controller.checkpoints(retryGoal.id).length === 0, 'automatic transient retry does not consume a Goal phase budget')
-retryTask.attempt = 2
-controller.onTaskChanged(retryTask)
-ok(controller.get(retryGoal.id)?.status === 'failed' && controller.checkpoints(retryGoal.id).length === 1, 'exhausted retry becomes a failed Goal checkpoint')
-
-const futureDir = path.join(outDir, 'future-data')
-fs.mkdirSync(path.join(futureDir, 'goals'), { recursive: true })
-fs.writeFileSync(path.join(futureDir, 'goals', 'index.json'), JSON.stringify({ schemaVersion: 99, goals: [], runs: [], checkpoints: [] }))
-let rejectedFuture = false
-try { new GoalStore(futureDir) } catch { rejectedFuture = true }
-ok(rejectedFuture, 'future goal schema is rejected instead of silently resetting data')
+// === 场景 9：issueId 必填校验 ===
 let rejectedInput = false
-try { parseGoalCreate({ text: 'unsafe', completionConditions: ['done'], stopConditions: [], maxRuns: 0, maxDurationMs: 1, workdir: '' }) } catch { rejectedInput = true }
-ok(rejectedInput, 'goal IPC rejects an exhausted run budget at the boundary')
+try { parseGoalCreate({ text: 'test', issueId: '', completionConditions: ['x'], stopConditions: [], maxRuns: 1, maxDurationMs: 1000, workdir: '/' }) } catch { rejectedInput = true }
+ok(rejectedInput, 'goal IPC rejects empty issueId')
 
 fs.rmSync(outDir, { recursive: true, force: true })
 if (failed) process.exitCode = 1
-else console.log('\nGOAL SMOKE PASSED')
+else console.log('\n✅ GOAL SMOKE PASSED (v2)')

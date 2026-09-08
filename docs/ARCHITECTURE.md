@@ -106,7 +106,10 @@ src/
 │   ├── retry-policy.ts       失败 attempt、resume/fresh 和退避纯策略
 │   ├── permission-broker.ts  权限等待、响应、超时与取消清理
 │   ├── task-finalizer.ts     最终文本、用量、Git 快照与状态落盘
-│   ├── delegate.ts           委派协议：解析/身份注入/循环/worktree 派发/集成
+│   ├── delegate.ts           委派协议：解析/身份注入/循环/worktree 派发/集成/
+│   │                         委派单审核（<review> → applyReview）
+│   ├── goal-controller.ts    目标模式循环引擎：Issue 收养、checkpoint、续轮/护栏决策
+│   ├── goal-store.ts         目标与 GoalCheckpoint 持久化（userData/goals/）
 │   ├── store.ts              任务与事件的文件存储（seq 单调分配）
 │   ├── agents.ts             队伍持久化 + 预置 + 迁移补员
 │   ├── settings.ts           设置持久化
@@ -213,22 +216,17 @@ delegate 标记 → 目标解析（限 subordinates，名字/平台 id 忽略大
 
 `tasks/tasks.json` 使用 `{ schemaVersion, tasks }` envelope。`migrateTaskIndex` 显式处理版本 0 数组和当前版本，旧字段迁移与坏记录过滤是幂等的，未来版本会拒绝加载。
 
-## 7.1 阶段 7 目标模式
+## 7.1 目标模式 v2：Issue 内自动推进（Goal-based Loop）
 
-Goal mode adds a durable `Goal -> GoalRun -> GoalCheckpoint` layer without
-replacing `Issue -> Run -> Task`. `GoalStore` writes
-`userData/goals/index.json` with the same tmp+rename discipline as the task
-store. `GoalController` owns lifecycle transitions, budgets, checkpoint
-creation and the next-run decision; it calls the existing TaskRunner creation,
-queue, cancellation and permission boundaries.
+目标模式 v2 不再建立独立「目标」页或合成 Issue（`iss_goal_xxx`），而是**在真实 Issue 内开启**，按 Loop Engineering 的 Goal-based loop 理念自动推进（对照 `docs/LOOP-ENGINEERING.md` §3 模块映射：Goal-based loop → `goal-controller.ts` + `goal-store.ts`）。`Goal` 层作为持久化状态脊柱叠加在 `Issue -> Run -> Task` 之上，不替代该模型：
 
-The main process registers `goals:*` IPC handlers and forwards controller
-updates as `goals:updated`. A running goal is recovered as `waiting_user` after
-restart instead of resuming silently. Each terminal TaskChanged event is
-projected once by run id and leaves a checkpoint, including failed/cancelled
-runs. The renderer's `components/goal/GoalsView.tsx` provides creation,
-status actions, budget display, checkpoint history and run history without a
-global state library.
+- **目标绑定真实 Issue**：`GoalCreateInput.issueId` 必填。开启即「收养」该 Issue 当前最新 Task 作为阶段任务：无 Task → 建首个（prompt 末尾注入目标模式块，startNow 即入队）；有 Task → 登记为当前阶段任务，startNow 时按其状态启动（queued/running 等执行、done/failed 走续聊回灌）。循环跟随 Issue 最新任务（天然含 `<continue>` 接力产生的 handoff 任务），不再只认自己建的任务。
+- **自省自推直到完成条件达成**：每轮 Task 终态（含失败/取消）→ 解析 checkpoint envelope 落盘 `GoalCheckpoint`（runId 幂等，状态脊柱）→ 预算扣减与护栏决策 → 续轮**优先同会话续聊回灌**（`continueTask` = `runner.followUp`，不重开上下文）；后端未注入续聊或 Task 无 `sessionId` 时**兜底新建 Task**（prompt = 目标块 + checkpoint 简报）。
+- **完成判定可验证**：checkpoint 的 `completedConditions` 由 agent 逐条对照完成条件原文填写（不再靠 prose 撞子串）。全部达成的那一轮 → goal completed，经 `finalizeIssue` 把 Issue 自动归档 done；预算耗尽 → blocked、停止条件命中 → waiting_user、连续失败超限 → failed，均停下并写明原因。
+- **委派单 maker/checker 审核流**：委派结果回灌后，领队（checker）须对每个 done 单输出 `<review of="#单号" verdict="pass|fail" note="…"/>` 结论——pass → 对应 Issue 看板状态置 done（自动归档）；fail → 置 blocked 并由领队下一轮改派或自行修复；未出结论的单保持 in_review（人工兜底）。写回复用 `issue-store` 的 `updateWorkflow`/`statusOverride`，审核得到的 done 不会被后续状态投影翻回。
+- **预算与护栏**：运行/时长预算、停止条件保留 v1 语义；连续非重试失败由 `Goal.failures`（可选，持久化）计数，`failures < 2` 自动续轮（回灌带失败上下文），≥2 → goal failed。重启恢复仍为 active → waiting_user，需显式 continue，绝不静默续跑。
+- **持久化与接线**：`goal-store.ts` 写 `userData/goals/index.json`（与任务存储同样 tmp+rename）；`goal-controller.ts` 拥有生命周期、预算、checkpoint 与续轮决策，复用 TaskRunner 的创建/队列/取消/权限边界。主进程经 `ipc/goals.ts` 注册 `goals:*` handler，更新推送为 `goals:updated`。
+- **渲染层**：删除整页 `GoalsView` 与「目标」导航（App.tsx）；`components/goal/GoalPanel.tsx` 嵌入 TaskDetail 侧栏（开启对话框、状态 chip、轮数预算、checkpoint 历史、暂停/继续/取消）；BoardView 给非终态目标的 Issue 卡片加 🎯 徽标。
 
 ## 8. 测试与验证基线
 
@@ -242,10 +240,10 @@ global state library.
 | 失败分类 | `npm run smoke:failure` | 11 类规则 + runner 落库 |
 | 自动重试 | `npm run smoke:retry` | 瞬态重试/非瞬态不重试/上限打满 |
 | diff 解析 | `npm run smoke:diff` | DiffView 解析器边界 |
-| 委派循环 | `npm run smoke:delegate` | 假后端：多轮派发/剥离/集成/取消语义 |
+| 委派循环 | `npm run smoke:delegate` | 假后端：多轮派发/剥离/集成/取消 + 单号报告与 `<review>` 审核（pass/fail/无结论不动状态） |
 | 真实委派 e2e | `npm run e2e:delegate` | GLM 领队自发派 Claude/OpenCode + 集成分支 |
 | 真实异构 e2e | `npm run e2e:delegate` | zcode 领队 + claude/opencode 队员（领队自主决策） |
-| 目标模式 | `npm run smoke:goal` | 多 Run、checkpoint 幂等、预算、取消/失败与重启恢复 |
+| 目标模式 | `npm run smoke:goal` | Issue 收养、checkpoint envelope 完成判定与 Issue 自动归档、预算/停止条件/连续失败护栏、重启恢复、无续聊时新任务兜底 |
 | 全量本地矩阵 | `npm run smoke:all` | 所有纯本地 smoke 串行执行 |
 
 打包：`npm run dist`（NSIS）；开发：`npm run dev`；类型：`npm run typecheck`。

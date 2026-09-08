@@ -189,6 +189,35 @@ export function stripRoundNotes(text: string): string {
   return text.replace(/<round\b[^>]*?\/>/g, '').trim()
 }
 
+// ---- 委派单审核（maker/checker，v2）：领队必须对 done 子任务出审核结论 ----
+
+export interface ReviewCall {
+  /** 单号（#1、#2）或队员名/标题子串（兜底匹配） */
+  of: string
+  verdict: 'pass' | 'fail'
+  note?: string
+}
+
+/** 解析自闭合的 <review of="#n" verdict="pass|fail" note="..."/> 标记 */
+export function parseReviews(text: string): ReviewCall[] {
+  const out: ReviewCall[] = []
+  const re = /<review\b([^>]*?)\/>/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(text))) {
+    const of = tagAttr(m[1], 'of')
+    const verdict = tagAttr(m[1], 'verdict')
+    if (!of || !verdict || (verdict !== 'pass' && verdict !== 'fail')) continue
+    const note = tagAttr(m[1], 'note')
+    out.push({ of, verdict, ...(note ? { note } : {}) })
+  }
+  return out
+}
+
+/** 把 review 标记从对外展示文本中剥掉 */
+export function stripReviews(text: string): string {
+  return text.replace(/<review\b[^>]*?\/>/g, '').trim()
+}
+
 /**
  * 子任务提示 = 指令 + 背景块 + 工程纪律。
  * 背景附领队任务原文并显式声明"参考非指令"（对齐 Multica quick-create 的防注入包裹），
@@ -214,6 +243,8 @@ export interface DelegationContext {
   opts: () => { mode: string; notify: boolean; maxParallel: number }
   pushTask: (taskId: string) => void
   pushEvent: (taskId: string, e: TaskEvent) => void
+  /** 审核子任务（pass → done，fail → blocked） */
+  applyReview?: (childId: string, verdict: 'pass' | 'fail', note?: string) => void
 }
 
 export interface DelegationOutcome {
@@ -299,23 +330,24 @@ export async function runDelegationLoop(
 
   while (round < budget) {
     const calls = parseDelegatesMerged(...scanTexts)
-    // 收编流式期间提前建的单（等待未决建单完成；登记取走即清空，回灌回合里新闭合的标记进下一轮再收）
+    // 收编流式期间提前建的单（等待未决建单完成）。seenKeys 是本会话出现过的全部派单
+    // key（含已交付的）：领队在回灌/评估回合里复述旧派单标记时，绝不能当成新派单再建。
     const early = await runner.takeEarlySpawns(taskId)
-    const fresh = calls.filter((c) => !early.has(`${c.to}\n${c.prompt}`))
-    if (!fresh.length && !early.size) break
+    const fresh = calls.filter((c) => !early.seenKeys.has(`${c.to}\n${c.prompt}`))
+    if (!fresh.length && !early.entries.length) break
     round++
     const roundChildren = new Map<string, DelegateCall>()
-    for (const [, entry] of early) {
+    for (const entry of early.entries) {
       if (entry.childId && store.get(entry.childId)) roundChildren.set(entry.childId, entry.call)
     }
     if (fresh.length) {
-      note(`第 ${round} 轮派发：${fresh.map((c) => `${c.to}${c.reason ? `（${c.reason}）` : ''}`).join('、')}${early.size ? `（另有 ${early.size} 单已在流式中提前接单）` : ''}`)
+      note(`第 ${round} 轮派发：${fresh.map((c) => `${c.to}${c.reason ? `（${c.reason}）` : ''}`).join('、')}${early.entries.length ? `（另有 ${early.entries.length} 单已在流式中提前接单）` : ''}`)
       for (const call of fresh) {
         const child = await runner.spawnDelegateChild(taskId, call)
         if (child) roundChildren.set(child.id, call)
       }
     } else {
-      note(`第 ${round} 轮：${early.size} 个子任务已在流式中提前接单`)
+      note(`第 ${round} 轮：${early.entries.length} 个子任务已在流式中提前接单`)
     }
     if (!roundChildren.size) break
     const childIds = [...roundChildren.keys()]
@@ -332,23 +364,47 @@ export async function runDelegationLoop(
       check()
     })
 
-    // 汇报回灌
+    // 汇报回灌（带单号；审核协议追加）
+    const childSeqMap = new Map<string, number>()
     const report = childIds
-      .map((id) => {
+      .map((id, idx) => {
         const c = store.get(id)!
         const call = roundChildren.get(id)
+        const seq = idx + 1
+        childSeqMap.set(id, seq)
         const body = c.status === 'done' ? (c.result ?? '').slice(0, 4000) : `状态 ${c.status}${c.error ? ': ' + c.error.slice(0, 300) : ''}`
-        return `### 队员 ${call?.to ?? c.agentId ?? c.backend} 的结果（${c.status}）\n${body}`
+        return `### 队员 ${call?.to ?? c.agentId ?? c.backend} 的结果（${c.status}，单号 #${seq}）\n${body}`
       })
       .join('\n\n')
     note(`第 ${round} 轮结果已回灌，等待领队继续`)
+    const reviewInstruction = `\n\n对报告里每个状态为 done 的单给出审核结论（maker/checker：队员是 maker，你是 checker）：
+<review of="#单号" verdict="pass|fail" note="一句话：通过理由或退回原因"/>
+- verdict=pass：该单在看板自动归档为已完成；verdict=fail：标记受阻，你应在下一轮改派或自行修复。
+- 未出结论的单将保留在人工审核列。`
     try {
       const turn = await runner.sendTurn(taskId, session,
-        `【系统】队员执行结果汇报：\n\n${report}\n\n请先输出一行本轮评估标记（<round outcome="..." reason="..."/>），再继续推进：需要再派发就继续用 <delegate> 标记；已全部完成就输出最终总结（不要再派发）。`
+        `【系统】队员执行结果汇报：\n\n${report}\n\n请先输出一行本轮评估标记（<round outcome="..." reason="..."/>），再继续推进：需要再派发就继续用 <delegate> 标记；已全部完成就输出最终总结（不要再派发）。${reviewInstruction}`
       )
       if (!turn.ok) throw new Error(turn.error || '回灌回合失败')
       for (const n of parseRoundNotes(turn.response)) {
         note(`第 ${round} 轮评估：${n.outcome}${n.reason ? ' — ' + n.reason : ''}`)
+      }
+      // 处理审核结论（每轮回灌后对本轮 done 子任务匹配审核）
+      const reviews = parseReviews(turn.response)
+      for (const childId of childIds) {
+        const child = store.get(childId)
+        if (!child || child.status !== 'done') continue
+        const seq = childSeqMap.get(childId)
+        const call = roundChildren.get(childId)
+        // 匹配：#序号 精确匹配，兜底按队员名/标题子串
+        const review = reviews.find((r) => r.of === `#${seq}`)
+          ?? reviews.find((r) => r.of === call?.to || (child.title && child.title.includes(r.of)))
+        if (!review) {
+          note(`单 #${seq} 未出审核结论，保留人工审核`)
+          continue
+        }
+        ctx.applyReview?.(childId, review.verdict, review.note)
+        note(`单 #${seq} 审核${review.verdict === 'pass' ? '通过' : '退回'}${review.note ? `：${review.note}` : ''}`)
       }
       scanTexts = [turn.delegationText ?? '', turn.response]
       finalResponse = turn.response
@@ -416,5 +472,5 @@ export async function runDelegationLoop(
   } as Partial<Task>)
   pushTask(taskId)
 
-  return { rounds: round, children: allChildren, finalText: stripRoundNotes(stripDelegates(finalResponse || scanTexts[0] || scanTexts[1])), scanTexts }
+  return { rounds: round, children: allChildren, finalText: stripReviews(stripRoundNotes(stripDelegates(finalResponse || scanTexts[0] || scanTexts[1]))), scanTexts }
 }

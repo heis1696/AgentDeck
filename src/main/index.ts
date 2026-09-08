@@ -115,6 +115,17 @@ app.whenReady().then(() => {
   runner.attachTeam(() => agents)
   presets = loadPresets()
   runner.attachPresets(() => presets)
+  runner.attachIssueOps({
+    reviewStatus: (childId, verdict, note) => {
+      const child = store.get(childId)
+      if (!child?.issueId) return
+      issueStore.updateWorkflow(child.issueId, verdict === 'pass' ? 'done' : 'blocked')
+      if (note) {
+        issueStore.addComment(child.issueId, `审核${verdict === 'pass' ? '通过' : '退回'}：${note}`, { type: 'agent', id: 'reviewer' })
+      }
+      publishIssueUpdate(child)
+    }
+  })
 
   /** Single creation path for user issues, automation runs, and legacy tasks. */
   const createTask = (input: CreateTaskInput, trigger: RunTrigger = 'assignment') => {
@@ -162,7 +173,15 @@ app.whenReady().then(() => {
       return store.get(task.id)!
     },
     cancelTask: (taskId) => runner.cancel(taskId),
-    listTasks: () => store.list()
+    listTasks: () => store.list(),
+    continueTask: (taskId, content) => runner.followUp(taskId, content),
+    finalizeIssue: (issueId) => {
+      const issue = issueStore.get(issueId)
+      if (!issue) return
+      issueStore.updateWorkflow(issueId, 'done')
+      const task = store.get(issue.taskId)
+      if (task) publishIssueUpdate(task)
+    }
   })
   goalController.subscribe((goal) => mainWindow?.webContents.send('goals:updated', goal))
   // An active goal must never resume silently after an application restart.

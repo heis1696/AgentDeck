@@ -86,7 +86,7 @@ export class TaskRunner {
   private readonly onTaskChanged?: (task: Task) => void
   /** 流式派单嗅探：领队会话期间逐条 text 事件累计扫描，闭合一个 <delegate> 即提前建单入队。
    *  回灌仍只在回合末（委派循环）发生，不会打断领队正在进行的主运行。 */
-  private earlySpawns = new Map<string, { buffer: string; spawned: Map<string, { call: DelegateCall; childId: string }>; pending: Promise<unknown>[] }>()
+  private earlySpawns = new Map<string, { buffer: string; spawned: Map<string, { call: DelegateCall; childId: string }>; seenKeys: Set<string>; pending: Promise<unknown>[] }>()
 
   constructor(
     store: TaskStore,
@@ -289,6 +289,17 @@ export class TaskRunner {
     this.onContinue = handler
   }
 
+  private issueOps: { reviewStatus: (childId: string, verdict: 'pass' | 'fail', note?: string) => void } | null = null
+  /** Issue 操作接口（委派审核流用） */
+  attachIssueOps(ops: { reviewStatus: (childId: string, verdict: 'pass' | 'fail', note?: string) => void }) {
+    this.issueOps = ops
+  }
+
+  /** 审核子任务（委派循环调用，runner 负责调度 issueOps 写状态） */
+  applyChildReview(childId: string, verdict: 'pass' | 'fail', note?: string) {
+    this.issueOps?.reviewStatus(childId, verdict, note)
+  }
+
   /** 执行日志留痕（状态类事件：落盘 + 推 UI） */
   private note(taskId: string, text: string) {
     const full = this.store.appendEvent(taskId, { ts: Date.now(), kind: 'status' as const, text })
@@ -297,7 +308,7 @@ export class TaskRunner {
 
   /** 武装流式派单嗅探（领队会话开始时调用；armed 才会在 text 事件上扫描 delegate 标记） */
   private armDelegateSniffer(taskId: string) {
-    this.earlySpawns.set(taskId, { buffer: '', spawned: new Map(), pending: [] })
+    this.earlySpawns.set(taskId, { buffer: '', spawned: new Map(), seenKeys: new Set(), pending: [] })
   }
   /** 撤销流式期间提前建的单：领队回合失败时，基于半截输出建的单不可信，
    *  取消仍在排队/运行的子任务并清空嗅探状态（对齐旧语义——失败回合不产生子任务） */
@@ -319,16 +330,24 @@ export class TaskRunner {
     if (state.pending.length) void Promise.allSettled(state.pending).then(cancelSpawned)
     else cancelSpawned()
   }
-  /** 收编流式期间提前建的单（委派循环每轮取走并入等待/回灌；取走后登记清空，本轮结束后再来的进下一轮）。
-   *  await 未决的建单 promise——标记在回合最后一刻闭合时，循环必须等到 childId 回填再回灌。 */
-  async takeEarlySpawns(taskId: string): Promise<Map<string, { call: DelegateCall; childId: string }>> {
+  /**
+   * 收编流式期间提前建的单（委派循环每轮调用）。
+   * entries = 尚未交付过的建单（本轮并入等待/回灌）；seenKeys = 本会话出现过的全部
+   * 派单 key——**永不清空**。缓冲区里旧标签文本随会话一直存在，若 take 清掉登记，
+   * 之后任何一条 text 事件的重扫描都会把同一派单再建一遍（生产事故：同一任务派两次）。
+   */
+  async takeEarlySpawns(taskId: string): Promise<{ entries: Array<{ call: DelegateCall; childId: string }>; seenKeys: Set<string> }> {
     const state = this.earlySpawns.get(taskId)
-    if (!state) return new Map()
+    if (!state) return { entries: [], seenKeys: new Set() }
     if (state.pending.length) await Promise.allSettled(state.pending)
-    const taken = state.spawned
-    state.spawned = new Map()
     state.pending = []
-    return taken
+    const entries: Array<{ call: DelegateCall; childId: string }> = []
+    for (const [key, entry] of state.spawned) {
+      state.spawned.delete(key)
+      state.seenKeys.add(key)
+      if (entry.childId) entries.push(entry)
+    }
+    return { entries, seenKeys: new Set(state.seenKeys) }
   }
   /** 逐条 text 事件增量扫描：闭合一个 <delegate to="...">...</delegate> 即提前建单 */
   private sniffDelegates(taskId: string, delta?: string) {
@@ -338,7 +357,9 @@ export class TaskRunner {
     if (!state.buffer.includes('<delegate')) return
     for (const call of parseDelegates(state.buffer)) {
       const key = `${call.to}\n${call.prompt}`
-      if (state.spawned.has(key)) continue
+      // key 一经出现终身登记（spawned 在途 / seenKeys 已交付），会话内同一派单绝不重建
+      if (state.spawned.has(key) || state.seenKeys.has(key)) continue
+      state.seenKeys.add(key)
       // 先同步占位去重（建单异步进行中，后续 text 事件不得重复建单），完成后回填 childId
       state.spawned.set(key, { call, childId: '' })
       const p = this.spawnDelegateChild(taskId, call).then((child) => {
@@ -452,7 +473,8 @@ export class TaskRunner {
           getTeam: () => this.getTeam?.() ?? [],
           opts: () => ({ mode: this.opts().mode, notify: this.opts().notify, maxParallel: Math.max(1, this.opts().workerConcurrency ?? this.opts().concurrency) }),
           pushTask: (id) => this.pushTask(id),
-          pushEvent: (id, e) => this.pushEvent(id, e)
+          pushEvent: (id, e) => this.pushEvent(id, e),
+          applyReview: (childId, verdict, note) => this.applyChildReview(childId, verdict, note)
         })
         finalText = outcome.finalText || r.response
         scanTexts = outcome.scanTexts
