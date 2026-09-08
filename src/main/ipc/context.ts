@@ -29,6 +29,8 @@ export interface IpcContext {
   getWindow: () => BrowserWindow | null
   get settings(): AppSettings
   setSettings: (settings: AppSettings) => void
+  /** 共享目录实际路径：settings.sharedDir 非空用之，否则 home 下默认（skills IPC 全部经它取路径） */
+  get sharedDir(): string
   readonly store: TaskStore
   readonly runner: TaskRunner
   readonly issueStore: IssueStore

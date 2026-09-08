@@ -1,4 +1,5 @@
 import type { Automation, AppSettings, AnalyticsSummary, Comment, Goal, GoalCheckpoint, GoalRun, Issue, IssuePriority, IssueStatus, Notification, Run, RunTrigger, RuntimeSnapshot, Task, TaskEvent } from './types'
+import type { SkillDetail, SkillMeta, SkillTarget, SyncState } from './skills'
 
 export interface PermissionRequest {
   requestId: string | number
@@ -173,4 +174,15 @@ export interface AgentDeckApi {
   }
   runtimes: { snapshot: () => Promise<RuntimeSnapshot[]> }
   analytics: { summary: (input?: { since?: number; until?: number }) => Promise<AnalyticsSummary> }
+  skills: {
+    list: () => Promise<{ root: string; skills: SkillMeta[] }>
+    get: (name: string) => Promise<SkillDetail | null>
+    save: (name: string, input: { description: string; body: string; originName?: string }) => Promise<SkillMeta>
+    delete: (name: string) => Promise<IpcResult>
+    import: (sourcePath: string) => Promise<SkillMeta>
+    targets: () => Promise<{ targets: SkillTarget[]; states: Record<string, Record<string, SyncState>> }>
+    install: (name: string, targetId: string) => Promise<IpcResult>
+    uninstall: (name: string, targetId: string) => Promise<IpcResult>
+    openDir: () => Promise<void>
+  }
 }

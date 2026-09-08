@@ -8,7 +8,7 @@ const issuePriorities = new Set<IssuePriority>(['urgent', 'high', 'medium', 'low
 const taskStatuses = new Set<TaskStatus>(['queued', 'running', 'done', 'failed', 'cancelled'])
 const triggers = new Set<RunTrigger>(['assignment', 'mention', 'autopilot', 'manual', 'handoff'])
 const backendIds = new Set<string>(BACKEND_IDS)
-const settingsKeys = new Set<keyof AppSettings>(['theme', 'zcodePath', 'dshPath', 'nodePath', 'concurrency', 'notifyOnDone', 'mode', 'workerConcurrency'])
+const settingsKeys = new Set<keyof AppSettings>(['theme', 'zcodePath', 'dshPath', 'nodePath', 'concurrency', 'notifyOnDone', 'mode', 'workerConcurrency', 'sharedDir'])
 
 function record(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} 必须是对象`)
@@ -172,6 +172,10 @@ export function parseSettingsPatch(value: unknown): Partial<AppSettings> {
     if (input[key] !== undefined && (typeof input[key] !== 'number' || !Number.isInteger(input[key]) || input[key] < 1 || input[key] > 32)) throw new Error(`${key} 必须是 1-32 的整数`)
   }
   for (const key of ['zcodePath', 'dshPath', 'nodePath'] as const) if (input[key] !== undefined && typeof input[key] !== 'string') throw new Error(`${key} 必须是字符串`)
+  if (input.sharedDir !== undefined) {
+    if (typeof input.sharedDir !== 'string') throw new Error('sharedDir 必须是字符串')
+    input.sharedDir = input.sharedDir.trim()
+  }
   if (input.notifyOnDone !== undefined && typeof input.notifyOnDone !== 'boolean') throw new Error('notifyOnDone 必须是布尔值')
   return input as Partial<AppSettings>
 }

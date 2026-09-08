@@ -17,6 +17,7 @@ import { createOpencodeBackend } from './backends/opencode'
 import { createDshBackend } from './backends/dsh'
 import type { AgentBackend } from './backends/types'
 import type { AppSettings, Task, RunTrigger } from '../shared/types'
+import { ensureSharedDir } from './skills'
 import { registerIpcHandlers, type CreateTaskInput } from './ipc/register'
 
 let mainWindow: BrowserWindow | null = null
@@ -75,6 +76,12 @@ function createWindow() {
 
 app.whenReady().then(() => {
   settings = loadSettings()
+  // 共享目录解析集中在主进程：settings.sharedDir 非空用之，否则 home 默认；首次启动即初始化 README + skills/
+  const resolveSharedDir = () => {
+    const custom = typeof settings.sharedDir === 'string' ? settings.sharedDir.trim() : ''
+    return custom || path.join(app.getPath('home'), '.agentdeck')
+  }
+  ensureSharedDir(resolveSharedDir())
   store = new TaskStore(app.getPath('userData'))
   issueStore = new IssueStore(app.getPath('userData'))
   issueStore.sync(store.list())
@@ -227,6 +234,7 @@ app.whenReady().then(() => {
     getWindow: () => mainWindow,
     get settings() { return settings },
     setSettings: (next) => { settings = saveSettings(next) },
+    get sharedDir() { return resolveSharedDir() },
     store,
     runner,
     issueStore,

@@ -4,6 +4,7 @@ import { Settings } from 'lucide-react'
 import { Menu } from '../ui/Menu'
 import { EmptyState } from '../ui/EmptyState'
 import { RuntimeView } from './RuntimeView'
+import { toast } from '../ui/Toasts'
 
 /** 设置分区（侧栏导航用）；队伍已提级为顶级 Agent tab，运行时页并入设置 */
 type Section = 'general' | 'runtime' | 'storage'
@@ -193,8 +194,37 @@ function RuntimeSection() {
 
 /** 存储说明 */
 function StorageSection() {
+  const { settings } = useSettings()
+  const [sharedRoot, setSharedRoot] = useState('')
+
+  // 渲染层只读展示解析后的实际路径（settings.sharedDir 为空 = 主进程默认 ~/.agentdeck）
+  useEffect(() => {
+    let alive = true
+    bridge.skills.list().then((r) => { if (alive) setSharedRoot(r.root) }).catch(() => {})
+    return () => { alive = false }
+  }, [settings?.sharedDir])
+
+  const changeSharedDir = async () => {
+    const dir = await bridge.pickDir()
+    if (!dir) return
+    await bridge.settings.set({ sharedDir: dir })
+    toast.success('共享目录已更新')
+  }
+
   return (
     <div className="settings-stack">
+      <section className="settings-card">
+        <h3>共享目录</h3>
+        <p className="hint">
+          存放可手动编辑、可备份、可入库的用户资产（技能库 skills/ 等），与 Claude Code、Codex、ZCode 等工具的 SKILL.md 格式互通。
+          应用状态（任务、设置、队伍）仍保存在 userData，两者互不混写。
+        </p>
+        <div className="mono storage-path">{sharedRoot || '…'}</div>
+        <div className="row">
+          <button className="btn" onClick={changeSharedDir}>更改…</button>
+          <button className="btn" onClick={() => void bridge.skills.openDir()}>打开目录</button>
+        </div>
+      </section>
       <section className="settings-card">
         <h3>存储</h3>
         <p className="hint">

@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 共享目录与技能库
+
+- **共享目录**：AgentDeck 拥有自己的用户资产目录（对标 `~/.claude` 等工具目录），默认 `~/.agentdeck`，可在设置「存储」中更改；首次启动/访问自动生成 `README.md` 与 `skills/`，目录用途与布局说明见 [docs/SKILLS-SHARED-DIR.md](docs/SKILLS-SHARED-DIR.md)。应用状态仍在 userData，两者互不混写。
+- **技能库**：技能以标准 `SKILL.md`（YAML frontmatter + Markdown 正文）存放于共享目录，支持新建/编辑/重命名/删除/从目录或单文件导入（重名自动 `-2` 后缀）；无 frontmatter 的老文件也能列出，导入不丢内容。
+- **一键共享到各 agent CLI**：技能可安装/卸载到 `~/.claude/skills`、`~/.codex/skills`、`~/.zcode/skills` 与跨工具共享位 `~/.agents/skills`（整目录拷贝、含附加文件）；逐字节比较（CRLF 归一）给出 in-sync/outdated/missing 状态，源改动后可一键「全部同步」。
+- **技能页替换扩展中心假页**：`SkillsView` 取代硬编码的 `MarketView`（已删除），左列技能列表（搜索、同步状态圆点），右侧编辑器 + 共享目标 chip；命令面板与导航同步改为「技能」。
+- 新增 `skills.ts`/`skill-targets.ts`（纯 Node、目录参数注入、`path.relative` 逃逸校验）与 `skills:*` IPC（`IpcContext.sharedDir` getter、`parseSettingsPatch` 放行 `sharedDir`）；新增 `npm run smoke:skills` 并入 `smoke:all`。
 ### 目标模式 v2（Issue 内自动推进）
 
 - **目标模式改为 Issue 内开启**：不再建立独立「目标」或合成 Issue——在 Issue 详情里开启目标模式后，agent 每轮结束自动续聊自省推进（同会话回灌优先），直到完成条件全部达成；达成后目标标记完成、对应 Issue 自动归档为已完成；触发预算/停止条件/连续失败护栏时停下并写明原因。

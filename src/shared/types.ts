@@ -337,6 +337,7 @@ export interface AppSettings {
   notifyOnDone: boolean
   mode: 'yolo' | 'build' | 'edit' | 'plan'
   workerConcurrency: number
+  sharedDir: string // 共享目录（技能库）；空串 = 默认 ~/.agentdeck，实际路径解析集中在主进程
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -347,5 +348,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   concurrency: 1,
   notifyOnDone: true,
   mode: 'yolo',
-  workerConcurrency: 3
+  workerConcurrency: 3,
+  sharedDir: ''
 }

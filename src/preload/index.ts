@@ -1,6 +1,7 @@
 // preload：向渲染层暴露类型安全的 IPC 桥
 import { contextBridge, ipcRenderer } from 'electron'
 import type { Task, TaskEvent, AppSettings, Issue, Run, Comment, Notification, Automation, RuntimeSnapshot, AnalyticsSummary, IssuePriority, IssueStatus, RunTrigger } from '../shared/types'
+import type { SkillDetail, SkillMeta, SkillTarget, SyncState } from '../shared/skills'
 import type { AgentDeckApi, AgentInfo, AgentModelCatalog, GoalCheckpointInput, GoalCreateInput, PermissionRequest, PresetInfo } from '../shared/contracts'
 
 const api: AgentDeckApi = {
@@ -127,6 +128,18 @@ const api: AgentDeckApi = {
   },
   analytics: {
     summary: (input?: { since?: number; until?: number }): Promise<AnalyticsSummary> => ipcRenderer.invoke('analytics:summary', input)
+  },
+  skills: {
+    list: (): Promise<{ root: string; skills: SkillMeta[] }> => ipcRenderer.invoke('skills:list'),
+    get: (name: string): Promise<SkillDetail | null> => ipcRenderer.invoke('skills:get', name),
+    save: (name: string, input: { description: string; body: string; originName?: string }): Promise<SkillMeta> =>
+      ipcRenderer.invoke('skills:save', name, input),
+    delete: (name: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('skills:delete', name),
+    import: (sourcePath: string): Promise<SkillMeta> => ipcRenderer.invoke('skills:import', sourcePath),
+    targets: (): Promise<{ targets: SkillTarget[]; states: Record<string, Record<string, SyncState>> }> => ipcRenderer.invoke('skills:targets'),
+    install: (name: string, targetId: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('skills:install', name, targetId),
+    uninstall: (name: string, targetId: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('skills:uninstall', name, targetId),
+    openDir: (): Promise<void> => ipcRenderer.invoke('skills:open-dir')
   }
 }
 

@@ -42,8 +42,9 @@
     "smoke:turn-model": "node scripts/smoke-turn-model.mjs",
     "smoke:stage6": "npm run typecheck && npm run smoke:taskflow && npm run smoke:turn-model && npm run smoke:migration && npm run smoke:issues",
     "smoke:goal": "node scripts/smoke-goal.mjs",
+    "smoke:skills": "node scripts/smoke-skills.mjs",
     "smoke:stage7": "npm run typecheck && npm run smoke:stage6 && npm run smoke && npm run smoke:goal",
-    "smoke:all": "npm run smoke && npm run smoke:event-log && npm run smoke:permission && npm run smoke:execution-services && npm run smoke:ipc-validation && npm run smoke:final-dedup && npm run smoke:cli-errors && npm run smoke:git-errors && npm run smoke:delegate && npm run smoke:migration && npm run smoke:failure && npm run smoke:diff && npm run smoke:retry && npm run smoke:flow && npm run smoke:resume && npm run smoke:issues && npm run smoke:automation && npm run smoke:runtime-analytics && npm run smoke:taskflow && npm run smoke:model && npm run smoke:continue && npm run smoke:round && npm run smoke:turn-model && npm run smoke:goal"
+    "smoke:all": "npm run smoke && npm run smoke:event-log && npm run smoke:permission && npm run smoke:execution-services && npm run smoke:ipc-validation && npm run smoke:final-dedup && npm run smoke:cli-errors && npm run smoke:git-errors && npm run smoke:delegate && npm run smoke:migration && npm run smoke:failure && npm run smoke:diff && npm run smoke:retry && npm run smoke:flow && npm run smoke:resume && npm run smoke:issues && npm run smoke:automation && npm run smoke:runtime-analytics && npm run smoke:taskflow && npm run smoke:model && npm run smoke:continue && npm run smoke:round && npm run smoke:turn-model && npm run smoke:goal && npm run smoke:skills"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

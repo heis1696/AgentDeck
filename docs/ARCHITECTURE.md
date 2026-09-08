@@ -99,7 +99,7 @@ Issue（目标、状态、负责人、评论时间线）
 src/
 ├── main/                     主进程
 │   ├── index.ts              窗口、backend/agent 装配、启动恢复
-│   ├── ipc/                  goals/tasks/issues/catalog/system 注册器
+│   ├── ipc/                  goals/tasks/issues/catalog/skills/system 注册器
 │   ├── runner.ts             执行协调、会话映射、取消级联、委派接入
 │   ├── scheduler.ts          普通任务/worker 双通道队列与并发槽
 │   ├── executor.ts           start/超时/取消竞态与迟到 session 清理
@@ -111,6 +111,8 @@ src/
 │   ├── goal-controller.ts    目标模式循环引擎：Issue 收养、checkpoint、续轮/护栏决策
 │   ├── goal-store.ts         目标与 GoalCheckpoint 持久化（userData/goals/）
 │   ├── store.ts              任务与事件的文件存储（seq 单调分配）
+│   ├── skills.ts             共享目录技能库：SKILL.md 解析/CRUD/导入（纯 Node，目录参数注入）
+│   ├── skill-targets.ts      技能安装目标注册表与同步状态（claude/codex/zcode/agents，路径逃逸校验）
 │   ├── agents.ts             队伍持久化 + 预置 + 迁移补员
 │   ├── settings.ts           设置持久化
 │   ├── git.ts                isGitRepo/snapshot/commitAll/createWorktree/
