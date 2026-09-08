@@ -2527,3 +2527,19 @@ html.light .board .board-col { min-width: 300px; max-width: 352px; }
 .goal-cp-head { display: flex; align-items: center; gap: 8px; }
 .goal-cp-head time { color: var(--text-faint); font-size: var(--text-caption); }
 .goal-run { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+/* Goal panel: issue 级目标模式（嵌在详情侧栏；复用 goal-checkpoint/goal-cond） */
+.goal-panel { margin-bottom: 12px; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-inset); }
+.goal-panel-head { display: flex; align-items: center; gap: 7px; }
+.goal-panel-head .page-icon { color: var(--text-dim); }
+.goal-panel-head .agent-del { margin-left: auto; }
+.goal-panel-head .agent-del + .agent-del { margin-left: 0; }
+.goal-panel-empty { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.goal-panel-empty .btn { align-self: flex-start; }
+.goal-panel-body { display: flex; flex-direction: column; gap: 5px; margin-top: 7px; }
+.goal-panel-goal { font-size: var(--text-caption); font-weight: 600; line-height: 1.45; }
+.goal-panel-reason { color: var(--warn, #e8a13c); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.goal-panel-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 3px; }
+.goal-panel-actions .btn { padding: 3px 9px; font-size: var(--text-caption); }
+.goal-panel-detail { margin-top: 9px; border-top: 1px solid var(--border); padding-top: 9px; }
+.goal-panel-runs { margin-top: 8px; }
+.badge-goal { flex: 0 0 auto; }

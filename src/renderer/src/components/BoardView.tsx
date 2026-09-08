@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { Issue, IssueStatus, Task } from '../../../shared/types'
+import type { Goal, Issue, IssueStatus, Task } from '../../../shared/types'
 import { bridge, fmtDuration, fmtTime } from '../api'
 import { ISSUE_STATUS_LABELS, TASK_STATUS_LABELS } from '../labels'
 import { toast } from '../ui/Toasts'
@@ -23,13 +23,16 @@ const COLUMNS: { key: IssueStatus; label: string; icon: typeof Clock3 }[] = [
 
 export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: string) => void }) {
   const [issues, setIssues] = useState<Issue[]>([])
+  const [goals, setGoals] = useState<Goal[]>([])
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null)
   const [dropTarget, setDropTarget] = useState<IssueStatus | null>(null)
   const refresh = () => void bridge.issues.list().then(setIssues)
   useEffect(() => {
     refresh()
     const off = bridge.issues.onUpdated(refresh)
-    return off
+    const offGoals = bridge.goals.onUpdated((goal) => setGoals((cur) => (cur.some((g) => g.id === goal.id) ? cur.map((g) => (g.id === goal.id ? goal : g)) : [...cur, goal])))
+    void bridge.goals.list().then(setGoals).catch(() => {})
+    return () => { off(); offGoals() }
   }, [])
   useEffect(() => {
     const close = () => setMenu(null)
@@ -38,6 +41,8 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
     return () => { window.removeEventListener('click', close); window.removeEventListener('blur', close) }
   }, [])
   const byTask = useMemo(() => new Map(issues.map((issue) => [issue.taskId, issue])), [issues])
+  /** 目标模式进行中的 Issue（看板角标：非终态目标即视为自动推进中） */
+  const autopilotIssues = useMemo(() => new Set(goals.filter((g) => !['completed', 'cancelled'].includes(g.status)).map((g) => g.issueId)), [goals])
   const cards = useMemo(() => tasks.map((task) => ({ task, issue: byTask.get(task.id) })).filter((item): item is { task: Task; issue: Issue } => !!item.issue), [tasks, byTask])
   const move = async (taskId: string, status: IssueStatus) => {
     setMenu(null)
@@ -54,7 +59,7 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
       return <div key={column.key} className={`board-col ${dropTarget === column.key ? 'is-drag-target' : ''}`} onDragEnter={() => setDropTarget(column.key)} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move' }} onDragLeave={(event) => { if (event.currentTarget === event.target) setDropTarget(null) }} onDrop={(event) => { event.preventDefault(); const id = event.dataTransfer.getData('text/task-id'); if (id) void move(id, column.key); setDropTarget(null) }}>
         <div className="board-col-head"><span className="dot dot-done" /><column.icon size={14} aria-hidden="true" /><span className="board-col-title">{column.label}</span><span className="board-col-count">{items.length}</span></div>
         <div className="board-col-body">{items.map(({ task, issue }) => <div key={task.id} className={`board-card issue-card status-${task.status}`} onClick={() => onOpen(task.id)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setMenu({ id: task.id, x: event.clientX, y: event.clientY }) }} draggable onDragStart={(event) => { event.dataTransfer.setData('text/task-id', task.id); event.dataTransfer.effectAllowed = 'move' }} onDragEnd={() => setDropTarget(null)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onOpen(task.id) } }} role="button" tabIndex={0} title={task.prompt.slice(0, 120)}>
-          <div className="board-card-title">{task.parentTaskId && <span className="badge badge-delegate">⚡ 委派</span>}{task.trigger === 'handoff' && <span className="badge badge-handoff">⇥ 接力</span>}<span className="issue-identifier">{issue.identifier}</span>{task.title}</div><div className="board-card-meta"><span className={`badge priority-${issue.priority}`}>{PRIORITY_LABELS[issue.priority]}</span><span className="badge">{task.backend}</span>{issue.labels.filter((label) => label !== '委派').slice(0, 2).map((label) => <span className="badge" key={label}>{label}</span>)}{task.status === 'running' && <span className="mini">{TASK_STATUS_LABELS.running}…</span>}{task.startedAt && task.endedAt && <span className="mini">{fmtDuration(task.endedAt - task.startedAt)}</span>}{task.status !== 'running' && task.status !== 'queued' && <span className="mini">{fmtTime(task.endedAt)}</span>}{task.workdir && <span className="mini workdir">{task.workdir.split(/[\\/]/).pop()}</span>}</div>
+          <div className="board-card-title">{autopilotIssues.has(issue.id) && <span className="badge badge-goal" title="目标模式自动推进中">🎯</span>}{task.parentTaskId && <span className="badge badge-delegate">⚡ 委派</span>}{task.trigger === 'handoff' && <span className="badge badge-handoff">⇥ 接力</span>}<span className="issue-identifier">{issue.identifier}</span>{task.title}</div><div className="board-card-meta"><span className={`badge priority-${issue.priority}`}>{PRIORITY_LABELS[issue.priority]}</span><span className="badge">{task.backend}</span>{issue.labels.filter((label) => label !== '委派').slice(0, 2).map((label) => <span className="badge" key={label}>{label}</span>)}{task.status === 'running' && <span className="mini">{TASK_STATUS_LABELS.running}…</span>}{task.startedAt && task.endedAt && <span className="mini">{fmtDuration(task.endedAt - task.startedAt)}</span>}{task.status !== 'running' && task.status !== 'queued' && <span className="mini">{fmtTime(task.endedAt)}</span>}{task.workdir && <span className="mini workdir">{task.workdir.split(/[\\/]/).pop()}</span>}</div>
         </div>)}{items.length === 0 && <EmptyState compact title="空" />}</div>
       </div>
     })}
