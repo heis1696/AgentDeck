@@ -1,111 +1,16 @@
 // 渲染层 API 封装：window.agentdeck 的类型 + 常用 hooks
 import { useEffect, useState, useCallback } from 'react'
+import type { AgentDeckApi, AgentInfo, AgentModelCatalog, PresetInfo, PermissionRequest } from '../../shared/contracts'
 import type { Task, TaskEvent, AppSettings, Issue, Run, Comment, Notification, Automation, RuntimeSnapshot, AnalyticsSummary, IssuePriority, IssueStatus, RunTrigger } from '../../shared/types'
-import type { PermissionRequest } from '../../main/backends/types'
-
-interface Bridge {
-  tasks: {
-    list: () => Promise<Task[]>
-    get: (id: string) => Promise<Task | null>
-    events: (id: string, afterSeq?: number) => Promise<TaskEvent[]>
-    create: (input: { title: string; prompt: string; workdir: string; backend?: string; agentId?: string; handoff?: string; startNow?: boolean; trigger?: RunTrigger }) => Promise<Task>
-    cancel: (id: string) => Promise<{ ok: boolean; error?: string }>
-    followUp: (id: string, content: string) => Promise<{ ok: boolean; error?: string }>
-    delete: (id: string) => Promise<{ ok: boolean; error?: string }>
-    retry: (id: string) => Promise<{ ok: boolean; error?: string }>
-    move: (id: string, status: Task['status']) => Promise<{ ok: boolean; error?: string }>
-    onUpdated: (cb: (t: Task) => void) => () => void
-    onDeleted: (cb: (id: string) => void) => () => void
-    onFocusTask: (cb: (id: string) => void) => () => void
-    start: (id: string) => Promise<{ ok: boolean; error?: string }>
-    rewind: (id: string, toSeq: number) => Promise<{ ok: boolean; error?: string }>
-    rename: (id: string, title: string) => Promise<Task | null>
-    onEventsInvalidated: (cb: (taskId: string) => void) => () => void
-    onEvent: (cb: (taskId: string, e: TaskEvent) => void) => () => void
-    onPermission: (cb: (taskId: string, req: PermissionRequest) => void) => () => void
-    respondPermission: (requestId: string | number, optionId: string, decision: 'allow' | 'deny') => Promise<{ ok: boolean; error?: string }>
-  }
-  issues: {
-    list: () => Promise<Issue[]>
-    get: (id: string) => Promise<Issue | null>
-    create: (input: { title: string; description: string; workdir: string; agentId?: string; backend?: string; handoff?: string; startNow?: boolean; trigger?: RunTrigger; titleAuto?: boolean }) => Promise<Issue>
-    runs: (id: string) => Promise<Run[]>
-    comments: (id: string) => Promise<Comment[]>
-    update: (id: string, patch: { priority?: IssuePriority; labels?: string[]; dueDate?: number; status?: IssueStatus }) => Promise<Issue | null>
-    addComment: (id: string, content: string) => Promise<Comment | null>
-    notifications: (unreadOnly?: boolean) => Promise<Notification[]>
-    markNotificationRead: (id: string) => Promise<{ ok: boolean }>
-    onUpdated: (cb: (payload: { taskId: string; issueId: string; issue: Issue | null; run: Run | null }) => void) => () => void
-  }
-  automations: {
-    list: () => Promise<Automation[]>
-    create: (input: Omit<Automation, 'id' | 'createdAt' | 'lastRunAt' | 'nextRunAt'>) => Promise<Automation>
-    update: (id: string, patch: Partial<Automation>) => Promise<Automation | null>
-    delete: (id: string) => Promise<{ ok: boolean }>
-    runNow: (id: string) => Promise<{ ok: boolean; error?: string; task?: Task }>
-  }
-  settings: {
-    get: () => Promise<AppSettings>
-    set: (patch: Partial<AppSettings>) => Promise<AppSettings>
-    onUpdated: (cb: (s: AppSettings) => void) => () => void
-    probe: () => Promise<{ ok: boolean; detail: string; searched: string[] }>
-  }
-  pickDir: () => Promise<string>
-  openPath: (target: string) => Promise<void>
-  notify: (title: string, body: string) => void
-  agents: {
-    list: () => Promise<AgentInfo[]>
-    save: (list: AgentInfo[]) => Promise<AgentInfo[]>
-    models: (backend: string) => Promise<AgentModelCatalog>
-  }
-  presets: {
-    list: () => Promise<ApiPresetInfo[]>
-    save: (list: ApiPresetInfo[]) => Promise<ApiPresetInfo[]>
-    newId: () => Promise<string>
-    models: (presetId: string) => Promise<AgentModelCatalog>
-  }
-  runtimes: {
-    snapshot: () => Promise<RuntimeSnapshot[]>
-  }
-  analytics: {
-    summary: (input?: { since?: number; until?: number }) => Promise<AnalyticsSummary>
-  }
-}
 
 /** 队员（agent 身份）——与主进程 agents.ts 的 Agent 对齐 */
-export interface AgentInfo {
-  id: string
-  name: string
-  backend: string
-  model?: string
-  presetId?: string
-  note?: string
-  color: string
-  role?: string
-  systemPrompt?: string
-  subordinates?: string[]
-}
+export type { AgentInfo, AgentModelCatalog }
 
 /** API 预设（连接档案）——与主进程 presets.ts 的 ApiPreset 对齐 */
-export interface ApiPresetInfo {
-  id: string
-  name: string
-  backend: string
-  baseURL: string
-  apiKey: string
-  note?: string
-  createdAt: number
-}
+export type ApiPresetInfo = PresetInfo
 
 /** 模型目录（agents:models 返回）：zcode 有本地 catalog，其余平台 freeform */
-export interface AgentModelCatalog {
-  backend: string
-  source: 'catalog' | 'freeform'
-  default?: string
-  models: string[]
-}
-
-export const bridge: Bridge = (window as any).agentdeck
+export const bridge: AgentDeckApi = (window as unknown as { agentdeck: AgentDeckApi }).agentdeck
 
 /** 任务列表 + 实时更新 */
 export function useTasks() {

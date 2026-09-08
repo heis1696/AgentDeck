@@ -4,6 +4,28 @@
 
 ## [Unreleased]
 
+### 阶段 8：并发与架构收口
+
+- IPC 从主入口拆到 goals/tasks/issues/catalog/system 领域注册器，所有写入口在 main 侧接收 `unknown` 并校验；保持既有 channel 和 payload。
+- runner 接入独立 Scheduler、Executor、PermissionBroker、RetryPolicy 与 TaskFinalizer；取消、启动迟到、旧回合事件和 429 退避均纳入统一生命周期。
+- 一次性 CLI 使用 per-session 进程句柄和进程树终止；首次拿到 provider session ID 即持久化，使首轮 429 可以续会话。
+- ZCode 拆出 JSON-RPC transport 和配置/model catalog；CLI JSONL 协议边界改为 `unknown` + type guards。
+- 新增 `smoke:all` 串行全量矩阵与执行服务 smoke；真实 Claude/Codex/OpenCode/ZCode 验收通过，本轮无 429。
+
+### 阶段 7：目标模式
+
+- 新增 `Goal`、`GoalRun`、`GoalCheckpoint` 共享模型，以及版本化 `GoalStore` 持久化。
+- 新增 `GoalController`：多 Run 续接、checkpoint、运行/时长预算、取消/失败边界与重启后显式恢复。
+- 主进程接入 `goals:*` IPC；目标执行复用既有 Issue/TaskRunner、权限与委派协议。
+- 新增目标 UI 与 `npm run smoke:goal`，覆盖完成、继续、暂停/取消、预算耗尽、幂等和重启恢复。
+
+### 阶段 6：渲染层拆分和领域模型收口
+
+- 从 `TaskDetail` 提取 `useTaskEvents`、`turnModel`、`useIssueDetails`，并拆分时间线、权限、运行历史、评论和 Git 视图；保留现有 DOM class、IPC channel 与交互行为。
+- 新增 renderer `taskService`，统一任务操作到既有 Bridge command；`TaskDetail` 降至 300 行以内。
+- 在 `shared/taskflow.ts` 集中任务状态转换、Issue/Run 派生和 `ExecutionRecord` 映射；事件归并 smoke 覆盖流式文本与 final 重复回显。
+- `tasks.json` 增加 `schemaVersion` envelope，显式迁移旧数组、过滤坏记录并拒绝未来版本；迁移可重复执行。
+
 ### 变更（委派提示词对齐 Multica 源码级拆解）
 
 - **领队协议升级**（对照 [docs/MULTICA-PROMPTS.md](docs/MULTICA-PROMPTS.md) §7.1）：新增人设优先于协议的冲突规则；名册无专长说明的队员显式标注"专长未说明"；"何时亲自做"从"琐碎自己做"细化为三档（琐碎自己做 / 无人胜任可亲自 / 并行与专长一律派发）；派发后即收尾本轮、总结只陈述结果。

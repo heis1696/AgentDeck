@@ -2509,3 +2509,21 @@ html.light .board .board-col { min-width: 300px; max-width: 352px; }
 .detail-body > .result, .detail-body > .git-pane { min-height: 0; flex: 1 1 0; }
 .followup { flex: 0 0 auto; position: relative; z-index: 2; background: var(--surface, var(--bg)); }
 .followup textarea { max-height: 200px; overflow-y: auto; }
+
+/* Goals view: goal cards reuse .agent-card; below are goal-specific pieces. */
+.goal-degraded { padding: 8px 12px; border: 1px solid color-mix(in srgb, var(--warn, #e8a13c) 45%, var(--border)); border-radius: var(--radius-md); background: color-mix(in srgb, var(--warn, #e8a13c) 8%, transparent); color: var(--text-dim); }
+.goal-card.open { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.goal-card-actions { margin-left: auto; flex-wrap: wrap; justify-content: flex-end; }
+.goal-detail { margin-top: 16px; padding: 18px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-raised); }
+.goal-detail h4 { margin: 18px 0 8px; font-size: var(--text-label); color: var(--text-dim); }
+.goal-conditions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 6px; }
+.goal-cond-group { display: flex; flex-direction: column; gap: 5px; }
+.goal-cond-group strong { font-size: var(--text-caption); color: var(--text-faint); }
+.goal-cond { display: inline-flex; align-items: center; gap: 6px; font-size: var(--text-caption); color: var(--text-dim); }
+.goal-cond.done { color: var(--ok, #3cb96e); }
+.goal-cond.stop { color: var(--danger, #e05252); }
+.goal-checkpoint { margin-bottom: 12px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-inset); }
+.goal-checkpoint p { margin: 6px 0; font-size: var(--text-caption); line-height: 1.5; }
+.goal-cp-head { display: flex; align-items: center; gap: 8px; }
+.goal-cp-head time { color: var(--text-faint); font-size: var(--text-caption); }
+.goal-run { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }

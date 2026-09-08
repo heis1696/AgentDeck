@@ -1,40 +1,9 @@
 // preload：向渲染层暴露类型安全的 IPC 桥
 import { contextBridge, ipcRenderer } from 'electron'
 import type { Task, TaskEvent, AppSettings, Issue, Run, Comment, Notification, Automation, RuntimeSnapshot, AnalyticsSummary, IssuePriority, IssueStatus, RunTrigger } from '../shared/types'
-import type { PermissionRequest } from '../main/backends/types'
+import type { AgentDeckApi, AgentInfo, AgentModelCatalog, GoalCheckpointInput, GoalCreateInput, PermissionRequest, PresetInfo } from '../shared/contracts'
 
-interface AgentInfo {
-  id: string
-  name: string
-  backend: string
-  model?: string
-  presetId?: string
-  note?: string
-  color: string
-  role?: string
-  systemPrompt?: string
-  subordinates?: string[]
-}
-
-/** 模型目录（agents:models / presets:models 返回）：zcode 与预设是 catalog，其余 freeform */
-interface AgentModelCatalog {
-  backend: string
-  source: 'catalog' | 'freeform'
-  default?: string
-  models: string[]
-}
-
-interface PresetInfo {
-  id: string
-  name: string
-  backend: string
-  baseURL: string
-  apiKey: string
-  note?: string
-  createdAt: number
-}
-
-const api = {
+const api: AgentDeckApi = {
   tasks: {
     list: (): Promise<Task[]> => ipcRenderer.invoke('tasks:list'),
     get: (id: string): Promise<Task | null> => ipcRenderer.invoke('tasks:get', id),
@@ -42,8 +11,8 @@ const api = {
     create: (input: { title: string; prompt: string; workdir: string; backend?: string; agentId?: string; handoff?: string; startNow?: boolean; trigger?: RunTrigger }) =>
       ipcRenderer.invoke('tasks:create', input) as Promise<Task>,
     cancel: (id: string) => ipcRenderer.invoke('tasks:cancel', id) as Promise<{ ok: boolean; error?: string }>,
-    followUp: (id: string, content: string) =>
-      ipcRenderer.invoke('tasks:followup', id, content) as Promise<{ ok: boolean; error?: string }>,
+    followUp: (id: string, content: string, opts?: { relay?: boolean }) =>
+      ipcRenderer.invoke('tasks:followup', id, content, opts) as Promise<{ ok: boolean; error?: string }>,
     delete: (id: string) => ipcRenderer.invoke('tasks:delete', id) as Promise<{ ok: boolean; error?: string }>,
     retry: (id: string) => ipcRenderer.invoke('tasks:retry', id) as Promise<{ ok: boolean; error?: string }>,
     move: (id: string, status: Task['status']) => ipcRenderer.invoke('tasks:move', id, status) as Promise<{ ok: boolean; error?: string }>,
@@ -101,6 +70,24 @@ const api = {
       return () => ipcRenderer.removeListener('issues:updated', h)
     }
   },
+  goals: {
+    list: (): Promise<import('../shared/types').Goal[]> => ipcRenderer.invoke('goals:list'),
+    get: (id: string): Promise<import('../shared/types').Goal | null> => ipcRenderer.invoke('goals:get', id),
+    create: (input: GoalCreateInput): Promise<import('../shared/types').Goal> => ipcRenderer.invoke('goals:create', input),
+    runs: (id: string): Promise<import('../shared/types').GoalRun[]> => ipcRenderer.invoke('goals:runs', id),
+    checkpoints: (id: string): Promise<import('../shared/types').GoalCheckpoint[]> => ipcRenderer.invoke('goals:checkpoints', id),
+    start: (id: string) => ipcRenderer.invoke('goals:start', id) as Promise<{ ok: boolean; error?: string }>,
+    pause: (id: string) => ipcRenderer.invoke('goals:pause', id) as Promise<{ ok: boolean; error?: string }>,
+    resume: (id: string) => ipcRenderer.invoke('goals:resume', id) as Promise<{ ok: boolean; error?: string }>,
+    cancel: (id: string) => ipcRenderer.invoke('goals:cancel', id) as Promise<{ ok: boolean; error?: string }>,
+    continue: (id: string) => ipcRenderer.invoke('goals:continue', id) as Promise<{ ok: boolean; error?: string }>,
+    checkpoint: (id: string, input: GoalCheckpointInput) => ipcRenderer.invoke('goals:checkpoint', id, input) as Promise<import('../shared/types').GoalCheckpoint | null>,
+    onUpdated: (cb: (goal: import('../shared/types').Goal) => void) => {
+      const h = (_e: unknown, goal: import('../shared/types').Goal) => cb(goal)
+      ipcRenderer.on('goals:updated', h)
+      return () => ipcRenderer.removeListener('goals:updated', h)
+    }
+  },
   automations: {
     list: (): Promise<Automation[]> => ipcRenderer.invoke('automations:list'),
     create: (input: Omit<Automation, 'id' | 'createdAt' | 'lastRunAt' | 'nextRunAt'>): Promise<Automation> => ipcRenderer.invoke('automations:create', input),
@@ -144,4 +131,3 @@ const api = {
 }
 
 contextBridge.exposeInMainWorld('agentdeck', api)
-export type AgentDeckApi = typeof api

@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import type { Comment, Issue, IssuePriority, IssueStatus, Notification, Run, Task } from '../shared/types'
+import { executionRecordFromTask, taskStatusToIssueStatus } from '../shared/taskflow'
 
 type Persisted = { issues: Issue[]; runs: Run[]; comments: Comment[]; notifications: Notification[]; nextIdentifier: number }
 
@@ -8,6 +9,8 @@ type Persisted = { issues: Issue[]; runs: Run[]; comments: Comment[]; notificati
 export class IssueStore {
   private readonly file: string
   private data: Persisted = { issues: [], runs: [], comments: [], notifications: [], nextIdentifier: 1 }
+  private lastTaskFingerprint = ''
+  private latestTasks = new Map<string, Task>()
 
   constructor(userDataDir: string) {
     const dir = path.join(userDataDir, 'issues')
@@ -35,6 +38,15 @@ export class IssueStore {
 
   /** Rebuild the projection from task snapshots. Safe to call before every read. */
   sync(tasks: Task[]) {
+    const fingerprint = tasks
+      .map((task) => [
+        task.id, task.createdAt, task.status, task.eventCount, task.runId, task.startedAt, task.endedAt,
+        task.title, task.prompt, task.issueId, task.parentTaskId, task.agentId, task.trigger,
+        task.result, task.error, task.usage && JSON.stringify(task.usage), task.suppressIssue
+      ].join('\u001f'))
+      .join('\u001e')
+    if (fingerprint === this.lastTaskFingerprint) return
+    this.lastTaskFingerprint = fingerprint
     let changed = false
     // One Issue can have many execution records (retries, follow-ups, or
     // comment mentions). Only the newest task owns the current Issue status;
@@ -51,7 +63,7 @@ export class IssueStore {
       const existing = this.data.issues.find((issue) => issue.taskId === task.id || (!!task.issueId && issue.id === task.issueId))
       // 委派子任务由 agent 创建：投影层打上来源标记，UI 才能和用户创建的区分
       const isDelegated = !!task.parentTaskId
-      const derivedStatus = issueStatus(task.status)
+      const derivedStatus = taskStatusToIssueStatus(task.status)
       const status = existingStatus(this.data.issues, task.id, task.status, derivedStatus, task.issueId)
       const isLatest = latestByIssue.get(task.issueId ?? `iss_${task.id}`)?.id === task.id
       if (!existing) {
@@ -94,23 +106,10 @@ export class IssueStore {
       if (!issue) continue
       // Parked tasks have an Issue but no execution yet. Legacy tasks use a stable fallback.
       if (task.status === 'queued' && !task.runId) continue
-      const runId = task.runId ?? `legacy_${task.id}_${task.attempt ?? 1}`
-      const runStatus = task.status === 'running' || task.status === 'queued' ? 'running' : task.status === 'cancelled' ? 'cancelled' : task.status === 'done' ? 'completed' : 'error'
+      const execution = executionRecordFromTask(task)
+      const runId = execution.id
       const current = this.data.runs.find((run) => run.id === runId)
-      const run: Run = {
-        id: runId,
-        issueId: issue.id,
-        taskId: task.id,
-        agentId: task.agentId,
-        trigger: task.trigger ?? 'assignment',
-        prompt: task.prompt,
-        status: runStatus,
-        startedAt: task.startedAt,
-        finishedAt: task.endedAt,
-        durationMs: task.usage?.durationMs,
-        usage: task.usage,
-        transcriptEventCount: task.eventCount
-      }
+      const run: Run = { ...execution, issueId: issue.id }
       if (!current || JSON.stringify(current) !== JSON.stringify(run)) {
         if (current) Object.assign(current, run)
         else this.data.runs.push(run)
@@ -144,6 +143,32 @@ export class IssueStore {
       }
     }
     if (changed) this.save()
+    this.latestTasks.clear()
+    for (const task of tasks) {
+      if (task.suppressIssue) continue
+      const key = task.issueId ?? `iss_${task.id}`
+      const current = this.latestTasks.get(key)
+      if (!current || task.createdAt >= current.createdAt) this.latestTasks.set(key, task)
+    }
+  }
+
+  /** Apply one task change without rebuilding unrelated Issues. */
+  syncTask(task: Task, parent?: Task) {
+    if (task.suppressIssue) return
+    const key = task.issueId ?? `iss_${task.id}`
+    const latest = this.latestTasks.get(key)
+    const previousLatest = new Map(this.latestTasks)
+    const candidates = [
+      ...(latest && latest.id !== task.id ? [latest] : []),
+      task,
+      ...(parent ? [parent] : [])
+    ]
+    this.lastTaskFingerprint = ''
+    this.sync(candidates)
+    this.latestTasks = previousLatest
+    const current = this.latestTasks.get(key)
+    if (!current || task.createdAt >= current.createdAt) this.latestTasks.set(key, task)
+    this.lastTaskFingerprint = ''
   }
 
   list() { return [...this.data.issues].sort((a, b) => b.updatedAt - a.updatedAt) }
@@ -208,14 +233,6 @@ function existingStatus(issues: Issue[], taskId: string, taskStatus: Task['statu
   // chosen review/done/blocked state instead of silently rewriting the board.
   if (issue?.statusOverride && taskStatus !== 'running') return issue.statusOverride
   return derived
-}
-
-function issueStatus(status: Task['status']): IssueStatus {
-  if (status === 'queued') return 'todo'
-  if (status === 'running') return 'in_progress'
-  if (status === 'done') return 'in_review'
-  if (status === 'cancelled') return 'cancelled'
-  return 'blocked'
 }
 
 export function priorityForIssue(value: unknown): IssuePriority {

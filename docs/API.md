@@ -12,6 +12,8 @@ preload 以 `contextBridge` 暴露，全部经 `ipcRenderer.invoke/on` 与主进
 
 ### 1.1 任务 `bridge.tasks`
 
+Renderer 组件通过 `src/renderer/src/task-service.ts` 调用任务命令；该服务只接收任务 ID、文本或领域对象，并将参数映射到下列兼容 channel。组件不直接拼装 IPC payload。
+
 | 方法 | 签名 | 说明 |
 |---|---|---|
 | `list` | `() => Promise<Task[]>` | 全量任务，按创建时间倒序 |
@@ -58,6 +60,24 @@ preload 以 `contextBridge` 暴露，全部经 `ipcRenderer.invoke/on` 与主进
 - `backend ∈ { zcode, claude, codex, opencode, dsh }`
 - `subordinates` 非空 → 领队（获得委派能力）
 
+### 1.4 Goal mode (`bridge.goals`)
+
+Goal is a durable long-running objective attached to one Issue. Each
+continuation creates another GoalRun/Task under that Issue. Terminal runs leave
+one GoalCheckpoint; repeated TaskChanged notifications are idempotent by run id.
+
+| Method | Description |
+|---|---|
+| `list` / `get` | Read goals persisted in `userData/goals/index.json` |
+| `create(input)` | Create completion/stop conditions plus run and duration budgets; `startNow` controls the first run |
+| `runs(id)` / `checkpoints(id)` | Read phase history and durable checkpoint summaries |
+| `start` / `pause` / `continue` / `resume` / `cancel` | Lifecycle commands checked by the shared goal state machine |
+| `checkpoint(id, input)` | Persist a user-provided checkpoint for the current phase |
+
+An active goal is never resumed silently after restart. Recovery moves it to
+`waiting_user` and requires an explicit continuation. Goal execution reuses the
+existing TaskRunner, permission broker, workdir boundary and delegation protocol.
+
 ### 1.3 设置与工具
 
 | 方法 | 说明 |
@@ -71,6 +91,18 @@ preload 以 `contextBridge` 暴露，全部经 `ipcRenderer.invoke/on` 与主进
 ---
 
 ## 2. 数据模型（`src/shared/types.ts`）
+
+### 2.0 Task 索引 schema
+
+`userData/tasks/tasks.json` 使用显式 envelope：
+
+```json
+{ "schemaVersion": 1, "tasks": [] }
+```
+
+启动时 `migrateTaskIndex` 只接受未版本化数组（版本 0）或已声明版本；旧 `mode`/`squad` 字段仅在版本 0 迁移为 `integration`，坏记录会被过滤，未来版本会明确拒绝。迁移通过临时文件 + rename 写回，并可重复执行而不重新生成时间戳。
+
+Task 是本地执行兼容记录，不是用户工作单元。一个 Issue 可以关联多个 Run（重试、续聊、提及或接力），`executionRecordFromTask` 在 `src/shared/taskflow.ts` 中提供 Task 到内部 `ExecutionRecord` 的唯一映射。
 
 ### 2.1 Task
 
@@ -181,6 +213,7 @@ interface BackendSessionEvents {
   onTurnEnd(r: { response, ok, error?, tokenCount?, durationMs?, delegationText? })
   onPermission?(req): Promise<{ optionId?, decision }>        // 可选；缺省自动放行
   onLaunch?(handle: { stop() })                               // 可选；进程拉起即注册取消句柄
+  onSessionId?(sessionId: string)                             // 可选；首轮失败前也立即持久化，供 retry resume
 }
 ```
 

@@ -1,16 +1,8 @@
 // AgentBackend：执行后端适配器接口。
 // 新增后端（claude / codex …）时实现此接口并在 registry 注册即可。
 import type { TaskEvent } from '../../shared/types'
-
-export interface PermissionRequest {
-  requestId: string | number
-  toolName: string
-  reason: string
-  riskLevel: string
-  input?: unknown
-  /** 服务端预构建的选项，每个带 optionId 与 response */
-  options: Array<{ optionId: string; name: string; description?: string; response: { decision: string } }>
-}
+import type { PermissionRequest } from '../../shared/contracts'
+export type { PermissionRequest } from '../../shared/contracts'
 
 export interface BackendSessionEvents {
   onEvent: (e: Omit<TaskEvent, 'seq'>) => void
@@ -26,6 +18,8 @@ export interface BackendSessionEvents {
   onPermission?: (req: PermissionRequest) => Promise<{ optionId?: string; decision: 'allow' | 'deny' }>
   /** 进程/会话启动即回调（一次性 CLI 在 start resolve 前就要能被取消） */
   onLaunch?: (handle: { stop: () => void }) => void
+  /** Persist a provider session id as soon as it is known, including failed turns. */
+  onSessionId?: (sessionId: string) => void
 }
 
 /** One complete model turn. delegationText may contain assistant messages emitted before the final one. */

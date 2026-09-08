@@ -76,7 +76,7 @@ console.log('— <continue> 多行简报（正则修复回归）—')
   const c = '<continue start="parked">第一行\n\n第二行 简报内容</continue>'
   const conts = d.parseContinue(c)
   check('多行简报解析（旧 [sS]*? 必失败）', conts.length === 1 && conts[0].brief.includes('第二行') && conts[0].start === 'parked', conts)
-  check('缺省 start 视为 auto', d.parseContinue('<continue>简报</continue>')[0].start === 'auto')
+  check('缺省 start 视为 parked（防误切）', d.parseContinue('<continue>简报</continue>')[0].start === 'parked')
   check('strip 剥除', d.stripContinue(c) === '', d.stripContinue(c))
 }
 

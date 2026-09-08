@@ -3,10 +3,49 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import type { TaskEvent } from '../../shared/types'
 
+export type JsonPrimitive = string | number | boolean | null
+/** Parsed JSON is intentionally unknown at the transport boundary; adapters validate fields. */
+export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue }
+export type JsonObject = { [key: string]: JsonValue }
+
+export function isJsonObject(value: unknown): value is JsonObject {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+/** Kill a CLI and every tool process it spawned. */
+export function killProcessTree(child: ChildProcess) {
+  try {
+    if (process.platform === 'win32' && child.pid) {
+      spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+    } else {
+      child.kill('SIGKILL')
+    }
+  } catch {}
+}
+
+export function jsonObject(value: unknown): JsonObject {
+  return isJsonObject(value) ? value : {}
+}
+
+export function jsonString(value: unknown, fallback = ''): string {
+  return typeof value === 'string' ? value : fallback
+}
+
+export function jsonNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
 export interface CliJsonlRunner {
   child: ChildProcess
   /** 进程退出（含被杀）；stderrTail 供错误信息 */
-  exited: Promise<{ code: number | null; stderrTail: string }>
+  exited: Promise<{
+    code: number | null
+    signal?: NodeJS.Signals | null
+    stderrTail: string
+    stdoutBytes: number
+    lineCount: number
+    parseErrors: number
+  }>
   kill: () => void
 }
 
@@ -15,7 +54,7 @@ export function runCliJsonl(opts: {
   prefixArgs: string[]
   args: string[]
   cwd: string
-  onLine: (obj: any, raw: string) => void
+  onLine: (obj: unknown, raw: string) => void
   onRaw?: (line: string) => void
   /** 无输出超时（默认 10 分钟） */
   idleTimeoutMs?: number
@@ -34,9 +73,16 @@ export function runCliJsonl(opts: {
   let total = 0
   let buffer = ''
   let killed = false
-  const idleTimer = setTimeout(() => {
+  let lineCount = 0
+  let parseErrors = 0
+  /** 杀整棵进程树：CLI 会再起自己的子进程（shell/工具进程），只 kill 直接子进程会留下
+   *  继续打 API 的孤儿（429 残留来源之一）。Windows 用 taskkill /T /F 走 PID 树。 */
+  const killTree = () => {
     killed = true
-    child.kill()
+    killProcessTree(child)
+  }
+  const idleTimer = setTimeout(() => {
+    killTree()
   }, opts.idleTimeoutMs ?? 10 * 60 * 1000)
 
   child.stdout!.setEncoding('utf8')
@@ -45,8 +91,7 @@ export function runCliJsonl(opts: {
     if (!killed) idleTimer.refresh()
     total += chunk.length
     if (total > (opts.maxTotalBytes ?? 5 * 1024 * 1024)) {
-      killed = true
-      child.kill()
+      killTree()
       return
     }
     buffer += chunk
@@ -55,9 +100,11 @@ export function runCliJsonl(opts: {
       const line = buffer.slice(0, idx).trim()
       buffer = buffer.slice(idx + 1)
       if (!line) continue
+      lineCount++
       try {
         opts.onLine(JSON.parse(line), line)
       } catch {
+        parseErrors++
         opts.onRaw?.(line)
       }
     }
@@ -66,14 +113,24 @@ export function runCliJsonl(opts: {
     stderrTail = (stderrTail + c.toString()).slice(-1500)
   })
 
-  const exited = new Promise<{ code: number | null; stderrTail: string }>((resolve) => {
-    child.on('exit', (code) => {
+  const exited = new Promise<CliJsonlRunner['exited'] extends Promise<infer T> ? T : never>((resolve) => {
+    child.on('exit', (code, signal) => {
       clearTimeout(idleTimer)
-      resolve({ code, stderrTail: stderrTail.trim() })
+      const trailing = buffer.trim()
+      if (trailing) {
+        lineCount++
+        try {
+          opts.onLine(JSON.parse(trailing), trailing)
+        } catch {
+          parseErrors++
+          opts.onRaw?.(trailing)
+        }
+      }
+      resolve({ code, signal, stderrTail: stderrTail.trim(), stdoutBytes: total, lineCount, parseErrors })
     })
     child.on('error', (err) => {
       clearTimeout(idleTimer)
-      resolve({ code: -1, stderrTail: String(err) })
+      resolve({ code: -1, signal: null, stderrTail: String(err), stdoutBytes: total, lineCount, parseErrors })
     })
   })
 
@@ -81,10 +138,7 @@ export function runCliJsonl(opts: {
     child,
     exited,
     kill() {
-      killed = true
-      try {
-        child.kill()
-      } catch {}
+      killTree()
     }
   }
 }

@@ -1,6 +1,6 @@
 # AgentDeck 架构文档
 
-> 封板版本 v0.3.0（demo）。本地多 agent 协作台：五个 agent CLI 平台（zcode/claude/codex/opencode/dsh）同队，委派内置、领队自主拆解派工，全程本地运行。
+> 当前重构基线。本地多 agent 协作台：五个 agent CLI 平台（zcode/claude/codex/opencode/dsh）同队，委派内置、领队自主拆解派工，全程本地运行。
 
 ---
 
@@ -10,9 +10,9 @@
 ┌─────────────────────────────────────────────────────────────┐
 │ Electron 主进程（Node）                                       │
 │                                                             │
-│  index.ts ── IPC（tasks / agents / settings / dialog / shell）│
+│  index.ts ── 依赖装配 ──► ipc/（按领域注册 channel）             │
 │      │                                                      │
-│  TaskRunner ──双通道队列──► backends（5 个 AgentBackend 适配器）│
+│  TaskRunner ── Scheduler/Executor ──► backends（5 个适配器）   │
 │      │   ▲                    │        │        │        │   │
 │      │   └── attachTeam       zcode   claude   codex  opencode│
 │      │       (agents.json)   (常驻)   (一次性×3)       dsh    │
@@ -98,8 +98,14 @@ Issue（目标、状态、负责人、评论时间线）
 ```
 src/
 ├── main/                     主进程
-│   ├── index.ts              窗口、IPC 注册、backend/agent 装配、启动恢复
-│   ├── runner.ts             任务状态机、双通道队列、取消级联、权限网关
+│   ├── index.ts              窗口、backend/agent 装配、启动恢复
+│   ├── ipc/                  goals/tasks/issues/catalog/system 注册器
+│   ├── runner.ts             执行协调、会话映射、取消级联、委派接入
+│   ├── scheduler.ts          普通任务/worker 双通道队列与并发槽
+│   ├── executor.ts           start/超时/取消竞态与迟到 session 清理
+│   ├── retry-policy.ts       失败 attempt、resume/fresh 和退避纯策略
+│   ├── permission-broker.ts  权限等待、响应、超时与取消清理
+│   ├── task-finalizer.ts     最终文本、用量、Git 快照与状态落盘
 │   ├── delegate.ts           委派协议：解析/身份注入/循环/worktree 派发/集成
 │   ├── store.ts              任务与事件的文件存储（seq 单调分配）
 │   ├── agents.ts             队伍持久化 + 预置 + 迁移补员
@@ -108,7 +114,10 @@ src/
 │   │                         mergeBranchInto/branchDiffSummary
 │   └── backends/
 │       ├── types.ts          AgentBackend / BackendSession / PermissionRequest
-│       ├── zcode.ts          ZCode 协议（常驻型，resume+runtimeModel，300KB 看门狗）
+│       ├── zcode.ts          ZCode 协议到 BackendSession 的映射
+│       ├── zcode-transport.ts JSON-RPC stdio transport 与进程树清理
+│       ├── zcode-config.ts   CLI 配置迁移、runtimeModel 与模型目录
+│       ├── zcode-protocol.ts ZCode 消息 guard、握手与事件辅助映射
 │       ├── claude.ts         -p stream-json（含费用）
 │       ├── codex.ts          exec --json（Windows 必须 bypass 沙箱）
 │       ├── opencode.ts       run --format json
@@ -183,18 +192,50 @@ delegate 标记 → 目标解析（限 subordinates，名字/平台 id 忽略大
 
 - dsh 无流式过程与续聊（协议本身不提供）
 - 领队自己动手的改动留在主工作区（不自动提交，设计使然）
-- 委派深度一层（子任务不能再委派）
+- 委派最多 3 层、全链最多 8 轮；不支持无上限递归派发
 - 日志无虚拟滚动（单任务万级事件才需要）
 - Windows 沙箱限制：codex 必须 bypass（workspace-write 下命令执行会失败）
 - 未做多显示器/DPI 与国际化（界面中文）
 
 ---
 
-## 7. 测试与验证基线
+## 7. 阶段 6 渲染与领域边界
+
+阶段 6 的渲染入口保持 `TaskDetail` 兼容组件，但职责已拆到独立模块：
+
+- `renderer/src/hooks/useTaskEvents.ts` 负责事件订阅、按 `seq` 归并、权限响应和回退刷新。
+- `renderer/src/hooks/turnModel.ts` 负责把 `TaskEvent[]` 转为回合模型；流式文本与重复 `final` 只保留一个最终消息。
+- `renderer/src/hooks/useIssueDetails.ts` 负责 Issue、Run、Comment 查询与更新。
+- `renderer/src/components/task/` 提供 `TurnTimeline`、`PermissionPrompt`、`RunHistory`、`CommentPanel` 和 `GitSummary`。
+- `renderer/src/task-service.ts` 是任务操作到 Bridge command 的单一入口。
+
+领域边界为 `Issue -> Run -> Task`：Issue 是用户工作单元，Run 是一次面向 Issue 的执行投影，Task 是本地 CLI 兼容记录；`ExecutionRecord` 由 `shared/taskflow.ts` 提供唯一映射。任务状态转换、Issue/Run 状态派生均集中在 `shared/taskflow.ts`。
+
+`tasks/tasks.json` 使用 `{ schemaVersion, tasks }` envelope。`migrateTaskIndex` 显式处理版本 0 数组和当前版本，旧字段迁移与坏记录过滤是幂等的，未来版本会拒绝加载。
+
+## 7.1 阶段 7 目标模式
+
+Goal mode adds a durable `Goal -> GoalRun -> GoalCheckpoint` layer without
+replacing `Issue -> Run -> Task`. `GoalStore` writes
+`userData/goals/index.json` with the same tmp+rename discipline as the task
+store. `GoalController` owns lifecycle transitions, budgets, checkpoint
+creation and the next-run decision; it calls the existing TaskRunner creation,
+queue, cancellation and permission boundaries.
+
+The main process registers `goals:*` IPC handlers and forwards controller
+updates as `goals:updated`. A running goal is recovered as `waiting_user` after
+restart instead of resuming silently. Each terminal TaskChanged event is
+projected once by run id and leaves a checkpoint, including failed/cancelled
+runs. The renderer's `components/goal/GoalsView.tsx` provides creation,
+status actions, budget display, checkpoint history and run history without a
+global state library.
+
+## 8. 测试与验证基线
 
 | 套件 | 命令 | 覆盖 |
 |---|---|---|
-| runner 状态机 | `npm run smoke` | 12 项断言（完成/续聊/取消/失败/删除） |
+| runner 状态机 | `npm run smoke` | 完成/续聊/取消/失败/超时/迟到 session 隔离 |
+| 执行服务 | `npm run smoke:execution-services` | Executor 迟到清理与 RetryPolicy 决策 |
 | zcode 适配器 | `npm run smoke:zcode` | 真实回合端到端 |
 | 三个 CLI 适配器 | `npm run smoke:clis` | claude/codex/opencode 真实回合 |
 | 数据迁移 | `npm run smoke:migration` | 0.3.x→0.4 schema（mode/squad→integration、悬挂 running 清扫） |
@@ -204,5 +245,7 @@ delegate 标记 → 目标解析（限 subordinates，名字/平台 id 忽略大
 | 委派循环 | `npm run smoke:delegate` | 假后端：多轮派发/剥离/集成/取消语义 |
 | 真实委派 e2e | `npm run e2e:delegate` | GLM 领队自发派 Claude/OpenCode + 集成分支 |
 | 真实异构 e2e | `npm run e2e:delegate` | zcode 领队 + claude/opencode 队员（领队自主决策） |
+| 目标模式 | `npm run smoke:goal` | 多 Run、checkpoint 幂等、预算、取消/失败与重启恢复 |
+| 全量本地矩阵 | `npm run smoke:all` | 所有纯本地 smoke 串行执行 |
 
 打包：`npm run dist`（NSIS）；开发：`npm run dev`；类型：`npm run typecheck`。

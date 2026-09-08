@@ -23,3 +23,6 @@ Thumbs.db
 # Editor / IDE
 .vscode/
 .idea/
+
+# Teardown study clones (see docs/LOOP-ENGINEERING.md)
+teardown/repos/

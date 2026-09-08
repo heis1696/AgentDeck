@@ -1,12 +1,143 @@
 // 文件存储：userData/tasks.json（索引）+ userData/tasks/<id>/events.jsonl（日志流）
 import fs from 'node:fs'
 import path from 'node:path'
-import type { Task, TaskEvent, IntegrationInfo } from '../shared/types'
+import { isTaskStatus, type Task, type TaskEvent, type IntegrationInfo } from '../shared/types'
+import { EventLog } from './event-log'
+
+/** Version of the task index envelope, independent from per-task snapshots. */
+export const TASK_INDEX_SCHEMA_VERSION = 1 as const
+
+export interface TaskIndexDocument {
+  schemaVersion: typeof TASK_INDEX_SCHEMA_VERSION
+  tasks: Task[]
+}
+
+type LegacyTask = Partial<Task> & {
+  mode?: string
+  squad?: { integrationBranch?: string; integrationNote?: string }
+}
+
+/** Current on-disk Task shape. Unknown keys must not become implicit schema. */
+const TASK_INDEX_FIELDS = [
+  'id', 'title', 'prompt', 'workdir', 'backend', 'agentId', 'trigger', 'issueId',
+  'suppressIssue', 'runId', 'goalId', 'phaseIndex', 'parentTaskId', 'workerIndex', 'integration', 'status',
+  'createdAt', 'startedAt', 'endedAt', 'result', 'error', 'failure', 'attempt',
+  'roundsUsed', 'handoff', 'continuesFrom', 'parked', 'titleAuto', 'sessionId',
+  'gitDiff', 'gitStat', 'usage', 'eventCount'
+] as const
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
+ * Migrate one index entry. `sourceVersion` is explicit: legacy fields are
+ * only interpreted for version 0, so future schema additions do not grow an
+ * implicit compatibility branch.
+ */
+export function migrateTaskRecord(raw: unknown, sourceVersion = 0, now = Date.now()): Task | null {
+  if (!isRecord(raw)) return null
+  const old = raw as LegacyTask
+  const out: Record<string, unknown> = {}
+  for (const field of TASK_INDEX_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(raw, field)) out[field] = raw[field]
+  }
+  if (typeof out.id !== 'string' || !out.id.trim()) return null
+
+  // Fields introduced before the first explicit schema version.
+  if (sourceVersion < TASK_INDEX_SCHEMA_VERSION) {
+    delete out.mode
+    const squad = isRecord(old.squad) ? old.squad : undefined
+    if (squad) {
+      const integration: IntegrationInfo = {}
+      if (typeof squad.integrationBranch === 'string' && squad.integrationBranch) integration.branch = squad.integrationBranch
+      if (typeof squad.integrationNote === 'string' && squad.integrationNote) integration.note = squad.integrationNote
+      if (integration.branch || integration.note) out.integration = integration
+    }
+    // Always remove the legacy container, including malformed values. The
+    // versioned shape must never retain an implicit compatibility field.
+    delete out.squad
+  } else {
+    // These fields are not part of the versioned shape. Drop them even when a
+    // hand-edited/current index still contains them, without interpreting
+    // their values as another compatibility format.
+    delete out.mode
+    delete out.squad
+  }
+
+  // Older indexes may omit fields introduced after the initial schema.
+  if (typeof out.eventCount !== 'number' || !Number.isFinite(out.eventCount) || out.eventCount < 0) out.eventCount = 0
+  if (typeof out.workdir !== 'string') out.workdir = ''
+  if (typeof out.backend !== 'string' || !out.backend) out.backend = 'zcode'
+  if (!isTaskStatus(out.status)) out.status = 'queued'
+
+  // A running task cannot survive an application restart. This recovery is
+  // deliberately idempotent: the persisted result is terminal on next load.
+  if (out.status === 'running') {
+    const hadLegacySquad = sourceVersion < TASK_INDEX_SCHEMA_VERSION && isRecord(old.squad)
+    out.status = 'failed'
+    if (typeof out.error !== 'string' || !out.error) {
+      out.error = hadLegacySquad ? '旧版协同任务在升级后中断，请重新运行' : '应用重启导致任务中断，请重新运行'
+    }
+    if (typeof out.endedAt !== 'number' || !Number.isFinite(out.endedAt)) out.endedAt = now
+  }
+
+  // Rebuild in a deterministic key order so the first migration and every
+  // subsequent load produce byte-identical JSON.
+  const canonical: Record<string, unknown> = {}
+  for (const field of TASK_INDEX_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(out, field)) canonical[field] = out[field]
+  }
+  return canonical as unknown as Task
+}
+
+/**
+ * Parse both the pre-versioned array and the current envelope. The returned
+ * document always uses the current shape; callers can compare it with the
+ * source to decide whether an atomic rewrite is needed.
+ */
+export function migrateTaskIndex(raw: unknown, now = Date.now()): TaskIndexDocument {
+  let sourceVersion = 0
+  let entries: unknown[] = []
+  if (Array.isArray(raw)) {
+    entries = raw
+  } else if (isRecord(raw)) {
+    if (!Array.isArray(raw.tasks)) throw new Error('Invalid task index: expected tasks array')
+    if (!Object.prototype.hasOwnProperty.call(raw, 'schemaVersion')) {
+      throw new Error('Invalid task index: missing schema version')
+    }
+    const value = raw.schemaVersion
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+      throw new Error('Invalid task index schema version')
+    }
+    sourceVersion = value
+    entries = raw.tasks
+  } else {
+    throw new Error('Invalid task index: expected array or versioned document')
+  }
+  if (sourceVersion > TASK_INDEX_SCHEMA_VERSION) {
+    throw new Error(`Unsupported task index schema version: ${sourceVersion}`)
+  }
+  return {
+    schemaVersion: TASK_INDEX_SCHEMA_VERSION,
+    tasks: entries
+      .map((entry) => migrateTaskRecord(entry, sourceVersion, now))
+      .filter((task): task is Task => task !== null)
+  }
+}
+
+function sameTaskEntries(raw: unknown, document: TaskIndexDocument): boolean {
+  if (!isRecord(raw) || raw.schemaVersion !== TASK_INDEX_SCHEMA_VERSION || !Array.isArray(raw.tasks)) return false
+  return JSON.stringify(raw.tasks) === JSON.stringify(document.tasks)
+}
 
 export class TaskStore {
   private dir: string
   private tasks = new Map<string, Task>()
-  private seqCounters = new Map<string, number>()
+  private logs = new Map<string, EventLog>()
+  private pendingSnapshots = new Set<string>()
+  private indexTimer: NodeJS.Timeout | undefined
+  private indexDirty = false
 
   constructor(userDataDir: string) {
     this.dir = path.join(userDataDir, 'tasks')
@@ -22,63 +153,82 @@ export class TaskStore {
     return path.join(this.dir, id)
   }
 
-  private loadIndex() {
-    try {
-      const raw = fs.readFileSync(this.indexFile(), 'utf8')
-      const list = JSON.parse(raw) as unknown[]
-      for (const t of list) {
-        const migrated = this.migrate(t)
-        // Reconcile counters with the append-only log after an interrupted write.
-        if (migrated.id && migrated.eventCount === 0) {
-          try {
-            const rawEvents = fs.readFileSync(path.join(this.taskDir(migrated.id), 'events.jsonl'), 'utf8')
-            migrated.eventCount = rawEvents.split('\n').filter(Boolean).length
-          } catch {}
-        }
-        this.tasks.set(migrated.id, migrated)
-      }
-      if (list.length) this.saveIndex()
-    } catch {}
+  private eventLog(id: string) {
+    let log = this.logs.get(id)
+    if (!log) {
+      log = new EventLog(path.join(this.taskDir(id), 'events.jsonl'))
+      this.logs.set(id, log)
+    }
+    return log
   }
 
-  /** 一次性迁移 + 启动清扫：0.3.x 双轨 squad 字段 → integration；重启后悬挂的 running 任务标失败 */
-  private migrate(raw: unknown): Task {
-    const old = raw as Task & { mode?: string; squad?: { integrationBranch?: string; integrationNote?: string } }
-    const out = { ...old } as Partial<Task> & Record<string, unknown>
-    // Older indexes may omit fields introduced after the initial schema.
-    if (typeof out.eventCount !== 'number' || out.eventCount < 0) out.eventCount = 0
-    if (typeof out.workdir !== 'string') out.workdir = ''
-    if (typeof out.backend !== 'string' || !out.backend) out.backend = 'zcode'
-    if (typeof out.status !== 'string') out.status = 'queued'
-    delete out.mode
-    if (old.squad) {
-      const integration: IntegrationInfo = {}
-      if (old.squad.integrationBranch) integration.branch = old.squad.integrationBranch
-      if (old.squad.integrationNote) integration.note = old.squad.integrationNote
-      delete out.squad
-      if (integration.branch || integration.note) out.integration = integration
-      if (old.status === 'running') {
-        out.status = 'failed'
-        out.error = '旧版协同任务在升级后中断，请重新运行'
-        out.endedAt = Date.now()
-      }
-    } else if (old.status === 'running') {
-      // 应用重启后没有任何会话能续上这个任务——标失败让用户重试，而不是永远"执行中"
-      out.status = 'failed'
-      out.error = '应用重启导致任务中断，请重新运行'
-      out.endedAt = Date.now()
+  private loadIndex() {
+    let raw: string
+    try {
+      raw = fs.readFileSync(this.indexFile(), 'utf8')
+    } catch (error) {
+      // A missing index is the normal first-launch state. Other filesystem
+      // errors must remain visible instead of silently dropping all tasks.
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+      throw error
     }
-    return out as Task
+
+    const parsed = JSON.parse(raw) as unknown
+    const document = migrateTaskIndex(parsed)
+    let needsSave = !sameTaskEntries(parsed, document)
+    for (const migrated of document.tasks) {
+      // Reconcile counters with the append-only log after an interrupted write.
+      try {
+        const rawEvents = fs.readFileSync(path.join(this.taskDir(migrated.id), 'events.jsonl'), 'utf8')
+        const eventCount = rawEvents.split('\n').filter(Boolean).length
+        if (migrated.eventCount !== eventCount) {
+          migrated.eventCount = eventCount
+          needsSave = true
+        }
+      } catch {}
+      this.tasks.set(migrated.id, migrated)
+    }
+    if (needsSave) this.saveIndex()
   }
 
   private saveIndex() {
-    const list = [...this.tasks.values()].sort((a, b) => b.createdAt - a.createdAt)
+    const tasks = [...this.tasks.values()].sort((a, b) => b.createdAt - a.createdAt)
+    const document: TaskIndexDocument = { schemaVersion: TASK_INDEX_SCHEMA_VERSION, tasks }
     const tmp = this.indexFile() + '.tmp'
-    fs.writeFileSync(tmp, JSON.stringify(list, null, 2))
+    fs.writeFileSync(tmp, JSON.stringify(document, null, 2))
     fs.renameSync(tmp, this.indexFile())
   }
 
-  create(input: Pick<Task, 'title' | 'prompt' | 'workdir' | 'backend'> & Partial<Pick<Task, 'parentTaskId' | 'workerIndex' | 'integration' | 'agentId' | 'handoff' | 'continuesFrom' | 'parked' | 'suppressIssue' | 'trigger' | 'issueId' | 'titleAuto'>>): Task {
+  private scheduleFlush() {
+    this.indexDirty = true
+    if (this.indexTimer) return
+    this.indexTimer = setTimeout(() => {
+      this.indexTimer = undefined
+      this.flush()
+    }, 25)
+  }
+
+  /** Persist event-driven snapshots and the task index as one bounded batch. */
+  flush() {
+    if (this.indexTimer) {
+      clearTimeout(this.indexTimer)
+      this.indexTimer = undefined
+    }
+    for (const id of this.pendingSnapshots) {
+      const task = this.tasks.get(id)
+      if (!task) continue
+      try {
+        fs.writeFileSync(path.join(this.taskDir(id), 'task.json'), JSON.stringify(task, null, 2))
+      } catch {}
+    }
+    this.pendingSnapshots.clear()
+    if (this.indexDirty) {
+      this.indexDirty = false
+      this.saveIndex()
+    }
+  }
+
+  create(input: Pick<Task, 'title' | 'prompt' | 'workdir' | 'backend'> & Partial<Pick<Task, 'parentTaskId' | 'workerIndex' | 'integration' | 'agentId' | 'handoff' | 'continuesFrom' | 'parked' | 'suppressIssue' | 'trigger' | 'issueId' | 'goalId' | 'phaseIndex' | 'titleAuto'>>): Task {
     const task: Task = {
       id: `t_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
       title: input.title,
@@ -88,6 +238,8 @@ export class TaskStore {
       ...(input.agentId ? { agentId: input.agentId } : {}),
       ...(input.trigger ? { trigger: input.trigger } : {}),
       ...(input.issueId ? { issueId: input.issueId } : {}),
+      ...(input.goalId ? { goalId: input.goalId } : {}),
+      ...(input.phaseIndex !== undefined ? { phaseIndex: input.phaseIndex } : {}),
       ...(input.parentTaskId ? { parentTaskId: input.parentTaskId } : {}),
       ...(input.workerIndex !== undefined ? { workerIndex: input.workerIndex } : {}),
       ...(input.integration ? { integration: input.integration } : {}),
@@ -128,51 +280,28 @@ export class TaskStore {
   delete(id: string) {
     const t = this.tasks.get(id)
     if (!t) return
-    this.seqCounters.delete(id)
+    this.logs.delete(id)
     this.tasks.delete(id)
     fs.rmSync(this.taskDir(id), { recursive: true, force: true })
     this.saveIndex()
-  }
-
-  /** seq 由 store 统一分配：重启后从文件尾部恢复，保证单调 */
-  private nextSeq(id: string): number {
-    if (!this.seqCounters.has(id)) {
-      let max = 0
-      try {
-        const raw = fs.readFileSync(path.join(this.taskDir(id), 'events.jsonl'), 'utf8')
-        const lines = raw.trimEnd().split('\n').filter(Boolean)
-        const last = lines[lines.length - 1]
-        if (last) max = (JSON.parse(last) as TaskEvent).seq ?? 0
-      } catch {}
-      this.seqCounters.set(id, max)
-    }
-    const n = (this.seqCounters.get(id) ?? 0) + 1
-    this.seqCounters.set(id, n)
-    return n
   }
 
   appendEvent(id: string, e: Omit<TaskEvent, 'seq'>): TaskEvent | null {
     const t = this.tasks.get(id)
     if (!t) return null
     fs.mkdirSync(this.taskDir(id), { recursive: true })
-    const full: TaskEvent = { ...e, seq: this.nextSeq(id) }
     // Synchronous append keeps readEvents/finalization and crash recovery consistent.
-    try {
-      fs.appendFileSync(path.join(this.taskDir(id), 'events.jsonl'), JSON.stringify(full) + '\n', 'utf8')
-    } catch {
-      this.seqCounters.delete(id)
-      return null
-    }
+    const full = this.eventLog(id).append(e)
+    if (!full) return null
     t.eventCount = (t.eventCount ?? 0) + 1
-    try {
-      fs.writeFileSync(path.join(this.taskDir(id), 'task.json'), JSON.stringify(t, null, 2))
-    } catch {}
-    this.saveIndex()
+    this.pendingSnapshots.add(id)
+    this.scheduleFlush()
     return full
   }
 
   flushEvents(id: string) {
-    // Kept for API compatibility; events are durable when appendEvent returns.
+    void id
+    this.flush()
   }
 
   /** 消息回退：只保留 seq <= keepThroughSeq 的事件并重写 events.jsonl（tmp+rename）；
@@ -180,27 +309,10 @@ export class TaskStore {
   truncateEvents(id: string, keepThroughSeq: number): boolean {
     const t = this.tasks.get(id)
     if (!t) return false
-    const file = path.join(this.taskDir(id), 'events.jsonl')
-    const kept: TaskEvent[] = []
-    try {
-      const raw = fs.readFileSync(file, 'utf8')
-      for (const line of raw.split('\n')) {
-        if (!line.trim()) continue
-        try {
-          const e = JSON.parse(line) as TaskEvent
-          if (e.seq <= keepThroughSeq) kept.push(e)
-        } catch {}
-      }
-    } catch {}
-    try {
-      fs.mkdirSync(this.taskDir(id), { recursive: true })
-      const tmp = file + '.tmp'
-      fs.writeFileSync(tmp, kept.map((e) => JSON.stringify(e)).join('\n') + (kept.length ? '\n' : ''))
-      fs.renameSync(tmp, file)
-    } catch {
-      return false
-    }
-    this.seqCounters.set(id, keepThroughSeq)
+    this.flush()
+    fs.mkdirSync(this.taskDir(id), { recursive: true })
+    const kept = this.eventLog(id).truncate(keepThroughSeq)
+    if (!kept) return false
     t.eventCount = kept.length
     try {
       fs.writeFileSync(path.join(this.taskDir(id), 'task.json'), JSON.stringify(t, null, 2))
@@ -210,19 +322,6 @@ export class TaskStore {
   }
 
   readEvents(id: string, afterSeq = 0, limit = 5000): TaskEvent[] {
-    const file = path.join(this.taskDir(id), 'events.jsonl')
-    const out: TaskEvent[] = []
-    try {
-      const raw = fs.readFileSync(file, 'utf8')
-      for (const line of raw.split('\n')) {
-        if (!line.trim()) continue
-        try {
-          const e = JSON.parse(line) as TaskEvent
-          if (e.seq > afterSeq) out.push(e)
-          if (out.length >= limit) break
-        } catch {}
-      }
-    } catch {}
-    return out
+    return this.eventLog(id).read(afterSeq, limit)
   }
 }

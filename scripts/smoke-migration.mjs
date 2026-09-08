@@ -16,7 +16,7 @@ await build({
   target: 'node18',
   external: ['electron']
 })
-const { TaskStore } = await import(pathToFileURL(outfile).href)
+const { TaskStore, TASK_INDEX_SCHEMA_VERSION } = await import(pathToFileURL(outfile).href)
 
 let failed = 0
 const ok = (cond, msg) => {
@@ -66,7 +66,27 @@ ok(by('t_ok').status === 'done' && by('t_ok').result === 'r', 'done 任务原样
 
 console.log('落盘：')
 const saved = JSON.parse(fs.readFileSync(path.join(tasksDir, 'tasks.json'), 'utf8'))
-ok(saved.every((t) => !('mode' in t) && !('squad' in t)), 'tasks.json 已重写为新 schema')
+ok(saved.schemaVersion === TASK_INDEX_SCHEMA_VERSION, 'tasks.json 写入显式 schema version')
+ok(Array.isArray(saved.tasks) && saved.tasks.every((t) => !('mode' in t) && !('squad' in t)), 'tasks.json 已重写为新 schema')
+const stable = JSON.stringify(saved)
+const second = new TaskStore(tmp)
+const savedAgain = JSON.parse(fs.readFileSync(path.join(tasksDir, 'tasks.json'), 'utf8'))
+ok(second.get('t_old_leader')?.endedAt === saved.tasks.find((t) => t.id === 't_old_leader')?.endedAt, '重复加载不重新生成迁移时间戳')
+ok(JSON.stringify(savedAgain) === stable, '重复迁移保持索引稳定')
+
+console.log('显式版本边界：')
+const { migrateTaskIndex } = await import(pathToFileURL(outfile).href)
+const versionZero = migrateTaskIndex({ schemaVersion: 0, tasks: [{ id: 't_v0', title: 'v0', prompt: 'p', status: 'done', squad: 'malformed', futureField: 'drop-me' }] }, 123)
+ok(versionZero.schemaVersion === TASK_INDEX_SCHEMA_VERSION, 'schemaVersion 0 通过显式迁移升级')
+ok(versionZero.tasks[0]?.status === 'done' && !('squad' in versionZero.tasks[0]) && !('futureField' in versionZero.tasks[0]), '版本 0 不保留隐式 legacy 字段')
+ok(migrateTaskIndex([null, {}, { id: 't_valid', title: 'valid', prompt: 'p' }]).tasks.length === 1, '无效索引条目被安全过滤')
+let futureRejected = false
+try {
+  migrateTaskIndex({ schemaVersion: TASK_INDEX_SCHEMA_VERSION + 1, tasks: [] })
+} catch {
+  futureRejected = true
+}
+ok(futureRejected, '未来 schema version 明确拒绝而不降级')
 
 if (failed) {
   console.error(`\n❌ MIGRATION SMOKE FAILED (${failed})`)

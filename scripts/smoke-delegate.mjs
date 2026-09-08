@@ -235,5 +235,68 @@ if (ib2) {
 }
 assert(fs.readFileSync(path.join(repo2, 'c.txt'), 'utf8').trim() === 'c v1', '用户工作区未动（二层同理）')
 
+// ================= 场景 C：流式提前建单（闭合标签即建单；回灌仍只在回合末；不重复建单） =================
+const repo3 = fs.mkdtempSync(path.join(os.tmpdir(), 'dele3-repo-'))
+fs.writeFileSync(path.join(repo3, 'd.txt'), 'd v1\n')
+execSync('git init -q -b main && git add -A && git -c user.email=t@t -c user.name=t commit -qm init', { cwd: repo3 })
+
+const team3 = [
+  { id: 'L3', name: 'Boss3', backend: 'stream', role: '领队', systemPrompt: '', subordinates: ['S1'] },
+  { id: 'S1', name: 'Solo', backend: 'solo', role: '队员', systemPrompt: '' }
+]
+const sentToLeader = []
+const streamLeader = {
+  id: 'stream', label: 'stream',
+  async probe() { return { ok: true, detail: '' } },
+  async start({ events }) {
+    setTimeout(() => {
+      // 流式：闭合的 delegate 标签先随 text 事件到达（此刻就应提前建单），领队回合故意拖 2.5s 才结束
+      events.onEvent({ ts: Date.now(), kind: 'text', text: '派活。\n<delegate to="Solo">把 d.txt 改成 v2</delegate>' })
+      setTimeout(() => {
+        events.onTurnEnd({ response: '已派活，等队员结果。', ok: true })
+      }, 2500)
+    }, 30)
+    return {
+      sessionId: 's_stream',
+      async send(content) {
+        sentToLeader.push(content)
+        events.onEvent({ ts: Date.now(), kind: 'final', text: '全部完成。' })
+        events.onTurnEnd({ response: '全部完成。最终总结：d.txt 已升级。', ok: true })
+      },
+      async stop() {}, async close() {}
+    }
+  }
+}
+const soloBackend = {
+  id: 'solo', label: 'solo',
+  async probe() { return { ok: true, detail: '' } },
+  async start({ prompt, workdir, events }) {
+    setTimeout(() => {
+      fs.writeFileSync(path.join(workdir, 'd.txt'), 'd v2 by Solo\n')
+      const response = '已修改 d.txt'
+      events.onEvent({ ts: Date.now(), kind: 'final', text: response })
+      events.onTurnEnd({ response, ok: true })
+    }, 60)
+    return { sessionId: 's_solo', async send() {}, async stop() {}, async close() {} }
+  }
+}
+const runner3 = new TaskRunner(store, new Map([['stream', streamLeader], ['solo', soloBackend]]), () => ({ concurrency: 1, mode: 'yolo', notify: false, workerConcurrency: 2 }))
+runner3.attachTeam(() => team3)
+const streamTask = store.create({ title: '流式派单', prompt: '升级 d', workdir: repo3, backend: 'stream', agentId: 'L3' })
+runner3.enqueue(streamTask)
+const tC = Date.now()
+while (Date.now() - tC < 30000) {
+  const t = store.get(streamTask.id)
+  if (t.status === 'done' || t.status === 'failed') break
+  await new Promise((r) => setTimeout(r, 100))
+}
+const finC = store.get(streamTask.id)
+assert(finC.status === 'done', `场景 C：领队 done（${finC.status}${finC.error ? ' ' + finC.error : ''}）`)
+const earlyChildren = store.list().filter((t) => t.parentTaskId === streamTask.id)
+assert(earlyChildren.length === 1, `场景 C：提前建单且不重复（${earlyChildren.length} 个子任务）`)
+assert(earlyChildren[0]?.status === 'done', '场景 C：提前单已跑完')
+assert(sentToLeader.some((c) => c.includes('队员 Solo 的结果')), '场景 C：结果仍在回合末回灌给领队')
+assert(execSync(`git show ${finC.integration?.branch}:d.txt`, { cwd: repo3, encoding: 'utf8' }).includes('by Solo'), '场景 C：提前单改动照常合入集成分支')
+
 console.log('\n✅ DELEGATION SMOKE PASSED')
 process.exit(0)

@@ -57,6 +57,14 @@ function makeFakeBackend() {
     async stop() { behavior.stopped = true },
     async close() { behavior.closed = true }
   })
+  // The runner appends protocol instructions to the initial prompt. The fake
+  // backend should model the provider's business response, not echo those
+  // internal instructions into the task result.
+  const taskPrompt = (prompt) => {
+    const withoutProtocol = prompt.split('\n\n【阶段接力')[0]
+    const match = withoutProtocol.match(/【任务】\n([\s\S]*)$/)
+    return (match?.[1] ?? withoutProtocol).trim()
+  }
   return {
     id: 'fake',
     label: 'Fake',
@@ -64,12 +72,13 @@ function makeFakeBackend() {
     async start({ prompt, events }) {
       const behavior = { followupCount: 0, stopped: false, closed: false }
       session = makeSession(events, behavior)
+      const userPrompt = taskPrompt(prompt)
       // 异步完成首回合
       setTimeout(() => {
         events.onEvent({ ts: Date.now(), kind: 'text', text: '流式片段' })
         events.onEvent({ ts: Date.now(), kind: 'usage', data: { input_tokens: 1200, output_tokens: 300, total_cost_usd: 0.012 } })
-        events.onEvent({ ts: Date.now(), kind: 'final', text: `done:${prompt}` })
-        events.onTurnEnd({ response: `done:${prompt}`, ok: true })
+        events.onEvent({ ts: Date.now(), kind: 'final', text: `done:${userPrompt}` })
+        events.onTurnEnd({ response: `done:${userPrompt}`, ok: true })
       }, 50)
       session.__behavior = behavior
       return session
@@ -200,8 +209,31 @@ const hangBackend = {
     return new Promise(() => {})
   }
 }
+// A start that resolves after cancellation: the late session must be closed
+// and its terminal events must not mutate the cancelled task.
+const lateState = { launchStopped: false, sessionClosed: false }
+const lateBackend = {
+  id: 'late',
+  label: 'Late',
+  async probe() { return { ok: true, detail: '' } },
+  async start({ events }) {
+    events.onLaunch?.({ stop: () => { lateState.launchStopped = true } })
+    return new Promise((resolve) => setTimeout(() => {
+      resolve({
+        sessionId: 'sess_late',
+        async send() {},
+        async stop() {},
+        async close() { lateState.sessionClosed = true }
+      })
+      setTimeout(() => {
+        events.onEvent({ ts: Date.now(), kind: 'final', text: 'late result' })
+        events.onTurnEnd({ response: 'late result', ok: true })
+      }, 20)
+    }, 200))
+  }
+}
 const runner3 = new TaskRunner(store, new Map([
-  ['slow', slowBackend], ['hb', hbBackend], ['hang', hangBackend], ['fake', backend]
+  ['slow', slowBackend], ['hb', hbBackend], ['hang', hangBackend], ['late', lateBackend], ['fake', backend]
 ]), () => ({ concurrency: 1, mode: 'yolo', notify: false }))
 
 // 预置 attempt=2 关掉自动重试，让断言只看单次看门狗裁决
@@ -246,7 +278,55 @@ await wait(400)
 cur = store.get(t8.id)
 assert(cur.status === 'done', `挂死判败后并发槽已释放，后续任务可执行 (got ${cur.status})`)
 
+// Cancellation during backend.start releases the slot immediately and
+// quarantines the eventual completion of that abandoned start.
+const t9 = store.create({ title: 'task9', prompt: 'late-start', workdir: '', backend: 'late' })
+runner3.enqueue(t9)
+await wait(40)
+const c9 = await runner3.cancel(t9.id)
+const t10 = store.create({ title: 'task10', prompt: 'after-cancel', workdir: '', backend: 'fake' })
+runner3.enqueue(t10)
+await wait(400)
+assert(c9.ok && store.get(t9.id).status === 'cancelled', 'cancel during start remains cancelled')
+assert(lateState.launchStopped && lateState.sessionClosed, 'launch stopped and late session closed')
+assert(!store.readEvents(t9.id).some((e) => e.text === 'late result'), 'late terminal event ignored')
+assert(store.get(t10.id).status === 'done', 'cancel during start releases concurrency slot')
+
+// Two live sessions must be isolated: cancelling one task cannot stop or
+// suppress the other task's provider process and terminal event.
+const isolated = { stopped: [], closed: [] }
+const isolatedBackend = {
+  id: 'isolated',
+  label: 'Isolated',
+  async probe() { return { ok: true, detail: '' } },
+  async start({ prompt, events }) {
+    const name = prompt.includes('cancel-me') ? 'cancel-me' : 'keep-running'
+    const timer = setTimeout(() => {
+      events.onEvent({ ts: Date.now(), kind: 'final', text: `done:${name}` })
+      events.onTurnEnd({ response: `done:${name}`, ok: true })
+    }, name === 'cancel-me' ? 250 : 150)
+    return {
+      sessionId: `sess_${name}`,
+      async send() {},
+      async stop() { isolated.stopped.push(name); clearTimeout(timer) },
+      async close() { isolated.closed.push(name) }
+    }
+  }
+}
+const runner4 = new TaskRunner(store, new Map([['isolated', isolatedBackend]]), () => ({ concurrency: 2, mode: 'yolo', notify: false }))
+const t11 = store.create({ title: 'task11', prompt: 'cancel-me', workdir: '', backend: 'isolated' })
+const t12 = store.create({ title: 'task12', prompt: 'keep-running', workdir: '', backend: 'isolated' })
+runner4.enqueue(t11)
+runner4.enqueue(t12)
+await wait(50)
+await runner4.cancel(t11.id)
+await wait(250)
+assert(store.get(t11.id).status === 'cancelled', 'concurrent task A remains cancelled')
+assert(store.get(t12.id).status === 'done' && store.get(t12.id).result === 'done:keep-running', 'cancelling A does not stop concurrent task B')
+assert(isolated.stopped.includes('cancel-me') && !isolated.stopped.includes('keep-running'), 'stop handle is scoped to its own session')
+
 await runner.shutdown()
 await runner3.shutdown()
+await runner4.shutdown()
 console.log('\n✅ RUNNER SMOKE PASSED')
 process.exit(0)

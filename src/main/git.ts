@@ -2,12 +2,36 @@
 import { execFile } from 'node:child_process'
 import path from 'node:path'
 
-function git(workdir: string, args: string[]): Promise<string> {
+export interface GitCommandResult {
+  ok: boolean
+  stdout: string
+  stderr: string
+  code: number | null
+}
+
+/** Preserve process exit status and stderr. Empty stdout is a valid result. */
+export function runGit(workdir: string, args: string[], timeout = 15000): Promise<GitCommandResult> {
   return new Promise((resolve) => {
-    execFile('git', ['-C', workdir, ...args], { timeout: 15000, windowsHide: true }, (err, stdout) => {
-      resolve(err ? '' : stdout)
+    execFile('git', ['-C', workdir, ...args], { timeout, windowsHide: true }, (err, stdout, stderr) => {
+      const error = err as NodeJS.ErrnoException | null
+      resolve({
+        ok: !error,
+        stdout: String(stdout ?? ''),
+        stderr: String(stderr ?? '') || (error ? String(error.message ?? error) : ''),
+        code: !error ? 0 : typeof error.code === 'number' ? error.code : -1
+      })
     })
   })
+}
+
+async function git(workdir: string, args: string[], timeout = 15000): Promise<string> {
+  const result = await runGit(workdir, args, timeout)
+  return result.ok ? result.stdout : ''
+}
+
+function gitError(result: GitCommandResult): string {
+  const detail = (result.stderr || result.stdout).trim()
+  return `git exit ${result.code ?? 'unknown'}${detail ? `: ${detail.slice(0, 500)}` : ''}`
 }
 
 export async function isGitRepo(workdir: string): Promise<boolean> {
@@ -77,15 +101,8 @@ export async function createWorktree(
   const gitDir = gcd ? path.resolve(repoDir, gcd) : path.join(repoDir, '.git')
   const root = path.dirname(gitDir)
   const wtPath = path.join(root, '.agentdeck-worktrees', name)
-  const out = await new Promise<string>((resolve) => {
-    execFile(
-      'git',
-      ['-C', repoDir, 'worktree', 'add', '-b', branch, wtPath, ...(baseBranch ? [baseBranch] : [])],
-      { timeout: 60000, windowsHide: true },
-      (err, stdout) => resolve(err ? '' : stdout)
-    )
-  })
-  if (!out && !(await isGitRepo(wtPath))) return null
+  const out = await runGit(repoDir, ['worktree', 'add', '-b', branch, wtPath, ...(baseBranch ? [baseBranch] : [])], 60000)
+  if (!out.ok && !(await isGitRepo(wtPath))) return null
   // 把 worktree 目录从主仓库状态里排除，避免污染主目录的 status
   const excludeFile = path.join(gitDir, 'info', 'exclude')
   try {
@@ -105,38 +122,25 @@ export async function commitAll(workdir: string, message: string): Promise<boole
   const status = await git(workdir, ['status', '--porcelain'])
   if (!status.trim()) return false
   // 排除常见生成物（worker 运行时产生的缓存/构建产物）；此 git 不支持 :! 简写，用长格式
-  await git(workdir, ['add', '-A', '--', '.', ':(exclude)__pycache__', ':(exclude)*.pyc', ':(exclude)node_modules', ':(exclude)dist', ':(exclude)build'])
-  const staged = await git(workdir, ['diff', '--cached', '--name-only'])
-  if (!staged.trim()) return false
-  const committed = await new Promise<boolean>((resolve) => {
-    execFile(
-      'git',
-      ['-C', workdir, '-c', 'user.email=agentdeck@local', '-c', 'user.name=AgentDeck Worker', 'commit', '-m', message],
-      { timeout: 30000, windowsHide: true },
-      (err) => resolve(!err)
-    )
-  })
-  return committed
+  const added = await runGit(workdir, ['add', '-A', '--', '.', ':(exclude)__pycache__', ':(exclude)*.pyc', ':(exclude)node_modules', ':(exclude)dist', ':(exclude)build'])
+  if (!added.ok) return false
+  const staged = await runGit(workdir, ['diff', '--cached', '--name-only'])
+  if (!staged.ok || !staged.stdout.trim()) return false
+  const committed = await runGit(workdir, ['-c', 'user.email=agentdeck@local', '-c', 'user.name=AgentDeck Worker', 'commit', '-m', message], 30000)
+  return committed.ok
 }
 
 /** 在 repoDir 上把 sourceBranch merge 进 targetBranch（fast-forward 优先，不切换用户分支：用 worktree 上的 merge）
  *  返回 {ok, conflict, message} */
-export async function mergeBranchInto(
+async function mergeBranchIntoLegacy(
   repoDir: string,
   targetBranch: string,
   sourceBranch: string
 ): Promise<{ ok: boolean; conflict: boolean; message: string }> {
   // 确保 target 分支存在（从当前 HEAD 建）
-  const exists = await git(repoDir, ['rev-parse', '--verify', targetBranch])
-  if (!exists.trim()) {
-    const created = await new Promise<boolean>((resolve) => {
-      execFile(
-        'git',
-        ['-C', repoDir, 'branch', targetBranch],
-        { timeout: 30000, windowsHide: true },
-        (err) => resolve(!err)
-      )
-    })
+  const exists = await runGit(repoDir, ['rev-parse', '--verify', targetBranch])
+  if (!exists.ok || !exists.stdout.trim()) {
+    const created = await runGit(repoDir, ['branch', targetBranch], 30000)
     if (!created) return { ok: false, conflict: false, message: `无法创建集成分支 ${targetBranch}` }
   }
   // 在临时 worktree 中执行 merge，不动用户工作区
@@ -187,4 +191,34 @@ export async function branchDiffSummary(
     git(repoDir, ['diff', `${baseBranch}...${integrationBranch}`])
   ])
   return { diff: diff.slice(0, 200_000), stat: stat.trim().slice(0, 10_000) }
+}
+
+/** Structured merge implementation. The legacy helper above remains private for compatibility during migration. */
+export async function mergeBranchInto(
+  repoDir: string,
+  targetBranch: string,
+  sourceBranch: string
+): Promise<{ ok: boolean; conflict: boolean; message: string }> {
+  const exists = await runGit(repoDir, ['rev-parse', '--verify', targetBranch])
+  if (!exists.ok || !exists.stdout.trim()) {
+    const created = await runGit(repoDir, ['branch', targetBranch], 30000)
+    if (!created.ok) return { ok: false, conflict: false, message: `cannot create integration branch ${targetBranch}: ${gitError(created)}` }
+  }
+  const tmpName = `.agentdeck-merge-${Date.now().toString(36)}`
+  const wtPath = path.join(repoDir, '.agentdeck-worktrees', tmpName)
+  const added = await runGit(repoDir, ['worktree', 'add', wtPath, targetBranch], 60000)
+  if (!added.ok) return { ok: false, conflict: false, message: `cannot create merge worktree: ${gitError(added)}` }
+  try {
+    const merged = await runGit(wtPath, ['merge', '--no-ff', '-m', `merge ${sourceBranch} into ${targetBranch}`, sourceBranch], 60000)
+    const detail = `${merged.stderr}\n${merged.stdout}`.trim()
+    const conflict = /conflict|automatic merge failed/i.test(detail)
+    if (conflict) {
+      await runGit(wtPath, ['merge', '--abort'], 30000)
+      return { ok: false, conflict: true, message: `merge conflict: ${detail.slice(0, 400)}` }
+    }
+    if (!merged.ok) return { ok: false, conflict: false, message: detail.slice(0, 400) || `git exit ${merged.code ?? 'unknown'}` }
+    return { ok: true, conflict: false, message: '' }
+  } finally {
+    await runGit(repoDir, ['worktree', 'remove', '--force', wtPath], 30000)
+  }
 }

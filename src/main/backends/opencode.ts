@@ -4,18 +4,19 @@
 // 续聊：-s <sessionId>
 import type { AgentBackend, BackendSession, BackendSessionEvents } from './types'
 import type { TaskEvent } from '../../shared/types'
-import { runCliJsonl, toolEvent } from './cli-common'
+import { isJsonObject, jsonObject, jsonString, runCliJsonl, toolEvent } from './cli-common'
 import { resolveCli, probeCli } from './cli-locator'
 
 export function createOpencodeBackend(): AgentBackend {
-  let live: { kill: () => void } | null = null
 
   const runOnce = (
     prompt: string,
     workdir: string,
     resumeSessionId: string | undefined,
     events: BackendSessionEvents,
-    model?: string
+    model?: string,
+    /** 本会话当前进程句柄落点：stop/close 只杀自己会话的进程，多任务并发不再串杀/漏杀 */
+    onSpawn?: (runner: { kill: () => void }) => void
   ): Promise<{ sessionId: string; response: string; ok: boolean; error?: string }> => {
     const emit = (e: Omit<TaskEvent, 'seq' | 'ts'>) => events.onEvent({ ...e, ts: Date.now() })
     const resolved = resolveCli('opencode')
@@ -51,26 +52,30 @@ export function createOpencodeBackend(): AgentBackend {
       prefixArgs: resolved.prefixArgs,
       args,
       cwd: workdir || process.cwd(),
-      onLine: (j) => {
+      onLine: (obj) => {
+        if (!isJsonObject(obj)) return
+        const j = obj
         events.onHeartbeat?.() // 进程有任何输出即进展（含未映射成事件的行）：看门狗续命
         if (!sessionId && j.sessionID) {
-          sessionId = String(j.sessionID)
+          sessionId = jsonString(j.sessionID)
+          events.onSessionId?.(sessionId)
           emit({ kind: 'status', text: `opencode ${sessionId.slice(0, 10)}…` })
         }
-        const part = j.part ?? {}
+        const part = jsonObject(j.part)
         if (j.type === 'tool_use') {
-          const state = part.state?.status ?? ''
-          const name = String(part.tool ?? '')
+          const stateObject = jsonObject(part.state)
+          const state = jsonString(stateObject.status)
+          const name = jsonString(part.tool)
           if (state === 'running' || state === 'pending') {
-            emit(toolEvent('started', name, { args: String(part.title ?? '').slice(0, 200) }))
+            emit(toolEvent('started', name, { args: jsonString(part.title).slice(0, 200) }))
           } else {
-            emit(toolEvent('result', name, { ok: state !== 'error', preview: String(part.state?.output ?? part.title ?? '').slice(0, 300) }))
+            emit(toolEvent('result', name, { ok: state !== 'error', preview: jsonString(stateObject.output, jsonString(part.title)).slice(0, 300) }))
           }
         } else if (j.type === 'text' && part.text) {
           // 最后一条 text 即最终回复；中间 text 走 text 事件流式展示
-          const text = String(part.text)
+          const text = jsonString(part.text)
           finalText = text
-          const pid = part.id ? String(part.id) : ''
+          const pid = jsonString(part.id)
           if (pid && pid === textPartId) {
             // 同一 part 的增长快照：只补发增量，避免整段重复成泡
             if (text.length > textShown.length && text.startsWith(textShown)) {
@@ -84,10 +89,9 @@ export function createOpencodeBackend(): AgentBackend {
         }
       }
     })
-    live = runner
+    onSpawn?.(runner)
     events.onLaunch?.({ stop: () => runner.kill() })
     void runner.exited.then((exitInfo) => {
-      live = null
       if (!settled) {
         finish(
           exitInfo.code === 0 && !!finalText,
@@ -109,20 +113,23 @@ export function createOpencodeBackend(): AgentBackend {
       return p.ok ? { ok: true, detail: `opencode ${p.version}` } : { ok: false, detail: p.error ?? '未安装' }
     },
     async start({ prompt, workdir, events, resumeSessionId, model }) {
-      const r = await runOnce(prompt, workdir, resumeSessionId, events, model)
+      let own: { kill: () => void } | null = null
+      const runTurn = (turnPrompt: string, resumeId?: string) =>
+        runOnce(turnPrompt, workdir, resumeId, events, model, (r) => { own = r })
+      const r = await runTurn(prompt, resumeSessionId)
       if (!r.ok && r.error) throw new Error(r.error)
       const sid = r.sessionId
       return {
         sessionId: sid,
         async send(content) {
-          const res = await runOnce(content, workdir, sid, events, model)
+          const res = await runTurn(content, sid)
           if (!res.ok) throw new Error(res.error || '回合失败')
         },
         async stop() {
-          live?.kill()
+          own?.kill()
         },
         async close() {
-          live?.kill()
+          own?.kill()
         }
       }
     }

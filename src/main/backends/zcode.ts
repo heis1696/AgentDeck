@@ -6,30 +6,30 @@
 //   - session/send {sessionId, content} 派发提示词
 //   - 事件流：session/event（含 model.streaming 文本增量、回合终态）、
 //             state.updated（会话状态机）、v4/telemetry/event（turn.terminal 等）
-import { spawn, type ChildProcess } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
-import path from 'node:path'
 import type { TaskEvent } from '../../shared/types'
 import type { AgentBackend, BackendSession, BackendSessionEvents } from './types'
+import { isJsonObject, type JsonObject } from './cli-common'
+import { ZcodeConnection } from './zcode-transport'
+import { compactToolArgs, mergeTurnTexts as mergeTexts, runtimePreferences, sessionEvent, zcodeRecord, zcodeString } from './zcode-protocol'
+import {
+  buildRuntimeModelFromCliConfig as buildRuntimeModel,
+  ensureZcodeCliConfig as ensureCliConfig,
+  findZcodeBundle as findBundle,
+  listZcodeModels as listModels,
+  resolveNodeRuntime as resolveNode,
+  zcodeDefaultPaths as defaultPaths
+} from './zcode-config'
 
-const DEFAULT_MODEL = 'zai/glm-5.3'
-const LITE_MODEL = 'zai/glm-4.7'
+
+function asRecord(value: unknown): JsonObject {
+  return zcodeRecord(value)
+}
+const asString = zcodeString
 
 export function zcodeDefaultPaths(): string[] {
-  const roots = [
-    process.env.ProgramFiles,
-    process.env['ProgramFiles(x86)'],
-    'D:\\Program Files',
-    path.join(process.env.LOCALAPPDATA ?? '', 'Programs')
-  ].filter(Boolean) as string[]
-  const out: string[] = []
-  for (const root of roots) {
-    for (const dir of ['ZCode', 'zcode']) {
-      out.push(path.join(root, dir, 'resources', 'glm', 'zcode.cjs'))
-    }
-  }
-  return out
+  return defaultPaths()
 }
 
 /**
@@ -39,28 +39,11 @@ export function zcodeDefaultPaths(): string[] {
  * "No such built-in module: node:sqlite"，错误信息里会带这句提示）。
  */
 export function resolveNodeRuntime(preferred?: string): { path: string; source: string } {
-  if (preferred && fs.existsSync(preferred)) return { path: preferred, source: 'settings' }
-  const isWin = process.platform === 'win32'
-  const exe = isWin ? 'node.exe' : 'node'
-  const dirs = (process.env.PATH ?? '').split(isWin ? ';' : ':')
-  for (const dir of dirs) {
-    if (!dir) continue
-    const full = path.join(dir, exe)
-    try {
-      if (fs.existsSync(full)) return { path: full, source: 'PATH' }
-    } catch {}
-  }
-  return { path: process.execPath, source: 'fallback-electron' }
+  return resolveNode(preferred)
 }
 
 export function findZcodeBundle(custom?: string): string | null {
-  const candidates = custom ? [custom, ...zcodeDefaultPaths()] : zcodeDefaultPaths()
-  for (const p of candidates) {
-    try {
-      if (fs.existsSync(p)) return p
-    } catch {}
-  }
-  return null
+  return findBundle(custom)
 }
 
 /**
@@ -68,184 +51,12 @@ export function findZcodeBundle(custom?: string): string | null {
  * 优先从 GUI 的 `~/.zcode/v2/config.json` 迁移登录态；已有有效配置则不动。
  */
 export function ensureZcodeCliConfig(): { ok: boolean; detail: string } {
-  const home = os.homedir()
-  const cliConfigPath = path.join(home, '.zcode', 'cli', 'config.json')
-  try {
-    if (fs.existsSync(cliConfigPath)) {
-      const cfg = JSON.parse(fs.readFileSync(cliConfigPath, 'utf8'))
-      if (cfg?.model?.main) return { ok: true, detail: 'cli config 已存在' }
-    }
-  } catch {}
-  // 从 v2（GUI 登录态）迁移
-  try {
-    const v2Path = path.join(home, '.zcode', 'v2', 'config.json')
-    if (!fs.existsSync(v2Path)) return { ok: false, detail: '未找到 ~/.zcode/v2/config.json，请先在 ZCode 里登录' }
-    const v2 = JSON.parse(fs.readFileSync(v2Path, 'utf8'))
-    const providers = v2?.provider ?? {}
-    // 优先 builtin:zai，其次任何启用且带 key 的 provider
-    const ids = Object.keys(providers)
-    ids.sort((a, b) => (a === 'builtin:zai' ? -1 : b === 'builtin:zai' ? 1 : 0))
-    for (const id of ids) {
-      const p = providers[id]
-      const apiKey = p?.options?.apiKey
-      if (!p?.enabled || !apiKey || !p?.baseURL && !p?.options?.baseURL) continue
-      const providerId = id.replace(/^builtin:/, '')
-      const baseURL = p.options.baseURL ?? p.baseURL
-      // 模型目录：v2 里的模型表（键如 "GLM-5.3"）映射成小写 id → {name}
-      // resume 会话时服务端按此目录校验历史模型，目录为空会报"模型已不可用"
-      const models: Record<string, { name: string }> = {}
-      for (const mk of Object.keys(p.models ?? {})) {
-        models[mk.toLowerCase()] = { name: mk }
-      }
-      const modelIds = Object.keys(models)
-      const preferred =
-        modelIds.find((m) => m === 'glm-5.3') ?? modelIds[0] ?? 'glm-5.3'
-      const cfg = {
-        provider: {
-          [providerId]: {
-            kind: p.kind ?? 'anthropic',
-            name: p.name ?? providerId,
-            options: { apiKeyRequired: true, baseURL, apiKey },
-            models
-          }
-        },
-        model: {
-          main: `${providerId}/${preferred}`,
-          lite: `${providerId}/glm-4.7`
-        }
-      }
-      fs.mkdirSync(path.dirname(cliConfigPath), { recursive: true })
-      fs.writeFileSync(cliConfigPath, JSON.stringify(cfg, null, 2))
-      return { ok: true, detail: `已从 ZCode 登录态生成配置（${providerId}/${preferred}）` }
-    }
-    return { ok: false, detail: 'ZCode 登录态中没有可用的 API key' }
-  } catch (e) {
-    return { ok: false, detail: `读取 ZCode 配置失败: ${e instanceof Error ? e.message : String(e)}` }
-  }
-}
-
-interface WireMessage {
-  id?: number | string
-  method?: string
-  params?: any
-  result?: any
-  error?: { code: number; message: string; data?: any }
-}
-
-class ZcodeConnection {
-  private child: ChildProcess
-  private nextId = 1
-  private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>()
-  private buffer = ''
-  private stderrTail = ''
-  private handlers = new Set<(m: WireMessage) => void>()
-  exited = false
-
-  constructor(nodePath: string, zcodePath: string, cwd: string) {
-    // ELECTRON_RUN_AS_NODE 仅在退回 electron.exe 充当 node 时需要；真 node.exe 忽略之
-    const env: NodeJS.ProcessEnv = { ...process.env }
-    if (path.resolve(nodePath).toLowerCase() === path.resolve(process.execPath).toLowerCase()) {
-      env.ELECTRON_RUN_AS_NODE = '1'
-    } else {
-      delete env.ELECTRON_RUN_AS_NODE
-    }
-    this.child = spawn(
-      nodePath,
-      [zcodePath, 'app-server', '--stdio'],
-      {
-        cwd,
-        env,
-        stdio: ['pipe', 'pipe', 'pipe']
-      }
-    )
-    this.child.stdout!.setEncoding('utf8')
-    this.child.stdout!.on('data', (chunk: string) => {
-      this.buffer += chunk
-      let idx: number
-      while ((idx = this.buffer.indexOf('\n')) >= 0) {
-        const line = this.buffer.slice(0, idx).trim()
-        this.buffer = this.buffer.slice(idx + 1)
-        if (!line) continue
-        let msg: WireMessage
-        try {
-          msg = JSON.parse(line)
-        } catch {
-          continue
-        }
-        this.dispatch(msg)
-      }
-    })
-    this.child.stderr!.on('data', (c: Buffer) => {
-      const s = c.toString().trim()
-      if (s) {
-        // 保留 stderr 尾部，进程异常退出时随错误抛出（否则真实原因被吞）
-        this.stderrTail = (this.stderrTail + '\n' + s).slice(-1500)
-        console.warn('[zcode:stderr]', s.slice(0, 400))
-      }
-    })
-    this.child.on('exit', (code) => {
-      this.exited = true
-      const detail = this.stderrTail.trim()
-      const err = new Error(
-        `zcode app-server 进程退出 (code ${code})${detail ? ': ' + detail : ''}`
-      )
-      for (const [, p] of this.pending) p.reject(err)
-      this.pending.clear()
-      // 合成退出通知：让会话层把进行中的回合以错误收尾——否则调用方（runner）
-      // 等的事件永远不会来，任务会永久卡在 running
-      for (const h of [...this.handlers]) h({ method: 'zcode.exit', params: { code, stderr: detail.slice(-400) } })
-    })
-  }
-
-  private dispatch(msg: WireMessage) {
-    const isResponse = msg.id !== undefined && (msg.result !== undefined || msg.error !== undefined)
-    if (isResponse && typeof msg.id === 'number') {
-      const p = this.pending.get(msg.id)
-      if (p) {
-        this.pending.delete(msg.id)
-        if (msg.error) p.reject(new Error(msg.error.message))
-        else p.resolve(msg.result)
-        return
-      }
-    }
-    for (const h of this.handlers) h(msg)
-  }
-
-  onMessage(h: (m: WireMessage) => void): () => void {
-    this.handlers.add(h)
-    return () => this.handlers.delete(h)
-  }
-
-  request<T = any>(method: string, params?: any): Promise<T> {
-    if (this.exited) return Promise.reject(new Error('连接已关闭'))
-    const id = this.nextId++
-    return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject })
-      this.child.stdin!.write(JSON.stringify({ id, method, params }) + '\n')
-    })
-  }
-
-  respond(id: number | string, result: unknown) {
-    this.child.stdin!.write(JSON.stringify({ id, result }) + '\n')
-  }
-
-  kill() {
-    try {
-      this.child.kill()
-    } catch {}
-  }
+  return ensureCliConfig()
 }
 
 /** 工具参数 JSON 压缩成一行短预览 */
 function compactArgs(args?: string): string {
-  if (!args) return ''
-  try {
-    const parsed = JSON.parse(args)
-    const s = JSON.stringify(parsed)
-    return s.length > 200 ? s.slice(0, 200) + '…' : s
-  } catch {
-    return args.slice(0, 200)
-  }
+  return compactToolArgs(args)
 }
 
 /**
@@ -261,68 +72,7 @@ export function buildRuntimeModelFromCliConfig(
   modelRef?: string,
   connection?: { name: string; baseURL: string; apiKey: string }
 ): Record<string, unknown> | null {
-  try {
-    const ref = modelRef?.trim()
-    if (connection && ref) {
-      const slash = ref.indexOf('/')
-      const modelId = slash > 0 && slash < ref.length - 1 ? ref.slice(slash + 1) : ref
-      return {
-        revision: '0',
-        generatedAt: Date.now(),
-        model: { providerId: 'preset', modelId },
-        provider: {
-          providerId: 'preset',
-          kind: 'anthropic',
-          label: connection.name,
-          baseURL: connection.baseURL,
-          apiKey: { source: 'inline', value: connection.apiKey },
-          apiKeyRequired: true,
-          models: [{ modelId }]
-        }
-      }
-    }
-    const home = os.homedir()
-    const cfg = JSON.parse(fs.readFileSync(path.join(home, '.zcode', 'cli', 'config.json'), 'utf8'))
-    const mainRef = String(cfg?.model?.main ?? '')
-    const [mainProvider, mainModel] = mainRef.split('/')
-    let providerId = mainProvider
-    let modelId = mainModel
-    if (ref) {
-      const slash = ref.indexOf('/')
-      if (slash > 0 && slash < ref.length - 1) {
-        providerId = ref.slice(0, slash)
-        modelId = ref.slice(slash + 1)
-      } else {
-        modelId = ref
-      }
-    }
-    const prov = cfg?.provider?.[providerId]
-    if (!prov || !modelId) return null
-    const models = Object.entries(prov.models ?? {}).map(([id, m]: [string, any]) => ({
-      modelId: id,
-      ...(m?.name ? { label: m.name } : {})
-    }))
-    if (!models.some((m) => m.modelId === modelId)) {
-      models.push({ modelId })
-    }
-    const provider: Record<string, unknown> = {
-      providerId,
-      kind: prov.kind ?? 'anthropic',
-      ...(prov.name ? { label: prov.name } : {}),
-      ...(prov.options?.baseURL ? { baseURL: prov.options.baseURL } : {}),
-      apiKey: { source: 'inline', value: prov.options?.apiKey },
-      apiKeyRequired: true,
-      models
-    }
-    return {
-      revision: '0',
-      generatedAt: Date.now(),
-      model: { providerId, modelId },
-      provider
-    }
-  } catch {
-    return null
-  }
+  return buildRuntimeModel(modelRef, connection)
 }
 
 /**
@@ -333,24 +83,12 @@ export function buildRuntimeModelFromCliConfig(
  * 解析由 parseDelegatesMerged 按 to+prompt 去重。
  */
 export function mergeTurnTexts(full: string, streamed: string): string {
-  if (!streamed) return full
-  if (!full) return streamed
-  const flat = (s: string) => s.replace(/\s+/g, '')
-  if (flat(full).includes(flat(streamed))) return full
-  if (flat(streamed).includes(flat(full))) return streamed
-  return `${streamed}\n${full}`
+  return mergeTexts(full, streamed)
 }
 
 /** zcode 模型目录（Agent 管理的模型下拉用）：cli config 各 provider 的模型键并集 + 默认模型 */
 export function listZcodeModels(): { models: string[]; defaultModel?: string } {
-  try {
-    const cfg = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.zcode', 'cli', 'config.json'), 'utf8'))
-    const models = [...new Set(Object.values(cfg?.provider ?? {}).flatMap((p: any) => Object.keys(p?.models ?? {})))]
-    const defaultModel = String(cfg?.model?.main ?? '').split('/').pop()
-    return { models, ...(defaultModel ? { defaultModel } : {}) }
-  } catch {
-    return { models: [] }
-  }
+  return listModels()
 }
 
 export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath: string }): AgentBackend {
@@ -359,26 +97,26 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
     label: 'ZCode (GLM)',
     async probe() {
       const { zcodePath, nodePath } = getPaths()
-      const bundle = findZcodeBundle(zcodePath || undefined)
+      const bundle = findBundle(zcodePath || undefined)
       if (!bundle) return { ok: false, detail: '找不到 zcode.cjs（可在设置里手动指定路径）' }
-      const node = resolveNodeRuntime(nodePath || undefined)
+      const node = resolveNode(nodePath || undefined)
       const nodeNote =
         node.source === 'fallback-electron'
           ? '⚠ 未找到系统 Node（zcode 需要 Node ≥ 22.5），将退回内置运行时，可能失败'
           : `node: ${node.path}`
-      const cfg = ensureZcodeCliConfig()
+      const cfg = ensureCliConfig()
       if (!cfg.ok) return { ok: false, detail: `${cfg.detail} · ${nodeNote}` }
       return { ok: node.source !== 'fallback-electron', detail: `${bundle} · ${cfg.detail} · ${nodeNote}` }
     },
     async start({ prompt, workdir, mode, model, connection, events, resumeSessionId }) {
       const { nodePath, zcodePath } = getPaths()
-      const bundle = findZcodeBundle(zcodePath || undefined)
+      const bundle = findBundle(zcodePath || undefined)
       if (!bundle) throw new Error('找不到 zcode.cjs')
-      const cfgCheck = ensureZcodeCliConfig()
+      const cfgCheck = ensureCliConfig()
       if (!cfgCheck.ok) throw new Error(cfgCheck.detail)
 
       const cwd = workdir && fs.existsSync(workdir) ? workdir : os.tmpdir()
-      const node = resolveNodeRuntime(nodePath || undefined)
+      const node = resolveNode(nodePath || undefined)
       const conn = new ZcodeConnection(node.path, bundle, cwd)
       // 启动即注册硬停句柄：session/create 等握手请求挂死时（进程半死/连接无响应），
       // 调用方在 start 返回前也有手段杀掉进程，不会永久占住任务与并发槽
@@ -451,33 +189,27 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
             handleTurnEnd({
               response: '',
               ok: false,
-              error: `zcode app-server 进程退出${m.params?.code != null ? ` (code ${m.params.code})` : ''}${m.params?.stderr ? `：${String(m.params.stderr).slice(0, 300)}` : ''}`
+              error: `zcode app-server 进程退出${asRecord(m.params).code != null ? ` (code ${asRecord(m.params).code})` : ''}${asRecord(m.params).stderr ? `：${String(asRecord(m.params).stderr).slice(0, 300)}` : ''}`
             })
           }
           return
         }
         // 服务端 → 客户端 请求
         if (m.method === 'session/requestRuntimePreferences' && m.id !== undefined) {
-          conn.respond(m.id, {
-            askUserQuestionAutoResolutionEnabled: true,
-            nativeSearchEnhancementsEnabled: true,
-            memoryEnabled: false,
-            modelContextBudgetStrategy: 'preflight-v1'
-          })
+          conn.respond(m.id, runtimePreferences())
           return
         }
         if (m.method && m.id !== undefined && String(m.id).startsWith('server-')) {
           conn.respond(m.id, {})
           return
         }
-        if (m.method === 'session/event' || m.method === 'session/event/v2') {
-          const p = m.params ?? {}
-          const type: string = p.type ?? ''
-          const payload = p.payload ?? {}
+        const event = sessionEvent(m)
+        if (event) {
+          const { type, payload } = event
           if (type === 'model.streaming') {
-            const k: string = payload.kind ?? ''
+            const k = asString(payload.kind)
             if (k === 'text_delta') {
-              const delta = payload.delta ?? ''
+              const delta = asString(payload.delta)
               currentText += delta
               lastSegment += delta
               emit({ kind: 'text', text: delta })
@@ -494,29 +226,30 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
             } else if (k === 'tool_input_start') {
               // 工具活动开始：此后的文本属于新的一条 assistant 消息
               lastSegment = ''
-              toolInputs.set(payload.toolCallId, { name: payload.toolName ?? '', args: '' })
+              const toolCallId = asString(payload.toolCallId)
+              toolInputs.set(toolCallId, { name: asString(payload.toolName), args: '' })
             } else if (k === 'tool_input_delta') {
-              const ti = toolInputs.get(payload.toolCallId)
-              if (ti) ti.args += payload.delta ?? ''
+              const ti = toolInputs.get(asString(payload.toolCallId))
+              if (ti) ti.args += asString(payload.delta)
             }
             // tool_input_end / 其余 streaming 子类静默
           } else if (type === 'tool.updated') {
-            const k: string = payload.kind ?? ''
+            const k = asString(payload.kind)
             if (k === 'started') {
               lastSegment = ''
-              const ti = toolInputs.get(payload.toolCallId)
+              const ti = toolInputs.get(asString(payload.toolCallId))
               emit({
                 kind: 'tool',
-                text: payload.toolName ?? ti?.name ?? '',
+                text: asString(payload.toolName, ti?.name ?? ''),
                 data: {
                   phase: 'started',
-                  toolCallId: payload.toolCallId,
+                  toolCallId: asString(payload.toolCallId),
                   args: compactArgs(ti?.args)
                 }
               })
             } else if (k === 'result') {
               lastSegment = ''
-              const res = payload.result ?? {}
+              const res = asRecord(payload.result)
               const preview =
                 typeof res.content === 'string'
                   ? res.content.slice(0, 400)
@@ -525,12 +258,12 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
                     : ''
               emit({
                 kind: 'tool',
-                text: payload.toolName ?? toolInputs.get(payload.toolCallId)?.name ?? '',
+                text: asString(payload.toolName, toolInputs.get(asString(payload.toolCallId))?.name ?? ''),
                 data: {
                   phase: 'result',
-                  toolCallId: payload.toolCallId,
+                  toolCallId: asString(payload.toolCallId),
                   ok: res.success !== false,
-                  durationMs: payload.duration ?? res?.perf?.totalMs,
+                  durationMs: payload.duration ?? asRecord(res.perf).totalMs,
                   preview
                 }
               })
@@ -551,28 +284,29 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
           } else if (type === 'checkpoint.created') {
             emit({ kind: 'status', text: 'checkpoint' })
           } else if (type === 'model.request.status') {
-            emit({ kind: 'status', text: payload.status ?? '' })
+            emit({ kind: 'status', text: asString(payload.status) })
           }
           // session.titleUpdated / session.updated / turn.started / streamRecovery.updated 等噪音静默
           return
         }
         if (m.method === 'state.updated') {
-          const status = m.params?.patch?.status
+          const status = asRecord(asRecord(m.params).patch).status
           if (status) emit({ kind: 'status', text: `session:${status}` })
           return
         }
         if (m.method === 'v4/telemetry/event') {
-          const kind: string = m.params?.kind ?? ''
+          const telemetry = asRecord(m.params)
+          const kind: string = String(telemetry.kind ?? '')
           if (kind === 'turn.terminal') {
             // 备用终态信号：若尚未触发 handleTurnEnd
             if (!lastTurnEnd) {
               handleTurnEnd({
                 response: currentText,
-                ok: m.params?.status === 'success',
-                error: m.params?.status === 'success' ? undefined : `turn ended: ${m.params?.status}`
+                ok: telemetry.status === 'success',
+                error: telemetry.status === 'success' ? undefined : `turn ended: ${telemetry.status}`
               })
               // 只有在走备用路径时才补 usage（正常路径已由 session/event 发过）
-              const u = m.params
+              const u = telemetry
               if (u && (u.tokenCount || u.durationMs)) {
                 emit({ kind: 'usage', data: { tokenCount: u.tokenCount, durationMs: u.durationMs, toolCallCount: u.toolCallCount } })
               }
@@ -582,19 +316,19 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
           return
         }
         if (m.method === 'interaction/requestPermission' && m.id !== undefined) {
-          const p = m.params ?? {}
+          const p = asRecord(m.params)
           const options: Array<{ optionId: string; name: string; description?: string; response: { decision: string } }> =
-            (p.options ?? []).map((o: any) => ({
-              optionId: o.optionId,
-              name: o.name ?? o.kind ?? '',
-              description: o.description,
-              response: o.response ?? { decision: 'allow' }
+            (isJsonObject(p) && Array.isArray(p.options) ? p.options : []).filter(isJsonObject).map((o) => ({
+              optionId: String(o.optionId ?? ''),
+              name: String(o.name ?? o.kind ?? ''),
+              description: typeof o.description === 'string' ? o.description : undefined,
+              response: asRecord(o.response) as { decision: string }
             }))
           const req = {
             requestId: m.id,
-            toolName: p.toolName ?? '',
-            reason: p.reason ?? '',
-            riskLevel: p.riskLevel ?? '',
+            toolName: String(p.toolName ?? ''),
+            reason: String(p.reason ?? ''),
+            riskLevel: String(p.riskLevel ?? ''),
             input: p.input,
             options
           }
@@ -630,26 +364,27 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
       emit({ kind: 'status', text: 'starting app-server' })
       let sessionId: string
       if (resumeSessionId) {
-        const runtimeModel = buildRuntimeModelFromCliConfig(model, connection)
-        const resumed = await conn.request<any>('session/resume', {
+        const runtimeModel = buildRuntimeModel(model, connection)
+        const resumed = await conn.request<JsonObject>('session/resume', {
           sessionId: resumeSessionId,
           workspace: { workspaceKey: cwd, workspacePath: cwd },
           ...(runtimeModel ? { runtimeModel } : {})
         })
-        sessionId = resumed?.session?.sessionId ?? resumeSessionId
+        sessionId = String(asRecord(resumed.session).sessionId ?? resumeSessionId)
         emit({ kind: 'status', text: runtimeModel ? '会话已恢复' : '会话已恢复（未带模型注册表）' })
       } else {
         // agent 指定模型（或预设+模型）时 create 也带 runtimeModel；默认路径不带，保持历史行为
-        const runtimeModel = model?.trim() ? buildRuntimeModelFromCliConfig(model, connection) : null
-        const created = await conn.request<any>('session/create', {
+        const runtimeModel = model?.trim() ? buildRuntimeModel(model, connection) : null
+        const created = await conn.request<JsonObject>('session/create', {
           workspace: { workspaceKey: cwd, workspacePath: cwd },
           mode: mode || 'yolo',
           ...(runtimeModel ? { runtimeModel } : {})
         })
-        sessionId = created?.session?.sessionId
+        sessionId = String(asRecord(created.session).sessionId ?? '')
       }
       if (!sessionId) throw new Error('会话创建/resume 未返回 sessionId')
       sessionIdHolder.value = sessionId
+      events.onSessionId?.(sessionId)
       await conn.request('session/subscribe', { sessionId, deliveryKind: 'desktop-continuous' })
       currentText = ''
       lastSegment = ''

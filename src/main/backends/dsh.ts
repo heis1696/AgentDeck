@@ -50,12 +50,12 @@ export function findDshBin(custom?: string): { node: string; bin: string } | nul
 }
 
 export function createDshBackend(getPaths: () => { dshPath: string }): AgentBackend {
-  let live: { kill: () => void } | null = null
-
   const runOnce = (
     prompt: string,
     workdir: string,
-    events: BackendSessionEvents
+    events: BackendSessionEvents,
+    /** 本会话当前进程句柄落点：stop/close 只杀自己会话的进程，多任务并发不再串杀/漏杀 */
+    onSpawn?: (runner: { kill: () => void }) => void
   ): Promise<{ response: string; ok: boolean; error?: string }> => {
     // 每次调用现取设置，设置页改路径后无需重启即可生效
     const dsh = findDshBin(getPaths().dshPath || undefined)
@@ -84,11 +84,10 @@ export function createDshBackend(getPaths: () => { dshPath: string }): AgentBack
         out += line + '\n'
       }
     })
-    live = runner
+    onSpawn?.(runner)
     events.onLaunch?.({ stop: () => runner.kill() })
 
     void runner.exited.then((exitInfo) => {
-      live = null
       const text = out.trim()
       if (exitInfo.code === 0 && text) {
         events.onEvent({ kind: 'final', text, ts: Date.now() })
@@ -126,7 +125,8 @@ export function createDshBackend(getPaths: () => { dshPath: string }): AgentBack
       })
     },
     async start({ prompt, workdir, events }) {
-      const r = await runOnce(prompt, workdir, events)
+      let own: { kill: () => void } | null = null
+      const r = await runOnce(prompt, workdir, events, (runner) => { own = runner })
       if (!r.ok) throw new Error(r.error || 'dsh 回合失败')
       return {
         sessionId: `dsh_${Date.now().toString(36)}`,
@@ -134,10 +134,10 @@ export function createDshBackend(getPaths: () => { dshPath: string }): AgentBack
           throw new Error('dsh 无头模式不支持续聊（请新建任务）')
         },
         async stop() {
-          live?.kill()
+          own?.kill()
         },
         async close() {
-          live?.kill()
+          own?.kill()
         }
       }
     }

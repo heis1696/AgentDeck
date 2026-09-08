@@ -5,18 +5,18 @@
 // 注意：Windows 下 workspace-write 沙箱会废掉命令执行，必须 bypass（实测 exit -1）
 import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnResult } from './types'
 import type { TaskEvent } from '../../shared/types'
-import { runCliJsonl, toolEvent } from './cli-common'
+import { isJsonObject, jsonObject, jsonString, runCliJsonl, toolEvent } from './cli-common'
 import { resolveCli, probeCli } from './cli-locator'
 
 export function createCodexBackend(): AgentBackend {
-  let live: { kill: () => void } | null = null
-
   const runOnce = (
     prompt: string,
     workdir: string,
     resumeSessionId: string | undefined,
     events: BackendSessionEvents,
-    model?: string
+    model?: string,
+    /** 本会话当前进程句柄落点：stop/close 只杀自己会话的进程，多任务并发不再串杀/漏杀 */
+    onSpawn?: (runner: { kill: () => void }) => void
   ): Promise<{ sessionId: string } & BackendTurnResult> => {
     const emit = (e: Omit<TaskEvent, 'seq' | 'ts'>) => events.onEvent({ ...e, ts: Date.now() })
     const resolved = resolveCli('codex')
@@ -51,48 +51,51 @@ export function createCodexBackend(): AgentBackend {
       prefixArgs: resolved.prefixArgs,
       args,
       cwd: workdir,
-      onLine: (j) => {
+      onLine: (obj) => {
+        if (!isJsonObject(obj)) return
+        const j = obj
         events.onHeartbeat?.() // 进程有任何输出即进展（含未映射成事件的行）：看门狗续命
         if (j.type === 'thread.started') {
-          sessionId = j.thread_id ?? sessionId
+          sessionId = jsonString(j.thread_id, sessionId)
+          if (sessionId) events.onSessionId?.(sessionId)
           emit({ kind: 'status', text: `codex ${sessionId.slice(0, 8)}…` })
         } else if (j.type === 'item.started') {
-          const it = j.item ?? {}
-          const name = it.type === 'command_execution' ? 'Bash' : it.type === 'mcp_tool_call' ? String(it.name ?? 'mcp') : ''
+          const it = jsonObject(j.item)
+          const name = it.type === 'command_execution' ? 'Bash' : it.type === 'mcp_tool_call' ? jsonString(it.name, 'mcp') : ''
           if (name) {
-            itemNames.set(it.id, name)
-            const args = it.type === 'command_execution' ? String(it.command ?? '').slice(0, 200) : String(it.arguments ?? '').slice(0, 200)
+            const itemId = jsonString(it.id)
+            if (itemId) itemNames.set(itemId, name)
+            const args = jsonString(it.type === 'command_execution' ? it.command : it.arguments).slice(0, 200)
             emit(toolEvent('started', name, { args }))
           }
         } else if (j.type === 'item.completed') {
-          const it = j.item ?? {}
+          const it = jsonObject(j.item)
           if (it.type === 'agent_message') {
-            finalText = String(it.text ?? '')
+            finalText = jsonString(it.text)
             if (finalText) messageTexts.push(finalText)
             emit({ kind: 'text', text: finalText })
           } else if (it.type === 'command_execution' || it.type === 'mcp_tool_call') {
-            const name = itemNames.get(it.id) ?? (it.type === 'command_execution' ? 'Bash' : 'mcp')
+            const name = itemNames.get(jsonString(it.id)) ?? (it.type === 'command_execution' ? 'Bash' : 'mcp')
             emit(
               toolEvent('result', name, {
                 ok: it.status !== 'failed' && it.exit_code !== -1,
-                preview: String(it.aggregated_output ?? it.output ?? '').slice(0, 300)
+                preview: jsonString(it.aggregated_output, jsonString(it.output)).slice(0, 300)
               })
             )
           }
         } else if (j.type === 'turn.completed') {
-          if (j.usage) emit({ kind: 'usage', data: j.usage })
+          if (isJsonObject(j.usage)) emit({ kind: 'usage', data: j.usage })
           finish(true, finalText)
         } else if (j.type === 'turn.failed') {
-          finish(false, finalText, String(j.error?.message ?? 'codex 回合失败'))
+          finish(false, finalText, jsonString(jsonObject(j.error).message, 'codex 回合失败'))
         } else if (j.type === 'error') {
-          emit({ kind: 'error', text: String(j.message ?? '').slice(0, 200) })
+          emit({ kind: 'error', text: jsonString(j.message).slice(0, 200) })
         }
       }
     })
-    live = runner
+    onSpawn?.(runner)
     events.onLaunch?.({ stop: () => runner.kill() })
     void runner.exited.then((exitInfo) => {
-      live = null
       if (!settled) {
         finish(
           exitInfo.code === 0,
@@ -113,20 +116,23 @@ export function createCodexBackend(): AgentBackend {
     },
     async start({ prompt, workdir, events, resumeSessionId, model }) {
       const dir = workdir || process.cwd()
-      const r = await runOnce(prompt, dir, resumeSessionId, events, model)
+      let own: { kill: () => void } | null = null
+      const runTurn = (turnPrompt: string, resumeId?: string) =>
+        runOnce(turnPrompt, dir, resumeId, events, model, (r) => { own = r })
+      const r = await runTurn(prompt, resumeSessionId)
       if (!r.ok && r.error) throw new Error(r.error)
       const sid = r.sessionId
       return {
         sessionId: sid,
         async send(content) {
-          const res = await runOnce(content, dir, sid, events, model)
+          const res = await runTurn(content, sid)
           if (!res.ok) throw new Error(res.error || '回合失败')
         },
         async stop() {
-          live?.kill()
+          own?.kill()
         },
         async close() {
-          live?.kill()
+          own?.kill()
         }
       }
     }

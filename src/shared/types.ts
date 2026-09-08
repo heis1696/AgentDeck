@@ -16,6 +16,36 @@ export type IssuePriority = 'urgent' | 'high' | 'medium' | 'low' | 'none'
 export type RunStatus = 'running' | 'completed' | 'cancelled' | 'error'
 export type RunTrigger = 'assignment' | 'mention' | 'autopilot' | 'manual' | 'handoff'
 
+/** Lifecycle of a durable, multi-run user goal. */
+export type GoalStatus = 'draft' | 'active' | 'waiting_user' | 'completed' | 'blocked' | 'cancelled' | 'failed'
+
+export function isGoalStatus(value: unknown): value is GoalStatus {
+  return value === 'draft' || value === 'active' || value === 'waiting_user' || value === 'completed'
+    || value === 'blocked' || value === 'cancelled' || value === 'failed'
+}
+
+/** Durable product model for a long-running objective. */
+export interface Goal {
+  id: string
+  /** A Goal always belongs to one Issue and reuses that Issue's execution history. */
+  issueId: string
+  text: string
+  completionConditions: string[]
+  stopConditions: string[]
+  maxRuns: number
+  maxDurationMs: number
+  status: GoalStatus
+  runCount: number
+  totalDurationMs: number
+  currentRunId?: string
+  agentId?: string
+  backend?: string
+  workdir?: string
+  blockedReason?: string
+  createdAt: number
+  updatedAt: number
+}
+
 export interface IssueAssignee {
   type: 'agent' | 'user'
   id: string
@@ -56,6 +86,53 @@ export interface Run {
   durationMs?: number
   usage?: TaskUsage
   transcriptEventCount: number
+  /** Goal execution metadata; omitted for ordinary Issue runs. */
+  goalId?: string
+  phaseIndex?: number
+}
+
+/** A Run projected as one phase of a Goal. */
+export interface GoalRun extends Run {
+  goalId: string
+  phaseIndex: number
+}
+
+/** Durable summary emitted at the end of each Goal phase. */
+export interface GoalCheckpoint {
+  id: string
+  goalId: string
+  runId: string
+  phaseIndex: number
+  summary: string
+  completedConditions: string[]
+  incompleteConditions: string[]
+  nextPlan: string
+  blockers: string[]
+  createdAt: number
+  durationMs?: number
+  usage?: TaskUsage
+}
+
+/**
+ * Internal execution boundary used while Task remains the on-disk/IPC
+ * compatibility shape.  A record describes one concrete attempt; Run is the
+ * user-facing projection that may outlive and group several Tasks.
+ */
+export interface ExecutionRecord {
+  id: string
+  issueId: string
+  taskId: string
+  agentId?: string
+  trigger: RunTrigger
+  prompt: string
+  status: RunStatus
+  startedAt?: number
+  finishedAt?: number
+  durationMs?: number
+  usage?: TaskUsage
+  transcriptEventCount: number
+  goalId?: string
+  phaseIndex?: number
 }
 
 export interface Comment {
@@ -187,6 +264,10 @@ export interface Task {
   suppressIssue?: boolean
   /** Unique execution instance used to preserve Run history across retries/follow-ups. */
   runId?: string
+  /** Goal that owns this execution, when the task is one goal phase. */
+  goalId?: string
+  /** Zero-based phase number within the owning Goal. */
+  phaseIndex?: number
   /** 委派子任务专用：指向领队任务 */
   parentTaskId?: string
   /** 委派子任务专用：序号（展示用） */
