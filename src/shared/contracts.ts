@@ -71,6 +71,8 @@ export interface IssueUpdatePatch {
 
 export interface GoalCreateInput {
   text: string
+  /** 目标必须归属一个真实 Issue；循环在该 Issue 内自动推进（v2）。 */
+  issueId: string
   completionConditions: string[]
   stopConditions: string[]
   maxRuns: number

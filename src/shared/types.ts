@@ -37,6 +37,8 @@ export interface Goal {
   status: GoalStatus
   runCount: number
   totalDurationMs: number
+  /** 连续非重试失败次数（自动续轮上限用；续轮成功后清零） */
+  failures?: number
   currentRunId?: string
   agentId?: string
   backend?: string

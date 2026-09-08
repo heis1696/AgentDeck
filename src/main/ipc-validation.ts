@@ -127,13 +127,14 @@ function stringArrayValue(value: unknown, label: string, required = false): stri
 /** Validate Goal IPC input at the main-process boundary. */
 export function parseGoalCreate(value: unknown): GoalCreateInput {
   const input = record(value, 'Goal parameters')
-  assertKeys(input, ['text', 'completionConditions', 'stopConditions', 'maxRuns', 'maxDurationMs', 'workdir', 'agentId', 'backend', 'startNow'], 'Goal parameters')
+  assertKeys(input, ['text', 'issueId', 'completionConditions', 'stopConditions', 'maxRuns', 'maxDurationMs', 'workdir', 'agentId', 'backend', 'startNow'], 'Goal parameters')
   if (input.startNow !== undefined && typeof input.startNow !== 'boolean') throw new Error('startNow must be boolean')
   if (input.maxRuns === undefined || typeof input.maxRuns !== 'number' || !Number.isInteger(input.maxRuns) || input.maxRuns < 1 || input.maxRuns > 10000) throw new Error('maxRuns must be an integer between 1 and 10000')
   const maxDurationMs = input.maxDurationMs
   if (typeof maxDurationMs !== 'number' || !Number.isFinite(maxDurationMs) || maxDurationMs < 1 || maxDurationMs > 365 * 24 * 60 * 60 * 1000) throw new Error('maxDurationMs must be between 1ms and 365 days')
   return {
     text: stringValue(input.text, 'text')!,
+    issueId: stringValue(input.issueId, 'issueId')!,
     completionConditions: stringArrayValue(input.completionConditions, 'completionConditions', true),
     stopConditions: stringArrayValue(input.stopConditions, 'stopConditions'),
     maxRuns: input.maxRuns,
