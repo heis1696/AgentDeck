@@ -36,6 +36,7 @@ const tasks = []
 const queued = []
 let finalizeCalls = []
 let continueCalls = []
+let cancelCalls = []
 
 const controller = new GoalController(new GoalStore(userData), {
   createTask: (input) => {
@@ -61,6 +62,7 @@ const controller = new GoalController(new GoalStore(userData), {
   enqueueTask: (task) => queued.push(task),
   listTasks: () => tasks,
   continueTask: (taskId, content) => { continueCalls.push({ taskId, content }); return Promise.resolve({ ok: true }) },
+  cancelTask: (taskId) => { cancelCalls.push(taskId); const t = tasks.find((x) => x.id === taskId); if (t) t.status = 'cancelled'; return { ok: true } },
   finalizeIssue: (issueId) => { finalizeCalls.push(issueId) }
 })
 
@@ -262,6 +264,35 @@ ok(parseCheckpoint('{"summary":"ok","completedConditions":["release ready"]}', [
 let rejectedInput = false
 try { parseGoalCreate({ text: 'test', issueId: '', completionConditions: ['x'], stopConditions: [], maxRuns: 1, maxDurationMs: 1000, workdir: '/' }) } catch { rejectedInput = true }
 ok(rejectedInput, 'goal IPC rejects empty issueId')
+
+// === 场景 10：清除目标模式（remove 停在跑任务 + 级联删 runs/checkpoints）===
+const issue8 = 'iss_remove_test'
+const rmGoal = controller.create({
+  text: 'Remove test',
+  issueId: issue8,
+  completionConditions: ['never'],
+  stopConditions: [],
+  maxRuns: 5,
+  maxDurationMs: 100_000,
+  workdir: userData,
+  startNow: true
+})
+const rmTask = tasks.at(-1)
+rmTask.status = 'running'
+rmTask.sessionId = 'sess_rm_1'
+controller.onTaskChanged(rmTask)
+rmTask.status = 'done'
+rmTask.startedAt = rmTask.createdAt
+rmTask.endedAt = rmTask.createdAt + 100
+rmTask.result = JSON.stringify({ summary: 'halfway', completedConditions: [], incompleteConditions: ['never'], nextPlan: 'keep going', blockers: [] })
+controller.onTaskChanged(rmTask)
+await new Promise((r) => setTimeout(r, 100))
+ok(controller.get(rmGoal.id)?.status === 'active' && controller.checkpoints(rmGoal.id).length > 0, 'goal active with checkpoint before remove')
+const removed = controller.remove(rmGoal.id)
+ok(removed.ok && controller.get(rmGoal.id) === null, 'remove deletes the goal')
+ok(controller.runs(rmGoal.id).length === 0 && controller.checkpoints(rmGoal.id).length === 0, 'remove cascades runs/checkpoints')
+ok(cancelCalls.includes(rmTask.id) && rmTask.status === 'cancelled', 'remove cancels the in-flight task')
+ok(!controller.list().some((goal) => goal.id === rmGoal.id), 'goal no longer listed')
 
 fs.rmSync(outDir, { recursive: true, force: true })
 if (failed) process.exitCode = 1

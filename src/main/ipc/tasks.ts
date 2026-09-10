@@ -1,6 +1,7 @@
 import { BrowserWindow, ipcMain } from 'electron'
 import { validateMove } from '../../shared/taskflow'
 import { aggregateUsage } from '../usage'
+import { removeWorktree } from '../git'
 import { parseContent, parseFollowUpOptions, parseId, parseNonNegativeInteger, parsePermissionDecision, parseTaskCreate, parseTaskStatus } from '../ipc-validation'
 import type { IpcContext } from './context'
 
@@ -40,7 +41,7 @@ export function registerTaskIpc(ctx: IpcContext) {
   })
   ipcMain.handle('tasks:followup', (_e, id: unknown, content: unknown, options: unknown) => ctx.runner.followUp(parseId(id), parseContent(content, '追问'), parseFollowUpOptions(options)))
   ipcMain.handle('tasks:permission-respond', (_e, requestId: unknown, optionId: unknown, decision: unknown) => ctx.runner.resolvePermission(parseId(requestId, 'requestId'), parseContent(optionId, 'optionId'), parsePermissionDecision(decision)))
-  ipcMain.handle('tasks:delete', (_e, id: unknown) => {
+  ipcMain.handle('tasks:delete', async (_e, id: unknown) => {
     const taskId = parseId(id)
     const task = ctx.store.get(taskId)
     if (!task) return { ok: false, error: '任务不存在' }
@@ -48,17 +49,24 @@ export function registerTaskIpc(ctx: IpcContext) {
     const children = ctx.store.list().filter((item) => item.parentTaskId === taskId)
     if (children.some((item) => item.status === 'running')) return { ok: false, error: '请先取消运行中的子任务' }
     const deleted = [taskId, ...children.map((item) => item.id)]
-    for (const childId of deleted) ctx.store.delete(childId)
+    // 删除前先取 workdir（store.delete 之后任务对象就没了）
+    const workdirs = deleted.map((id) => ctx.store.get(id)?.workdir).filter((w): w is string => !!w)
+    for (const childId of deleted) {
+      await Promise.resolve(ctx.runner.forget?.(childId))
+      ctx.store.delete(childId)
+    }
+    // 回收该任务（含子任务）的委派 worktree，防累积；失败不阻塞删除，留待启动清扫兜底
+    for (const wd of workdirs) void removeWorktree(wd).catch(() => {})
     ctx.issueStore.sync(ctx.store.list())
     for (const childId of deleted) send('task:deleted', childId)
     return { ok: true }
   })
-  ipcMain.handle('tasks:retry', (_e, id: unknown) => {
+  ipcMain.handle('tasks:retry', async (_e, id: unknown) => {
     const taskId = parseId(id)
     const task = ctx.store.get(taskId)
     if (!task) return { ok: false, error: '任务不存在' }
     if (task.status === 'running' || task.status === 'queued') return { ok: false, error: '任务已在队列/运行中' }
-    ctx.runner.closeSession(taskId)
+    await ctx.runner.closeSession(taskId)
     ctx.store.update(taskId, { status: 'queued', error: undefined, failure: undefined, result: undefined, sessionId: undefined, attempt: undefined, runId: undefined })
     ctx.runner.enqueue(ctx.store.get(taskId)!)
     ctx.issueStore.sync(ctx.store.list())

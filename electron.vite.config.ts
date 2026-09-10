@@ -8,7 +8,10 @@ export default defineConfig({
     build: {
       outDir: 'out/main',
       rollupOptions: {
-        input: { index: resolve(__dirname, 'src/main/index.ts') }
+        input: {
+          index: resolve(__dirname, 'src/main/index.ts'),
+          'sidecar-server': resolve(__dirname, 'src/main/sidecar-server.ts')
+        }
       }
     }
   },

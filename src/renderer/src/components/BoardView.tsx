@@ -31,8 +31,9 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
     refresh()
     const off = bridge.issues.onUpdated(refresh)
     const offGoals = bridge.goals.onUpdated((goal) => setGoals((cur) => (cur.some((g) => g.id === goal.id) ? cur.map((g) => (g.id === goal.id ? goal : g)) : [...cur, goal])))
+    const offGoalDeleted = bridge.goals.onDeleted((goalId) => setGoals((cur) => cur.filter((g) => g.id !== goalId)))
     void bridge.goals.list().then(setGoals).catch(() => {})
-    return () => { off(); offGoals() }
+    return () => { off(); offGoals(); offGoalDeleted() }
   }, [])
   useEffect(() => {
     const close = () => setMenu(null)

@@ -325,6 +325,45 @@ assert(store.get(t11.id).status === 'cancelled', 'concurrent task A remains canc
 assert(store.get(t12.id).status === 'done' && store.get(t12.id).result === 'done:keep-running', 'cancelling A does not stop concurrent task B')
 assert(isolated.stopped.includes('cancel-me') && !isolated.stopped.includes('keep-running'), 'stop handle is scoped to its own session')
 
+// A provider may deliver the previous turn's terminal callback after a new
+// internal title turn has started. The duplicate must not settle the title.
+const staleTitleBackend = {
+  id: 'stale-title',
+  label: 'Stale title',
+  async probe() { return { ok: true, detail: '' } },
+  async start({ events }) {
+    const session = {
+      sessionId: 'sess_stale_title',
+      async send() {
+        setTimeout(() => {
+          events.onEvent({ ts: Date.now(), kind: 'final', text: 'initial response' })
+          events.onTurnEnd({ response: 'initial response', ok: true })
+        }, 15)
+        setTimeout(() => {
+          events.onEvent({ ts: Date.now(), kind: 'final', text: 'generated title' })
+          events.onTurnEnd({ response: 'generated title', ok: true })
+        }, 45)
+        await wait(60)
+      },
+      async stop() {},
+      async close() {}
+    }
+    setTimeout(() => {
+      events.onEvent({ ts: Date.now(), kind: 'final', text: 'initial response' })
+      events.onTurnEnd({ response: 'initial response', ok: true })
+    }, 10)
+    return session
+  }
+}
+const runner5 = new TaskRunner(store, new Map([['stale-title', staleTitleBackend]]), () => ({ concurrency: 1, mode: 'yolo', notify: false }))
+const staleTitleTask = store.create({ title: 'title me', prompt: 'title race', workdir: '', backend: 'stale-title', titleAuto: true })
+runner5.enqueue(staleTitleTask)
+await wait(180)
+assert(store.get(staleTitleTask.id).status === 'done', 'stale title task completes')
+assert(store.get(staleTitleTask.id).title === 'generated title', 'late previous terminal does not steal title turn')
+assert(store.readEvents(staleTitleTask.id).filter((e) => e.kind === 'final').length === 1, 'title turn finals stay hidden')
+await runner5.shutdown()
+
 await runner.shutdown()
 await runner3.shutdown()
 await runner4.shutdown()

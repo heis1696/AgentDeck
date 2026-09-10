@@ -24,6 +24,17 @@ if ((await replacement).decision !== 'deny') throw new Error('replacement reques
 const cancelled = broker.ask('task-c', request('three'))
 broker.cancelTask('task-c')
 if ((await cancelled).decision !== 'deny') throw new Error('task cancellation did not deny request')
+
+// Changing task content invalidates an outstanding approval snapshot.
+const versioned = broker.ask('task-v', request('versioned'), 'v1')
+broker.setWorkVersion('task-v', 'v2')
+if ((await versioned).decision !== 'deny') throw new Error('workVersion change did not deny stale request')
+if (broker.resolve('versioned', 'allow', 'allow').ok) throw new Error('stale workVersion approval was accepted')
+const crossTask = broker.ask('task-x', request('shared-id'), 'v1')
+const crossTaskRejected = broker.ask('task-y', request('shared-id'), 'v1')
+if ((await crossTaskRejected).decision !== 'deny') throw new Error('cross-task request id was not rejected')
+if (broker.resolve('shared-id', 'allow', 'allow').ok) throw new Error('cross-task request id could authorize stale task')
+if ((await crossTask).decision !== 'deny') throw new Error('ambiguous cross-task request did not fail closed')
 await wait(5)
-console.log('✓ response, duplicate, timeout and cancellation')
+console.log('✓ response, duplicate, timeout, cancellation, workVersion and task binding boundaries')
 console.log('✅ PERMISSION SMOKE PASSED')

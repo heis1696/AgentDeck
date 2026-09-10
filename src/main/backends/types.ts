@@ -17,7 +17,7 @@ export interface BackendSessionEvents {
   /** 权限确认；返回所选 optionId；未提供时自动放行 */
   onPermission?: (req: PermissionRequest) => Promise<{ optionId?: string; decision: 'allow' | 'deny' }>
   /** 进程/会话启动即回调（一次性 CLI 在 start resolve 前就要能被取消） */
-  onLaunch?: (handle: { stop: () => void }) => void
+  onLaunch?: (handle: { stop: () => void | Promise<unknown> }) => void
   /** Persist a provider session id as soon as it is known, including failed turns. */
   onSessionId?: (sessionId: string) => void
 }

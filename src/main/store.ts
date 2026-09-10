@@ -1,7 +1,7 @@
 // 文件存储：userData/tasks.json（索引）+ userData/tasks/<id>/events.jsonl（日志流）
 import fs from 'node:fs'
 import path from 'node:path'
-import { isTaskStatus, type Task, type TaskEvent, type IntegrationInfo } from '../shared/types'
+import { isTaskEventDurable, isTaskStatus, type Task, type TaskEvent, type IntegrationInfo } from '../shared/types'
 import { EventLog } from './event-log'
 
 /** Version of the task index envelope, independent from per-task snapshots. */
@@ -22,8 +22,8 @@ const TASK_INDEX_FIELDS = [
   'id', 'title', 'prompt', 'workdir', 'backend', 'agentId', 'trigger', 'issueId',
   'suppressIssue', 'runId', 'goalId', 'phaseIndex', 'parentTaskId', 'workerIndex', 'integration', 'status',
   'createdAt', 'startedAt', 'endedAt', 'result', 'error', 'failure', 'attempt',
-  'roundsUsed', 'handoff', 'continuesFrom', 'parked', 'titleAuto', 'sessionId',
-  'gitDiff', 'gitStat', 'usage', 'eventCount'
+  'roundsUsed', 'handoff', 'continuesFrom', 'parked', 'backgroundRunning', 'titleAuto', 'sessionId',
+  'gitDiff', 'gitStat', 'usage', 'eventCount', 'unavailableReason', 'worktree', 'workVersion'
 ] as const
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -178,14 +178,14 @@ export class TaskStore {
     let needsSave = !sameTaskEntries(parsed, document)
     for (const migrated of document.tasks) {
       // Reconcile counters with the append-only log after an interrupted write.
-      try {
-        const rawEvents = fs.readFileSync(path.join(this.taskDir(migrated.id), 'events.jsonl'), 'utf8')
-        const eventCount = rawEvents.split('\n').filter(Boolean).length
-        if (migrated.eventCount !== eventCount) {
-          migrated.eventCount = eventCount
-          needsSave = true
-        }
-      } catch {}
+      // EventLog owns JSONL recovery and live-only filtering. Counting raw
+      // lines here would resurrect torn/unknown records in tasks.json. Future
+      // event schema versions intentionally propagate as a fail-closed error.
+      const eventCount = this.eventLog(migrated.id).count()
+      if (migrated.eventCount !== eventCount) {
+        migrated.eventCount = eventCount
+        needsSave = true
+      }
       this.tasks.set(migrated.id, migrated)
     }
     if (needsSave) this.saveIndex()
@@ -228,7 +228,7 @@ export class TaskStore {
     }
   }
 
-  create(input: Pick<Task, 'title' | 'prompt' | 'workdir' | 'backend'> & Partial<Pick<Task, 'parentTaskId' | 'workerIndex' | 'integration' | 'agentId' | 'handoff' | 'continuesFrom' | 'parked' | 'suppressIssue' | 'trigger' | 'issueId' | 'goalId' | 'phaseIndex' | 'titleAuto'>>): Task {
+  create(input: Pick<Task, 'title' | 'prompt' | 'workdir' | 'backend'> & Partial<Pick<Task, 'parentTaskId' | 'workerIndex' | 'integration' | 'agentId' | 'handoff' | 'continuesFrom' | 'parked' | 'backgroundRunning' | 'suppressIssue' | 'trigger' | 'issueId' | 'goalId' | 'phaseIndex' | 'titleAuto' | 'unavailableReason' | 'worktree' | 'workVersion'>>): Task {
     const task: Task = {
       id: `t_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
       title: input.title,
@@ -242,12 +242,16 @@ export class TaskStore {
       ...(input.phaseIndex !== undefined ? { phaseIndex: input.phaseIndex } : {}),
       ...(input.parentTaskId ? { parentTaskId: input.parentTaskId } : {}),
       ...(input.workerIndex !== undefined ? { workerIndex: input.workerIndex } : {}),
+      ...(input.unavailableReason ? { unavailableReason: input.unavailableReason } : {}),
+      ...(input.worktree ? { worktree: input.worktree } : {}),
       ...(input.integration ? { integration: input.integration } : {}),
       ...(input.handoff ? { handoff: input.handoff } : {}),
       ...(input.continuesFrom ? { continuesFrom: input.continuesFrom } : {}),
       ...(input.parked ? { parked: true } : {}),
+      ...(input.backgroundRunning ? { backgroundRunning: true } : {}),
       ...(input.suppressIssue ? { suppressIssue: true } : {}),
       ...(input.titleAuto ? { titleAuto: true } : {}),
+      ...(input.workVersion ? { workVersion: input.workVersion } : {}),
       status: 'queued',
       createdAt: Date.now(),
       eventCount: 0
@@ -270,6 +274,15 @@ export class TaskStore {
   update(id: string, patch: Partial<Task>) {
     const t = this.tasks.get(id)
     if (!t) return
+    // Permission approvals are scoped to the task content. A caller may set a
+    // version explicitly (for deterministic migrations/tests); otherwise bump
+    // it whenever an execution-relevant field changes.
+    const contentFields: Array<keyof Task> = ['title', 'prompt', 'workdir', 'backend', 'agentId', 'handoff']
+    const changed = contentFields.some((field) => Object.prototype.hasOwnProperty.call(patch, field) && patch[field] !== t[field])
+    if (changed && !Object.prototype.hasOwnProperty.call(patch, 'workVersion')) {
+      const current = Number.parseInt(t.workVersion ?? '0', 10)
+      patch = { ...patch, workVersion: Number.isFinite(current) ? String(current + 1) : '1' }
+    }
     Object.assign(t, patch)
     try {
       fs.writeFileSync(path.join(this.taskDir(id), 'task.json'), JSON.stringify(t, null, 2))
@@ -293,9 +306,11 @@ export class TaskStore {
     // Synchronous append keeps readEvents/finalization and crash recovery consistent.
     const full = this.eventLog(id).append(e)
     if (!full) return null
-    t.eventCount = (t.eventCount ?? 0) + 1
-    this.pendingSnapshots.add(id)
-    this.scheduleFlush()
+    if (isTaskEventDurable(full)) {
+      t.eventCount = (t.eventCount ?? 0) + 1
+      this.pendingSnapshots.add(id)
+      this.scheduleFlush()
+    }
     return full
   }
 

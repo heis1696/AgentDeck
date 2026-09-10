@@ -3,6 +3,8 @@ import type { SkillDetail, SkillMeta, SkillTarget, SyncState } from './skills'
 
 export interface PermissionRequest {
   requestId: string | number
+  /** Snapshot of the task content this approval was issued for. */
+  workVersion?: string | number
   toolName: string
   reason: string
   riskLevel: string
@@ -78,6 +80,10 @@ export interface GoalCreateInput {
   stopConditions: string[]
   maxRuns: number
   maxDurationMs: number
+  /** Maximum consecutive checker blocks; defaults to 8. */
+  blockCap?: number
+  /** Maximum consecutive identical outputs; defaults to 2. */
+  noProgressCap?: number
   workdir: string
   agentId?: string
   backend?: string
@@ -97,7 +103,24 @@ export interface IpcResult {
   error?: string
 }
 
+/** Renderer-safe snapshot of the optional business-brain sidecar. */
+export interface SidecarSnapshot {
+  protocolVersion: number
+  port: number
+  /** Omitted from renderer IPC responses; bearer tokens stay in main. */
+  token?: string
+  instanceId: string
+  pid?: number
+  startedAt: number
+  status: 'stopped' | 'starting' | 'ready' | 'degraded' | 'reconnecting' | 'stopping'
+  url: string
+  orphanRuns: string[]
+}
+
 export interface AgentDeckApi {
+  worktrees: {
+    prune: () => Promise<{ scanned: number; removed: string[]; retained: Array<{ name: string; reason: string }>; failed: Array<{ name: string; reason: string }> }>
+  }
   tasks: {
     list: () => Promise<Task[]>
     get: (id: string) => Promise<Task | null>
@@ -143,7 +166,9 @@ export interface AgentDeckApi {
     cancel: (id: string) => Promise<{ ok: boolean; error?: string }>
     continue: (id: string) => Promise<{ ok: boolean; error?: string }>
     checkpoint: (id: string, input: GoalCheckpointInput) => Promise<GoalCheckpoint | null>
+    delete: (id: string) => Promise<{ ok: boolean; error?: string }>
     onUpdated: (cb: (goal: Goal) => void) => () => void
+    onDeleted: (cb: (goalId: string) => void) => () => void
   }
   automations: {
     list: () => Promise<Automation[]>
@@ -174,6 +199,12 @@ export interface AgentDeckApi {
   }
   runtimes: { snapshot: () => Promise<RuntimeSnapshot[]> }
   analytics: { summary: (input?: { since?: number; until?: number }) => Promise<AnalyticsSummary> }
+  sidecar: {
+    status: () => Promise<SidecarSnapshot | null>
+    sync: () => Promise<unknown>
+    reconnect: () => Promise<SidecarSnapshot | null>
+    onStatus: (cb: (snapshot: SidecarSnapshot) => void) => () => void
+  }
   skills: {
     list: () => Promise<{ root: string; skills: SkillMeta[] }>
     get: (name: string) => Promise<SkillDetail | null>

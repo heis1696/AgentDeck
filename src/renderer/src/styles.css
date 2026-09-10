@@ -2322,41 +2322,101 @@ html.light .settings-body > .page-header-bar { background: #fff; border-bottom-c
 }
 
 /* TaskDetail 对话重构 */
-/* —— 对话区容器：导航侧条 + 对话流 —— */
+/* —— 对话区容器：聊天流占满全宽，回合迷你导航嵌在左缘 —— */
 .chat-wrap { flex: 1; min-height: 0; display: flex; gap: 12px; align-items: stretch; container-type: inline-size; }
 .chat-wrap .log.chat { flex: 1; min-width: 0; position: relative; }
 
-/* —— 回合导航侧条 —— */
-.chat-nav {
-  flex: 0 0 200px;
-  display: flex; flex-direction: column; gap: 2px;
-  overflow-y: auto;
-  padding: 8px 4px 8px 0;
-  border-right: 1px solid var(--border);
+/* —— 回合索引线（ZCode 式）：固定不随滚动，小而安静的左缘线组；
+      所有线等长并以轨道中轴对称居中（悬停加长时对称生长）；
+      线组整体在聊天区垂直居中，回合增减时保持居中；
+      当前回合只高亮不加长，悬停单线才高亮加长 —— */
+.chat-wrap { position: relative; }
+.chat-minimap {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 30px;
+  z-index: 6;
+  pointer-events: none;
 }
-.chat-nav-head {
-  display: flex; align-items: baseline; justify-content: space-between; gap: 6px;
-  padding: 4px 8px 8px;
-  font-size: 11px; color: var(--text-dim);
-}
-.chat-nav-count { font: 10px var(--mono); color: var(--text-faint); }
-.chat-nav-item {
-  display: flex; align-items: center; gap: 6px;
-  padding: 6px 8px;
-  border: none; border-radius: 6px;
+.chat-minimap-item {
+  position: absolute;
+  left: 0;
+  width: 30px;
+  height: 10px;
+  transform: translateY(-50%);
+  padding: 0;
+  border: none;
   background: transparent;
-  color: var(--text-dim);
-  font-size: 12px; text-align: left;
   cursor: pointer;
+  pointer-events: auto;
 }
-.chat-nav-item:hover { background: var(--bg-hover); color: var(--text); }
-.chat-nav-item.active { background: var(--accent-soft); color: var(--text); }
-.chat-nav-idx { flex-shrink: 0; font: 10px var(--mono); color: var(--text-faint); }
-.chat-nav-item.active .chat-nav-idx { color: var(--accent); }
-.chat-nav-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chat-nav-state { flex-shrink: 0; font-size: 11px; color: var(--ok); }
-.chat-nav-state.running { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: pulse 1.2s infinite; }
-@container (max-width: 719px) { .chat-nav { display: none; } }
+.chat-minimap-item::after {
+  content: '';
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  width: 14px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--ink-faint);
+  opacity: .4;
+  transform: translateY(-50%);
+  transition: width .22s cubic-bezier(.2, 0, .2, 1), background .18s ease, opacity .18s ease;
+}
+/* 静默 → 待命：鼠标进入聊天区，线组整体微提亮 */
+.chat-wrap:hover .chat-minimap-item::after { opacity: .6; }
+/* 悬停单线：沿中轴对称加长提亮（唯一的凸出态） */
+.chat-minimap-item:hover::after,
+.chat-minimap-item:focus-visible::after {
+  width: 26px;
+  background: var(--ink);
+  opacity: 1;
+}
+/* 当前回合：只高亮，不加长 */
+.chat-minimap-item.active::after {
+  background: var(--ink);
+  opacity: .95;
+}
+.chat-minimap-pop {
+  position: absolute;
+  left: 36px;
+  transform: translateY(-50%);
+  width: clamp(280px, 32vw, 460px);
+  padding: 8px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  box-shadow: var(--menu-shadow);
+  pointer-events: none;
+  z-index: 9;
+  animation: minimap-pop-in .16s var(--ease-out, ease-out) both;
+}
+@keyframes minimap-pop-in {
+  from { opacity: 0; transform: translateY(calc(-50% + 5px)); }
+  to { opacity: 1; transform: translateY(-50%); }
+}
+.chat-minimap-pop-head {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.45;
+}
+.chat-minimap-pop-idx { flex: none; font: 10px var(--mono); color: var(--teal); }
+.chat-minimap-pop-body {
+  margin-top: 3px;
+  color: var(--ink-dim);
+  font-size: 11px;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 
 /* —— 气泡内 Markdown：中间消息段（已关闭）与终段统一渲染，
       代码块/表格/引用等要有可辨认的对比度 —— */
@@ -2583,3 +2643,569 @@ html.light .board .board-col { min-width: 300px; max-width: 352px; }
 .skill-target-copy small { color: var(--text-dim); font-size: var(--text-caption); }
 @media (max-width: 900px) { .skills-layout { grid-template-columns: 1fr; } .skills-editor-row { grid-template-columns: 1fr; } .skills-list { max-height: 300px; } }
 .storage-path { margin-bottom: 12px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-inset); color: var(--text-dim); font-size: 11px; word-break: break-all; }
+
+/* ============================================================
+   气泡回复富渲染 v1（2026-09）
+   1) Markdown 字体颜色区分：标题分级配色 / 行内代码琥珀 / 链接青色 /
+      引用块 / 表格斑马纹 / 列表彩色圆点 / 强调与删除线
+   2) 代码卡片：语言标签 + 一键复制 + 内置语法高亮（--tok-* 配色）
+   3) 气泡动效：入场浮现、流式光标、悬停描边
+   说明：历史主题层留有 .bubble.agent .md x 同名规则，这里每条都带
+   .md / .bubble.agent .md / .timeline-content .md 三份选择器，靠层叠顺序取赢。
+   ============================================================ */
+
+/* ---- 语法高亮与代码配色（暗/浅双主题重映射） ---- */
+:root {
+  --tok-kw: #c39ef2;    /* 关键字：紫 */
+  --tok-str: #98c379;   /* 字符串/diff 新增：绿 */
+  --tok-num: #d19a66;   /* 数字与字面常量：橙 */
+  --tok-com: #5f7480;   /* 注释：灰 */
+  --tok-fn: #61d6c8;    /* 函数：主题青 */
+  --tok-type: #e5c07b;  /* 类型/类名/选择器：黄 */
+  --tok-prop: #7dcfff;  /* 属性/键/命令行开关：浅蓝 */
+  --tok-tag: #ef7168;   /* 标签/diff 删除：红 */
+  --tok-attr: #d19a66;  /* HTML 属性：橙 */
+}
+html.light {
+  --tok-kw: #8250df;
+  --tok-str: #1a7f37;
+  --tok-num: #b3540b;
+  --tok-com: #8a949b;
+  --tok-fn: #087f87;
+  --tok-type: #9a6700;
+  --tok-prop: #0550ae;
+  --tok-tag: #cf222e;
+  --tok-attr: #953800;
+}
+.tok-kw { color: var(--tok-kw); }
+.tok-str { color: var(--tok-str); }
+.tok-num { color: var(--tok-num); }
+.tok-com { color: var(--tok-com); font-style: italic; }
+.tok-fn { color: var(--tok-fn); }
+.tok-type { color: var(--tok-type); }
+.tok-prop { color: var(--tok-prop); }
+.tok-tag { color: var(--tok-tag); }
+.tok-attr { color: var(--tok-attr); }
+
+/* ---- 行内代码：琥珀色，与正文/链接一眼区分 ---- */
+.md code,
+.bubble.agent .md code,
+.timeline-content .md code {
+  padding: 1px 5px;
+  border: 1px solid color-mix(in srgb, var(--tok-num) 26%, transparent);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--tok-num) 10%, transparent);
+  color: color-mix(in srgb, var(--tok-num) 80%, var(--ink));
+  font: 11.5px var(--mono);
+}
+/* 代码卡片内部的 code 还原为正文样式（上面那条行内规则管不到卡片体） */
+.md .md-code code,
+.bubble.agent .md .md-code code,
+.timeline-content .md .md-code code {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: 11.5px/1.6 var(--mono);
+}
+
+/* ---- 代码卡片：语言标签 + 一键复制 ---- */
+.md-code {
+  margin: 10px 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-inset);
+  overflow: hidden;
+}
+.md-code-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 7px 5px 11px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--teal) 6%, var(--surface-inset));
+}
+.md-code-lang {
+  font: 10px var(--mono);
+  color: var(--teal);
+  text-transform: uppercase;
+  letter-spacing: .8px;
+  user-select: none;
+}
+.md-code-copy {
+  padding: 2px 9px;
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  background: transparent;
+  color: var(--ink-dim);
+  font: 10.5px var(--font-ui, sans-serif);
+  cursor: pointer;
+  transition: color var(--duration-quick, .12s) ease, border-color var(--duration-quick, .12s) ease, background var(--duration-quick, .12s) ease;
+}
+.md-code-copy:hover { color: var(--teal); border-color: var(--teal-line); background: var(--teal-soft); }
+.md-code-copy.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
+.md .md-code pre,
+.bubble.agent .md .md-code pre,
+.timeline-content .md .md-code pre {
+  margin: 0;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  max-height: 380px;
+  overflow: auto;
+  font: 11.5px/1.6 var(--mono);
+}
+
+/* ---- 标题分级配色：h1 下划线 / h2 青条 / h3 青染 / h4 灰 ---- */
+.md h1, .bubble.agent .md h1, .timeline-content .md h1 {
+  margin: 14px 0 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink);
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: .2px;
+}
+.md h2, .bubble.agent .md h2, .timeline-content .md h2 {
+  margin: 14px 0 6px;
+  padding-left: 9px;
+  border-left: 3px solid var(--teal);
+  color: var(--ink);
+  font-size: 14.5px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+.md h3, .bubble.agent .md h3, .timeline-content .md h3 {
+  margin: 12px 0 5px;
+  color: color-mix(in srgb, var(--teal) 55%, var(--ink));
+  font-size: 13.5px;
+  font-weight: 650;
+}
+.md h4, .bubble.agent .md h4, .timeline-content .md h4,
+.md h5, .md h6 {
+  margin: 10px 0 4px;
+  color: var(--ink-dim);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+/* ---- 行内文字的颜色区分：强调/斜体/删除线/段落断行 ---- */
+.md strong, .bubble.agent .md strong, .timeline-content .md strong { color: var(--ink); font-weight: 700; }
+.md em, .bubble.agent .md em, .timeline-content .md em { color: color-mix(in srgb, var(--teal) 35%, var(--ink-dim)); }
+.md del, .bubble.agent .md del { color: var(--text-faint); }
+.md p { overflow-wrap: anywhere; }
+
+/* ---- 链接：青色 + 半透明下划线，悬停加重 ---- */
+.md a, .bubble.agent .md a, .timeline-content .md a {
+  color: var(--teal);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--teal) 45%, transparent);
+  text-underline-offset: 3px;
+  transition: text-decoration-color var(--duration-quick, .12s) ease;
+}
+.md a:hover, .bubble.agent .md a:hover, .timeline-content .md a:hover {
+  text-decoration-color: var(--teal);
+}
+
+/* ---- 引用块：青色竖条 + 淡青底 ---- */
+.md blockquote, .bubble.agent .md blockquote, .timeline-content .md blockquote {
+  margin: 10px 0;
+  padding: 7px 12px;
+  border-left: 3px solid var(--teal);
+  border-radius: 0 8px 8px 0;
+  background: color-mix(in srgb, var(--teal) 7%, transparent);
+  color: var(--ink-dim);
+}
+.md blockquote p { margin: 4px 0; }
+
+/* ---- 表格：表头青染 + 斑马纹 + 悬停行 ---- */
+.md table, .bubble.agent .md table, .timeline-content .md table {
+  margin: 10px 0;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.md th, .bubble.agent .md th, .timeline-content .md th {
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--teal) 10%, transparent);
+  color: var(--ink);
+  font-weight: 650;
+  text-align: left;
+}
+.md td, .bubble.agent .md td, .timeline-content .md td {
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  color: var(--ink-dim);
+}
+.md tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--ink) 3%, transparent); }
+.md tbody tr:hover td { background: var(--surface-hover); }
+
+/* ---- 列表：彩色圆点/序号，任务勾选框染色 ---- */
+.md li::marker { color: var(--teal); }
+.md li input[type='checkbox'] { accent-color: var(--teal); margin-right: 4px; }
+
+/* ---- 分隔线：中淡两端虚化的渐变线；图片圆角描边 ---- */
+.md hr, .bubble.agent .md hr, .timeline-content .md hr {
+  border: 0;
+  height: 1px;
+  margin: 12px 0;
+  background: linear-gradient(90deg, transparent, var(--line-strong) 22%, var(--line-strong) 78%, transparent);
+}
+.md img { max-width: 100%; border-radius: 8px; border: 1px solid var(--line); }
+
+/* ---- 气泡外观：入场浮现动效 + 双向不对称圆角 + 渐变底 ---- */
+@keyframes bubble-in {
+  from { opacity: 0; transform: translateY(7px); }
+  to { opacity: 1; transform: none; }
+}
+.bubble { animation: bubble-in .22s var(--ease-out, ease-out) both; }
+.bubble.user {
+  background: linear-gradient(135deg, var(--teal-soft), rgba(97, 214, 200, .04) 58%, transparent);
+  border: 1px solid var(--teal-line);
+  border-radius: 14px 14px 4px 14px;
+}
+html.light .bubble.user {
+  background: linear-gradient(135deg, var(--teal-soft), rgba(8, 127, 135, .03) 58%, transparent);
+  border-color: var(--teal-line);
+}
+.bubble.agent {
+  background: linear-gradient(180deg, var(--surface-raised), var(--surface) 60%);
+  border: 1px solid var(--line);
+  border-radius: 14px 14px 14px 4px;
+  box-shadow: var(--shadow-panel);
+  transition: border-color var(--duration-base, .15s) ease;
+}
+.bubble.agent:hover { border-color: var(--line-strong); }
+html.light .bubble.agent {
+  background: linear-gradient(180deg, var(--surface-raised), var(--surface) 60%);
+  border-color: var(--line);
+  box-shadow: 0 10px 26px rgba(38, 58, 67, .08);
+}
+
+/* ---- 流式回复：末尾闪烁光标（吐字中的视觉锚点） ---- */
+@keyframes caret-blink { 50% { opacity: 0; } }
+.bubble.agent .streaming::after {
+  content: '▍';
+  margin-left: 1px;
+  color: var(--teal);
+  animation: caret-blink .9s step-end infinite;
+}
+
+/* ---- token 用量徽章：轻胶囊，右对齐 ---- */
+.bubble-usage {
+  display: block;
+  width: fit-content;
+  margin: 8px 0 0 auto;
+  padding: 2px 9px;
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
+  color: var(--text-faint);
+  font: 10px var(--mono);
+  text-align: right;
+  user-select: text;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bubble { animation: none; }
+  .bubble.agent .streaming::after { animation: none; }
+}
+
+/* ============================================================
+   气泡富渲染 v1.1 —— 美术强化层
+   舞台氛围 / 回合分隔 / 呼吸光环 / 三点跳动 / 圆角表格 /
+   代码卡质感 / 引用水印 / 外链箭头 / 选区配色
+   ============================================================ */
+
+/* 气泡顶缘高光随主题切换（呼吸动画里也要引用同一变量） */
+:root { --bubble-inset: inset 0 1px 0 rgba(255, 255, 255, .04); }
+html.light { --bubble-inset: inset 0 1px 0 rgba(255, 255, 255, .75); }
+
+/* ---- 聊天舞台：顶部微光垂直渐隐（水平均匀无侧边轮廓）+ 极淡点阵 ----
+   用多停靠点缓出过渡，避免亮区与暗底之间出现可感知的分界；
+   不用径向渐变——容器两侧裁剪会让光晕远看像半个矩形。 */
+.log.chat {
+  max-width: none;
+  padding-left: 46px;
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--accent) 6%, transparent) 0,
+      color-mix(in srgb, var(--accent) 3.2%, transparent) 90px,
+      color-mix(in srgb, var(--accent) 1.2%, transparent) 190px,
+      transparent 300px),
+    radial-gradient(color-mix(in srgb, var(--ink) 3%, transparent) 1px, transparent 1.4px);
+  background-size: auto, 28px 28px;
+  background-repeat: no-repeat, repeat;
+}
+
+/* ---- 回合分隔：淡入淡出的发丝线，给长对话分节拍 ---- */
+.log.chat .turn + .turn::before {
+  content: '';
+  display: block;
+  height: 1px;
+  margin: 0 4px 14px;
+  background: linear-gradient(90deg, transparent, var(--line) 25%, var(--line) 75%, transparent);
+}
+
+/* ---- 气泡质感：顶缘内嵌高光；用户气泡带青色柔光投影 ---- */
+.bubble.user { box-shadow: 0 6px 18px color-mix(in srgb, var(--teal) 12%, transparent); }
+.bubble.agent { box-shadow: var(--bubble-inset), var(--shadow-panel); }
+
+/* ---- 执行中气泡（流式/排队）：青色呼吸光环 ---- */
+@keyframes bubble-breath {
+  0%, 100% { box-shadow: var(--bubble-inset), var(--shadow-panel), 0 0 0 0 color-mix(in srgb, var(--teal) 22%, transparent); }
+  50% { box-shadow: var(--bubble-inset), var(--shadow-panel), 0 0 0 6px color-mix(in srgb, var(--teal) 9%, transparent); }
+}
+.bubble.agent:has(.log-running) {
+  border-color: var(--teal-line);
+  animation: bubble-breath 2.2s var(--ease-in-out, ease-in-out) infinite;
+}
+
+/* ---- 回复中/排队中：三点跳动（替代整段脉冲闪烁） ---- */
+.log-running {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 0 2px;
+  color: var(--teal);
+  font-size: 12px;
+  animation: none;
+}
+.log-running .dots { display: inline-flex; gap: 3px; }
+.log-running .dots i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--teal);
+  animation: dot-hop 1.1s var(--ease-in-out, ease-in-out) infinite;
+}
+.log-running .dots i:nth-child(2) { animation-delay: .15s; }
+.log-running .dots i:nth-child(3) { animation-delay: .3s; }
+@keyframes dot-hop {
+  0%, 70%, 100% { transform: translateY(0); opacity: .4; }
+  35% { transform: translateY(-4px); opacity: 1; }
+}
+
+/* ---- 流式光标：青色辉光，像在发光地吐字 ---- */
+.bubble.agent .streaming::after { text-shadow: 0 0 10px var(--accent-glow); }
+
+/* ---- h1：青色渐隐发丝底线（替代实线） ---- */
+.md h1, .bubble.agent .md h1, .timeline-content .md h1 {
+  border-bottom: 0;
+  padding-bottom: 8px;
+  background-image: linear-gradient(90deg, var(--teal-line), transparent 72%);
+  background-repeat: no-repeat;
+  background-size: 100% 1px;
+  background-position: left bottom;
+}
+
+/* ---- 引用块：右下角大引号水印 ---- */
+.md blockquote, .bubble.agent .md blockquote, .timeline-content .md blockquote {
+  position: relative;
+  overflow: hidden;
+}
+.md blockquote::before, .bubble.agent .md blockquote::before, .timeline-content .md blockquote::before {
+  content: '❝';
+  position: absolute;
+  right: 10px;
+  bottom: -16px;
+  font-size: 44px;
+  line-height: 1;
+  color: color-mix(in srgb, var(--teal) 16%, transparent);
+  pointer-events: none;
+  user-select: none;
+}
+
+/* ---- 表格 v2：整体圆角描边，单元格只画内网格线 ---- */
+.md table, .bubble.agent .md table, .timeline-content .md table {
+  margin: 10px 0;
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: 12px;
+}
+.md th, .bubble.agent .md th, .timeline-content .md th {
+  padding: 6px 12px;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--teal) 10%, transparent);
+  color: var(--ink);
+  font-weight: 650;
+  text-align: left;
+}
+.md td, .bubble.agent .md td, .timeline-content .md td {
+  padding: 5px 12px;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-dim);
+}
+.md tr > *:last-child { border-right: 0; }
+.md tbody tr:last-child > * { border-bottom: 0; }
+.md th:first-child { border-top-left-radius: 9px; }
+.md th:last-child { border-top-right-radius: 9px; }
+.md tbody tr:last-child td:first-child { border-bottom-left-radius: 9px; }
+.md tbody tr:last-child td:last-child { border-bottom-right-radius: 9px; }
+
+/* ---- 代码卡质感：悬停描边、头部渐隐发丝、体部左上青辉、细滚动条 ---- */
+.md-code { transition: border-color var(--duration-quick, .12s) ease; }
+.md-code:hover { border-color: var(--line-strong); }
+.md-code-bar { border-bottom: 0; box-shadow: 0 1px 0 color-mix(in srgb, var(--teal) 14%, transparent); }
+.md .md-code pre, .bubble.agent .md .md-code pre, .timeline-content .md .md-code pre {
+  background: radial-gradient(420px 90px at 0% 0%, color-mix(in srgb, var(--teal) 5%, transparent), transparent 70%);
+}
+.md-code pre::-webkit-scrollbar { width: 8px; height: 8px; }
+.md-code pre::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 99px; border: 2px solid var(--surface-inset); }
+.md-code pre::-webkit-scrollbar-track { background: transparent; }
+.md-code-copy { transition: color var(--duration-quick, .12s) ease, border-color var(--duration-quick, .12s) ease, background var(--duration-quick, .12s) ease, transform .1s ease; }
+.md-code-copy:active { transform: scale(.94); }
+
+/* ---- 外链箭头：http 链接尾部 ↗，悬停点亮 ---- */
+.md a .md-link-ext { margin-left: 2px; font-size: .82em; opacity: .55; transition: opacity var(--duration-quick, .12s) ease; }
+.md a:hover .md-link-ext { opacity: 1; }
+
+/* ---- 气泡内选区：青色 ---- */
+.bubble ::selection { background: color-mix(in srgb, var(--teal) 32%, transparent); }
+
+@media (prefers-reduced-motion: reduce) {
+  .bubble.agent:has(.log-running) { animation: none; }
+  .log-running .dots i { animation: none; opacity: .8; }
+}
+
+/* ============================================================
+   协议标记卡片 v2 —— 硬切接力 / 回合自评 / 审核结论
+   （delegate 委派卡见前；紫色系对齐看板 .badge-handoff 阶段接力徽章）
+   ============================================================ */
+:root {
+  --violet: #a78bfa;
+  --violet-soft: rgba(167, 139, 250, .13);
+  --violet-line: rgba(167, 139, 250, .4);
+  --violet-ink: #1b1430;
+}
+html.light {
+  --violet: #8250df;
+  --violet-soft: rgba(130, 80, 223, .09);
+  --violet-line: rgba(130, 80, 223, .32);
+  --violet-ink: #ffffff;
+}
+
+/* ---- 硬切接力卡：<continue start>简报</continue> —— 本回合在此硬切新会话 ---- */
+.continue-card {
+  margin: 8px 0;
+  border: 1px solid var(--violet-line);
+  border-left: 3px solid var(--violet);
+  border-radius: 8px;
+  background: var(--violet-soft);
+}
+.continue-card-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+  padding: 7px 10px;
+  font-size: 12px;
+}
+.continue-card-icon { flex-shrink: 0; color: var(--violet); }
+.continue-card-tag {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--violet);
+  color: var(--violet-ink);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .5px;
+}
+.continue-card-title { flex-shrink: 0; color: var(--ink); font-weight: 650; }
+.continue-card-mode {
+  flex-shrink: 0;
+  padding: 1px 8px;
+  border: 1px solid var(--violet-line);
+  border-radius: 99px;
+  color: var(--violet);
+  font-size: 10px;
+  font-weight: 650;
+}
+.continue-card-body summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 10px;
+  border-top: 1px dashed var(--violet-line);
+  color: var(--ink-dim);
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+.continue-card-body summary::-webkit-details-marker { display: none; }
+.continue-card-body summary::before { content: '▸ '; color: var(--ink-faint); }
+.continue-card-body[open] summary::before { content: '▾ '; }
+.continue-card-body summary:hover { color: var(--ink); }
+.continue-card-summary-label { flex-shrink: 0; }
+.continue-card-excerpt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.continue-card-body pre {
+  margin: 0;
+  padding: 10px 12px;
+  max-height: 240px;
+  overflow: auto;
+  border-top: 1px solid var(--violet-line);
+  background: var(--surface-inset);
+  color: var(--ink);
+  font: 11.5px/1.55 var(--mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---- 回合自评：<round outcome reason/> —— 圆点着色的小胶囊 ---- */
+.round-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 6px 0;
+  padding: 4px 11px;
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.round-chip-dot { flex-shrink: 0; width: 6px; height: 6px; border-radius: 50%; background: var(--ink-faint); }
+.round-chip.rc-action .round-chip-dot { background: var(--teal); box-shadow: 0 0 0 3px var(--teal-soft); }
+.round-chip.rc-failed .round-chip-dot { background: var(--err); box-shadow: 0 0 0 3px var(--red-soft); }
+.round-chip-tag { flex-shrink: 0; color: var(--ink-faint); font-size: 10px; letter-spacing: .5px; }
+.round-chip-outcome { flex-shrink: 0; color: var(--ink); font-weight: 650; }
+.round-chip.rc-action .round-chip-outcome { color: var(--teal); }
+.round-chip.rc-failed .round-chip-outcome { color: var(--err); }
+.round-chip-reason { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-dim); }
+
+/* ---- 审核结论：<review of verdict note/> —— 通过绿 / 退回红 ---- */
+.review-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 6px 0;
+  padding: 4px 11px;
+  border-radius: 99px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.review-chip.rv-pass { border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent); background: var(--status-done-bg, rgba(88, 197, 138, .12)); }
+.review-chip.rv-fail { border: 1px solid color-mix(in srgb, var(--err) 35%, transparent); background: var(--status-failed-bg, rgba(239, 113, 104, .12)); }
+.review-chip-icon { flex-shrink: 0; font-size: 11px; }
+.review-chip.rv-pass .review-chip-icon { color: var(--ok); }
+.review-chip.rv-fail .review-chip-icon { color: var(--err); }
+.review-chip-tag { flex-shrink: 0; color: var(--ink-faint); font-size: 10px; letter-spacing: .5px; }
+.review-chip-of { flex-shrink: 0; color: var(--ink); font-weight: 650; font-family: var(--mono); }
+.review-chip-verdict { flex-shrink: 0; font-weight: 650; }
+.review-chip.rv-pass .review-chip-verdict { color: var(--ok); }
+.review-chip.rv-fail .review-chip-verdict { color: var(--err); }
+.review-chip-note { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-dim); }

@@ -6,6 +6,7 @@ import { TaskRunner } from './runner'
 import { IssueStore } from './issue-store'
 import { GoalStore } from './goal-store'
 import { GoalController } from './goal-controller'
+import { TaskService } from './task-service'
 import { AutomationStore } from './automation-store'
 import { loadSettings, saveSettings } from './settings'
 import { loadAgents, type Agent } from './agents'
@@ -18,7 +19,9 @@ import { createDshBackend } from './backends/dsh'
 import type { AgentBackend } from './backends/types'
 import type { AppSettings, Task, RunTrigger } from '../shared/types'
 import { ensureSharedDir } from './skills'
+import { sweepWorktrees } from './git'
 import { registerIpcHandlers, type CreateTaskInput } from './ipc/register'
+import { SidecarManager } from './sidecar'
 
 let mainWindow: BrowserWindow | null = null
 let settings: AppSettings
@@ -28,6 +31,8 @@ let issueStore: IssueStore
 let goalStore: GoalStore
 let goalController!: GoalController
 let automationStore: AutomationStore
+let taskService: TaskService
+let sidecarManager: SidecarManager
 let automationTimer: NodeJS.Timeout | undefined
 let agents: Agent[]
 let presets: ApiPreset[]
@@ -47,6 +52,13 @@ function publishIssueUpdate(task: Task | null) {
     issue: issue ?? null,
     run: run ?? null
   })
+}
+
+/** Single task-change fanout used by runner transitions and parked handoffs. */
+function notifyTaskChanged(task: Task | null) {
+  if (!task) return
+  publishIssueUpdate(task)
+  goalController?.onTaskChanged(task)
 }
 
 function createWindow() {
@@ -85,8 +97,29 @@ app.whenReady().then(() => {
   store = new TaskStore(app.getPath('userData'))
   issueStore = new IssueStore(app.getPath('userData'))
   issueStore.sync(store.list())
+  // 启动清扫：回收上次会话遗留的委派 worktree（合并临时目录 + 已删任务的目录），后台执行不阻塞启动
+  for (const dir of new Set(store.list().map((t) => t.worktree?.repoDir || t.workdir).filter(Boolean))) {
+    void sweepWorktrees(dir, (owner) => {
+      const task = store.get(owner)
+      return task?.status === 'queued' || task?.status === 'running'
+    }).catch(() => {})
+  }
   goalStore = new GoalStore(app.getPath('userData'))
   automationStore = new AutomationStore(app.getPath('userData'))
+
+  // The business brain owns a loopback process and durable-file projection.
+  // Startup is deliberately best-effort: the established in-process runner
+  // remains the compatibility path when a packaged sidecar is unavailable.
+  sidecarManager = new SidecarManager({
+    userDataDir: app.getPath('userData'),
+    entrypoint: path.join(__dirname, 'sidecar-server.js'),
+    preferredPort: Number(process.env.AGENTDECK_SIDECAR_PORT) || undefined
+  })
+  sidecarManager.onStatus((snapshot) => {
+    const { token: _token, ...publicSnapshot } = snapshot
+    mainWindow?.webContents.send('sidecar:status', publicSnapshot)
+  })
+  void sidecarManager.reconnect().catch(() => {})
 
   const zcode = createZcodeBackend(() => ({ nodePath: settings.nodePath, zcodePath: settings.zcodePath }))
   backends.set(zcode.id, zcode)
@@ -96,16 +129,20 @@ app.whenReady().then(() => {
   backends.set('dsh', createDshBackend(() => ({ dshPath: settings.dshPath })))
   agents = loadAgents()
 
+  taskService = new TaskService({
+    store,
+    issueStore,
+    getAgent: (agentId) => agents.find((agent) => agent.id === agentId)
+  })
+
   runner = new TaskRunner(store, backends, () => ({
     concurrency: settings.concurrency,
     mode: settings.mode,
     notify: settings.notifyOnDone,
     workerConcurrency: settings.workerConcurrency
-  }), (task) => {
-    publishIssueUpdate(task)
-    goalController?.onTaskChanged(task)
-  }, {
+  }), (task) => notifyTaskChanged(task), {
     send: (channel, payload) => mainWindow?.webContents.send(channel, payload),
+    onTaskEvent: (taskId, event) => goalController?.onTaskEvent(taskId, event),
     notify: (task, what, body) => {
       try {
         if (!Notification.isSupported()) return
@@ -120,6 +157,7 @@ app.whenReady().then(() => {
     }
   })
   runner.attachTeam(() => agents)
+  runner.attachTaskService(taskService)
   presets = loadPresets()
   runner.attachPresets(() => presets)
   runner.attachIssueOps({
@@ -135,35 +173,13 @@ app.whenReady().then(() => {
   })
 
   /** Single creation path for user issues, automation runs, and legacy tasks. */
-  const createTask = (input: CreateTaskInput, trigger: RunTrigger = 'assignment') => {
-    const agent = agents.find((a) => a.id === input.agentId)
-    const backend = agent?.backend ?? input.backend ?? 'zcode'
-    const task = store.create({
-      title: input.title.trim() || '未命名任务',
-      prompt: input.prompt.trim(),
-      workdir: input.workdir || '',
-      backend,
-      trigger,
-      ...(agent ? { agentId: agent.id } : {}),
-      ...(input.handoff?.trim() ? { handoff: input.handoff.trim() } : {}),
-      ...(input.startNow === false ? { parked: true } : {}),
-      ...(input.suppressIssue ? { suppressIssue: true } : {}),
-      ...(input.issueId ? { issueId: input.issueId } : {}),
-      ...(input.continuesFrom ? { continuesFrom: input.continuesFrom } : {}),
-      ...(input.goalId ? { goalId: input.goalId } : {}),
-      ...(input.phaseIndex !== undefined ? { phaseIndex: input.phaseIndex } : {}),
-      ...(input.titleAuto ? { titleAuto: true } : {})
-    })
-    if (!task.suppressIssue && !task.issueId) store.update(task.id, { issueId: `iss_${task.id}` })
-    issueStore.sync(store.list())
-    return store.get(task.id)!
-  }
+  const createTask = (input: CreateTaskInput, trigger: RunTrigger = 'assignment') => taskService.createTask(input, trigger)
 
   // Goals reuse the existing TaskRunner/Issue projection.  The controller is
   // intentionally installed after createTask so every compatibility run uses
   // the same creation path and retains the existing task/JSONL contract.
   goalController = new GoalController(goalStore, {
-    createTask: (input) => createTask({
+    createTask: (input) => taskService.createTask({
       title: input.title,
       prompt: input.prompt,
       workdir: input.workdir,
@@ -172,6 +188,7 @@ app.whenReady().then(() => {
       issueId: input.issueId,
       goalId: input.goalId,
       phaseIndex: input.phaseIndex,
+      dedupeKey: input.dedupeKey,
       startNow: input.startNow
     }, input.trigger),
     enqueueTask: (task) => runner.enqueue(task),
@@ -182,6 +199,17 @@ app.whenReady().then(() => {
     cancelTask: (taskId) => runner.cancel(taskId),
     listTasks: () => store.list(),
     continueTask: (taskId, content) => runner.followUp(taskId, content),
+    onGuard: (goal, reason, detail) => {
+      const task = store.list().find((candidate) => candidate.goalId === goal.id)
+      if (!task) return
+      const event = store.appendEvent(task.id, {
+        ts: Date.now(),
+        kind: 'status',
+        text: `Goal guard ${reason}: ${detail}`,
+        data: { stopReason: reason, goalId: goal.id }
+      })
+      if (event) runner.pushEvent(task.id, event)
+    },
     finalizeIssue: (issueId) => {
       const issue = issueStore.get(issueId)
       if (!issue) return
@@ -198,20 +226,11 @@ app.whenReady().then(() => {
   runner.attachContinue(({ sourceTaskId, issueId, brief, start }) => {
     const source = store.get(sourceTaskId)
     if (!source) return null
-    const title = brief.split(/\r?\n/).map((l) => l.trim()).find(Boolean)?.slice(0, 40) ?? `${source.title}（下一阶段）`
-    const task = createTask({
-      title: `▶ ${title}`,
-      prompt: brief,
-      workdir: source.workdir,
-      agentId: source.agentId,
-      backend: source.backend,
-      issueId,
-      continuesFrom: sourceTaskId,
-      startNow: start !== 'parked'
-    }, 'handoff')
-    if (start !== 'parked') runner.enqueue(store.get(task.id)!)
-    else publishIssueUpdate(store.get(task.id)!)
-    return store.get(task.id)!
+    const task = taskService.createHandoffTask({ sourceTaskId, issueId, brief, start })
+    if (!task) return null
+    if (start !== 'parked' && task.status === 'queued') runner.enqueue(task)
+    else notifyTaskChanged(task)
+    return task
   })
 
   const runAutomation = (id: string) => {
@@ -242,6 +261,7 @@ app.whenReady().then(() => {
     automationStore,
     backends,
     zcode,
+    sidecar: sidecarManager,
     get agents() { return agents },
     set agents(value) { agents = value },
     get presets() { return presets },
@@ -261,6 +281,7 @@ app.whenReady().then(() => {
 app.on('before-quit', async () => {
   if (automationTimer) clearInterval(automationTimer)
   await runner?.shutdown()
+  await sidecarManager?.stop()
   store?.flush()
 })
 

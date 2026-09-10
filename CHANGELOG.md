@@ -4,6 +4,36 @@
 
 ## [Unreleased]
 
+### dsh 专属回合预算（修复超 10 分钟任务被误杀）
+
+- **修复 dsh 任务一旦超过 10 分钟必被看门狗掐断**：dsh headless 是一次性纯文本 CLI——整个运行期 stdout 完全静默、退出前才打印最终回复（无 JSON 流、无 resume，源码契约见 deepseek-harness `packages/bundle/headless`），既产生不了任何续命事件，也没有中间输出刷新 `cli-common` 的空闲看门狗，两层「10 分钟无输出即死」的看门狗都从进程启动起跑且永不重置。现在 dsh 改按**固定回合总预算**裁决（默认 60 分钟，`AGENTDECK_DSH_TURN_MS` 可覆盖）：`dsh.ts` 新增 `DSH_TURN_BUDGET_MS` 并传入 `runCliJsonl` 的 `idleTimeoutMs`，`runner.ts` 的 `turnBudgetMs` 按 backend 取预算供回合层看门狗（武装/续命/超时文案）使用。代价：dsh 真卡死时要等满预算才被判败。
+- **修复回合超时自动重试后看门狗丢失（永久 running）**：零延迟自动重试会在上一回合 `finally cancel` 之前用同一 taskId 换上新看门狗，旧哨兵的 `cancel`/过期回调按 taskId 裸删定时器，恰好删掉后继回合的看门狗——重试回合从此无人看护，永久卡在 running（HEAD 上即可复现，与本次预算改动无关）。`idleSentinel` 现在按武装时的看门狗记录对象核对所有权：`expire`/`cancel` 只动自己的回合，`touchWatchdog` 原地刷新保持记录身份不变。
+- 附带影响：dsh 本不支持 resume，超时重试原本会从头重跑整个任务；配合预算上调后，长任务被拦腰掐断再整段重跑的情况大幅减少。
+- 新增 `smoke:dsh-budget`（静默假 backend 对照：常规后端按空闲阈值判败重试、dsh 按专属预算撑过空闲阈值并完整走完重试链），已并入 `smoke:all`；长期正路是接入 deepseek-harness 的 ACP 服务（`packages/acp`）获得流式事件与真续聊。
+
+### 目标模式可清除（修复停止后卡死 Issue）
+
+- **新增「清除目标模式」**：GoalPanel 标题栏新增清除按钮（危险确认框），任何状态（含已取消/已完成/失败）都可一键清除——非终态目标连带取消在跑任务，随后删除目标及其全部 runs/checkpoints 记录，面板回到可重新开启的空态。此前目标只能「取消」不能删，旧目标永久占据面板、无法重新开启目标模式。
+- **删除即时广播**：新增 `goals:delete` IPC 与 `goals:deleted` 事件（preload bridge + `AgentDeckApi` 契约同步），看板 🎯 角标与详情面板即时摘除，无需刷新。
+- **修复取消后 Issue 被卡死**：`runner.followUp` 原本只放行 done/failed 任务，「取消目标」连带取消任务后追问必报「任务尚未完成」；现在 cancelled 任务也允许追问续聊，停止目标模式的 Issue 可继续手动推进或归档。
+- `GoalStore` 新增 `delete(id)`（级联删除该目标的 runs 与 checkpoints）；`GoalController` 新增 `remove(id)`（非终态先停任务再删记录并清 taskByGoal 登记）；`smoke:goal` 新增场景 10（remove 停任务 + 级联删记录 + 列表移除）。
+
+### 委派 worktree 生命周期回收（修复累积）
+
+- **修复委派 worktree 只建不删**：此前 `runner.ts` 为每个子任务在 `.agentdeck-worktrees/` 下创建的隔离 worktree（及 `agentdeck/<任务>_c<N>` 工作分支）从未被回收，随使用不断累积。现在三处兜底：
+  - 委派循环集成阶段（`delegate.ts`）：子任务改动全部合入集成分支后立即回收其 worktree 并删除已合并的工作分支；合并失败/冲突则保留现场便于排查。子任务无任何可集成改动时也直接回收。
+  - 删除任务（`ipc/tasks.ts` `tasks:delete`）：连带回收该任务及其子任务名下的 worktree。
+  - 启动清扫（`index.ts` → `git.ts` `sweepWorktrees`）：按已知仓库回收上次会话遗留的合并临时目录（`.agentdeck-merge-*`，其 `finally` 兜不住进程被杀）与已不存在任务的委派目录；任务仍在的目录不动（可能存有未提交改动）。
+- `git.ts` 新增 `removeWorktree`（守卫：只动 `.agentdeck-worktrees/` 下的目录，绝不误删回退共享主目录的子任务工作区；从 worktree 内解析主仓库根再执行移除，规避 git 拒绝在 worktree 内部移除自身）、`deleteBranch`、`sweepWorktrees`。
+
+### Loop Engineering 调研与六项目拆解（文档）
+
+- 新增 [docs/LOOP-ENGINEERING.md](docs/LOOP-ENGINEERING.md)：Loop Engineering 方法论综述（prompt→context→loop 谱系、六大构件、LangChain 四层循环、Claude 四种循环类型）、agentdeck 现状映射，以及拆解结果与 12 条行动清单（按改动成本排序，含“明确不学”清单）。
+- 新增 `docs/teardown/` 六份深度拆解报告（共约 26 万字符，结论均带源码 文件:行号 引用）：learn-claude-code（Loop 1 教学实现）、cc-haha（桌面编排同类）、ruflo（多后端 meta-harness）、deer-flow（长时程 SuperAgent）、opencode（agentdeck 上游协议）、ouroboros（Loop 4 自我改进样本）。
+- 关键行动项：opencode 适配器升级 server 模式（当前 `--format json` 视图旁路了 PermissionBroker 并丢弃增量/cost 事件）；goal-controller 增加产出签名熔断 + 拦截上限 + doom-loop 检测；permission-broker 增加审批-版本绑定；scheduler 增加 at-least-once 交付语义。
+- 拆解用克隆位于 `teardown/repos/`（已 gitignore，不入库）。
+- 新增 [`docs/ORCHESTRATION-GOAL-CONSTRUCTION.md`](docs/ORCHESTRATION-GOAL-CONSTRUCTION.md)：把六份 teardown 和架构审查收敛为 Agent 编排/目标模式的阶段施工总册，固定跨阶段不变量、风险台账、验收闸门及阶段 1 交互矩阵范围。
+
 ### 共享目录与技能库
 
 - **共享目录**：AgentDeck 拥有自己的用户资产目录（对标 `~/.claude` 等工具目录），默认 `~/.agentdeck`，可在设置「存储」中更改；首次启动/访问自动生成 `README.md` 与 `skills/`，目录用途与布局说明见 [docs/SKILLS-SHARED-DIR.md](docs/SKILLS-SHARED-DIR.md)。应用状态仍在 userData，两者互不混写。

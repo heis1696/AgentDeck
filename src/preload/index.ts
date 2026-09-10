@@ -2,9 +2,12 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { Task, TaskEvent, AppSettings, Issue, Run, Comment, Notification, Automation, RuntimeSnapshot, AnalyticsSummary, IssuePriority, IssueStatus, RunTrigger } from '../shared/types'
 import type { SkillDetail, SkillMeta, SkillTarget, SyncState } from '../shared/skills'
-import type { AgentDeckApi, AgentInfo, AgentModelCatalog, GoalCheckpointInput, GoalCreateInput, PermissionRequest, PresetInfo } from '../shared/contracts'
+import type { AgentDeckApi, AgentInfo, AgentModelCatalog, GoalCheckpointInput, GoalCreateInput, PermissionRequest, PresetInfo, SidecarSnapshot } from '../shared/contracts'
 
 const api: AgentDeckApi = {
+  worktrees: {
+    prune: () => ipcRenderer.invoke('worktrees:prune')
+  },
   tasks: {
     list: (): Promise<Task[]> => ipcRenderer.invoke('tasks:list'),
     get: (id: string): Promise<Task | null> => ipcRenderer.invoke('tasks:get', id),
@@ -83,10 +86,16 @@ const api: AgentDeckApi = {
     cancel: (id: string) => ipcRenderer.invoke('goals:cancel', id) as Promise<{ ok: boolean; error?: string }>,
     continue: (id: string) => ipcRenderer.invoke('goals:continue', id) as Promise<{ ok: boolean; error?: string }>,
     checkpoint: (id: string, input: GoalCheckpointInput) => ipcRenderer.invoke('goals:checkpoint', id, input) as Promise<import('../shared/types').GoalCheckpoint | null>,
+    delete: (id: string) => ipcRenderer.invoke('goals:delete', id) as Promise<{ ok: boolean; error?: string }>,
     onUpdated: (cb: (goal: import('../shared/types').Goal) => void) => {
       const h = (_e: unknown, goal: import('../shared/types').Goal) => cb(goal)
       ipcRenderer.on('goals:updated', h)
       return () => ipcRenderer.removeListener('goals:updated', h)
+    },
+    onDeleted: (cb: (goalId: string) => void) => {
+      const h = (_e: unknown, goalId: string) => cb(goalId)
+      ipcRenderer.on('goals:deleted', h)
+      return () => ipcRenderer.removeListener('goals:deleted', h)
     }
   },
   automations: {
@@ -128,6 +137,16 @@ const api: AgentDeckApi = {
   },
   analytics: {
     summary: (input?: { since?: number; until?: number }): Promise<AnalyticsSummary> => ipcRenderer.invoke('analytics:summary', input)
+  },
+  sidecar: {
+    status: (): Promise<SidecarSnapshot | null> => ipcRenderer.invoke('sidecar:status'),
+    sync: (): Promise<unknown> => ipcRenderer.invoke('sidecar:sync'),
+    reconnect: (): Promise<SidecarSnapshot | null> => ipcRenderer.invoke('sidecar:reconnect'),
+    onStatus: (cb: (snapshot: SidecarSnapshot) => void) => {
+      const h = (_e: unknown, snapshot: SidecarSnapshot) => cb(snapshot)
+      ipcRenderer.on('sidecar:status', h)
+      return () => ipcRenderer.removeListener('sidecar:status', h)
+    }
   },
   skills: {
     list: (): Promise<{ root: string; skills: SkillMeta[] }> => ipcRenderer.invoke('skills:list'),

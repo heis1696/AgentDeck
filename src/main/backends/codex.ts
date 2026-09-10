@@ -16,7 +16,7 @@ export function createCodexBackend(): AgentBackend {
     events: BackendSessionEvents,
     model?: string,
     /** 本会话当前进程句柄落点：stop/close 只杀自己会话的进程，多任务并发不再串杀/漏杀 */
-    onSpawn?: (runner: { kill: () => void }) => void
+    onSpawn?: (runner: { kill: () => void | Promise<unknown> }) => void
   ): Promise<{ sessionId: string } & BackendTurnResult> => {
     const emit = (e: Omit<TaskEvent, 'seq' | 'ts'>) => events.onEvent({ ...e, ts: Date.now() })
     const resolved = resolveCli('codex')
@@ -129,10 +129,10 @@ export function createCodexBackend(): AgentBackend {
           if (!res.ok) throw new Error(res.error || '回合失败')
         },
         async stop() {
-          own?.kill()
+          await Promise.resolve(own?.kill())
         },
         async close() {
-          own?.kill()
+          await Promise.resolve(own?.kill())
         }
       }
     }

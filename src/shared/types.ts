@@ -39,6 +39,18 @@ export interface Goal {
   totalDurationMs: number
   /** 连续非重试失败次数（自动续轮上限用；续轮成功后清零） */
   failures?: number
+  /** SHA-256 signature of the latest visible AI output. */
+  progressKey?: string
+  /** Consecutive terminal runs with the same progressKey. */
+  noProgress?: number
+  /** Maximum consecutive no-progress runs before human intervention. */
+  noProgressCap?: number
+  /** Consecutive checker blocks for this Goal. */
+  blockCount?: number
+  /** Maximum consecutive checker blocks before human intervention. */
+  blockCap?: number
+  /** Stable machine-readable reason for the latest guard decision. */
+  stopReason?: string
   currentRunId?: string
   agentId?: string
   backend?: string
@@ -237,6 +249,22 @@ export interface IntegrationInfo {
   note?: string
 }
 
+/** Durable ownership and cleanup record for an isolated delegate worktree. */
+export type WorktreeCleanupStatus = 'active' | 'removed' | 'retained' | 'failed'
+
+export interface WorktreeInfo {
+  ownerTaskId: string
+  repoDir: string
+  path: string
+  branch: string
+  baseSha: string
+  createdAt: number
+  cleanupStatus: WorktreeCleanupStatus
+  cleanupReason?: string
+  cleanedAt?: number
+  manualKeep?: boolean
+}
+
 /** 任务累计用量（finalize 时从 events 聚合） */
 export interface TaskUsage {
   inputTokens: number
@@ -274,6 +302,10 @@ export interface Task {
   parentTaskId?: string
   /** 委派子任务专用：序号（展示用） */
   workerIndex?: number
+  /** Worktree 创建失败或工作区非 Git 时的显式降级原因。 */
+  unavailableReason?: string
+  /** 隔离 worktree 的 durable owner/base/cleanup metadata。 */
+  worktree?: WorktreeInfo
   /** 领队任务专用：git 集成结果 */
   integration?: IntegrationInfo
   status: TaskStatus
@@ -296,10 +328,14 @@ export interface Task {
   continuesFrom?: string
   /** 暂不启动：创建后停放在队列外，等用户手动开始 */
   parked?: boolean
+  /** Background work is still running; Goal evaluation must defer. */
+  backgroundRunning?: boolean
   /** 标题由 prompt 首行自动派生（非用户拟定）：首轮完成后由 agent 总结重起，重命名后失效 */
   titleAuto?: boolean
   /** zcode 会话 id，用于续聊 */
   sessionId?: string
+  /** Stable snapshot of task content used to invalidate stale approvals. */
+  workVersion?: string
   /** 完成时抓取的 git 改动 */
   gitDiff?: string
   gitStat?: string
@@ -313,17 +349,95 @@ export interface Task {
 export interface TaskEvent {
   seq: number
   ts: number
-  kind:
-    | 'user' // 用户输入（首条 prompt / 追问），对话视图按它分回合
-    | 'status' // 状态变化/请求状态
-    | 'text' // 流式文本增量
-    | 'final' // 回合最终回复
-    | 'tool' // 工具调用
-    | 'usage' // token 用量
-    | 'error'
-    | 'raw' // 其他协议事件
+  /** Persisted event schema version. `v` is the wire/on-disk spelling. */
+  v?: number
+  /** Read-side alias accepted for callers that use a descriptive name. */
+  version?: number
+  /** Stable producer id used to make retries of an append idempotent. */
+  id?: string
+  eventId?: string
+  /** Provider event name, when `kind` is only a compatibility category. */
+  type?: string
+  /** Original kind retained when an unknown provider event is normalized to raw. */
+  rawKind?: string
+  /** Whether the event is only an in-memory stream update or a durable record. */
+  durability?: TaskEventDurability
+  /** OpenCode-style durable declaration. `false` is accepted for live events. */
+  durable?: TaskEventDurableMetadata | boolean
+  /** Aggregate metadata for durable event streams. */
+  aggregate?: TaskEventAggregateMetadata | string
+  kind: TaskEventKind
   text?: string
   data?: unknown
+}
+
+/** Stable manifest for the compatibility `kind` field. Provider-specific
+ * names remain in TASK_EVENT_MANIFEST below, while this list drives legacy
+ * event normalization. */
+export const TASK_EVENT_KINDS = ['user', 'status', 'text', 'final', 'tool', 'usage', 'error', 'raw'] as const
+export type TaskEventKind = typeof TASK_EVENT_KINDS[number]
+export function isTaskEventKind(value: unknown): value is TaskEventKind {
+  return typeof value === 'string' && (TASK_EVENT_KINDS as readonly string[]).includes(value)
+}
+
+/** Event schema version written by the local EventLog. */
+export const TASK_EVENT_SCHEMA_VERSION = 1 as const
+
+export type TaskEventDurability = 'durable' | 'live'
+
+/** Durable metadata follows the OpenCode event contract while remaining optional. */
+export interface TaskEventDurableMetadata {
+  aggregate: string
+  aggregateId?: string
+  seq?: number
+  version: number
+}
+
+export interface TaskEventAggregateMetadata {
+  aggregate?: string
+  id?: string
+  seq?: number
+  version?: number
+}
+
+/** Single source of truth for the provider event names with special replay semantics. */
+export const TASK_EVENT_MANIFEST = {
+  'text.delta': 'live',
+  'reasoning.delta': 'live',
+  'tool.input.delta': 'live',
+  'compaction.delta': 'live',
+  'text.ended': 'durable',
+  'tool.result': 'durable',
+  'tool.success': 'durable',
+  'tool.error': 'durable'
+} as const
+
+function taskEventDataRecord(event: Pick<TaskEvent, 'data'>): Record<string, unknown> | undefined {
+  return event.data && typeof event.data === 'object' && !Array.isArray(event.data)
+    ? event.data as Record<string, unknown>
+    : undefined
+}
+
+/** Return the provider event name used to select a manifest entry. */
+export function taskEventType(event: Pick<TaskEvent, 'type' | 'data'>): string | undefined {
+  if (typeof event.type === 'string' && event.type) return event.type
+  const data = taskEventDataRecord(event)
+  for (const key of ['type', 'eventType', 'event']) {
+    if (typeof data?.[key] === 'string' && data[key]) return data[key] as string
+  }
+  return undefined
+}
+
+/** Stream fragments are live-only; old `kind: text` events remain durable. */
+export function isTaskEventLiveOnly(event: Pick<TaskEvent, 'kind' | 'type' | 'data' | 'durability' | 'durable'>): boolean {
+  if (event.durability === 'live' || event.durable === false) return true
+  if (event.durability === 'durable' || event.durable === true || (event.durable && typeof event.durable === 'object')) return false
+  const type = taskEventType(event)
+  return !!type && TASK_EVENT_MANIFEST[type as keyof typeof TASK_EVENT_MANIFEST] === 'live'
+}
+
+export function isTaskEventDurable(event: Pick<TaskEvent, 'kind' | 'type' | 'data' | 'durability' | 'durable'>): boolean {
+  return !isTaskEventLiveOnly(event)
 }
 
 export type Theme = 'dark' | 'light' | 'system'

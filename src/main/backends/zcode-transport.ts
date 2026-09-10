@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import path from 'node:path'
-import { isJsonObject, killProcessTree, type JsonValue } from './cli-common'
+import { isJsonObject, killProcessTree, type JsonValue, type KillProcessResult } from './cli-common'
 
 export interface ZcodeWireMessage {
   id?: number | string
@@ -98,7 +98,7 @@ export class ZcodeConnection {
     this.child.stdin!.write(`${JSON.stringify({ id, result })}\n`)
   }
 
-  kill() {
-    killProcessTree(this.child)
+  kill(): Promise<KillProcessResult> {
+    return killProcessTree(this.child)
   }
 }

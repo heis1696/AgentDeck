@@ -5,7 +5,7 @@ import type { Task, TaskEvent } from '../shared/types'
 import type { TaskStore } from './store'
 import type { TaskRunner } from './runner'
 import type { BackendSession, BackendTurnResult } from './backends/types'
-import { isGitRepo, mergeBranchInto, branchDiffSummary, currentBranch, commitAll, branchExists } from './git'
+import { isGitRepo, mergeBranchInto, branchDiffSummary, currentBranch, commitAll, branchExists, reclaimWorktree, deleteBranch, markWorktreeCleanup } from './git'
 
 export interface DelegateCall {
   to: string
@@ -150,7 +150,8 @@ ${roster}
 <round outcome="action|no_action|failed" reason="一句话：本轮结果如何、下一步打算"/>
 系统会并行执行并把结果汇报给你，你继续推进；可多轮派发。
 判断原则：琐碎小事自己做（并行开销不值得）；队员无人能胜任时可亲自完成；需要并行或专长的工作一律派发。
-派发标记输出完即收尾本轮，不必解说等待。最终总结陈述结果而非过程，且不含任何标记。`
+派发标记输出完即收尾本轮，不必解说等待。最终总结陈述结果而非过程，且不含任何标记。
+派发即时生效：标记闭合的瞬间系统就会建单并行执行，不需要确认，也不要因为"没看到动静"而重派同一工作或亲自重做——每轮结果会在本轮结束时自动回灌给你。已派过的工作不要输出第二次；对已派单的进展有疑问，在正文里说明即可，等待回灌。`
 }
 
 /** 把子任务指令里的主仓库绝对路径改写成相对路径（队员在隔离副本工作，绝对路径会改错地方） */
@@ -430,18 +431,66 @@ export async function runDelegationLoop(
       const c = store.get(cid)!
       if (!c.workdir) continue
       // 该子任务需要合入的分支：自己的工作分支（有改动时）+ 它作为子领队的集成分支（二层委派递归交付）
-      const ownBranch = c.gitStat ? `agentdeck/${taskId}_c${idx}` : ''
+      const ownBranch = c.worktree?.branch || (c.gitStat ? `agentdeck/${taskId}_c${idx}` : '')
       const subIntegration = await branchExists(task.workdir, `agentdeck/task-${cid}`) ? `agentdeck/task-${cid}` : ''
-      if (!ownBranch && !subIntegration) continue
+      if (!ownBranch && !subIntegration) {
+        // 没有任何可集成改动，worktree 里没有值得保留的东西：直接回收
+        const reclaimed = await reclaimWorktree(c.workdir)
+        if (c.worktree) store.update(cid, {
+          worktree: {
+            ...c.worktree,
+            cleanupStatus: reclaimed.status,
+            ...(reclaimed.reason ? { cleanupReason: reclaimed.reason } : {}),
+            ...(reclaimed.ok ? { cleanedAt: Date.now() } : {})
+          }
+        })
+        if (!reclaimed.ok) {
+          allOk = false
+          problems.push(`worktree cleanup: ${reclaimed.reason ?? reclaimed.status}`)
+        }
+        continue
+      }
       if (ownBranch) await commitAll(c.workdir, `agentdeck: ${c.title}`)
+      let childOk = true
       for (const b of [ownBranch, subIntegration].filter(Boolean)) {
         const r = await mergeBranchInto(task.workdir, integrationBranch, b!)
         if (!r.ok) {
+          childOk = false
           allOk = false
           problems.push(r.message)
+          if (c.worktree) store.update(cid, {
+            worktree: { ...c.worktree, cleanupStatus: 'retained', cleanupReason: r.message }
+          })
           if (r.conflict) break
         } else {
           mergedCount++
+        }
+      }
+      // 收尾回收：全部合入集成分支后 worktree 即无保留价值（改动都在集成分支上），
+      // 顺带删掉已合并的工作分支；有失败/冲突则保留现场便于排查，留待任务删除时回收
+      if (childOk) {
+        const reclaimed = await reclaimWorktree(c.workdir)
+        if (c.worktree) store.update(cid, {
+          worktree: {
+            ...c.worktree,
+            cleanupStatus: reclaimed.status,
+            ...(reclaimed.reason ? { cleanupReason: reclaimed.reason } : {}),
+            ...(reclaimed.ok ? { cleanedAt: Date.now() } : {})
+          }
+        })
+        if (!reclaimed.ok && reclaimed.status === 'failed') {
+          childOk = false
+          allOk = false
+          problems.push(`worktree cleanup: ${reclaimed.reason ?? 'failed'}`)
+        }
+        if (childOk && ownBranch && !(await deleteBranch(task.workdir, ownBranch))) {
+          childOk = false
+          allOk = false
+          problems.push(`branch cleanup: ${ownBranch}`)
+          if (c.worktree) store.update(cid, {
+            worktree: { ...c.worktree, cleanupStatus: 'retained', cleanupReason: `branch ${ownBranch} could not be deleted` }
+          })
+          await markWorktreeCleanup(c.workdir, 'retained', `branch ${ownBranch} could not be deleted`)
         }
       }
       if (!allOk) break

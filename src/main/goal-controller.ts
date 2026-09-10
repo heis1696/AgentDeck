@@ -1,7 +1,94 @@
-import type { Goal, GoalRun, GoalStatus, Task } from '../shared/types'
+import { createHash } from 'node:crypto'
+import type { Goal, GoalRun, GoalStatus, Task, TaskEvent } from '../shared/types'
 import type { GoalCheckpointInput, GoalCreateInput } from '../shared/contracts'
 import { isTerminalGoalStatus, validateGoalTransition } from '../shared/taskflow'
 import { GoalStore, type GoalCreateRecord } from './goal-store'
+
+export const DEFAULT_BLOCK_CAP = 8
+export const DEFAULT_NO_PROGRESS_CAP = 2
+/** Runner attempts are zero-based: first execution is attempt 0. */
+export const DEFAULT_MAX_RETRY_ATTEMPTS = 2
+export const MAX_PHASE_EXECUTIONS = DEFAULT_MAX_RETRY_ATTEMPTS + 1
+export const DOOM_LOOP_THRESHOLD = 3
+
+export interface GoalToolCall {
+  /** Canonical backend field; `name` is accepted for raw event fixtures. */
+  toolName?: string
+  name?: string
+  input?: unknown
+}
+
+/** Stable JSON for tool arguments so object key ordering cannot evade detection. */
+function stableValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableValue)
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => [key, stableValue(item)]))
+  }
+  return value
+}
+
+function stableJson(value: unknown) {
+  try { return JSON.stringify(stableValue(value)) } catch { return String(value) }
+}
+
+/** SHA-256 signature of exactly the visible model output, excluding evaluator prose. */
+export function progressKeyForOutput(output: string) {
+  return createHash('sha256').update(output.trim(), 'utf8').digest('hex')
+}
+
+/** Compatibility name used by the Goal design notes and integrations. */
+export const computeGoalProgressKey = progressKeyForOutput
+
+/** Backwards-friendly aliases for callers that describe this as a signature. */
+export const stableProgressKey = progressKeyForOutput
+export const computeProgressKey = progressKeyForOutput
+
+/** Returns true when the trailing window contains the same tool and arguments. */
+export function detectDoomLoop(calls: readonly GoalToolCall[], threshold = DOOM_LOOP_THRESHOLD) {
+  if (!Number.isInteger(threshold) || threshold < 2 || calls.length < threshold) return false
+  const window = calls.slice(-threshold)
+  const name = window[0].toolName ?? window[0].name ?? ''
+  const input = stableJson(window[0].input)
+  return !!name && window.every((call) => (call.toolName ?? call.name) === name && stableJson(call.input) === input)
+}
+
+export interface GoalBudgetExplanation {
+  phaseAttempt: number
+  phaseExecutions: number
+  maxPhaseExecutions: number
+  goalFailures: number
+  maxGoalFailures: number
+  goalRuns: number
+  maxGoalRuns: number
+}
+
+/** Human-readable accounting shared by retry and Goal failure paths. */
+export function explainGoalBudget(goal: Pick<Goal, 'runCount' | 'maxRuns' | 'failures'>, task: Pick<Task, 'attempt'>): GoalBudgetExplanation {
+  const phaseAttempt = Math.max(0, task.attempt ?? 0)
+  return {
+    phaseAttempt,
+    phaseExecutions: phaseAttempt + 1,
+    maxPhaseExecutions: MAX_PHASE_EXECUTIONS,
+    goalFailures: Math.max(0, goal.failures ?? 0),
+    maxGoalFailures: 2,
+    goalRuns: Math.max(0, goal.runCount),
+    maxGoalRuns: goal.maxRuns
+  }
+}
+
+function budgetText(goal: Goal, task: Task, nextFailure?: number) {
+  const budget = explainGoalBudget(goal, task)
+  const failures = nextFailure ?? budget.goalFailures
+  return `Phase execution ${budget.phaseExecutions}/${budget.maxPhaseExecutions}; Goal failures ${failures}/${budget.maxGoalFailures}; Goal runs ${budget.goalRuns}/${budget.maxGoalRuns}`
+}
+
+function isBackgroundRunning(task: Task, checkpoint: ParsedCheckpoint | null) {
+  if (task.backgroundRunning === true) return true
+  const text = `${checkpoint?.summary ?? ''} ${checkpoint?.blockers.join(' ') ?? ''}`
+  return /background[_ ]running|background task.*running|后台.*运行/i.test(text)
+}
 
 export interface GoalTaskInput {
   title: string
@@ -14,6 +101,8 @@ export interface GoalTaskInput {
   phaseIndex: number
   trigger: 'autopilot' | 'manual'
   startNow: boolean
+  /** Process-local idempotency key for this Goal phase creation. */
+  dedupeKey?: string
 }
 
 export interface GoalControllerOptions {
@@ -30,6 +119,8 @@ export interface GoalControllerOptions {
   continueTask?: (taskId: string, content: string) => Promise<{ ok: boolean; error?: string }> | { ok: boolean; error?: string }
   /** 完成时调用：Issue 归档 done（v2） */
   finalizeIssue?: (issueId: string) => void
+  /** Optional sink for a human-visible Goal guard event. */
+  onGuard?: (goal: Goal, reason: string, detail: string) => void
 }
 
 export interface GoalDecision {
@@ -37,6 +128,10 @@ export interface GoalDecision {
   complete: boolean
   shouldContinue: boolean
   reason?: string
+  /** Stable guard code for event/UI consumers. */
+  stopReason?: string
+  /** A deferred evaluation must wait for background work to settle. */
+  defer?: boolean
 }
 
 type ParsedCheckpoint = GoalCheckpointInput
@@ -97,6 +192,8 @@ export class GoalController {
   private readonly updateListeners = new Set<(goal: Goal) => void>()
   /** 在飞续轮标记：防止重复派发（goalId+taskId 去重） */
   private readonly inflightContinues = new Set<string>()
+  private readonly toolWindows = new Map<string, GoalToolCall[]>()
+  private readonly doomLoopNotified = new Set<string>()
 
   constructor(goals: GoalStore, options: GoalControllerOptions) {
     this.goals = goals
@@ -113,6 +210,52 @@ export class GoalController {
   get(id: string) { return this.goals.get(id) }
   runs(id: string) { return this.goals.runs(id) }
   checkpoints(id: string) { return this.goals.checkpoints(id) }
+
+  /**
+   * Observe one tool invocation for a Goal task. Callers may feed TaskEvent
+   * records here without coupling the controller to a particular backend.
+   * Doom-loop approval is deliberately a Goal guard, so a later terminal Task
+   * event cannot silently resume it.
+   */
+  observeToolCall(taskId: string, toolName: string, input?: unknown) {
+    const task = this.options.listTasks?.().find((candidate) => candidate.id === taskId)
+    const goalId = task?.goalId ?? [...this.taskByGoal.entries()].find(([, currentTaskId]) => currentTaskId === taskId)?.[0]
+    if (!goalId || !toolName.trim()) return { doomLoop: false as const }
+    const owner = this.goals.get(goalId)
+    if (!owner || (task?.issueId && task.issueId !== owner.issueId)) return { doomLoop: false as const }
+    const calls = this.toolWindows.get(taskId) ?? []
+    calls.push({ toolName: toolName.trim(), name: toolName.trim(), input })
+    // Keep enough history for a trailing-window detector while bounding memory.
+    if (calls.length > DOOM_LOOP_THRESHOLD) calls.splice(0, calls.length - DOOM_LOOP_THRESHOLD)
+    this.toolWindows.set(taskId, calls)
+    if (!detectDoomLoop(calls) || this.doomLoopNotified.has(taskId)) return { doomLoop: false as const }
+    this.doomLoopNotified.add(taskId)
+    const goal = owner
+    if (isTerminalGoalStatus(goal.status)) return { doomLoop: true as const, goal }
+    const reason = `Doom loop detected: ${DOOM_LOOP_THRESHOLD} identical ${toolName.trim()} calls; user approval required`
+    const next = this.goals.update(goal.id, {
+      status: 'waiting_user',
+      blockedReason: reason,
+      stopReason: 'doom_loop'
+    })
+    if (next) {
+      this.emit(next)
+      this.options.onGuard?.(next, 'doom_loop', reason)
+    }
+    return { doomLoop: true as const, goal: next ?? goal, reason }
+  }
+
+  /** Adapt TaskEvent tool payloads to observeToolCall for runner integrations. */
+  onTaskEvent(taskId: string, event: Pick<TaskEvent, 'kind' | 'data' | 'text'>) {
+    if (event.kind !== 'tool') return { doomLoop: false as const }
+    const data = event.data && typeof event.data === 'object' ? event.data as Record<string, unknown> : {}
+    if (data.phase !== undefined && data.phase !== 'started') return { doomLoop: false as const }
+    const toolName = typeof event.text === 'string' ? event.text
+      : typeof data.toolName === 'string' ? data.toolName
+      : typeof data.name === 'string' ? data.name : ''
+    if (!toolName) return { doomLoop: false as const }
+    return this.observeToolCall(taskId, toolName, data.input ?? data.args)
+  }
 
   private emit(goal: Goal | null) {
     if (!goal) return null
@@ -137,6 +280,8 @@ export class GoalController {
     if (!completionConditions.length) throw new Error('At least one completion condition is required')
     if (!Number.isInteger(input.maxRuns) || input.maxRuns < 1 || input.maxRuns > 10000) throw new Error('maxRuns must be an integer between 1 and 10000')
     if (!Number.isFinite(input.maxDurationMs) || input.maxDurationMs <= 0) throw new Error('maxDurationMs must be positive')
+    if (input.blockCap !== undefined && (!Number.isInteger(input.blockCap) || input.blockCap < 1 || input.blockCap > 1000)) throw new Error('blockCap must be an integer between 1 and 1000')
+    if (input.noProgressCap !== undefined && (!Number.isInteger(input.noProgressCap) || input.noProgressCap < 1 || input.noProgressCap > 1000)) throw new Error('noProgressCap must be an integer between 1 and 1000')
     if (typeof input.workdir !== 'string') throw new Error('workdir is required')
     const id = `goal_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
     const record: GoalCreateRecord = {
@@ -146,6 +291,8 @@ export class GoalController {
       stopConditions: cleanLines(input.stopConditions),
       maxRuns: input.maxRuns,
       maxDurationMs: input.maxDurationMs,
+      blockCap: input.blockCap ?? DEFAULT_BLOCK_CAP,
+      noProgressCap: input.noProgressCap ?? DEFAULT_NO_PROGRESS_CAP,
       workdir: input.workdir,
       ...(input.agentId ? { agentId: input.agentId } : {}),
       ...(input.backend ? { backend: input.backend } : {})
@@ -211,7 +358,7 @@ export class GoalController {
     if (!transitioned.ok) return transitioned
     const taskId = this.taskByGoal.get(id)
     if (taskId && this.options.cancelTask) void Promise.resolve(this.options.cancelTask(taskId)).catch(() => {})
-    const updated = this.goals.update(id, { blockedReason: 'Paused by user' })!
+    const updated = this.goals.update(id, { blockedReason: 'Paused by user', stopReason: 'user_pause' })!
     this.emit(updated)
     return { ok: true as const }
   }
@@ -228,10 +375,23 @@ export class GoalController {
     if (goal.totalDurationMs >= goal.maxDurationMs) return { ok: false as const, error: 'Goal duration budget exhausted' }
     const transitioned = this.transition(id, 'active', 'user')
     if (!transitioned.ok) return transitioned
-    const updated = this.goals.update(id, { blockedReason: undefined })!
+    // Continuing is an explicit human acknowledgement of a fuse. Start the
+    // progress/block windows fresh so the previous run cannot immediately
+    // consume the new budget.
+    const updated = this.goals.update(id, {
+      blockedReason: undefined,
+      stopReason: undefined,
+      progressKey: undefined,
+      noProgress: 0,
+      blockCount: 0
+    })!
+    const taskId = this.taskByGoal.get(id)
+    if (taskId) {
+      this.toolWindows.delete(taskId)
+      this.doomLoopNotified.delete(taskId)
+    }
     this.emit(updated)
     // v2：优先对最新 Task 触发续轮（首选 followUp，无则 launchNext）
-    const taskId = this.taskByGoal.get(id)
     if (taskId) {
       void this.triggerContinue(id, taskId, undefined)
       return { ok: true as const }
@@ -247,7 +407,28 @@ export class GoalController {
     if (!transitioned.ok) return transitioned
     const taskId = this.taskByGoal.get(id)
     if (taskId && this.options.cancelTask) void Promise.resolve(this.options.cancelTask(taskId)).catch(() => {})
-    this.emit(transitioned.goal)
+    const updated = this.goals.update(id, { stopReason: 'user_cancel', blockedReason: 'Cancelled by user' })!
+    this.emit(updated)
+    return { ok: true as const }
+  }
+
+  /** 清除目标模式：非终态先停掉在跑任务（同 cancel 的任务侧处理），随后删掉目标及其
+   *  运行/检查点记录。删除后 Issue 与目标模式彻底脱钩——面板回到可重新开启的空态，
+   *  也不会再有任何自动续轮。 */
+  remove(id: string) {
+    const goal = this.goals.get(id)
+    if (!goal) return { ok: false as const, error: 'Goal does not exist' }
+    if (!isTerminalGoalStatus(goal.status)) {
+      const taskId = this.taskByGoal.get(id)
+      if (taskId && this.options.cancelTask) void Promise.resolve(this.options.cancelTask(taskId)).catch(() => {})
+    }
+    const taskId = this.taskByGoal.get(id)
+    if (taskId) {
+      this.toolWindows.delete(taskId)
+      this.doomLoopNotified.delete(taskId)
+    }
+    this.taskByGoal.delete(id)
+    this.goals.delete(id)
     return { ok: true as const }
   }
 
@@ -280,7 +461,7 @@ export class GoalController {
       const candidates = tasks.filter((task) => task.goalId === goal.id).sort((a, b) => b.createdAt - a.createdAt)
       const current = candidates.find((task) => task.status === 'queued' || task.status === 'running') ?? candidates[0]
       if (current) this.taskByGoal.set(goal.id, current.id)
-      const updated = this.goals.update(goal.id, { status: 'waiting_user', blockedReason: 'Application restarted; confirm continuation' })
+      const updated = this.goals.update(goal.id, { status: 'waiting_user', blockedReason: 'Application restarted; confirm continuation', stopReason: 'application_restart' })
       if (updated) { changed.push(updated); this.emit(updated) }
     }
     return changed
@@ -293,6 +474,7 @@ export class GoalController {
     if (!goal) return null
     // v2：只处理该 Issue 的任务（天然收养 <continue> 接力任务——循环跟随 Issue 最新任务）
     if (task.issueId !== goal.issueId) return null
+    const previousTaskId = this.taskByGoal.get(goal.id)
     this.taskByGoal.set(goal.id, task.id)
     if (task.status === 'queued' || task.status === 'running') {
       // A queued task does not have an execution id yet. Persist the GoalRun
@@ -309,9 +491,10 @@ export class GoalController {
     if (!projected) return null
     const retrying = task.status === 'failed' && task.failure?.retryable && (task.attempt ?? 0) < 2
     if (retrying) {
-      const updated = this.goals.update(goal.id, { currentRunId: projected.id, status: 'active', blockedReason: task.error || 'Transient run failure; retrying' })
+      const reason = `${budgetText(goal, task)}; retrying transient failure: ${task.error || 'Run failed'}`
+      const updated = this.goals.update(goal.id, { currentRunId: projected.id, status: 'active', blockedReason: reason, stopReason: undefined })
       this.emit(updated)
-      return { status: 'active', complete: false, shouldContinue: false, reason: task.error || 'Transient run failure; retrying' }
+      return { status: 'active', complete: false, shouldContinue: false, reason }
     }
     // Runner may publish the same terminal snapshot more than once. A
     // checkpoint is the durable idempotency marker for a completed phase.
@@ -346,21 +529,40 @@ export class GoalController {
       durationMs: projected.durationMs ?? duration,
       usage: projected.usage
     })
+    // Progress is derived from the visible model output only. Evaluator prose,
+    // timing and failure wording are intentionally excluded so the same output
+    // cannot evade the no-progress guard by changing its explanation.
+    const output = task.result ?? task.error ?? ''
+    const nextProgressKey = progressKeyForOutput(output)
+    const nextNoProgress = goal.progressKey === nextProgressKey ? (goal.noProgress ?? 0) + 1 : 0
+    this.goals.update(goal.id, { progressKey: nextProgressKey, noProgress: nextNoProgress })
     const decision = this.decide(goal, task, parsed)
     // v2：完成时调用 finalizeIssue（归档 Issue）；非重试失败自动续轮（failures 上限 2）
     if (decision.complete && decision.status === 'completed') {
       this.options.finalizeIssue?.(goal.issueId)
     }
-    if (decision.status !== goal.status) {
-      const next = this.goals.update(goal.id, { status: decision.status, blockedReason: decision.reason })!
+    if (decision.status !== goal.status || decision.reason !== goal.blockedReason || decision.stopReason !== goal.stopReason) {
+      const next = this.goals.update(goal.id, {
+        status: decision.status,
+        blockedReason: decision.reason,
+        ...(decision.stopReason ? { stopReason: decision.stopReason } : { stopReason: undefined })
+      })!
       this.emit(next)
+      if (decision.stopReason) this.options.onGuard?.(next, decision.stopReason, decision.reason ?? decision.stopReason)
     } else {
       this.emit(this.goals.get(goal.id))
     }
     // v2：续轮引擎（首选同会话续聊 continueTask，兜底 launchNext 新任务）
     if (decision.shouldContinue && decision.status === 'active') {
       const next = this.goals.get(goal.id)
-      if (next) void this.triggerContinue(next.id, task.id, parsed)
+      // An explicit <continue> already created the next phase. Do not also
+      // follow up the source session, which would produce a duplicate Run.
+      const hasHandoff = (this.options.listTasks?.() ?? []).some((candidate) =>
+        candidate.continuesFrom === task.id
+        && candidate.issueId === goal.issueId
+        && (candidate.trigger === 'handoff' || candidate.goalId === goal.id)
+      )
+      if (next && previousTaskId === task.id && !hasHandoff) void this.triggerContinue(next.id, task.id, parsed)
     }
     return decision
   }
@@ -368,41 +570,63 @@ export class GoalController {
   private decide(goal: Goal, task: Task, checkpoint: ParsedCheckpoint | null): GoalDecision {
     // A user cancellation wins over the compatibility Task's eventual
     // cancellation callback. Do not resurrect a terminal Goal to waiting_user.
-    if (goal.status === 'cancelled') return { status: 'cancelled', complete: false, shouldContinue: false, reason: goal.blockedReason }
+    if (goal.status === 'cancelled') return { status: 'cancelled', complete: false, shouldContinue: false, reason: goal.blockedReason, stopReason: goal.stopReason }
     if (goal.status === 'completed') return { status: 'completed', complete: true, shouldContinue: false }
-    if (task.status === 'cancelled') return { status: 'waiting_user', complete: false, shouldContinue: false, reason: 'Run cancelled; waiting for user' }
+    // A doom-loop or no-progress fuse is a human decision boundary. Late task
+    // terminal events must not turn that waiting state back into auto-run.
+    if (goal.status === 'waiting_user' && goal.stopReason) {
+      return { status: 'waiting_user', complete: false, shouldContinue: false, reason: goal.blockedReason, stopReason: goal.stopReason }
+    }
+    if (task.status === 'cancelled') return { status: 'waiting_user', complete: false, shouldContinue: false, reason: 'Run cancelled; waiting for user', stopReason: 'cancelled' }
     // TaskRunner may perform a bounded automatic retry for transient failures.
     // Keep the Goal active while that same phase is being re-queued; only a
     // non-retryable or exhausted failure becomes a user-visible failed Goal.
     if (task.status === 'failed' && task.failure?.retryable && (task.attempt ?? 0) < 2) {
-      return { status: 'active', complete: false, shouldContinue: false, reason: task.error || 'Transient run failure; retrying' }
+      return { status: 'active', complete: false, shouldContinue: false, reason: `${budgetText(goal, task)}; retrying transient failure: ${task.error || 'Run failed'}` }
     }
     // v2：非重试失败自动续轮（failures 上限 2；续轮成功后清零）
     if (task.status === 'failed') {
       const failures = (goal.failures ?? 0) + 1
       this.goals.update(goal.id, { failures })
       if (failures < 2) {
-        return { status: 'active', complete: false, shouldContinue: true, reason: `Auto-retry after failure ${failures}/2: ${task.error || 'Run failed'}` }
+        return { status: 'active', complete: false, shouldContinue: true, reason: `${budgetText(goal, task, failures)}; auto-continue after failure: ${task.error || 'Run failed'}` }
       }
-      return { status: 'failed', complete: false, shouldContinue: false, reason: `Failure limit reached (${failures}): ${task.error || 'Run failed'}` }
+      return { status: 'failed', complete: false, shouldContinue: false, reason: `${budgetText(goal, task, failures)}; failure limit reached: ${task.error || 'Run failed'}`, stopReason: 'failure_cap' }
     }
     // 成功续轮时清零 failures
     if (task.status === 'done' && goal.failures) {
       this.goals.update(goal.id, { failures: 0 })
     }
+    if (isBackgroundRunning(task, checkpoint)) {
+      const reason = 'Deferred: background task still running; waiting for its result'
+      return { status: 'active', complete: false, shouldContinue: false, reason, stopReason: 'defer', defer: true }
+    }
     const completed = checkpoint?.completedConditions ?? []
     const complete = goal.completionConditions.every((condition) => completed.some((item) => normalize(item) === normalize(condition) || mentions(completed.join(' '), condition)))
     if (complete) return { status: 'completed', complete: true, shouldContinue: false }
     const stop = goal.stopConditions.find((condition) => mentions(`${checkpoint?.summary ?? ''} ${checkpoint?.blockers.join(' ') ?? ''}`, condition))
-    if (stop) return { status: 'waiting_user', complete: false, shouldContinue: false, reason: `Stop condition: ${stop}` }
-    if (goal.runCount >= goal.maxRuns) return { status: 'blocked', complete: false, shouldContinue: false, reason: 'Run budget exhausted' }
-    if (goal.totalDurationMs >= goal.maxDurationMs) return { status: 'blocked', complete: false, shouldContinue: false, reason: 'Duration budget exhausted' }
+    if (stop) return { status: 'waiting_user', complete: false, shouldContinue: false, reason: `Stop condition: ${stop}`, stopReason: 'stop_condition' }
+    if (goal.runCount >= goal.maxRuns) return { status: 'blocked', complete: false, shouldContinue: false, reason: `Goal run budget exhausted (${goal.runCount}/${goal.maxRuns})`, stopReason: 'run_budget' }
+    if (goal.totalDurationMs >= goal.maxDurationMs) return { status: 'blocked', complete: false, shouldContinue: false, reason: `Goal duration budget exhausted (${goal.totalDurationMs}/${goal.maxDurationMs}ms)`, stopReason: 'duration_budget' }
+    const blockCap = goal.blockCap ?? DEFAULT_BLOCK_CAP
+    const blockCount = (goal.blockCount ?? 0) + 1
+    const noProgress = goal.noProgress ?? 0
+    const noProgressCap = goal.noProgressCap ?? DEFAULT_NO_PROGRESS_CAP
+    if (noProgress >= noProgressCap) {
+      const reason = `No progress guard reached (${noProgress}/${noProgressCap}); waiting for user`
+      return { status: 'waiting_user', complete: false, shouldContinue: false, reason, stopReason: 'no_progress' }
+    }
+    this.goals.update(goal.id, { blockCount })
+    if (blockCount >= blockCap) {
+      const reason = `Checker block cap reached (${blockCount}/${blockCap}); waiting for user`
+      return { status: 'waiting_user', complete: false, shouldContinue: false, reason, stopReason: 'block_cap' }
+    }
     return { status: 'active', complete: false, shouldContinue: true }
   }
 
   private launchNext(goal: Goal, enqueue = true): { ok: boolean; error?: string; task?: Task } {
-    if (goal.runCount >= goal.maxRuns) return { ok: false, error: 'Goal run budget exhausted' }
-    if (goal.totalDurationMs >= goal.maxDurationMs) return { ok: false, error: 'Goal duration budget exhausted' }
+    if (goal.runCount >= goal.maxRuns) return { ok: false, error: `Goal run budget exhausted (${goal.runCount}/${goal.maxRuns})` }
+    if (goal.totalDurationMs >= goal.maxDurationMs) return { ok: false, error: `Goal duration budget exhausted (${goal.totalDurationMs}/${goal.maxDurationMs}ms)` }
     const phaseIndex = goal.runCount
     const previous = this.goals.checkpoints(goal.id).at(-1)
     // v2：首个 Task（phaseIndex=0）注入目标模式块（§4.1）
@@ -431,6 +655,7 @@ export class GoalController {
         goalId: goal.id,
         phaseIndex,
         trigger: phaseIndex === 0 ? 'manual' : 'autopilot',
+        dedupeKey: `goal_${goal.id}:phase_${phaseIndex}`,
         startNow: enqueue
       })
       this.taskByGoal.set(goal.id, task.id)
@@ -440,7 +665,7 @@ export class GoalController {
       return { ok: true, task }
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error)
-      const updated = this.goals.update(goal.id, { status: 'failed', blockedReason: reason })
+      const updated = this.goals.update(goal.id, { status: 'failed', blockedReason: reason, stopReason: 'launch_failed' })
       this.emit(updated)
       return { ok: false, error: reason }
     }

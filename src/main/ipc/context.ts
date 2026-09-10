@@ -6,24 +6,12 @@ import type { GoalController } from '../goal-controller'
 import type { IssueStore } from '../issue-store'
 import type { TaskRunner } from '../runner'
 import type { TaskStore } from '../store'
+import type { CreateTaskInput } from '../task-service'
 import type { AgentBackend } from '../backends/types'
 import type { AppSettings, RunTrigger, Task } from '../../shared/types'
+import type { SidecarManager } from '../sidecar'
 
-export interface CreateTaskInput {
-  title: string
-  prompt: string
-  workdir: string
-  backend?: string
-  agentId?: string
-  handoff?: string
-  startNow?: boolean
-  suppressIssue?: boolean
-  issueId?: string
-  titleAuto?: boolean
-  continuesFrom?: string
-  goalId?: string
-  phaseIndex?: number
-}
+export type { CreateTaskInput } from '../task-service'
 
 export interface IpcContext {
   getWindow: () => BrowserWindow | null
@@ -38,6 +26,8 @@ export interface IpcContext {
   readonly automationStore: AutomationStore
   readonly backends: Map<string, AgentBackend>
   readonly zcode: AgentBackend
+  /** Optional business-brain sidecar. Legacy/test contexts may omit it. */
+  readonly sidecar?: SidecarManager
   get agents(): Agent[]
   set agents(value: Agent[])
   get presets(): ApiPreset[]

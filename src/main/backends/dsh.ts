@@ -10,6 +10,15 @@ import { resolveCli, findOnPath, findSystemNode } from './cli-locator'
 
 const DSH_BIN = path.join('apps', 'cli', 'lib', 'bin.js')
 
+/**
+ * dsh headless 的回合预算：整个运行期 stdout 静默、退出前才打印最终回复，
+ * 没有"无输出=卡死"的可观测信号，空闲超时语义不适用，改按固定总预算裁决。
+ * AGENTDECK_DSH_TURN_MS 可覆盖（测试加速用）；runner 回合层看门狗取同一值。
+ */
+export const DSH_TURN_BUDGET_MS = Number(process.env.AGENTDECK_DSH_TURN_MS) > 0
+  ? Number(process.env.AGENTDECK_DSH_TURN_MS)
+  : 60 * 60 * 1000
+
 /** 候选安装根目录 */
 function dshRootCandidates(): string[] {
   const roots = [
@@ -55,7 +64,7 @@ export function createDshBackend(getPaths: () => { dshPath: string }): AgentBack
     workdir: string,
     events: BackendSessionEvents,
     /** 本会话当前进程句柄落点：stop/close 只杀自己会话的进程，多任务并发不再串杀/漏杀 */
-    onSpawn?: (runner: { kill: () => void }) => void
+    onSpawn?: (runner: { kill: () => void | Promise<unknown> }) => void
   ): Promise<{ response: string; ok: boolean; error?: string }> => {
     // 每次调用现取设置，设置页改路径后无需重启即可生效
     const dsh = findDshBin(getPaths().dshPath || undefined)
@@ -79,6 +88,8 @@ export function createDshBackend(getPaths: () => { dshPath: string }): AgentBack
       // node 可能是 electron 充当（findSystemNode 找不到时的回退）：
       // 不加此标记会按 GUI 应用启动、不退出，子任务只能等看门狗超时
       env: { ELECTRON_RUN_AS_NODE: '1' },
+      // 运行期零输出，默认 10 分钟空闲看门狗会把还在干活的 dsh 杀掉：改用固定回合预算
+      idleTimeoutMs: DSH_TURN_BUDGET_MS,
       onLine: () => {}, // 输出是纯文本非 JSON
       onRaw: (line) => {
         out += line + '\n'
@@ -134,10 +145,10 @@ export function createDshBackend(getPaths: () => { dshPath: string }): AgentBack
           throw new Error('dsh 无头模式不支持续聊（请新建任务）')
         },
         async stop() {
-          own?.kill()
+          await Promise.resolve(own?.kill())
         },
         async close() {
-          own?.kill()
+          await Promise.resolve(own?.kill())
         }
       }
     }

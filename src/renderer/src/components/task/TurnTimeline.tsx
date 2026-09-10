@@ -1,5 +1,5 @@
 import { Undo2 } from 'lucide-react'
-import type { RefObject } from 'react'
+import { useEffect, useRef, useState, type CSSProperties, type RefObject } from 'react'
 import { Markdown } from '../Markdown'
 import { fmtDuration } from '../../api'
 import type { Task, TaskEvent } from '../../../../shared/types'
@@ -39,6 +39,91 @@ function firstLine(value: string) {
   return line.length > 100 ? line.slice(0, 100) + '…' : line
 }
 
+// 迷你导航悬停预览：用户首行 + 最近的回复首行
+function turnPreview(turn: Turn): { title: string; body: string } {
+  const title = (turn.userText ?? '').split('\n')[0].replace(/\s+/g, ' ').trim()
+  let replyText = ''
+  for (let i = turn.items.length - 1; i >= 0; i--) {
+    const item = turn.items[i]
+    if ((item.type === 'final' || item.type === 'text') && item.text.trim()) { replyText = item.text.trim(); break }
+  }
+  const bodyLine = replyText.split('\n').map((line) => line.trim()).filter(Boolean)[0] ?? ''
+  return {
+    title: title.length > 46 ? title.slice(0, 46) + '…' : title,
+    body: bodyLine.length > 80 ? bodyLine.slice(0, 80) + '…' : bodyLine
+  }
+}
+
+// ZCode 式回合索引线：固定不随滚动，线组在左缘垂直居中、等距排列；
+// 线宽编码回合内容量占比；静默态淡灰、悬停加长提亮（带动画）、当前回合青色高亮；
+// 悬停弹出该回合预览，点击跳转。
+function TurnMinimap({ turns, activeNav, onNavigate }: { turns: Turn[]; activeNav: number; onNavigate: (index: number) => void }) {
+  const railRef = useRef<HTMLDivElement>(null)
+  const popRef = useRef<HTMLDivElement>(null)
+  const hoveredRef = useRef(-1)
+  const [railH, setRailH] = useState(0)
+  const [hovered, setHovered] = useState(-1)
+
+  useEffect(() => {
+    const rail = railRef.current
+    if (!rail) return
+    const measure = () => setRailH(rail.clientHeight)
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(rail)
+    return () => observer.disconnect()
+    // 首回合为空时轨道未挂载，回合出现后需重新挂上测量
+  }, [turns.length])
+
+  const enter = (index: number) => {
+    hoveredRef.current = index
+    setHovered(index)
+    const pop = popRef.current
+    const rail = railRef.current
+    if (pop && rail) {
+      // 与线条同高对齐，夹在轨道范围内
+      const top = itemTop(index)
+      pop.style.top = `${Math.max(18, Math.min(top, rail.clientHeight - 34))}px`
+    }
+  }
+  const leave = () => {
+    hoveredRef.current = -1
+    setHovered(-1)
+  }
+
+  // 线距固定 10px，回合过多时压缩间距塞进轨道；线组整体垂直居中，数量增长时两端对称扩展
+  const itemTop = (index: number) => {
+    const n = turns.length
+    const pitch = n > 1 ? Math.min(10, Math.max(5, (railH - 40) / (n - 1))) : 0
+    return railH / 2 - (pitch * (n - 1)) / 2 + pitch * index
+  }
+
+  if (!turns.length) return null
+  const preview = hovered >= 0 ? turnPreview(turns[hovered]) : null
+  return (
+    <div className="chat-minimap" ref={railRef} onMouseLeave={leave}>
+      {turns.map((_, index) => (
+        <button
+          key={index}
+          type="button"
+          className={`chat-minimap-item${index === activeNav ? ' active' : ''}`}
+          style={{ top: `${itemTop(index)}px` }}
+          onMouseEnter={() => enter(index)}
+          onFocus={() => enter(index)}
+          onClick={() => onNavigate(index)}
+          aria-label={`回合 ${index + 1}`}
+        />
+      ))}
+      {hovered >= 0 && preview && (
+        <div ref={popRef} className="chat-minimap-pop" style={{ top: itemTop(hovered) }} role="tooltip">
+          <div className="chat-minimap-pop-head"><span className="chat-minimap-pop-idx">{hovered + 1}</span>{preview.title || navSummary(turns[hovered], hovered)}</div>
+          {preview.body && <div className="chat-minimap-pop-body">{preview.body}</div>}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function LogLine({ event }: { event: TaskEvent }) {
   const time = new Date(event.ts).toISOString().slice(11, 19)
   if (event.kind === 'status') return <div className="log-line status"><span className="ts">{time}</span> {event.text}</div>
@@ -57,7 +142,7 @@ export function TurnTimeline({ task, turns, activeNav, onNavigate, onRewind, log
   const active = task.status === 'running'
   return (
     <div className="chat-wrap">
-      {turns.length > 0 && <nav className="chat-nav"><div className="chat-nav-head">对话导航<span className="chat-nav-count">{turns.length} 回合</span></div>{turns.map((turn, index) => <button key={index} type="button" className={`chat-nav-item${index === activeNav ? ' active' : ''}`} onClick={() => onNavigate(index)}><span className="chat-nav-idx">{index + 1}</span><span className="chat-nav-label">{navSummary(turn, index)}</span>{index === turns.length - 1 && active ? <span className="chat-nav-state running" aria-label="执行中" /> : <span className="chat-nav-state" aria-label="已完成">✓</span>}</button>)}</nav>}
+      <TurnMinimap turns={turns} activeNav={activeNav} onNavigate={onNavigate} />
       <div className="log chat" ref={logRef} onScroll={onScroll}>
         {turns.map((turn, index) => {
           const streaming = index === turns.length - 1 && active
@@ -74,10 +159,10 @@ export function TurnTimeline({ task, turns, activeNav, onNavigate, onRewind, log
             {turn.items.map((item, itemIndex) => {
               if (item.type === 'work') return <details className="worklog" key={itemIndex} open={streaming && itemIndex === lastWorkIndex ? true : undefined}><summary>🔧 工作过程（{item.work.filter((event) => event.kind === 'tool').length} 次工具调用）<ToolChips work={item.work} /></summary><div className="worklog-body">{item.work.map((event) => <LogLine key={event.seq} event={event} />)}</div></details>
               if (item.type === 'final') return <div className="bubble agent" key={itemIndex}><Markdown text={item.text} />{turn.usage && <UsageBadge usage={turn.usage} />}</div>
-              return <div className="bubble agent" key={itemIndex}>{item.closed ? <Markdown text={item.text} /> : <pre className="streaming">{item.text}</pre>}{streaming && !item.closed && <div className="log-running">● 回复中…</div>}{turn.usage && finalIndex < 0 && itemIndex === lastBubbleIndex && <UsageBadge usage={turn.usage} />}</div>
+              return <div className="bubble agent" key={itemIndex}>{item.closed ? <Markdown text={item.text} /> : <pre className="streaming">{item.text}</pre>}{streaming && !item.closed && <div className="log-running"><span className="dots"><i /><i /><i /></span>回复中…</div>}{turn.usage && finalIndex < 0 && itemIndex === lastBubbleIndex && <UsageBadge usage={turn.usage} />}</div>
             })}
-            {streaming && !endsWithOpenText && <div className="bubble agent"><div className="log-running">● 回复中…</div></div>}
-            {pending && <div className="bubble agent"><div className="log-running">排队等待执行…</div></div>}
+            {streaming && !endsWithOpenText && <div className="bubble agent"><div className="log-running"><span className="dots"><i /><i /><i /></span>回复中…</div></div>}
+            {pending && <div className="bubble agent"><div className="log-running"><span className="dots"><i /><i /><i /></span>排队等待执行…</div></div>}
           </div>
         })}
         {turns.length === 0 && <div className="list-empty">（无对话内容）</div>}

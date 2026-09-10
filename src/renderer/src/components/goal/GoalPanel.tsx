@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Target, Play, Pause, XCircle, RotateCw, ChevronDown, ChevronRight, CircleCheck, CircleDashed, Zap } from 'lucide-react'
+import { Target, Play, Pause, XCircle, RotateCw, ChevronDown, ChevronRight, CircleCheck, CircleDashed, Zap, Trash2 } from 'lucide-react'
 import { bridge, fmtDuration, fmtTime } from '../../api'
 import { toast } from '../../ui/Toasts'
 import { Menu } from '../../ui/Menu'
+import { confirmDialog } from '../../ui/Confirm'
 import { GOAL_STATUS_LABELS } from '../../labels'
 import type { Goal, GoalCheckpoint, GoalRun, Task } from '../../../../shared/types'
 import type { AgentInfo } from '../../../../shared/contracts'
@@ -57,8 +58,9 @@ export function GoalPanel({ task, issueId }: { task: Task; issueId: string }) {
       if (g.issueId !== issueId) return
       setGoal((cur) => (!cur || g.id === cur.id || g.updatedAt >= cur.updatedAt) ? g : cur)
     })
+    const offDeleted = bridge.goals.onDeleted((goalId) => setGoal((cur) => (cur?.id === goalId ? null : cur)))
     void bridge.agents.list().then((list) => { if (alive) setAgents(list) }).catch(() => {})
-    return () => { alive = false; off() }
+    return () => { alive = false; off(); offDeleted() }
   }, [issueId])
 
   const loadDetail = useCallback(async (id: string) => {
@@ -88,6 +90,28 @@ export function GoalPanel({ task, issueId }: { task: Task; issueId: string }) {
     setBusy(true)
     const res = await bridge.goals.cancel(goal.id).catch((e) => ({ ok: false, error: e instanceof Error ? e.message : String(e) }))
     if (!res.ok) toast.error(`取消失败: ${res.error ?? '未知错误'}`)
+    setBusy(false)
+  }
+
+  /** 清除目标模式：删掉目标及其 checkpoint（运行中任务连带取消），面板回到可重新开启的空态 */
+  const removeGoal = async () => {
+    if (!goal || busy) return
+    const yes = await confirmDialog({
+      title: '清除目标模式',
+      body: '将删除该目标及其全部 checkpoint 记录，运行中的任务会被取消。清除后本 Issue 不再被目标模式锁定，可重新开启。',
+      danger: true,
+      confirmText: '清除'
+    })
+    if (!yes) return
+    setBusy(true)
+    const res = await bridge.goals.delete(goal.id).catch((e) => ({ ok: false, error: e instanceof Error ? e.message : String(e) }))
+    if (res.ok) {
+      setGoal(null)
+      setCheckpoints([])
+      setRuns([])
+    } else {
+      toast.error(`清除失败: ${res.error ?? '未知错误'}`)
+    }
     setBusy(false)
   }
 
@@ -131,6 +155,9 @@ export function GoalPanel({ task, issueId }: { task: Task; issueId: string }) {
       {goal && !['completed', 'cancelled'].includes(goal.status) && (
         <button className="btn ghost agent-del" title="取消目标" disabled={busy} onClick={() => void cancelGoal()}><XCircle size={13} /></button>
       )}
+      {goal && (
+        <button className="btn ghost agent-del" title="清除目标模式：删除目标及其 checkpoint，运行中的任务会被取消" disabled={busy} onClick={() => void removeGoal()}><Trash2 size={13} /></button>
+      )}
       {goal && <button className="btn ghost agent-del" title={expanded ? '收起' : '展开 checkpoint'} onClick={toggle}>{expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}</button>}
     </div>
     {!goal && <div className="goal-panel-empty">
@@ -145,6 +172,13 @@ export function GoalPanel({ task, issueId }: { task: Task; issueId: string }) {
         {goal.currentRunId ? ' · 执行中' : ''}
         {goal.failures ? ` · 失败 ${goal.failures}/2` : ''}
       </div>
+      {(goal.stopReason || (goal.noProgress ?? 0) > 0 || (goal.blockCount ?? 0) > 0) && (
+        <div className="hint goal-panel-reason">
+          {goal.stopReason ? `护栏：${goal.stopReason}` : '护栏监测中'}
+          {(goal.noProgress ?? 0) > 0 ? ` · 连续无进展 ${goal.noProgress}` : ''}
+          {(goal.blockCount ?? 0) > 0 ? ` · 裁判拦截 ${goal.blockCount}/${goal.blockCap ?? 8}` : ''}
+        </div>
+      )}
       {goal.blockedReason && <div className="hint goal-panel-reason" title={goal.blockedReason}>{goal.blockedReason}</div>}
       <div className="goal-panel-actions">
         {goalActions(goal.status).map(({ key, label, icon: Icon }) => (

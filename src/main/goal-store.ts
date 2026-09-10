@@ -20,6 +20,8 @@ export interface GoalCreateRecord {
   stopConditions: string[]
   maxRuns: number
   maxDurationMs: number
+  blockCap?: number
+  noProgressCap?: number
   workdir: string
   agentId?: string
   backend?: string
@@ -95,7 +97,13 @@ export class GoalStore {
         completionConditions: stringArray(goal.completionConditions),
         stopConditions: stringArray(goal.stopConditions),
         runCount: Number.isFinite(goal.runCount) ? goal.runCount : 0,
-        totalDurationMs: Number.isFinite(goal.totalDurationMs) ? goal.totalDurationMs : 0
+        totalDurationMs: Number.isFinite(goal.totalDurationMs) ? goal.totalDurationMs : 0,
+        noProgress: typeof goal.noProgress === 'number' && Number.isFinite(goal.noProgress) ? Math.max(0, goal.noProgress) : 0,
+        noProgressCap: typeof goal.noProgressCap === 'number' && Number.isFinite(goal.noProgressCap) && goal.noProgressCap > 0 ? Math.floor(goal.noProgressCap) : 2,
+        blockCount: typeof goal.blockCount === 'number' && Number.isFinite(goal.blockCount) ? Math.max(0, goal.blockCount) : 0,
+        blockCap: typeof goal.blockCap === 'number' && Number.isFinite(goal.blockCap) && goal.blockCap > 0 ? Math.floor(goal.blockCap) : 8,
+        ...(typeof goal.progressKey === 'string' && goal.progressKey ? { progressKey: goal.progressKey } : {}),
+        ...(typeof goal.stopReason === 'string' && goal.stopReason ? { stopReason: goal.stopReason } : {})
       })) : []
       const runs = Array.isArray(parsed.runs) ? parsed.runs.filter((run): run is GoalRun => record(run)
         && typeof run.id === 'string' && !!run.id
@@ -154,9 +162,13 @@ export class GoalStore {
       stopConditions: [...input.stopConditions],
       maxRuns: input.maxRuns,
       maxDurationMs: input.maxDurationMs,
+      blockCap: input.blockCap ?? 8,
       status: input.status ?? 'draft',
       runCount: 0,
       totalDurationMs: 0,
+      noProgress: 0,
+      noProgressCap: input.noProgressCap ?? 2,
+      blockCount: 0,
       ...(input.agentId ? { agentId: input.agentId } : {}),
       ...(input.backend ? { backend: input.backend } : {}),
       ...(input.workdir ? { workdir: input.workdir } : {}),
@@ -174,6 +186,17 @@ export class GoalStore {
     Object.assign(goal, patch, { updatedAt: Date.now() })
     this.save()
     return goal
+  }
+
+  /** 删除目标及其全部运行/检查点记录（「清除目标模式」用）；id 不存在返回 false */
+  delete(id: string): boolean {
+    const before = this.data.goals.length
+    this.data.goals = this.data.goals.filter((goal) => goal.id !== id)
+    if (this.data.goals.length === before) return false
+    this.data.runs = this.data.runs.filter((run) => run.goalId !== id)
+    this.data.checkpoints = this.data.checkpoints.filter((checkpoint) => checkpoint.goalId !== id)
+    this.save()
+    return true
   }
 
   runs(goalId: string): GoalRun[] {

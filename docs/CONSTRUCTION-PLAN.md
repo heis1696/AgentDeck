@@ -6,6 +6,8 @@
 >
 > 约束：保持本地单机和现有 Electron 边界；第一阶段不新增状态管理库或测试框架；每一阶段都可独立回滚，并在阶段末执行 typecheck 和相关 smoke。
 
+> 编排与目标模式的最新施工顺序、学习结论、不变量和交互矩阵入口见 [`docs/ORCHESTRATION-GOAL-CONSTRUCTION.md`](ORCHESTRATION-GOAL-CONSTRUCTION.md)。本文保留 0.14–0.18 的架构拆分历史，实施时以后者的阶段闸门为准。
+
 ---
 
 ## 1. 当前基线

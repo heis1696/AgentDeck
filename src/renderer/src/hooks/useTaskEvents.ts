@@ -44,6 +44,12 @@ export function useTaskEvents(taskId: string) {
     const offPermission = bridge.tasks.onPermission((id, request) => {
       if (id === taskId) setPermission(request)
     })
+    // A sidecar reconnect is an authoritative boundary: replay the durable
+    // snapshot before accepting the next live event, retaining any event
+    // delivered while the read is in flight.
+    const offSidecar = bridge.sidecar.onStatus((snapshot) => {
+      if (snapshot.status === 'ready') void refresh()
+    })
     return () => {
       mountedRef.current = false
       ++requestRef.current
@@ -52,6 +58,7 @@ export function useTaskEvents(taskId: string) {
       offEvent()
       offInvalidated()
       offPermission()
+      offSidecar()
     }
   }, [refresh, taskId])
 

@@ -12,15 +12,44 @@ export function isJsonObject(value: unknown): value is JsonObject {
   return !!value && typeof value === 'object' && !Array.isArray(value)
 }
 
-/** Kill a CLI and every tool process it spawned. */
-export function killProcessTree(child: ChildProcess) {
-  try {
-    if (process.platform === 'win32' && child.pid) {
-      spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
-    } else {
-      child.kill('SIGKILL')
+export interface KillProcessResult {
+  ok: boolean
+  code?: number | null
+  error?: string
+}
+
+/** Kill a CLI and every tool process it spawned, returning when the kill
+ * request has completed. The bounded wait keeps shutdown observable without
+ * hanging forever on a provider that ignores termination. */
+export function killProcessTree(child: ChildProcess): Promise<KillProcessResult> {
+  return new Promise((resolve) => {
+    let settled = false
+    let timer: NodeJS.Timeout | undefined
+    const finish = (result: KillProcessResult) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      resolve(result)
     }
-  } catch {}
+    timer = setTimeout(() => finish({ ok: false, error: 'process kill timed out' }), 2_000)
+    const onExit = (code: number | null) => finish({ ok: true, code })
+    const onError = (error: Error) => finish({ ok: false, error: error.message })
+    child.once('exit', onExit)
+    child.once('error', onError)
+    try {
+      if (process.platform === 'win32' && child.pid) {
+        const killer = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+        killer.once('error', onError)
+        killer.once('close', (code) => finish(code === 0 ? { ok: true, code } : { ok: false, code, error: `taskkill exited ${code}` }))
+      } else if (child.killed || child.exitCode !== null) {
+        finish({ ok: true, code: child.exitCode })
+      } else if (!child.kill('SIGKILL')) {
+        finish({ ok: false, error: 'process kill was rejected' })
+      }
+    } catch (error) {
+      finish({ ok: false, error: error instanceof Error ? error.message : String(error) })
+    }
+  })
 }
 
 export function jsonObject(value: unknown): JsonObject {
@@ -46,7 +75,7 @@ export interface CliJsonlRunner {
     lineCount: number
     parseErrors: number
   }>
-  kill: () => void
+  kill: () => Promise<KillProcessResult>
 }
 
 export function runCliJsonl(opts: {
@@ -75,11 +104,13 @@ export function runCliJsonl(opts: {
   let killed = false
   let lineCount = 0
   let parseErrors = 0
+  let killPromise: Promise<KillProcessResult> | undefined
   /** 杀整棵进程树：CLI 会再起自己的子进程（shell/工具进程），只 kill 直接子进程会留下
    *  继续打 API 的孤儿（429 残留来源之一）。Windows 用 taskkill /T /F 走 PID 树。 */
   const killTree = () => {
     killed = true
-    killProcessTree(child)
+    if (!killPromise) killPromise = killProcessTree(child)
+    return killPromise
   }
   const idleTimer = setTimeout(() => {
     killTree()
@@ -138,7 +169,7 @@ export function runCliJsonl(opts: {
     child,
     exited,
     kill() {
-      killTree()
+      return killTree()
     }
   }
 }

@@ -59,9 +59,17 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   const updateActiveNav = () => {
     const element = scrollEl()
     if (!element) return
+    const nodes = element.querySelectorAll<HTMLElement>('.turn')
+    if (!nodes.length) { setActiveNav(0); return }
+    // 滚到底（含新消息后自动跟随最新内容）时，当前回合就是最新回合——
+    // 否则短的新回合在视口下半部永远够不着顶部门线，高亮会卡在上一条
+    if (element.scrollHeight - element.scrollTop - element.clientHeight < 40) {
+      setActiveNav(nodes.length - 1)
+      return
+    }
     const top = element.getBoundingClientRect().top
     let active = 0
-    element.querySelectorAll<HTMLElement>('.turn').forEach((node, index) => { if (node.getBoundingClientRect().top - top <= 80) active = index })
+    nodes.forEach((node, index) => { if (node.getBoundingClientRect().top - top <= 80) active = index })
     setActiveNav(active)
   }
   const onLogScroll = () => {

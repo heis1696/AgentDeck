@@ -465,7 +465,7 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
               new Promise((r) => setTimeout(r, 1500))
             ])
           } catch {}
-          conn.kill()
+          await conn.kill()
         }
       }
       return session

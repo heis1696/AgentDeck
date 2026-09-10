@@ -4,10 +4,37 @@
 // 续聊：-s <sessionId>
 import type { AgentBackend, BackendSession, BackendSessionEvents } from './types'
 import type { TaskEvent } from '../../shared/types'
-import { isJsonObject, jsonObject, jsonString, runCliJsonl, toolEvent } from './cli-common'
-import { resolveCli, probeCli } from './cli-locator'
+import { isJsonObject, jsonObject, jsonString, runCliJsonl, toolEvent, killProcessTree } from './cli-common'
+import { resolveCli, probeCli, type ResolvedCli } from './cli-locator'
+import { createOpencodeServerBackend, OpencodeServerClient, OpencodeServerVersionError, OpencodeServerUnavailableError, type FetchLike } from './opencode-server'
+import { spawn, type ChildProcess } from 'node:child_process'
+import { createServer } from 'node:net'
 
-export function createOpencodeBackend(): AgentBackend {
+interface SidecarState {
+  url: string
+  child: ChildProcess
+  users: number
+}
+
+async function freePort(): Promise<number> {
+  const server = createServer()
+  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', () => resolve()) })
+  const address = server.address()
+  const port = typeof address === 'object' && address ? address.port : 0
+  await new Promise<void>((resolve) => server.close(() => resolve()))
+  if (!port) throw new Error('could not allocate OpenCode server port')
+  return port
+}
+
+export interface OpencodeBackendOptions {
+  serverUrl?: string
+  required?: boolean
+  cliOnly?: boolean
+  skipVersionProbe?: boolean
+  fetch?: FetchLike
+}
+
+export function createOpencodeBackend(config: OpencodeBackendOptions = {}): AgentBackend {
 
   const runOnce = (
     prompt: string,
@@ -16,7 +43,7 @@ export function createOpencodeBackend(): AgentBackend {
     events: BackendSessionEvents,
     model?: string,
     /** 本会话当前进程句柄落点：stop/close 只杀自己会话的进程，多任务并发不再串杀/漏杀 */
-    onSpawn?: (runner: { kill: () => void }) => void
+    onSpawn?: (runner: { kill: () => void | Promise<unknown> }) => void
   ): Promise<{ sessionId: string; response: string; ok: boolean; error?: string }> => {
     const emit = (e: Omit<TaskEvent, 'seq' | 'ts'>) => events.onEvent({ ...e, ts: Date.now() })
     const resolved = resolveCli('opencode')
@@ -105,7 +132,7 @@ export function createOpencodeBackend(): AgentBackend {
     return done
   }
 
-  return {
+  const cliBackend: AgentBackend = {
     id: 'opencode',
     label: 'OpenCode',
     async probe() {
@@ -126,11 +153,125 @@ export function createOpencodeBackend(): AgentBackend {
           if (!res.ok) throw new Error(res.error || '回合失败')
         },
         async stop() {
-          own?.kill()
+          await Promise.resolve(own?.kill())
         },
         async close() {
-          own?.kill()
+          await Promise.resolve(own?.kill())
         }
+      }
+    }
+  }
+
+  // Server mode is the preferred transport. A user-provided URL avoids a
+  // second process; otherwise a local `opencode serve` is started lazily.
+  // The old JSONL adapter remains the explicit fallback for unavailable
+  // servers, preserving historical Task/Run records and CLI behavior.
+  const configuredUrl = (config.serverUrl ?? process.env.AGENTDECK_OPENCODE_SERVER_URL ?? process.env.OPENCODE_SERVER_URL ?? '').trim()
+  const required = config.required ?? /^(1|true|required)$/i.test(process.env.AGENTDECK_OPENCODE_SERVER_REQUIRED || '')
+  const disabled = config.cliOnly ?? /^(1|true|cli)$/i.test(process.env.AGENTDECK_OPENCODE_CLI_ONLY || '')
+  const skipVersionProbe = config.skipVersionProbe ?? /^(1|true)$/i.test(process.env.AGENTDECK_OPENCODE_SERVER_SKIP_VERSION || '')
+  let sidecar: SidecarState | undefined
+  let sidecarStarting: Promise<SidecarState> | undefined
+
+  const stopSidecar = async () => {
+    const current = sidecar
+    if (!current) return
+    sidecar = undefined
+    try { await killProcessTree(current.child) } catch {}
+  }
+  const startSidecar = async (): Promise<SidecarState> => {
+    const resolved: ResolvedCli | null = resolveCli('opencode')
+    if (!resolved) throw new OpencodeServerUnavailableError('PATH 上找不到 opencode')
+    const port = await freePort()
+    const child = spawn(resolved.command, [...resolved.prefixArgs, 'serve', '--port', String(port), '--hostname', '127.0.0.1', '--pure'], {
+      cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true
+    })
+    child.stdout?.on('data', () => {})
+    let stderr = ''
+    child.stderr?.on('data', (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-1000) })
+    const state: SidecarState = { url: `http://127.0.0.1:${port}`, child, users: 0 }
+    const client = new OpencodeServerClient({ baseUrl: state.url, skipVersionProbe, requestTimeoutMs: 1_000, ...(config.fetch ? { fetch: config.fetch } : {}) })
+    let last = ''
+    try {
+      for (let attempt = 0; attempt < 50; attempt++) {
+        if (child.exitCode !== null) break
+        try {
+          const result = await client.version()
+          if (result.ok) {
+            // `/global/health` becomes available just before all session
+            // routes are ready on some Bun builds. Let the listener finish
+            // registering those routes before the first create request.
+            await new Promise((resolve) => setTimeout(resolve, 250))
+            return state
+          }
+          last = result.error
+        } catch (error) {
+          if (error instanceof OpencodeServerVersionError) throw error
+          last = error instanceof Error ? error.message : String(error)
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100))
+      }
+      throw new OpencodeServerUnavailableError(`OpenCode server failed to start: ${last || stderr || 'timeout'}`)
+    } catch (error) {
+      try { await killProcessTree(child) } catch {}
+      throw error
+    }
+  }
+  const ensureServer = async (): Promise<SidecarState | { url: string; child?: undefined; users: number }> => {
+    if (configuredUrl) return { url: configuredUrl, users: 0 }
+    if (sidecar) return sidecar
+    if (!sidecarStarting) sidecarStarting = startSidecar().then((value) => { sidecar = value; return value }).finally(() => { sidecarStarting = undefined })
+    return sidecarStarting
+  }
+  const releaseSidecar = async (state: SidecarState | { url: string; child?: undefined; users: number }) => {
+    if (!state.child || state !== sidecar) return
+    state.users = Math.max(0, state.users - 1)
+    if (state.users === 0) await stopSidecar()
+  }
+
+  return {
+    ...cliBackend,
+    async probe() {
+      if (disabled) return cliBackend.probe()
+      let checked: SidecarState | { url: string; child?: undefined; users: number } | undefined
+      try {
+        checked = await ensureServer()
+        const server = await createOpencodeServerBackend({ baseUrl: checked.url, skipVersionProbe, ...(config.fetch ? { fetch: config.fetch } : {}) }).probe()
+        if (server.ok || required) return server
+      } catch (error) {
+        if (error instanceof OpencodeServerVersionError || required) return { ok: false, detail: error instanceof Error ? error.message : String(error) }
+      } finally {
+        if (checked?.child && checked.users === 0) await stopSidecar()
+      }
+      const cli = await cliBackend.probe()
+      return cli.ok ? { ...cli, detail: `${cli.detail}; OpenCode server unavailable (using CLI fallback)` } : cli
+    },
+    async start(options) {
+      if (disabled) return cliBackend.start(options)
+      try {
+        const state = await ensureServer()
+        if (state.child) state.users++
+        let session
+        try {
+          session = await createOpencodeServerBackend({ baseUrl: state.url, skipVersionProbe, ...(config.fetch ? { fetch: config.fetch } : {}) }).start(options)
+        } catch (error) {
+          if (state.child) await releaseSidecar(state)
+          throw error
+        }
+        let released = false
+        const close = session.close
+        session.close = async () => {
+          if (released) return
+          released = true
+          try { await close() } finally { await releaseSidecar(state) }
+        }
+        return session
+      } catch (error) {
+        if (sidecar && sidecar.users === 0) await stopSidecar()
+        if (required || error instanceof OpencodeServerVersionError) throw error
+        // Keep the old adapter as a deliberate fallback for an unavailable
+        // sidecar. The original error remains diagnostic in probe output.
+        return cliBackend.start(options)
       }
     }
   }

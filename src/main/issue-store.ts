@@ -42,7 +42,8 @@ export class IssueStore {
       .map((task) => [
         task.id, task.createdAt, task.status, task.eventCount, task.runId, task.startedAt, task.endedAt,
         task.title, task.prompt, task.issueId, task.parentTaskId, task.agentId, task.trigger,
-        task.result, task.error, task.usage && JSON.stringify(task.usage), task.suppressIssue
+        task.result, task.error, task.usage && JSON.stringify(task.usage), task.suppressIssue,
+        task.goalId, task.phaseIndex, task.continuesFrom
       ].join('\u001f'))
       .join('\u001e')
     if (fingerprint === this.lastTaskFingerprint) return
