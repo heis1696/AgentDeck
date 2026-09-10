@@ -1,209 +1,96 @@
 /* ============================================================
-   AgentDeck 设计令牌 v2
-   用途：暗色/浅色主题完整令牌定义，供 styles.css 引用
-   约定：组件代码只引用令牌变量，不直接写色值
+   AgentDeck 设计令牌（单一权威来源）
+   用途：暗色/浅色主题全部令牌，供 styles.css 与 polish/*.css 引用
+   约定：
+   - 组件代码只引用令牌变量，不直接写色值
+   - 主张：深夜驾驶舱的深邃平静 + 唯一的青色电弧光作为品牌强调
+   - 状态色语义：运行中=青色电弧（唯一允许发光）、排队=琥珀、
+     完成=翠绿、失败=红、取消=灰（后四者不发光）
    ============================================================ */
 
 /* ---- 暗色模式（默认）---- */
 :root {
   /* 表面四层：壳 → 画布 → 表面 → 浮起 */
-  --app-shell: #080a0d;           /* 最外框，包裹整个应用 */
-  --bg: #0e1218;                  /* 页面画布（内容生活的地方）*/
-  --bg-raised: #161b23;           /* 表面（卡片/输入框）*/
-  --bg-hover: #1d242e;            /* 表面悬停 */
-  --bg-inset: #0b0f14;            /* 凹陷输入（文本框内部）*/
-  --bg-selected: #1a2535;         /* 选中态背景 */
+  --app-shell: #090b10;           /* 最外框，包裹整个应用 */
+  --bg: #0d1117;                  /* 页面画布（内容生活的地方）*/
+  --bg-raised: #151b24;           /* 表面（卡片/输入框）*/
+  --bg-hover: #1c2531;            /* 表面悬停 */
+  --bg-inset: #0a0e14;            /* 凹陷输入（文本框内部）*/
+  --bg-selected: #1c3140;         /* 选中态背景 */
 
   /* 边框 */
-  --border: #1f2730;              /* 默认边框 */
-  --border-strong: #2a3240;       /* 强调边框（浮层/对话框）*/
+  --border: #263341;              /* 默认边框 */
+  --border-strong: #344556;       /* 强调边框（浮层/对话框）*/
 
   /* 文字 */
-  --text: #e8ebf0;                /* 主文字 */
-  --text-dim: #8f97a8;            /* 次要文字 */
-  --text-faint: #5a6372;          /* 辅助文字（提示/标签）*/
+  --text: #edf3f7;                /* 主文字 */
+  --text-dim: #9aa9b7;            /* 次要文字 */
+  --text-faint: #657482;          /* 辅助文字（提示/标签）*/
 
-  /* 品牌色 */
-  --accent: #4d88ff;              /* 主强调色（链接/按钮/焦点）*/
-  --accent-soft: rgba(77, 136, 255, 0.12);  /* 柔和背景 */
-  --accent-glow: rgba(77, 136, 255, 0.24);  /* 光晕效果 */
+  /* 品牌色：唯一的电弧光 */
+  --accent: #4bc0c8;                            /* 主强调色（链接/按钮/焦点/激活）*/
+  --accent-ink: #06262b;                        /* accent 之上的墨色文字（暗主题用深墨）*/
+  --accent-soft: rgba(75, 192, 200, 0.14);      /* 柔和背景 */
+  --accent-glow: rgba(75, 192, 200, 0.24);      /* 光晕效果 */
 
   /* 状态色：运行态光环的核心 */
-  --status-running: #4d88ff;      /* 运行中=蓝色电弧 */
-  --status-running-bg: rgba(77, 136, 255, 0.10);
-  --status-running-glow: rgba(77, 136, 255, 0.28);  /* 脉冲光晕 */
-
-  --status-queued: #d9a23c;       /* 排队=琥珀 */
-  --status-queued-bg: rgba(217, 162, 60, 0.12);
-  --status-queued-glow: rgba(217, 162, 60, 0.22);   /* 呼吸光晕 */
-
-  --status-done: #38b86f;         /* 成功=翠绿（不发光）*/
-  --status-done-bg: rgba(56, 184, 111, 0.12);
-
-  --status-failed: #e55c52;       /* 失败=红（不发光）*/
-  --status-failed-bg: rgba(229, 92, 82, 0.12);
-
-  --status-cancelled: #6b7280;    /* 已取消=灰（不发光）*/
-  --status-cancelled-bg: rgba(107, 114, 128, 0.10);
-
-  /* 功能色（向后兼容既有 --ok/--warn/--err）*/
-  --ok: #38b86f;
-  --warn: #d9a23c;
-  --err: #e55c52;
-
-  /* 阴影：双阴影系统（menu 轻 / pop 重）*/
-  --menu-shadow: 0 10px 30px rgba(0, 0, 0, 0.35), 0 2px 10px rgba(0, 0, 0, 0.22);
-  --shadow-pop: 0 22px 52px rgba(0, 0, 0, 0.50), 0 4px 14px rgba(0, 0, 0, 0.30);
-
-  /* 圆角 */
-  --radius-sm: 6px;    /* 小按钮、菜单项、徽标 */
-  --radius-md: 8px;    /* 输入框、卡片、对话框 */
-  --radius-lg: 12px;   /* 大卡片、浮层面板 */
-  --radius-pill: 999px; /* 胶囊按钮、状态芯片 */
-  --radius: 10px;      /* 向后兼容（等效 --radius-md，未来可废弃）*/
-
-  /* 字阶（角色命名，全站仅用这些步进）*/
-  --text-micro: 11px;       /* 角色：时间戳、辅助标签、键盘提示 */
-  --text-caption: 12px;     /* 角色：描述、次要信息、表格正文 */
-  --text-label: 13px;       /* 角色：列表项标题、按钮、输入框 */
-  --text-body: 14px;        /* 角色：正文、输入文本 */
-  --text-title-sm: 16px;    /* 角色：卡片标题、对话框标题 */
-  --text-title: 18px;       /* 角色：页面标题 */
-
-  /* 字体栈 */
-  --font-ui: -apple-system, 'Segoe UI', 'Microsoft YaHei UI', 'PingFang SC', sans-serif;
-  --font-mono: 'Cascadia Code', 'Cascadia Mono', Consolas, 'Courier New', monospace;
-  --mono: var(--font-mono);  /* 向后兼容别名 */
-
-  /* 动效令牌 */
-  --duration-quick: 0.10s;   /* 菜单展开、tooltip */
-  --duration-base: 0.12s;    /* 按钮悬停、边框变色、背景变色 */
-  --duration-slow: 0.16s;    /* 对话框入场、面板滑入 */
-  --duration-pulse: 1.4s;    /* 状态光环脉冲周期 */
-
-  --ease-out: cubic-bezier(0.2, 0, 0.3, 1);      /* 入场、展开 */
-  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);   /* 悬停、状态切换 */
-}
-
-/* ---- 浅色模式（完整令牌重映射，无组件级补丁）---- */
-html.light {
-  /* 表面四层 */
-  --app-shell: #eceef2;
-  --bg: #f6f8fb;
-  --bg-raised: #ffffff;
-  --bg-hover: #eef1f6;
-  --bg-inset: #fafbfd;
-  --bg-selected: #e5ebf5;
-
-  /* 边框 */
-  --border: #e0e4eb;
-  --border-strong: #cfd5e0;
-
-  /* 文字 */
-  --text: #18191d;
-  --text-dim: #5a6474;
-  --text-faint: #97a0b3;
-
-  /* 品牌色 */
-  --accent: #3862d8;
-  --accent-soft: rgba(56, 98, 216, 0.09);
-  --accent-glow: rgba(56, 98, 216, 0.18);
-
-  /* 状态色 */
-  --status-running: #3862d8;
-  --status-running-bg: rgba(56, 98, 216, 0.08);
-  --status-running-glow: rgba(56, 98, 216, 0.20);
-
-  --status-queued: #b8811c;
-  --status-queued-bg: rgba(184, 129, 28, 0.10);
-  --status-queued-glow: rgba(184, 129, 28, 0.18);
-
-  --status-done: #1a7d47;
-  --status-done-bg: rgba(26, 125, 71, 0.10);
-
-  --status-failed: #c73c34;
-  --status-failed-bg: rgba(199, 60, 52, 0.10);
-
-  --status-cancelled: #6b7280;
-  --status-cancelled-bg: rgba(107, 114, 128, 0.08);
-
-  /* 功能色 */
-  --ok: #1a7d47;
-  --warn: #b8811c;
-  --err: #c73c34;
-
-  /* 阴影 */
-  --menu-shadow: 0 10px 30px rgba(30, 42, 76, 0.11), 0 2px 10px rgba(30, 42, 76, 0.07);
-  --shadow-pop: 0 22px 52px rgba(30, 42, 76, 0.15), 0 4px 14px rgba(30, 42, 76, 0.09);
-
-  /* 圆角/字阶/字体/动效：继承暗色值，无需重定义 */
-}
-
-/* ---- 辅助功能：降低动画强度 ---- */
-@media (prefers-reduced-motion: reduce) {
-  :root {
-    --duration-quick: 0.01s;
-    --duration-base: 0.01s;
-    --duration-slow: 0.01s;
-    --duration-pulse: 0.01s;
-  }
-}
-
-/* AgentDeck workspace system: final tokens (imported after component styles). */
-:root {
-  --app-shell: #090b10;
-  --bg: #0d1117;
-  --bg-raised: #151b24;
-  --bg-hover: #1c2531;
-  --bg-inset: #0a0e14;
-  --bg-selected: #1c3140;
-  --border: #263341;
-  --border-strong: #344556;
-  --text: #edf3f7;
-  --text-dim: #9aa9b7;
-  --text-faint: #657482;
-  --accent: #4bc0c8;
-  --accent-soft: rgba(75, 192, 200, 0.14);
-  --accent-glow: rgba(75, 192, 200, 0.24);
-  --status-running: #4bc0c8;
+  --status-running: #4bc0c8;      /* 运行中=青色电弧（唯一发光态）*/
   --status-running-bg: rgba(75, 192, 200, 0.14);
   --status-running-glow: rgba(75, 192, 200, 0.28);
-  --status-queued: #e3a84b;
+
+  --status-queued: #e3a84b;       /* 排队=琥珀 */
   --status-queued-bg: rgba(227, 168, 75, 0.14);
   --status-queued-glow: rgba(227, 168, 75, 0.24);
-  --status-done: #58c58a;
+
+  --status-done: #58c58a;         /* 成功=翠绿（不发光）*/
   --status-done-bg: rgba(88, 197, 138, 0.14);
-  --status-failed: #ef7168;
+
+  --status-failed: #ef7168;       /* 失败=红（不发光）*/
   --status-failed-bg: rgba(239, 113, 104, 0.14);
-  --status-cancelled: #7b8995;
+
+  --status-cancelled: #7b8995;    /* 已取消=灰（不发光）*/
   --status-cancelled-bg: rgba(123, 137, 149, 0.14);
+
+  /* 功能色（向后兼容既有 --ok/--warn/--err）*/
   --ok: #58c58a;
   --warn: #e3a84b;
   --err: #ef7168;
+
+  /* 阴影：双阴影系统（menu 轻 / pop 重）*/
   --menu-shadow: 0 18px 44px rgba(0, 0, 0, 0.42), 0 3px 12px rgba(0, 0, 0, 0.25);
   --shadow-pop: 0 28px 64px rgba(0, 0, 0, 0.5), 0 6px 18px rgba(0, 0, 0, 0.28);
-  --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
-  --radius-pill: 999px;
-  --radius: 8px;
+
+  /* 圆角 */
+  --radius-sm: 6px;     /* 小按钮、菜单项、徽标 */
+  --radius-md: 8px;     /* 输入框、卡片、对话框 */
+  --radius-lg: 12px;    /* 大卡片、浮层面板 */
+  --radius-pill: 999px; /* 胶囊按钮、状态芯片 */
+  --radius: 8px;        /* 向后兼容 */
+
+  /* 字阶（角色命名，全站仅用这些步进）*/
+  --text-micro: 11px;       /* 时间戳、辅助标签、键盘提示 */
+  --text-caption: 12px;     /* 描述、次要信息、表格正文 */
+  --text-label: 13px;       /* 列表项标题、按钮、输入框 */
+  --text-body: 14px;        /* 正文、输入文本 */
+  --text-title-sm: 16px;    /* 卡片标题、对话框标题 */
+  --text-title: 18px;       /* 页面标题 */
+
+  /* 字体栈 */
   --font-ui: Inter, 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei UI', sans-serif;
   --font-mono: 'Cascadia Code', 'SFMono-Regular', Consolas, monospace;
-  --mono: var(--font-mono);
-  --text-micro: 11px;
-  --text-caption: 12px;
-  --text-label: 13px;
-  --text-body: 14px;
-  --text-title-sm: 16px;
-  --text-title: 18px;
-  --duration-quick: 0.12s;
-  --duration-base: 0.18s;
-  --duration-slow: 0.24s;
-  --duration-pulse: 1.6s;
-  --ease-out: cubic-bezier(0.2, 0, 0, 1);
-  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --mono: var(--font-mono);  /* 向后兼容别名 */
+
+  /* 动效令牌 */
+  --duration-quick: 0.12s;   /* 菜单展开、tooltip */
+  --duration-base: 0.18s;    /* 按钮悬停、边框/背景变色 */
+  --duration-slow: 0.24s;    /* 对话框入场、面板滑入 */
+  --duration-pulse: 1.6s;    /* 状态光环脉冲周期 */
+
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);      /* 入场、展开 */
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1); /* 悬停、状态切换 */
 }
 
+/* ---- 浅色模式（完整令牌重映射，无组件级补丁）---- */
 html.light {
   --app-shell: #eef2f4;
   --bg: #f6f8f9;
@@ -211,33 +98,45 @@ html.light {
   --bg-hover: #edf2f4;
   --bg-inset: #f1f5f6;
   --bg-selected: #dff1f2;
+
   --border: #d9e2e5;
   --border-strong: #c3d0d5;
+
   --text: #17232a;
   --text-dim: #61717a;
   --text-faint: #8c9ba2;
+
   --accent: #087f87;
+  --accent-ink: #ffffff;                          /* 浅主题 accent 更深，用白墨 */
   --accent-soft: rgba(8, 127, 135, 0.1);
   --accent-glow: rgba(8, 127, 135, 0.18);
+
   --status-running: #087f87;
   --status-running-bg: rgba(8, 127, 135, 0.1);
   --status-running-glow: rgba(8, 127, 135, 0.18);
+
   --status-queued: #a66c0a;
   --status-queued-bg: rgba(166, 108, 10, 0.1);
   --status-queued-glow: rgba(166, 108, 10, 0.16);
+
   --status-done: #187548;
   --status-done-bg: rgba(24, 117, 72, 0.1);
+
   --status-failed: #bf493f;
   --status-failed-bg: rgba(191, 73, 63, 0.1);
+
   --status-cancelled: #718089;
   --status-cancelled-bg: rgba(113, 128, 137, 0.1);
+
   --ok: #187548;
   --warn: #a66c0a;
   --err: #bf493f;
+
   --menu-shadow: 0 18px 44px rgba(38, 58, 67, 0.16), 0 3px 12px rgba(38, 58, 67, 0.1);
   --shadow-pop: 0 28px 64px rgba(38, 58, 67, 0.18), 0 6px 18px rgba(38, 58, 67, 0.1);
 }
 
+/* ---- 辅助功能：降低动画强度 ---- */
 @media (prefers-reduced-motion: reduce) {
   :root {
     --duration-quick: 0.01s;

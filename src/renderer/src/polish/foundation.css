@@ -1,8 +1,94 @@
 /* ============================================================
    0.15.0 UI Polish Wave · foundation（领队专属文件）
-   职责：强调色收敛（ lime → accent 家族）、品牌区、主按钮、
-   全局焦点环、选区/滚动条等基础层统一。
+   职责：强调色收敛（lime → accent 家族）、品牌区、主按钮、
+   全局焦点环、选区等基础层统一。
    约定：本文件在 styles.css/tokens.css 之后加载，只做
    覆盖与别名桥接，不修改既有文件；组件级样式归属各自的
    polish/*.css，不要写在这里。
    ============================================================ */
+
+/* ---- 旧 lime 代际的变量别名桥接 ----
+   历史层（styles.css 0.12/0.13 代际）引用了 --signal-strong /
+   --brand / --brand-ink（柠檬绿家族）。这里把它们指向 accent
+   家族，所有历史引用一次性安全收敛，无需改动历史层。 */
+:root {
+  --signal: var(--accent);
+  --signal-strong: var(--accent);
+  --brand: var(--accent);
+  --brand-ink: var(--accent-ink);
+}
+html.light {
+  --signal: var(--accent);
+  --signal-strong: var(--accent);
+  --brand: var(--accent);
+  --brand-ink: var(--accent-ink);
+}
+
+/* ---- 主 CTA（新建任务）：唯一的 accent 电弧光 ---- */
+.new-task-btn,
+html.light .new-task-btn {
+  border: 1px solid transparent;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 650;
+  box-shadow: 0 4px 16px var(--accent-glow);
+}
+.new-task-btn:hover {
+  background: var(--accent);
+  color: var(--accent-ink);
+  filter: brightness(1.06);
+  box-shadow: 0 6px 20px var(--accent-glow);
+  transform: translateY(-1px);
+}
+.new-task-btn:active { transform: translateY(0); filter: brightness(0.97); }
+.new-task-btn kbd {
+  margin-left: auto;
+  border: none;
+  background: color-mix(in srgb, var(--accent-ink) 13%, transparent);
+  color: var(--accent-ink);
+}
+
+/* ---- 主要按钮：与 CTA 同一强调系统 ---- */
+.btn.primary,
+html.light .btn.primary {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 650;
+  box-shadow: 0 4px 14px var(--accent-glow);
+}
+.btn.primary:hover {
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--accent-ink);
+  filter: brightness(1.06);
+  transform: translateY(-1px);
+}
+.btn.primary:active { transform: translateY(0); filter: brightness(0.97); }
+.btn.primary:disabled { opacity: 0.5; filter: none; transform: none; }
+
+/* ---- 品牌徽标：accent 底 + 墨字，移除过期的硬编码版本角标 ---- */
+.brand-mark,
+html.light .brand-mark {
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 800;
+  box-shadow: 0 2px 10px var(--accent-glow);
+}
+.workspace-title .brand-mark { background: var(--accent); color: var(--accent-ink); }
+.brand::after { display: none; }
+
+/* ---- 全局焦点环：键盘可达性统一 accent ---- */
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+a:focus-visible,
+[role='button']:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ---- 选区色与品牌一致 ---- */
+::selection { background: color-mix(in srgb, var(--accent) 32%, transparent); }
