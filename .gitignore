@@ -26,3 +26,8 @@ Thumbs.db
 
 # Teardown study clones (see docs/LOOP-ENGINEERING.md)
 teardown/repos/
+
+# Local backup artifacts (branch bundle / worktree snapshots / GUI test shots)
+agentdeck-task-branches-backup.bundle
+agentdeck-worktree-backups/
+gui-test-screenshots/

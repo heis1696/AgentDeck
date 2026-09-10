@@ -18,6 +18,24 @@ expectReject(() => validation.parseTaskCreate({ title: 'x', prompt: 'p', workdir
 expectReject(() => validation.parseIssuePatch({ status: 'running' }), 'invalid issue status')
 expectReject(() => validation.parseSettingsPatch({ concurrency: 0 }), 'invalid concurrency')
 expectReject(() => validation.parseSettingsPatch({ unknown: true }), 'unknown setting')
+// 调优参数：合法值放行、越界值拒绝（区间与 ipc-validation 的 settingsIntRanges 对齐）
+const tuning = validation.parseSettingsPatch({
+  turnIdleTimeoutMs: 300_000, permissionTimeoutMs: 60_000, maxRetryAttempts: 0, retryBackoffMs: 0,
+  maxHandoffChain: 4, delegateMaxRounds: 2, delegateMaxTotalRounds: 3, delegateMaxDepth: 1,
+  doomLoopThreshold: 5, worktreeMaxAgeDays: 7
+})
+if (tuning.turnIdleTimeoutMs !== 300_000 || tuning.maxRetryAttempts !== 0 || tuning.doomLoopThreshold !== 5) throw new Error('valid tuning settings were rejected')
+expectReject(() => validation.parseSettingsPatch({ turnIdleTimeoutMs: 500 }), 'turnIdle below 1s')
+expectReject(() => validation.parseSettingsPatch({ turnIdleTimeoutMs: 1.5 }), 'turnIdle non-integer')
+expectReject(() => validation.parseSettingsPatch({ permissionTimeoutMs: 1000 }), 'permissionTimeout below 5s')
+expectReject(() => validation.parseSettingsPatch({ maxRetryAttempts: 11 }), 'retry attempts above 10')
+expectReject(() => validation.parseSettingsPatch({ retryBackoffMs: -1 }), 'negative retry backoff')
+expectReject(() => validation.parseSettingsPatch({ maxHandoffChain: 0 }), 'handoff chain below 1')
+expectReject(() => validation.parseSettingsPatch({ delegateMaxRounds: 51 }), 'delegate rounds above 50')
+expectReject(() => validation.parseSettingsPatch({ delegateMaxTotalRounds: 201 }), 'delegate total rounds above 200')
+expectReject(() => validation.parseSettingsPatch({ delegateMaxDepth: 11 }), 'delegate depth above 10')
+expectReject(() => validation.parseSettingsPatch({ doomLoopThreshold: 1 }), 'doom threshold below 2')
+expectReject(() => validation.parseSettingsPatch({ worktreeMaxAgeDays: 366 }), 'worktree age above 365')
 expectReject(() => validation.parseContent(''), 'empty content')
 const automation = validation.parseAutomationCreate({ name: 'daily', prompt: 'check', workdir: '', scheduleMinutes: 15, output: 'issue', enabled: true })
 if (automation.scheduleMinutes !== 15 || automation.output !== 'issue') throw new Error('valid automation was rejected')

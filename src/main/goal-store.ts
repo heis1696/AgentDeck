@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { isGoalStatus, type Goal, type GoalCheckpoint, type GoalRun, type GoalStatus, type Task, type TaskUsage } from '../shared/types'
+import { isGoalStatus, type AcceptanceCriterion, type Goal, type GoalCheckpoint, type GoalRun, type GoalSpecSnapshot, type GoalStatus, type Task, type TaskUsage } from '../shared/types'
 import { executionRecordFromTask } from '../shared/taskflow'
 
 /** Versioned durable index for long-running goals. */
@@ -11,12 +11,14 @@ export interface GoalIndexDocument {
   goals: Goal[]
   runs: GoalRun[]
   checkpoints: GoalCheckpoint[]
+  specSnapshots?: GoalSpecSnapshot[]
 }
 
 export interface GoalCreateRecord {
   issueId: string
   text: string
   completionConditions: string[]
+  acceptanceCriteria?: Array<Pick<AcceptanceCriterion, 'id' | 'text'> | string>
   stopConditions: string[]
   maxRuns: number
   maxDurationMs: number
@@ -50,6 +52,20 @@ function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string').map((item) => item.trim()).filter(Boolean) : []
 }
 
+function normalizeAcceptance(value: unknown, fallback: string[] = []): AcceptanceCriterion[] {
+  const source = Array.isArray(value) ? value : fallback
+  return source.flatMap((item, index) => {
+    if (typeof item === 'string') {
+      const text = item.trim()
+      return text ? [{ id: `ac_${index}`, text, status: 'pending' as const }] : []
+    }
+    if (!record(item) || typeof item.text !== 'string' || !item.text.trim()) return []
+    const id = typeof item.id === 'string' && item.id.trim() ? item.id.trim() : `ac_${index}`
+    const status = item.status === 'passed' || item.status === 'failed' ? item.status : 'pending'
+    return [{ id, text: item.text.trim(), status, ...(typeof item.passedAt === 'number' && Number.isFinite(item.passedAt) ? { passedAt: item.passedAt } : {}), ...(typeof item.evidence === 'string' && item.evidence.trim() ? { evidence: item.evidence.trim() } : {}) }]
+  })
+}
+
 function validGoal(value: unknown): value is Goal {
   if (!record(value)) return false
   return typeof value.id === 'string' && !!value.id
@@ -70,7 +86,7 @@ function validGoal(value: unknown): value is Goal {
 export class GoalStore {
   private readonly dir: string
   private readonly file: string
-  private data: GoalIndexDocument = { schemaVersion: GOAL_INDEX_SCHEMA_VERSION, goals: [], runs: [], checkpoints: [] }
+  private data: GoalIndexDocument = { schemaVersion: GOAL_INDEX_SCHEMA_VERSION, goals: [], runs: [], checkpoints: [], specSnapshots: [] }
 
   constructor(userDataDir: string) {
     this.dir = path.join(userDataDir, 'goals')
@@ -103,7 +119,8 @@ export class GoalStore {
         blockCount: typeof goal.blockCount === 'number' && Number.isFinite(goal.blockCount) ? Math.max(0, goal.blockCount) : 0,
         blockCap: typeof goal.blockCap === 'number' && Number.isFinite(goal.blockCap) && goal.blockCap > 0 ? Math.floor(goal.blockCap) : 8,
         ...(typeof goal.progressKey === 'string' && goal.progressKey ? { progressKey: goal.progressKey } : {}),
-        ...(typeof goal.stopReason === 'string' && goal.stopReason ? { stopReason: goal.stopReason } : {})
+        ...(typeof goal.stopReason === 'string' && goal.stopReason ? { stopReason: goal.stopReason } : {}),
+        acceptanceCriteria: normalizeAcceptance(goal.acceptanceCriteria, stringArray(goal.completionConditions))
       })) : []
       const runs = Array.isArray(parsed.runs) ? parsed.runs.filter((run): run is GoalRun => record(run)
         && typeof run.id === 'string' && !!run.id
@@ -127,7 +144,23 @@ export class GoalStore {
         blockers: stringArray(cp.blockers),
         nextPlan: typeof cp.nextPlan === 'string' ? cp.nextPlan : ''
       })) : []
-      this.data = { schemaVersion: GOAL_INDEX_SCHEMA_VERSION, goals, runs, checkpoints }
+      const specSnapshots = Array.isArray(parsed.specSnapshots) ? parsed.specSnapshots.filter((snapshot): snapshot is GoalSpecSnapshot => record(snapshot)
+        && typeof snapshot.id === 'string' && !!snapshot.id
+        && typeof snapshot.goalId === 'string' && !!snapshot.goalId
+        && typeof snapshot.generation === 'number' && Number.isInteger(snapshot.generation) && snapshot.generation >= 0
+        && typeof snapshot.text === 'string'
+        && Array.isArray(snapshot.acceptanceCriteria)
+        && Array.isArray(snapshot.completionConditions)
+        && Array.isArray(snapshot.stopConditions)
+        && typeof snapshot.createdAt === 'number'
+        && typeof snapshot.outcomeGatePassed === 'boolean'
+        && (snapshot.decision === 'initial' || snapshot.decision === 'applied' || snapshot.decision === 'rejected' || snapshot.decision === 'rollback')).map((snapshot) => ({
+        ...snapshot,
+        acceptanceCriteria: normalizeAcceptance(snapshot.acceptanceCriteria),
+        completionConditions: stringArray(snapshot.completionConditions),
+        stopConditions: stringArray(snapshot.stopConditions)
+      })) : []
+      this.data = { schemaVersion: GOAL_INDEX_SCHEMA_VERSION, goals, runs, checkpoints, specSnapshots }
     } catch (error) {
       throw error instanceof Error ? error : new Error(String(error))
     }
@@ -159,6 +192,7 @@ export class GoalStore {
       issueId: input.issueId,
       text: input.text,
       completionConditions: [...input.completionConditions],
+      acceptanceCriteria: normalizeAcceptance(input.acceptanceCriteria, input.completionConditions),
       stopConditions: [...input.stopConditions],
       maxRuns: input.maxRuns,
       maxDurationMs: input.maxDurationMs,
@@ -176,6 +210,16 @@ export class GoalStore {
       updatedAt: now
     }
     this.data.goals.push(goal)
+    this.saveSpecSnapshot({
+      goalId: goal.id,
+      generation: 1,
+      text: goal.text,
+      acceptanceCriteria: goal.acceptanceCriteria ?? [],
+      completionConditions: goal.completionConditions,
+      stopConditions: goal.stopConditions,
+      outcomeGatePassed: false,
+      decision: 'initial'
+    })
     this.save()
     return goal
   }
@@ -195,6 +239,7 @@ export class GoalStore {
     if (this.data.goals.length === before) return false
     this.data.runs = this.data.runs.filter((run) => run.goalId !== id)
     this.data.checkpoints = this.data.checkpoints.filter((checkpoint) => checkpoint.goalId !== id)
+    this.data.specSnapshots = (this.data.specSnapshots ?? []).filter((snapshot) => snapshot.goalId !== id)
     this.save()
     return true
   }
@@ -230,6 +275,34 @@ export class GoalStore {
 
   checkpoints(goalId: string): GoalCheckpoint[] {
     return this.data.checkpoints.filter((checkpoint) => checkpoint.goalId === goalId).sort((a, b) => (a.phaseIndex - b.phaseIndex) || (a.createdAt - b.createdAt))
+  }
+
+  /** Return immutable Loop 4 specification snapshots in generation order. */
+  snapshots(goalId: string): GoalSpecSnapshot[] {
+    return (this.data.specSnapshots ?? []).filter((snapshot) => snapshot.goalId === goalId)
+      .sort((a, b) => (a.generation - b.generation) || (a.createdAt - b.createdAt))
+      .map((snapshot) => ({ ...snapshot, acceptanceCriteria: snapshot.acceptanceCriteria.map((criterion) => ({ ...criterion })) }))
+  }
+
+  snapshotForGeneration(goalId: string, generation: number) {
+    return this.snapshots(goalId).find((snapshot) => snapshot.generation === generation) ?? null
+  }
+
+  saveSpecSnapshot(input: Omit<GoalSpecSnapshot, 'id' | 'createdAt'> & { id?: string; createdAt?: number }): GoalSpecSnapshot {
+    const snapshot: GoalSpecSnapshot = {
+      ...input,
+      id: input.id ?? this.id('spec'),
+      createdAt: input.createdAt ?? Date.now(),
+      acceptanceCriteria: input.acceptanceCriteria.map((criterion) => ({ ...criterion })),
+      completionConditions: [...input.completionConditions],
+      stopConditions: [...input.stopConditions]
+    }
+    const snapshots = this.data.specSnapshots ?? (this.data.specSnapshots = [])
+    const existing = snapshots.find((item) => item.id === snapshot.id)
+    if (existing) Object.assign(existing, snapshot)
+    else snapshots.push(snapshot)
+    this.save()
+    return { ...snapshot, acceptanceCriteria: snapshot.acceptanceCriteria.map((criterion) => ({ ...criterion })) }
   }
 
   checkpointForRun(runId: string) {

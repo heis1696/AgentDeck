@@ -1,5 +1,5 @@
-import { BACKEND_IDS, type AppSettings, type Automation, type IssuePriority, type IssueStatus, type RunTrigger, type TaskStatus } from '../shared/types'
-import type { GoalCheckpointInput, GoalCreateInput, IssueCreateInput, IssueUpdatePatch, TaskCreateInput } from '../shared/contracts'
+import { BACKEND_IDS, type AppSettings, type Automation, type GoalAcceptancePatch, type GoalEvolutionPatch, type GoalPatchProvenance, type IssuePriority, type IssueStatus, type RunTrigger, type TaskStatus } from '../shared/types'
+import type { GoalCheckpointInput, GoalCreateInput, GoalEvolveInput, IssueCreateInput, IssueUpdatePatch, TaskCreateInput } from '../shared/contracts'
 import type { Agent } from './agents'
 import type { ApiPreset } from './presets'
 
@@ -8,7 +8,21 @@ const issuePriorities = new Set<IssuePriority>(['urgent', 'high', 'medium', 'low
 const taskStatuses = new Set<TaskStatus>(['queued', 'running', 'done', 'failed', 'cancelled'])
 const triggers = new Set<RunTrigger>(['assignment', 'mention', 'autopilot', 'manual', 'handoff'])
 const backendIds = new Set<string>(BACKEND_IDS)
-const settingsKeys = new Set<keyof AppSettings>(['theme', 'zcodePath', 'dshPath', 'nodePath', 'concurrency', 'notifyOnDone', 'mode', 'workerConcurrency', 'sharedDir'])
+const settingsKeys = new Set<keyof AppSettings>(['theme', 'zcodePath', 'dshPath', 'nodePath', 'concurrency', 'notifyOnDone', 'mode', 'workerConcurrency', 'sharedDir', 'turnIdleTimeoutMs', 'permissionTimeoutMs', 'maxRetryAttempts', 'retryBackoffMs', 'maxHandoffChain', 'delegateMaxRounds', 'delegateMaxTotalRounds', 'delegateMaxDepth', 'doomLoopThreshold', 'worktreeMaxAgeDays'])
+
+/** 调优参数的合法区间：越界直接拒绝，防止手滑值把看门狗/预算打穿 */
+const settingsIntRanges: Partial<Record<keyof AppSettings, [min: number, max: number]>> = {
+  turnIdleTimeoutMs: [1_000, 86_400_000],
+  permissionTimeoutMs: [5_000, 3_600_000],
+  maxRetryAttempts: [0, 10],
+  retryBackoffMs: [0, 3_600_000],
+  maxHandoffChain: [1, 100],
+  delegateMaxRounds: [1, 50],
+  delegateMaxTotalRounds: [1, 200],
+  delegateMaxDepth: [1, 10],
+  doomLoopThreshold: [2, 100],
+  worktreeMaxAgeDays: [1, 365]
+}
 
 function record(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} 必须是对象`)
@@ -162,6 +176,54 @@ export function parseGoalCheckpoint(value: unknown): GoalCheckpointInput {
   }
 }
 
+/** Loop 4 规格补丁来源：谁提议、为何改。 */
+function parsePatchProvenance(value: unknown, label: string): GoalPatchProvenance {
+  const rec = record(value, label)
+  assertKeys(rec, ['source', 'rationale', 'evidence', 'author', 'createdAt'], label)
+  return {
+    source: stringValue(rec.source, `${label}.source`)!,
+    rationale: stringValue(rec.rationale, `${label}.rationale`)!,
+    ...(Array.isArray(rec.evidence) ? { evidence: rec.evidence.map((item, index) => stringValue(item, `${label}.evidence[${index}]`)!) } : {}),
+    ...(rec.author !== undefined ? { author: stringValue(rec.author, `${label}.author`) } : {}),
+    ...(rec.createdAt !== undefined ? { createdAt: finiteNumber(rec.createdAt, `${label}.createdAt`) } : {})
+  }
+}
+
+function parseGoalEvolutionPatch(value: unknown): GoalEvolutionPatch {
+  const rec = record(value, 'patch')
+  assertKeys(rec, ['text', 'criteria', 'provenance'], 'patch')
+  if (!Array.isArray(rec.criteria)) throw new Error('patch.criteria 必须是数组')
+  const criteria = rec.criteria.map((item, index): GoalAcceptancePatch => {
+    const criterion = record(item, `patch.criteria[${index}]`)
+    assertKeys(criterion, ['action', 'criterionId', 'text', 'provenance'], `patch.criteria[${index}]`)
+    const action = criterion.action
+    if (action !== 'keep' && action !== 'revise' && action !== 'add') throw new Error(`patch.criteria[${index}].action 必须是 keep/revise/add`)
+    return {
+      action,
+      criterionId: optionalString(criterion.criterionId, `patch.criteria[${index}].criterionId`),
+      text: optionalString(criterion.text, `patch.criteria[${index}].text`),
+      provenance: criterion.provenance === undefined ? undefined : parsePatchProvenance(criterion.provenance, `patch.criteria[${index}].provenance`)
+    }
+  })
+  return {
+    text: optionalString(rec.text, 'patch.text'),
+    criteria,
+    provenance: parsePatchProvenance(rec.provenance, 'patch.provenance')
+  }
+}
+
+/** Validate Goal spec-evolution IPC input at the main-process boundary. */
+export function parseGoalEvolve(value: unknown): GoalEvolveInput {
+  const input = record(value, 'Goal evolve parameters')
+  assertKeys(input, ['patch', 'approve', 'outcomeGatePassed', 'ambiguityScore'], 'Goal evolve parameters')
+  return {
+    patch: input.patch === undefined ? undefined : parseGoalEvolutionPatch(input.patch),
+    approve: input.approve === undefined ? undefined : booleanValue(input.approve, 'approve'),
+    outcomeGatePassed: input.outcomeGatePassed === undefined ? undefined : booleanValue(input.outcomeGatePassed, 'outcomeGatePassed'),
+    ambiguityScore: finiteNumber(input.ambiguityScore, 'ambiguityScore', false)
+  }
+}
+
 export function parseTaskStatus(value: unknown): TaskStatus {
   if (typeof value !== 'string' || !taskStatuses.has(value as TaskStatus)) throw new Error('任务状态无效')
   return value as TaskStatus
@@ -174,6 +236,10 @@ export function parseSettingsPatch(value: unknown): Partial<AppSettings> {
   if (input.mode !== undefined && !['yolo', 'build', 'edit', 'plan'].includes(String(input.mode))) throw new Error('mode 无效')
   for (const key of ['concurrency', 'workerConcurrency'] as const) {
     if (input[key] !== undefined && (typeof input[key] !== 'number' || !Number.isInteger(input[key]) || input[key] < 1 || input[key] > 32)) throw new Error(`${key} 必须是 1-32 的整数`)
+  }
+  for (const [key, [min, max]] of Object.entries(settingsIntRanges) as Array<[keyof AppSettings, [number, number]]>) {
+    const value = input[key]
+    if (value !== undefined && (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > max)) throw new Error(`${key} 必须是 ${min}-${max} 的整数`)
   }
   for (const key of ['zcodePath', 'dshPath', 'nodePath'] as const) if (input[key] !== undefined && typeof input[key] !== 'string') throw new Error(`${key} 必须是字符串`)
   if (input.sharedDir !== undefined) {

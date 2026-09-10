@@ -2926,9 +2926,12 @@ html.light { --bubble-inset: inset 0 1px 0 rgba(255, 255, 255, .75); }
 /* ---- 聊天舞台：顶部微光垂直渐隐（水平均匀无侧边轮廓）+ 极淡点阵 ----
    用多停靠点缓出过渡，避免亮区与暗底之间出现可感知的分界；
    不用径向渐变——容器两侧裁剪会让光晕远看像半个矩形。 */
-.log.chat {
-  max-width: none;
-  padding-left: 46px;
+/* ---- 聊天舞台：顶部微光垂直渐隐（水平均匀无侧边轮廓）+ 极淡点阵 ----
+   铺在整个聊天容器上（而非滚动内容层），扩满全部可视区域且不随滚动；
+   用多停靠点缓出过渡，避免亮区与暗底之间出现可感知的分界；
+   不用径向渐变——容器两侧裁剪会让光晕远看像半个矩形。 */
+.chat-wrap {
+  position: relative;
   background:
     linear-gradient(180deg,
       color-mix(in srgb, var(--accent) 6%, transparent) 0,
@@ -2938,6 +2941,10 @@ html.light { --bubble-inset: inset 0 1px 0 rgba(255, 255, 255, .75); }
     radial-gradient(color-mix(in srgb, var(--ink) 3%, transparent) 1px, transparent 1.4px);
   background-size: auto, 28px 28px;
   background-repeat: no-repeat, repeat;
+}
+.log.chat {
+  max-width: none;
+  padding-left: 46px;
 }
 
 /* ---- 回合分隔：淡入淡出的发丝线，给长对话分节拍 ---- */
@@ -3209,3 +3216,30 @@ html.light {
 .review-chip.rv-pass .review-chip-verdict { color: var(--ok); }
 .review-chip.rv-fail .review-chip-verdict { color: var(--err); }
 .review-chip-note { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-dim); }
+
+/* ---- 流式气泡内的行内变体：胶囊随打字流即时出现，不打断文本流 ---- */
+.round-chip.inline, .review-chip.inline {
+  display: inline-flex;
+  vertical-align: middle;
+  margin: 0 4px;
+  max-width: 100%;
+}
+.stream-tag {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  margin: 0 4px;
+  padding: 1px 8px;
+  border: 1px solid var(--teal-line);
+  border-radius: 99px;
+  background: var(--teal-soft);
+  color: var(--teal);
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+.stream-tag-violet {
+  border-color: var(--violet-line);
+  background: var(--violet-soft);
+  color: var(--violet);
+}

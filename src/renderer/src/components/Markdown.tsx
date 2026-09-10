@@ -106,10 +106,10 @@ function ContinueCard({ start, brief }: { start?: string; brief: string }) {
 
 // 回合自评：领队每轮回灌后输出的 <round outcome reason/>
 const ROUND_LABEL: Record<string, string> = { action: '已行动', no_action: '无动作', failed: '受挫' }
-function RoundChip({ outcome, reason }: { outcome?: string; reason?: string }) {
+function RoundChip({ outcome, reason, inline }: { outcome?: string; reason?: string; inline?: boolean }) {
   const known = outcome ? ROUND_LABEL[outcome] : undefined
   return (
-    <div className={`round-chip${outcome ? ` rc-${outcome}` : ''}`}>
+    <div className={`round-chip${inline ? ' inline' : ''}${outcome ? ` rc-${outcome}` : ''}`}>
       <span className="round-chip-dot" aria-hidden="true" />
       <span className="round-chip-tag">自评</span>
       <b className="round-chip-outcome">{known ?? outcome ?? '—'}</b>
@@ -119,11 +119,11 @@ function RoundChip({ outcome, reason }: { outcome?: string; reason?: string }) {
 }
 
 // 委派单审核结论：领队对 done 子任务输出的 <review of verdict note/>
-function ReviewChip({ of, verdict, note }: { of?: string; verdict?: string; note?: string }) {
+function ReviewChip({ of, verdict, note, inline }: { of?: string; verdict?: string; note?: string; inline?: boolean }) {
   const pass = verdict === 'pass'
   const label = pass ? '通过' : verdict === 'fail' ? '退回' : verdict || '—'
   return (
-    <div className={`review-chip ${pass ? 'rv-pass' : 'rv-fail'}`}>
+    <div className={`review-chip${inline ? ' inline' : ''} ${pass ? 'rv-pass' : 'rv-fail'}`}>
       <span className="review-chip-icon" aria-hidden="true">{pass ? '✓' : '↩'}</span>
       <span className="review-chip-tag">审核</span>
       <b className="review-chip-of">{of || '—'}</b>
@@ -131,6 +131,34 @@ function ReviewChip({ of, verdict, note }: { of?: string; verdict?: string; note
       {note ? <span className="review-chip-note">· {note}</span> : null}
     </div>
   )
+}
+
+// 流式过程中的行内标记渲染：已完整闭合的协议标记即时卡片化，
+// 未闭合的残余文本保持原样（闭合瞬间自动变身）。流式气泡用，闭合后走完整 Markdown。
+export function renderStreamingMarkers(text: string): ReactNode {
+  const re = /<delegate\b[^>]*>[\s\S]*?<\/delegate>|<continue\b[^>]*>[\s\S]*?<\/continue>|<(?:round|review)\b[^>]*?\/>/g
+  const nodes: ReactNode[] = []
+  let last = 0
+  let m: RegExpExecArray | null
+  while ((m = re.exec(text))) {
+    if (m.index > last) nodes.push(text.slice(last, m.index))
+    const tag = m[0]
+    const key = `m${m.index}`
+    if (tag.startsWith('<round')) {
+      nodes.push(<RoundChip key={key} inline outcome={tagAttr(tag, ROUND_OUTCOME_RE)} reason={tagAttr(tag, ROUND_REASON_RE)} />)
+    } else if (tag.startsWith('<review')) {
+      nodes.push(
+        <ReviewChip key={key} inline of={tagAttr(tag, REVIEW_OF_RE)} verdict={tagAttr(tag, REVIEW_VERDICT_RE)} note={tagAttr(tag, REVIEW_NOTE_RE)} />
+      )
+    } else if (tag.startsWith('<delegate')) {
+      nodes.push(<span key={key} className="stream-tag">⚡ 委派 → {tagAttr(tag, DELEGATE_TO_RE) ?? '…'}</span>)
+    } else {
+      nodes.push(<span key={key} className="stream-tag stream-tag-violet">⏭ 阶段接力</span>)
+    }
+    last = m.index + tag.length
+  }
+  nodes.push(text.slice(last))
+  return nodes
 }
 
 // ---------- 内置语法高亮（零依赖） ----------

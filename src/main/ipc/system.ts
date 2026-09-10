@@ -28,12 +28,13 @@ export function registerSystemIpc(ctx: IpcContext) {
   })
   ipcMain.handle('worktrees:prune', async () => {
     const dirs = new Set(ctx.store.list().map((task) => task.worktree?.repoDir || task.workdir).filter(Boolean))
+    const maxAgeMs = ctx.settings.worktreeMaxAgeDays * 24 * 60 * 60 * 1000
     const results = []
     for (const repoDir of dirs) {
       results.push(await pruneWorktrees(repoDir, (owner) => {
         const task = ctx.store.get(owner)
         return task?.status === 'queued' || task?.status === 'running'
-      }))
+      }, { maxAgeMs }))
       for (const metadata of listWorktreeMetadata(repoDir)) {
         const task = ctx.store.list().find((item) => item.worktree?.path === metadata.path)
         if (task && task.worktree && task.worktree.cleanupStatus !== metadata.cleanupStatus) {

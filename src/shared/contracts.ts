@@ -1,5 +1,13 @@
-import type { Automation, AppSettings, AnalyticsSummary, Comment, Goal, GoalCheckpoint, GoalRun, Issue, IssuePriority, IssueStatus, Notification, Run, RunTrigger, RuntimeSnapshot, Task, TaskEvent } from './types'
+import type { AcceptanceCriterion, Automation, AppSettings, AnalyticsSummary, Comment, Goal, GoalCheckpoint, GoalEvolutionPatch, GoalSpecSnapshot, GoalRun, Issue, IssuePriority, IssueStatus, Notification, Run, RunTrigger, RuntimeSnapshot, Task, TaskEvent } from './types'
 import type { SkillDetail, SkillMeta, SkillTarget, SyncState } from './skills'
+
+/** Loop 4 规格进化输入：patch 为提议的规格变更，approve=true 才会应用（结果闸门结论随行记录）。 */
+export interface GoalEvolveInput {
+  patch?: GoalEvolutionPatch
+  approve?: boolean
+  outcomeGatePassed?: boolean
+  ambiguityScore?: number
+}
 
 export interface PermissionRequest {
   requestId: string | number
@@ -77,6 +85,8 @@ export interface GoalCreateInput {
   /** 目标必须归属一个真实 Issue；循环在该 Issue 内自动推进（v2）。 */
   issueId: string
   completionConditions: string[]
+  /** Optional stable criterion list; omitted values are derived from completionConditions. */
+  acceptanceCriteria?: Array<Pick<AcceptanceCriterion, 'id' | 'text'> | string>
   stopConditions: string[]
   maxRuns: number
   maxDurationMs: number
@@ -160,6 +170,9 @@ export interface AgentDeckApi {
     create: (input: GoalCreateInput) => Promise<Goal>
     runs: (id: string) => Promise<GoalRun[]>
     checkpoints: (id: string) => Promise<GoalCheckpoint[]>
+    snapshots: (id: string) => Promise<GoalSpecSnapshot[]>
+    evolve: (id: string, input: GoalEvolveInput) => Promise<{ ok: boolean; error?: string; goal?: Goal; snapshot?: GoalSpecSnapshot; questions?: string[] }>
+    rollback: (id: string, generation: number) => Promise<{ ok: boolean; error?: string; goal?: Goal; snapshot?: GoalSpecSnapshot }>
     start: (id: string) => Promise<{ ok: boolean; error?: string }>
     pause: (id: string) => Promise<{ ok: boolean; error?: string }>
     resume: (id: string) => Promise<{ ok: boolean; error?: string }>

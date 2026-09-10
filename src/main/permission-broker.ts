@@ -10,9 +10,14 @@ export class PermissionBroker {
 
   constructor(
     private readonly onRequest: (taskId: string, request: PermissionRequest) => void,
-    private readonly timeoutMs = 5 * 60 * 1000,
+    /** 固定毫秒数或实时读取设置的取值函数（每次 ask 时取当前值，改设置无需重启） */
+    private readonly timeoutMs: number | (() => number) = 5 * 60 * 1000,
     private readonly getWorkVersion?: (taskId: string) => WorkVersion | undefined
   ) {}
+
+  private timeout(): number {
+    return typeof this.timeoutMs === 'function' ? this.timeoutMs() : this.timeoutMs
+  }
 
   /** Update the current content version and invalidate older pending requests. */
   setWorkVersion(taskId: string, version: WorkVersion) {
@@ -64,7 +69,7 @@ export class PermissionBroker {
       const timer = setTimeout(() => {
         this.pending.delete(key)
         resolve({ decision: 'deny' })
-      }, this.timeoutMs)
+      }, this.timeout())
       this.pending.set(key, { taskId, workVersion: snapshot, resolve, timer })
       this.onRequest(taskId, { ...request, workVersion: snapshot })
     })

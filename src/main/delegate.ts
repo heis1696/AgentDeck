@@ -241,7 +241,11 @@ export interface DelegationContext {
   store: TaskStore
   runner: TaskRunner
   getTeam: () => AgentLike[]
-  opts: () => { mode: string; notify: boolean; maxParallel: number }
+  opts: () => {
+    mode: string; notify: boolean; maxParallel: number
+    /** 委派预算（缺省回落到模块常量）：单领队轮数 / 全链轮数 / 层级上限 */
+    maxRounds?: number; maxTotalRounds?: number; maxDepth?: number
+  }
   pushTask: (taskId: string) => void
   pushEvent: (taskId: string, e: TaskEvent) => void
   /** 审核子任务（pass → done，fail → blocked） */
@@ -311,12 +315,15 @@ export async function runDelegationLoop(
 
   // ---- 二层委派的三道闸（0.7.0；建单路径的同类闸在 runner.spawnDelegateChild）----
   const { inherited, depth } = ancestorBudget(store, taskId)
+  const maxDepth = ctx.opts().maxDepth ?? MAX_DEPTH
+  const maxRounds = ctx.opts().maxRounds ?? MAX_ROUNDS
+  const maxTotalRounds = ctx.opts().maxTotalRounds ?? MAX_TOTAL_ROUNDS
   const bail = (why: string): DelegationOutcome => {
     note(`⚠ ${why}，本任务不再下派`)
     return { rounds: 0, children: [], finalText: stripDelegates(first.response), scanTexts: [first.delegationText ?? '', first.response] }
   }
-  if (depth >= MAX_DEPTH) return bail(`委派层级已达上限（${MAX_DEPTH} 层）`)
-  const budget = Math.min(MAX_ROUNDS, MAX_TOTAL_ROUNDS - inherited)
+  if (depth >= maxDepth) return bail(`委派层级已达上限（${maxDepth} 层）`)
+  const budget = Math.min(maxRounds, maxTotalRounds - inherited)
   if (budget <= 0) return bail('全链委派轮数预算已耗尽')
 
   /** 标记解析用：回合文本的全部来源（终态全文/流式累计并集 + 最后一条消息） */
@@ -508,7 +515,8 @@ export async function runDelegationLoop(
       gitStat = dirty.stat || ""
       integrationNote = '子任务无独立分支改动；领队若自己改了文件，改动保留在主目录工作区（未提交）'
     } else {
-      integrationNote = `集成未完成：${problems.join('; ')}`
+      // 一次性告知：失败原因只进时间线事件（收件箱/看板等错误面亦可散见），
+      // 不写进常驻的集成横幅——横幅长期挂在任务详情上只会在事后造成噪音
       note(`集成停止：${problems.join('; ')}`)
     }
   }

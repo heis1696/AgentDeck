@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
-import type { Goal, GoalRun, GoalStatus, Task, TaskEvent } from '../shared/types'
-import type { GoalCheckpointInput, GoalCreateInput } from '../shared/contracts'
+import type { Goal, GoalRun, GoalSpecSnapshot, GoalStatus, Task, TaskEvent } from '../shared/types'
+import type { GoalCheckpointInput, GoalCreateInput, GoalEvolveInput } from '../shared/contracts'
 import { isTerminalGoalStatus, validateGoalTransition } from '../shared/taskflow'
 import { GoalStore, type GoalCreateRecord } from './goal-store'
 
@@ -121,6 +121,8 @@ export interface GoalControllerOptions {
   finalizeIssue?: (issueId: string) => void
   /** Optional sink for a human-visible Goal guard event. */
   onGuard?: (goal: Goal, reason: string, detail: string) => void
+  /** doom-loop 审批阈值（固定值或实时读设置的取值函数；缺省用 DOOM_LOOP_THRESHOLD） */
+  doomLoopThreshold?: number | (() => number)
 }
 
 export interface GoalDecision {
@@ -211,6 +213,103 @@ export class GoalController {
   runs(id: string) { return this.goals.runs(id) }
   checkpoints(id: string) { return this.goals.checkpoints(id) }
 
+  /** Loop 4 规格快照：按 generation 升序只读返回；目标不存在时返回空表。 */
+  snapshots(id: string): GoalSpecSnapshot[] {
+    const goal = this.goals.get(id)
+    return goal ? this.goals.snapshots(goal.id) : []
+  }
+
+  /**
+   * Loop 4 规格进化：应用用户批准的补丁并落 'applied' 快照。
+   * 未批准（approve≠true）或无补丁一律拒绝——规格变更必须留痕、可回滚。
+   */
+  evolve(id: string, input: GoalEvolveInput): { ok: boolean; error?: string; goal?: Goal; snapshot?: GoalSpecSnapshot; questions?: string[] } {
+    const goal = this.goals.get(id)
+    if (!goal) return { ok: false, error: '目标不存在' }
+    const patch = input.patch
+    if (!patch || !Array.isArray(patch.criteria)) return { ok: false, error: '缺少规格进化补丁（patch）' }
+    if (input.approve !== true) return { ok: false, error: '规格进化需用户批准（approve=true）后才能应用' }
+    const criteria = (goal.acceptanceCriteria ?? []).map((criterion) => ({ ...criterion }))
+    for (const [index, criterionPatch] of patch.criteria.entries()) {
+      if (criterionPatch.action === 'add') {
+        const text = criterionPatch.text?.trim()
+        if (!text) return { ok: false, error: `第 ${index + 1} 条 add 补丁缺少 text` }
+        criteria.push({ id: criterionPatch.criterionId?.trim() || `ac_${Date.now().toString(36)}_${index}`, text, status: 'pending' })
+        continue
+      }
+      const criterionId = criterionPatch.criterionId?.trim()
+      if (!criterionId) return { ok: false, error: `第 ${index + 1} 条 ${criterionPatch.action} 补丁缺少 criterionId` }
+      const target = criteria.find((criterion) => criterion.id === criterionId)
+      if (!target) return { ok: false, error: `验收标准 ${criterionId} 不存在` }
+      if (criterionPatch.action === 'revise') {
+        const text = criterionPatch.text?.trim()
+        if (!text) return { ok: false, error: `验收标准 ${criterionId} 的 revise 补丁缺少 text` }
+        target.text = text
+        // 修订后的标准视为未验收，需要重新通过结果闸门
+        target.status = 'pending'
+        delete target.passedAt
+        delete target.evidence
+      }
+      // 'keep'：不改内容，仅随快照记录保留意图
+    }
+    const text = patch.text?.trim() || goal.text
+    const snapshot = this.goals.saveSpecSnapshot({
+      goalId: goal.id,
+      generation: this.nextGeneration(goal.id),
+      text,
+      acceptanceCriteria: criteria,
+      completionConditions: goal.completionConditions,
+      stopConditions: goal.stopConditions,
+      outcomeGatePassed: input.outcomeGatePassed === true,
+      decision: 'applied',
+      patch,
+      ...(patch.provenance?.rationale ? { reason: patch.provenance.rationale } : {})
+    })
+    const updated = this.goals.update(goal.id, { text, acceptanceCriteria: criteria })!
+    this.emit(updated)
+    return { ok: true, goal: updated, snapshot, questions: [] }
+  }
+
+  /** 规格回滚：以历史快照覆盖当前规格并落 'rollback' 记录；generation 只增不减，历史不可变。 */
+  rollback(id: string, generation: number): { ok: boolean; error?: string; goal?: Goal; snapshot?: GoalSpecSnapshot } {
+    const goal = this.goals.get(id)
+    if (!goal) return { ok: false, error: '目标不存在' }
+    if (!Number.isInteger(generation) || generation < 1) return { ok: false, error: 'generation 必须是正整数' }
+    const base = this.goals.snapshotForGeneration(goal.id, generation)
+    if (!base) return { ok: false, error: `规格快照 generation ${generation} 不存在` }
+    if (base.decision === 'rollback') return { ok: false, error: `generation ${generation} 本身是回滚记录，不能作为回滚目标` }
+    const snapshot = this.goals.saveSpecSnapshot({
+      goalId: goal.id,
+      generation: this.nextGeneration(goal.id),
+      text: base.text,
+      acceptanceCriteria: base.acceptanceCriteria.map((criterion) => ({ ...criterion })),
+      completionConditions: base.completionConditions,
+      stopConditions: base.stopConditions,
+      outcomeGatePassed: base.outcomeGatePassed,
+      decision: 'rollback',
+      reason: `回滚到 generation ${generation}`
+    })
+    const updated = this.goals.update(goal.id, {
+      text: base.text,
+      acceptanceCriteria: base.acceptanceCriteria.map((criterion) => ({ ...criterion })),
+      completionConditions: base.completionConditions,
+      stopConditions: base.stopConditions
+    })!
+    this.emit(updated)
+    return { ok: true, goal: updated, snapshot }
+  }
+
+  /** 下一快照代数：现有最大 generation + 1（建目标时的初始快照为 1）。 */
+  private nextGeneration(goalId: string): number {
+    return this.goals.snapshots(goalId).reduce((max, snapshot) => Math.max(max, snapshot.generation), 0) + 1
+  }
+
+  /** doom-loop 阈值：设置取值函数实时读，未配置回落到常量 */
+  private doomThreshold(): number {
+    const configured = this.options.doomLoopThreshold
+    return typeof configured === 'function' ? configured() : configured ?? DOOM_LOOP_THRESHOLD
+  }
+
   /**
    * Observe one tool invocation for a Goal task. Callers may feed TaskEvent
    * records here without coupling the controller to a particular backend.
@@ -225,14 +324,15 @@ export class GoalController {
     if (!owner || (task?.issueId && task.issueId !== owner.issueId)) return { doomLoop: false as const }
     const calls = this.toolWindows.get(taskId) ?? []
     calls.push({ toolName: toolName.trim(), name: toolName.trim(), input })
+    const threshold = this.doomThreshold()
     // Keep enough history for a trailing-window detector while bounding memory.
-    if (calls.length > DOOM_LOOP_THRESHOLD) calls.splice(0, calls.length - DOOM_LOOP_THRESHOLD)
+    if (calls.length > threshold) calls.splice(0, calls.length - threshold)
     this.toolWindows.set(taskId, calls)
-    if (!detectDoomLoop(calls) || this.doomLoopNotified.has(taskId)) return { doomLoop: false as const }
+    if (!detectDoomLoop(calls, threshold) || this.doomLoopNotified.has(taskId)) return { doomLoop: false as const }
     this.doomLoopNotified.add(taskId)
     const goal = owner
     if (isTerminalGoalStatus(goal.status)) return { doomLoop: true as const, goal }
-    const reason = `Doom loop detected: ${DOOM_LOOP_THRESHOLD} identical ${toolName.trim()} calls; user approval required`
+    const reason = `Doom loop detected: ${threshold} identical ${toolName.trim()} calls; user approval required`
     const next = this.goals.update(goal.id, {
       status: 'waiting_user',
       blockedReason: reason,
@@ -288,6 +388,7 @@ export class GoalController {
       issueId,
       text,
       completionConditions,
+      ...(input.acceptanceCriteria ? { acceptanceCriteria: input.acceptanceCriteria } : {}),
       stopConditions: cleanLines(input.stopConditions),
       maxRuns: input.maxRuns,
       maxDurationMs: input.maxDurationMs,

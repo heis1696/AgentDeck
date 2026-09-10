@@ -86,7 +86,13 @@ const SESSION_DEAD_RE = /连接已关闭|进程退出|EPIPE|ENOTCONN|ECONNRESET|
 export class TaskRunner {
   private store: TaskStore
   private backends: Map<string, AgentBackend>
-  private opts: () => { concurrency: number; mode: string; notify: boolean; workerConcurrency?: number }
+  private opts: () => {
+    concurrency: number; mode: string; notify: boolean; workerConcurrency?: number
+    turnIdleTimeoutMs?: number; permissionTimeoutMs?: number
+    maxRetryAttempts?: number; retryBackoffMs?: number; maxHandoffChain?: number
+    delegateMaxRounds?: number; delegateMaxTotalRounds?: number; delegateMaxDepth?: number
+    doomLoopThreshold?: number
+  }
   private sessions = new Map<string, BackendSession>()
   /** Bind a backend session's callbacks to the currently accepted turn. */
   private sessionEventContexts = new WeakMap<BackendSession, { generation: number; sessionOwner?: string }>()
@@ -152,7 +158,7 @@ export class TaskRunner {
     this.ports = { send, notify, onTaskEvent: ports.onTaskEvent }
     this.permissionBroker = new PermissionBroker((taskId, request) => {
       send('task:permission', { taskId, request })
-    }, 5 * 60 * 1000, (taskId) => this.workVersion(taskId))
+    }, () => this.opts().permissionTimeoutMs ?? 5 * 60 * 1000, (taskId) => this.workVersion(taskId))
     this.finalizer = new TaskFinalizer(store, (taskId) => this.pushTask(taskId))
     this.scheduler = new Scheduler(
       () => this.store.list(),
@@ -283,7 +289,7 @@ export class TaskRunner {
     const state = previous?.key === key ? previous : { key, count: 0, requested: false }
     state.count += 1
     this.toolWindows.set(taskId, state)
-    if (state.count !== 3 || state.requested) return
+    if (state.count !== (this.opts().doomLoopThreshold ?? 3) || state.requested) return
     state.requested = true
     const requestId = `doom_${taskId}_${++this.doomRequestSeq}`
     const reason = `检测到同名同参工具连续调用 ${state.count} 次，疑似 doom-loop；需要人工确认是否继续。`
@@ -380,7 +386,13 @@ export class TaskRunner {
    * dsh headless 运行期零输出、永远等不到续命事件，按固定总预算裁决。
    */
   private turnBudgetMs(taskId: string): number {
-    return this.store.get(taskId)?.backend === 'dsh' ? DSH_TURN_BUDGET_MS : TURN_IDLE_TIMEOUT_MS
+    return this.store.get(taskId)?.backend === 'dsh' ? DSH_TURN_BUDGET_MS : this.turnIdleBudgetMs()
+  }
+  /** 空转预算来源：测试 env > 设置（默认 10 分钟） */
+  private turnIdleBudgetMs(): number {
+    const env = Number(process.env.AGENTDECK_TURN_IDLE_MS)
+    if (env > 0) return env
+    return this.opts().turnIdleTimeoutMs ?? 600_000
   }
   private disarmWatchdog(taskId: string) {
     const w = this.turnWatchdogs.get(taskId)
@@ -642,11 +654,13 @@ export class TaskRunner {
       this.note(taskId, `⚠ 拒绝派给 ${call.to}：它在当前委派链上（防环），请改派他人或自己做`)
       return null
     }
-    if (depth >= MAX_DEPTH) {
-      this.note(taskId, `⚠ 委派层级已达上限（${MAX_DEPTH} 层），拒绝派给 ${call.to}`)
+    const delegateMaxDepth = this.opts().delegateMaxDepth ?? MAX_DEPTH
+    const delegateTotalRounds = this.opts().delegateMaxTotalRounds ?? MAX_TOTAL_ROUNDS
+    if (depth >= delegateMaxDepth) {
+      this.note(taskId, `⚠ 委派层级已达上限（${delegateMaxDepth} 层），拒绝派给 ${call.to}`)
       return null
     }
-    if (MAX_TOTAL_ROUNDS - inherited <= 0) {
+    if (delegateTotalRounds - inherited <= 0) {
       this.note(taskId, `⚠ 全链委派轮数预算已耗尽，拒绝派给 ${call.to}`)
       return null
     }
@@ -746,7 +760,14 @@ export class TaskRunner {
           store: this.store,
           runner: this,
           getTeam: () => this.getTeam?.() ?? [],
-          opts: () => ({ mode: this.opts().mode, notify: this.opts().notify, maxParallel: Math.max(1, this.opts().workerConcurrency ?? this.opts().concurrency) }),
+          opts: () => ({
+            mode: this.opts().mode,
+            notify: this.opts().notify,
+            maxParallel: Math.max(1, this.opts().workerConcurrency ?? this.opts().concurrency),
+            maxRounds: this.opts().delegateMaxRounds,
+            maxTotalRounds: this.opts().delegateMaxTotalRounds,
+            maxDepth: this.opts().delegateMaxDepth
+          }),
           pushTask: (id) => this.pushTask(id),
           pushEvent: (id, e) => this.pushEvent(id, e),
           applyReview: (childId, verdict, note) => this.applyChildReview(childId, verdict, note)
@@ -778,11 +799,12 @@ export class TaskRunner {
     // Cancelled handoffs are abandoned attempts and must not consume the
     // finite relay chain budget. Failed, queued, running and completed
     // handoffs remain durable chain members for audit and loop prevention.
+    const chainLimit = this.opts().maxHandoffChain ?? MAX_HANDOFF_CHAIN
     const handoffCount = this.store.list().filter((t) =>
       t.issueId === task.issueId && t.trigger === 'handoff' && t.status !== 'cancelled'
     ).length
-    if (handoffCount >= MAX_HANDOFF_CHAIN) {
-      note(`⚠ 阶段接力已达上限（${MAX_HANDOFF_CHAIN} 次），<continue> 被拒绝；请人工推进后续阶段`)
+    if (handoffCount >= chainLimit) {
+      note(`⚠ 阶段接力已达上限（${chainLimit} 次），<continue> 被拒绝；请人工推进后续阶段`)
       return stripped
     }
     let ok = false
@@ -1004,11 +1026,12 @@ export class TaskRunner {
     const task = this.store.get(taskId)
     if (!task || task.status !== 'failed') return
     const failure = task.failure
-    const decision = decideRetry(task, failure)
+    const maxAttempts = this.opts().maxRetryAttempts ?? 2
+    const decision = decideRetry(task, failure, maxAttempts, this.opts().retryBackoffMs)
     if (!decision.retry || !failure) return
     const next = decision.attempt
     const fresh = decision.freshSession
-    const goalBudget = task.goalId ? ` · Phase execution ${next + 1}/3` : ''
+    const goalBudget = task.goalId ? ` · Phase execution ${next + 1}/${maxAttempts + 1}` : ''
     const schedule = () => {
       this.retryTimers.delete(taskId)
       // 退避等待期间用户可能已取消/手动处理：不再是 failed 态就放弃重试
@@ -1064,7 +1087,7 @@ export class TaskRunner {
     if (!task) return { ok: false, error: '任务不存在' }
     const message = content.trim()
     if (!message) return { ok: false, error: '追问不能为空' }
-    if (task.status === 'running') return { ok: false, error: '任务正在运行' }
+    if (task.status === 'running') return { ok: false, error: '任务正在运行（长时间无输出时可先「停止」再「重新运行」）' }
     // cancelled 也放行：目标模式停止/用户取消后的任务仍可追问续聊，别把 Issue 卡死在"任务尚未完成"
     if (task.status !== 'done' && task.status !== 'failed' && task.status !== 'cancelled') return { ok: false, error: '任务尚未完成' }
     const backend = this.backends.get(task.backend)

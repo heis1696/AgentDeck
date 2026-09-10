@@ -1,6 +1,6 @@
 {
   "name": "agentdeck",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "description": "本地任务看板 — 把任务派给本地 agent 执行",
   "main": "./out/main/index.js",
   "author": "agentdeck",
@@ -51,10 +51,11 @@
     "smoke:stage6": "npm run typecheck && npm run smoke:event-log && npm run smoke:taskflow && npm run smoke:turn-model && npm run smoke:migration && npm run smoke:issues",
     "smoke:goal": "node scripts/smoke-goal.mjs",
     "smoke:goal-guards": "node scripts/smoke-goal-guards.mjs",
+    "smoke:goal-spec": "node scripts/smoke-goal-spec.mjs",
     "smoke:skills": "node scripts/smoke-skills.mjs",
     "smoke:stage7": "npm run typecheck && npm run smoke:stage6 && npm run smoke:opencode-server && npm run smoke && npm run smoke:goal",
     "smoke:stage8": "npm run typecheck && npm run smoke:sidecar && npm run build && git diff --check",
-    "smoke:all": "npm run smoke && npm run smoke:event-log && npm run smoke:permission && npm run smoke:execution-services && npm run smoke:ipc-validation && npm run smoke:final-dedup && npm run smoke:cli-errors && npm run smoke:dsh-budget && npm run smoke:git-errors && npm run smoke:delegate && npm run smoke:migration && npm run smoke:failure && npm run smoke:diff && npm run smoke:retry && npm run smoke:flow && npm run smoke:resume && npm run smoke:issues && npm run smoke:automation && npm run smoke:runtime-analytics && npm run smoke:taskflow && npm run smoke:model && npm run smoke:continue && npm run smoke:orchestration-matrix && npm run smoke:round && npm run smoke:turn-model && npm run smoke:turn-lifecycle && npm run smoke:lifecycle && npm run smoke:worktrees && npm run smoke:opencode-server && npm run smoke:goal && npm run smoke:goal-guards && npm run smoke:skills && npm run smoke:task-service && npm run smoke:sidecar",
+    "smoke:all": "npm run smoke && npm run smoke:event-log && npm run smoke:permission && npm run smoke:execution-services && npm run smoke:ipc-validation && npm run smoke:final-dedup && npm run smoke:cli-errors && npm run smoke:dsh-budget && npm run smoke:git-errors && npm run smoke:delegate && npm run smoke:migration && npm run smoke:failure && npm run smoke:diff && npm run smoke:retry && npm run smoke:flow && npm run smoke:resume && npm run smoke:issues && npm run smoke:automation && npm run smoke:runtime-analytics && npm run smoke:taskflow && npm run smoke:model && npm run smoke:continue && npm run smoke:orchestration-matrix && npm run smoke:round && npm run smoke:turn-model && npm run smoke:turn-lifecycle && npm run smoke:lifecycle && npm run smoke:worktrees && npm run smoke:opencode-server && npm run smoke:goal && npm run smoke:goal-guards && npm run smoke:goal-spec && npm run smoke:skills && npm run smoke:task-service && npm run smoke:sidecar",
     "smoke:task-service": "node scripts/smoke-task-service.mjs",
     "smoke:sidecar": "node scripts/smoke-sidecar.mjs"
   },

@@ -138,6 +138,11 @@ export class TaskStore {
   private pendingSnapshots = new Set<string>()
   private indexTimer: NodeJS.Timeout | undefined
   private indexDirty = false
+  /** Ids flipped running→failed by this process's load migration. The startup
+   * reconciliation owns the narration and the final-event rescue; without it a
+   * restart-interrupted turn (e.g. one waiting on an auto-retry) would leave a
+   * timeline that dead-ends at its last live event with no explanation. */
+  private restartInterrupted = new Set<string>()
 
   constructor(userDataDir: string) {
     this.dir = path.join(userDataDir, 'tasks')
@@ -175,6 +180,15 @@ export class TaskStore {
 
     const parsed = JSON.parse(raw) as unknown
     const document = migrateTaskIndex(parsed)
+    // Record zombie-running flips while the raw status is still visible. The
+    // flip itself stays silent and idempotent; startup reconciliation reads
+    // this ledger once and appends the visible "interrupted" trace.
+    const rawEntries = Array.isArray(parsed) ? parsed : isRecord(parsed) && Array.isArray(parsed.tasks) ? parsed.tasks : []
+    for (const entry of rawEntries) {
+      if (isRecord(entry) && entry.status === 'running' && typeof entry.id === 'string' && entry.id.trim()) {
+        this.restartInterrupted.add(entry.id)
+      }
+    }
     let needsSave = !sameTaskEntries(parsed, document)
     for (const migrated of document.tasks) {
       // Reconcile counters with the append-only log after an interrupted write.
@@ -265,6 +279,17 @@ export class TaskStore {
 
   get(id: string): Task | undefined {
     return this.tasks.get(id)
+  }
+
+  /** Tasks flipped running→failed by the load migration (drain-once). */
+  drainRestartInterrupted(): Task[] {
+    const drained: Task[] = []
+    for (const id of this.restartInterrupted) {
+      const task = this.tasks.get(id)
+      if (task) drained.push(task)
+    }
+    this.restartInterrupted.clear()
+    return drained
   }
 
   list(): Task[] {

@@ -139,7 +139,16 @@ app.whenReady().then(() => {
     concurrency: settings.concurrency,
     mode: settings.mode,
     notify: settings.notifyOnDone,
-    workerConcurrency: settings.workerConcurrency
+    workerConcurrency: settings.workerConcurrency,
+    turnIdleTimeoutMs: settings.turnIdleTimeoutMs,
+    permissionTimeoutMs: settings.permissionTimeoutMs,
+    maxRetryAttempts: settings.maxRetryAttempts,
+    retryBackoffMs: settings.retryBackoffMs,
+    maxHandoffChain: settings.maxHandoffChain,
+    delegateMaxRounds: settings.delegateMaxRounds,
+    delegateMaxTotalRounds: settings.delegateMaxTotalRounds,
+    delegateMaxDepth: settings.delegateMaxDepth,
+    doomLoopThreshold: settings.doomLoopThreshold
   }), (task) => notifyTaskChanged(task), {
     send: (channel, payload) => mainWindow?.webContents.send(channel, payload),
     onTaskEvent: (taskId, event) => goalController?.onTaskEvent(taskId, event),
@@ -158,6 +167,56 @@ app.whenReady().then(() => {
   })
   runner.attachTeam(() => agents)
   runner.attachTaskService(taskService)
+  // 启动对账：执行存在于主进程内存里，快照里遗留的 running 在重启后必然是僵尸。
+  // store 的加载迁移已把它们翻成 failed 并登记在案（直接按 status 过滤会扑空——
+  // 轮到这里的它们早已不是 running，时间线会永远死止在最后一刻，比如卡在"⟳ 自动重试"）。
+  // 日志尾部已有 final 的（输出实际完成、只是状态没来得及落盘）补记为 done；其余留中断说明。
+  for (const stale of store.drainRestartInterrupted()) {
+    const events = store.readEvents(stale.id)
+    // 只有 final 就是日志最后一个事件时才可抢救（final 落盘后、状态落盘前崩溃）。
+    // 多回合任务里旧回合的 final 后面总跟着新回合的事件（追问/委派状态），那说明
+    // 被打断的是后继回合——按旧 final 抢救成 done 会把没跑完的回合谎报成完成。
+    const lastEvent = events[events.length - 1]
+    const lastFinal = lastEvent?.kind === 'final' && lastEvent.text ? lastEvent : undefined
+    const note = store.appendEvent(stale.id, {
+      ts: Date.now(),
+      kind: 'status',
+      text: lastFinal
+        ? '启动对账：检测到本任务在上次退出前已完成输出，自动标记为完成'
+        : '启动对账：应用重启导致执行中断，自动标记为失败（可「重新运行」或继续追问）'
+    })
+    store.update(stale.id, lastFinal
+      ? { status: 'done', endedAt: lastFinal.ts, result: lastFinal.text ?? stale.result }
+      : { status: 'failed', endedAt: Date.now() })
+    if (note) runner.pushEvent(stale.id, note)
+    notifyTaskChanged(store.get(stale.id) ?? stale)
+  }
+  // 排队启动依赖事件（enqueue / 上一跑落幕触发 pump），重启后事件源全消失，
+  // 遗留的 queued 会永远滞留——硬切接力的后继任务正是这么卡死的。启动对账分两路：
+  // ① 普通任务（自包含，如硬切后继）→ 补一次 enqueue 自动恢复，时间线留痕；
+  // ② goal 绑定 / 委派 worker → 置 parked 挂起（pump 只认非 parked，不停车迟早被
+  //    后续任何一次 pump 顺带扫走，等于静默恢复）。goal 重启后由 waiting_user 确认
+  //    续跑（launchNext 新建）；worker 的委派循环已死，跑了也无人收编，留 ▶ 手动入口。
+  for (const stale of store.list().filter((task) => task.status === 'queued' && !task.parked)) {
+    if (stale.goalId || stale.parentTaskId) {
+      const note = store.appendEvent(stale.id, {
+        ts: Date.now(),
+        kind: 'status',
+        text: '启动对账：应用重启，排队任务挂起待确认（可手动启动）'
+      })
+      store.update(stale.id, { parked: true })
+      if (note) runner.pushEvent(stale.id, note)
+      notifyTaskChanged(store.get(stale.id) ?? stale)
+    } else {
+      const note = store.appendEvent(stale.id, {
+        ts: Date.now(),
+        kind: 'status',
+        text: '启动对账：恢复上次排队中的执行'
+      })
+      if (note) runner.pushEvent(stale.id, note)
+      runner.enqueue(store.get(stale.id) ?? stale)
+    }
+  }
   presets = loadPresets()
   runner.attachPresets(() => presets)
   runner.attachIssueOps({
@@ -191,6 +250,7 @@ app.whenReady().then(() => {
       dedupeKey: input.dedupeKey,
       startNow: input.startNow
     }, input.trigger),
+    doomLoopThreshold: () => settings.doomLoopThreshold,
     enqueueTask: (task) => runner.enqueue(task),
     startTask: (task) => {
       store.update(task.id, { parked: undefined })

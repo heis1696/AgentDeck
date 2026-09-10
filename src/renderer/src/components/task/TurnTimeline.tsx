@@ -1,6 +1,6 @@
 import { Undo2 } from 'lucide-react'
 import { useEffect, useRef, useState, type CSSProperties, type RefObject } from 'react'
-import { Markdown } from '../Markdown'
+import { Markdown, renderStreamingMarkers } from '../Markdown'
 import { fmtDuration } from '../../api'
 import type { Task, TaskEvent } from '../../../../shared/types'
 import type { Turn } from '../../hooks/turnModel'
@@ -159,9 +159,9 @@ export function TurnTimeline({ task, turns, activeNav, onNavigate, onRewind, log
             {turn.items.map((item, itemIndex) => {
               if (item.type === 'work') return <details className="worklog" key={itemIndex} open={streaming && itemIndex === lastWorkIndex ? true : undefined}><summary>🔧 工作过程（{item.work.filter((event) => event.kind === 'tool').length} 次工具调用）<ToolChips work={item.work} /></summary><div className="worklog-body">{item.work.map((event) => <LogLine key={event.seq} event={event} />)}</div></details>
               if (item.type === 'final') return <div className="bubble agent" key={itemIndex}><Markdown text={item.text} />{turn.usage && <UsageBadge usage={turn.usage} />}</div>
-              return <div className="bubble agent" key={itemIndex}>{item.closed ? <Markdown text={item.text} /> : <pre className="streaming">{item.text}</pre>}{streaming && !item.closed && <div className="log-running"><span className="dots"><i /><i /><i /></span>回复中…</div>}{turn.usage && finalIndex < 0 && itemIndex === lastBubbleIndex && <UsageBadge usage={turn.usage} />}</div>
+              return <div className="bubble agent" key={itemIndex}>{item.closed ? <Markdown text={item.text} /> : <pre className="streaming">{renderStreamingMarkers(item.text)}</pre>}{streaming && !item.closed && <div className="log-running"><span className="dots"><i /><i /><i /></span>回复中…</div>}{turn.usage && finalIndex < 0 && itemIndex === lastBubbleIndex && <UsageBadge usage={turn.usage} />}</div>
             })}
-            {streaming && !endsWithOpenText && <div className="bubble agent"><div className="log-running"><span className="dots"><i /><i /><i /></span>回复中…</div></div>}
+            {streaming && !endsWithOpenText && finalIndex < 0 && <div className="bubble agent"><div className="log-running"><span className="dots"><i /><i /><i /></span>回复中…</div></div>}
             {pending && <div className="bubble agent"><div className="log-running"><span className="dots"><i /><i /><i /></span>排队等待执行…</div></div>}
           </div>
         })}

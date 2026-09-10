@@ -28,7 +28,9 @@ export function registerTaskIpc(ctx: IpcContext) {
     const taskId = parseId(id)
     const task = ctx.store.get(taskId)
     if (!task) return { ok: false, error: '任务不存在' }
-    if (task.status !== 'queued' || !task.parked) return { ok: false, error: '任务不在待启动状态' }
+    // parked 与非 parked 的 queued 都放行：非 parked 排队（如硬切后继）若因故滞留，
+    // 这是用户唯一的手动解卡入口
+    if (task.status !== 'queued') return { ok: false, error: '任务不在排队中' }
     ctx.store.update(taskId, { parked: undefined })
     ctx.runner.enqueue(ctx.store.get(taskId)!)
     ctx.issueStore.sync(ctx.store.list())
@@ -65,7 +67,8 @@ export function registerTaskIpc(ctx: IpcContext) {
     const taskId = parseId(id)
     const task = ctx.store.get(taskId)
     if (!task) return { ok: false, error: '任务不存在' }
-    if (task.status === 'running' || task.status === 'queued') return { ok: false, error: '任务已在队列/运行中' }
+    if (task.status === 'running') return { ok: false, error: '任务正在运行，如长时间无输出可先「停止」再重新运行' }
+    if (task.status === 'queued') return { ok: false, error: '任务已在队列中等待并发槽位' }
     await ctx.runner.closeSession(taskId)
     ctx.store.update(taskId, { status: 'queued', error: undefined, failure: undefined, result: undefined, sessionId: undefined, attempt: undefined, runId: undefined })
     ctx.runner.enqueue(ctx.store.get(taskId)!)

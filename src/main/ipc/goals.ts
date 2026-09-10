@@ -1,5 +1,5 @@
 import { ipcMain } from 'electron'
-import { parseGoalCheckpoint, parseGoalCreate, parseId } from '../ipc-validation'
+import { parseGoalCheckpoint, parseGoalCreate, parseGoalEvolve, parseId } from '../ipc-validation'
 import type { IpcContext } from './context'
 
 export function registerGoalIpc(ctx: IpcContext) {
@@ -8,6 +8,9 @@ export function registerGoalIpc(ctx: IpcContext) {
   ipcMain.handle('goals:create', (_e, input: unknown) => ctx.goalController.create(parseGoalCreate(input)))
   ipcMain.handle('goals:runs', (_e, id: unknown) => ctx.goalController.runs(parseId(id, 'goalId')))
   ipcMain.handle('goals:checkpoints', (_e, id: unknown) => ctx.goalController.checkpoints(parseId(id, 'goalId')))
+  ipcMain.handle('goals:snapshots', (_e, id: unknown) => ctx.goalController.snapshots(parseId(id, 'goalId')))
+  ipcMain.handle('goals:evolve', (_e, id: unknown, input: unknown) => ctx.goalController.evolve(parseId(id, 'goalId'), parseGoalEvolve(input)))
+  ipcMain.handle('goals:rollback', (_e, id: unknown, generation: unknown) => ctx.goalController.rollback(parseId(id, 'goalId'), generation as number))
   ipcMain.handle('goals:start', (_e, id: unknown) => ctx.goalController.start(parseId(id, 'goalId')))
   ipcMain.handle('goals:pause', (_e, id: unknown) => ctx.goalController.pause(parseId(id, 'goalId')))
   ipcMain.handle('goals:resume', (_e, id: unknown) => ctx.goalController.resume(parseId(id, 'goalId')))

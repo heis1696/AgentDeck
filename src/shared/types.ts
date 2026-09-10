@@ -19,6 +19,54 @@ export type RunTrigger = 'assignment' | 'mention' | 'autopilot' | 'manual' | 'ha
 /** Lifecycle of a durable, multi-run user goal. */
 export type GoalStatus = 'draft' | 'active' | 'waiting_user' | 'completed' | 'blocked' | 'cancelled' | 'failed'
 
+/** Stable, positional acceptance criterion used by Loop 4 specification evolution. */
+export type AcceptanceCriterionStatus = 'pending' | 'passed' | 'failed'
+export interface AcceptanceCriterion {
+  /** Never recycle this id: it is the criterion's audit identity across generations. */
+  id: string
+  text: string
+  status: AcceptanceCriterionStatus
+  passedAt?: number
+  /** Optional evidence reference; this is advisory and never replaces the result gate. */
+  evidence?: string
+}
+
+export type GoalPatchAction = 'keep' | 'revise' | 'add'
+export interface GoalPatchProvenance {
+  source: string
+  rationale: string
+  evidence?: string[]
+  author?: string
+  createdAt?: number
+}
+export interface GoalAcceptancePatch {
+  action: GoalPatchAction
+  /** Required for keep/revise; add receives a generated stable id when omitted. */
+  criterionId?: string
+  text?: string
+  provenance?: GoalPatchProvenance
+}
+export interface GoalEvolutionPatch {
+  /** Optional goal wording change. Acceptance criteria remain independently guarded. */
+  text?: string
+  criteria: GoalAcceptancePatch[]
+  provenance: GoalPatchProvenance
+}
+export interface GoalSpecSnapshot {
+  id: string
+  goalId: string
+  generation: number
+  text: string
+  acceptanceCriteria: AcceptanceCriterion[]
+  completionConditions: string[]
+  stopConditions: string[]
+  createdAt: number
+  outcomeGatePassed: boolean
+  decision: 'initial' | 'applied' | 'rejected' | 'rollback'
+  patch?: GoalEvolutionPatch
+  reason?: string
+}
+
 export function isGoalStatus(value: unknown): value is GoalStatus {
   return value === 'draft' || value === 'active' || value === 'waiting_user' || value === 'completed'
     || value === 'blocked' || value === 'cancelled' || value === 'failed'
@@ -31,6 +79,8 @@ export interface Goal {
   issueId: string
   text: string
   completionConditions: string[]
+  /** Loop 4 criteria with stable positional identity. Older goals may omit this field. */
+  acceptanceCriteria?: AcceptanceCriterion[]
   stopConditions: string[]
   maxRuns: number
   maxDurationMs: number
@@ -452,6 +502,17 @@ export interface AppSettings {
   mode: 'yolo' | 'build' | 'edit' | 'plan'
   workerConcurrency: number
   sharedDir: string // 共享目录（技能库）；空串 = 默认 ~/.agentdeck，实际路径解析集中在主进程
+  // —— 运行调优参数（设置界面「调优」分区；保持默认 = 出厂行为）——
+  turnIdleTimeoutMs: number // 回合空转看门狗：等待终态期间无任何事件达此时长判超时（有事件续命）
+  permissionTimeoutMs: number // 权限请求无响应自动拒绝时限
+  maxRetryAttempts: number // 瞬态失败（限流/超时/崩溃/沙箱）自动重试上限
+  retryBackoffMs: number // 限流（429）退避时长
+  maxHandoffChain: number // 阶段接力（<continue>）链上限，防无限自继
+  delegateMaxRounds: number // 单领队委派循环轮数上限
+  delegateMaxTotalRounds: number // 全链委派轮数预算（二层委派祖先轮数计入）
+  delegateMaxDepth: number // 委派层级上限（领队→子领队→队员）
+  doomLoopThreshold: number // 同名同参工具连续调用 N 次触发人工确认
+  worktreeMaxAgeDays: number // 委派 worktree 回收年龄（天），手动清理时超过即回收
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -463,5 +524,15 @@ export const DEFAULT_SETTINGS: AppSettings = {
   notifyOnDone: true,
   mode: 'yolo',
   workerConcurrency: 3,
-  sharedDir: ''
+  sharedDir: '',
+  turnIdleTimeoutMs: 600_000,
+  permissionTimeoutMs: 300_000,
+  maxRetryAttempts: 2,
+  retryBackoffMs: 60_000,
+  maxHandoffChain: 8,
+  delegateMaxRounds: 6,
+  delegateMaxTotalRounds: 8,
+  delegateMaxDepth: 3,
+  doomLoopThreshold: 3,
+  worktreeMaxAgeDays: 30
 }
