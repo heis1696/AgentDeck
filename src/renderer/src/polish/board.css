@@ -1,6 +1,110 @@
 /* ============================================================
    0.15.0 UI Polish Wave · board（看板视图专属文件）
-   职责：看板列与卡片、空列状态、运行中卡着色语义。
+   职责：看板列与卡片、空列状态、卡片信息分层。
    约定：只覆盖看板类名；颜色一律引用令牌变量；
    按钮全局体系归 foundation.css 管。
    ============================================================ */
+
+/* ---------- 卡片：head / title / meta 三层分明 ---------- */
+.board-card { transition: border-color var(--duration-base) var(--ease-in-out), box-shadow var(--duration-base) var(--ease-in-out), transform var(--duration-base) var(--ease-out); }
+.board-card:hover { border-color: var(--border-strong); transform: translateY(-1px); box-shadow: var(--menu-shadow); }
+.board-card[draggable='true']:active { cursor: grab; transform: translateY(0); box-shadow: var(--shadow-pop); }
+
+/* head：identifier + 语义徽章，不再混入标题文本流 */
+.board-card .board-card-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.board-card .issue-identifier {
+  margin: 0;
+  color: var(--text-faint);
+  font: var(--text-micro)/1 var(--mono);
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+}
+.board-card .board-card-head .badge {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+/* title：两行截断 */
+.board-card .board-card-title {
+  margin: 0 0 8px;
+  color: var(--text);
+  font-size: var(--text-label);
+  font-weight: 560;
+  line-height: 1.45;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+/* meta：单行右对齐收尾，不再换行堆积 */
+.board-card .board-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+.board-card .board-card-meta .badge {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  background: var(--bg-inset);
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.board-card .board-card-meta .badge-meta { flex-shrink: 0; }
+.board-card .board-card-meta .priority-urgent { background: var(--status-failed-bg); color: var(--err); }
+.board-card .board-card-meta .priority-high { background: var(--status-queued-bg); color: var(--warn); }
+.board-card .board-card-time {
+  flex-shrink: 0;
+  margin-left: auto;
+  color: var(--text-faint);
+  font: var(--text-micro)/1 var(--mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.board-card .board-card-time.workdir { margin-left: 0; }
+.board-card .board-card-time.is-running { color: var(--status-running); font-weight: 620; }
+
+/* ---------- 运行语义着色：红只属于失败，青色属于电弧 ---------- */
+.board-card.issue-card.status-running {
+  border-color: color-mix(in srgb, var(--status-running) 36%, transparent);
+  background: linear-gradient(180deg, var(--status-running-bg) 0%, transparent 60%), var(--bg-raised);
+}
+.board-card.issue-card.status-queued {
+  border-color: color-mix(in srgb, var(--status-queued) 30%, transparent);
+}
+.board-card.issue-card.status-failed {
+  border-color: color-mix(in srgb, var(--status-failed) 36%, transparent);
+}
+
+/* ---------- 列头与列体 ---------- */
+.board-col { transition: border-color var(--duration-base) var(--ease-in-out), background var(--duration-base) var(--ease-in-out); }
+.board-col.is-drag-target { border-color: var(--accent); background: var(--accent-soft); }
+.board-col-head .board-col-count {
+  margin-left: auto;
+  color: var(--text-faint);
+  font: var(--text-micro)/1 var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+/* 列头状态点按列语义着色（替代历史硬编码的 dot-done 全绿点） */
+.board-col-dot { background: var(--text-faint); }
+.board-col-dot-todo, .board-col-dot-in_review { background: var(--status-queued); }
+.board-col-dot-in_progress { background: var(--status-running); box-shadow: 0 0 0 3px var(--status-running-bg); }
+.board-col-dot-done { background: var(--status-done); }
+.board-col-dot-blocked { background: var(--status-failed); }
+.board-col-dot-cancelled { background: var(--status-cancelled); }

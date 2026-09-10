@@ -20,6 +20,20 @@ const STATUS_ORDER: Array<{ key: IssueStatus; icon: typeof Clock3 }> = [
 
 const PRIORITY: Record<Issue['priority'], string> = { urgent: '紧急', high: '高', medium: '中', low: '低', none: '无优先级' }
 
+/** 相对时间：列表行的轻量时间线索（刚刚/N 分钟前/…/9月5日） */
+function relativeTime(ts: number): string {
+  const diff = Date.now() - ts
+  if (diff < 45_000) return '刚刚'
+  const minutes = Math.round(diff / 60_000)
+  if (minutes < 60) return `${minutes} 分钟前`
+  const hours = Math.round(minutes / 60)
+  if (hours < 24) return `${hours} 小时前`
+  const days = Math.round(hours / 24)
+  if (days < 7) return `${days} 天前`
+  const date = new Date(ts)
+  return `${date.getMonth() + 1}月${date.getDate()}日`
+}
+
 /** Issue-first home: the durable work queue, with Task only supplying live execution details. */
 export function IssuesView({ tasks, onOpen, onCreate }: { tasks: Task[]; onOpen: (taskId: string) => void; onCreate: () => void }) {
   const { issues } = useIssues()
@@ -72,5 +86,16 @@ export function IssuesView({ tasks, onOpen, onCreate }: { tasks: Task[]; onOpen:
 }
 
 function IssueRow({ issue, task, onOpen, onMove }: { issue: Issue; task: Task; onOpen: (id: string) => void; onMove: (issue: Issue, status: IssueStatus) => void }) {
-  return <article className="issue-home-row" role="button" tabIndex={0} onClick={() => onOpen(task.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onOpen(task.id) } }}><span className={`dot dot-${task.status}`} /><span className="issue-identifier">{issue.identifier}</span><strong>{issue.title}</strong>{issue.createdBy === 'agent' && <span className="badge badge-delegate">⚡ 委派</span>}{task.trigger === 'handoff' && <span className="badge badge-handoff">⇥ 接力</span>}<span className={`badge priority-${issue.priority}`}>{PRIORITY[issue.priority]}</span><span className="badge">{issue.labels[0] && issue.labels[0] !== '委派' ? issue.labels[0] : task.backend}</span><span className="issue-row-state">{task.status === 'running' ? '执行中' : ISSUE_STATUS_LABELS[issue.status]}</span><select value={issue.status} aria-label="移动 Issue" onClick={(event) => event.stopPropagation()} onChange={(event) => void onMove(issue, event.target.value as IssueStatus)}>{STATUS_ORDER.map(({ key }) => <option value={key} key={key}>{ISSUE_STATUS_LABELS[key]}</option>)}</select></article>
+  // 行内已有状态分组头作语境，行内不再重复状态文字；搬运控件 hover 才浮现
+  return <article className="issue-home-row" role="button" tabIndex={0} onClick={() => onOpen(task.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onOpen(task.id) } }}>
+    <span className={`dot dot-${task.status}`} />
+    <span className="issue-identifier">{issue.identifier}</span>
+    <strong className="issue-home-title">{issue.title}</strong>
+    {issue.createdBy === 'agent' && <span className="badge badge-delegate">⚡ 委派</span>}
+    {task.trigger === 'handoff' && <span className="badge badge-handoff">⇥ 接力</span>}
+    {issue.priority !== 'none' && <span className={`badge priority-${issue.priority}`}>{PRIORITY[issue.priority]}</span>}
+    <span className="badge badge-meta">{issue.labels[0] && issue.labels[0] !== '委派' ? issue.labels[0] : task.backend}</span>
+    <span className="issue-row-time" title={new Date(issue.updatedAt).toLocaleString()}>{relativeTime(issue.updatedAt)}</span>
+    <select className="issue-row-move" value={issue.status} aria-label="移动 Issue" onClick={(event) => event.stopPropagation()} onChange={(event) => void onMove(issue, event.target.value as IssueStatus)}>{STATUS_ORDER.map(({ key }) => <option value={key} key={key}>{ISSUE_STATUS_LABELS[key]}</option>)}</select>
+  </article>
 }

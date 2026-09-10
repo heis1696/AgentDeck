@@ -23,6 +23,18 @@ html.light {
   --brand: var(--accent);
   --brand-ink: var(--accent-ink);
 }
+/* 0.13 代际的 teal 家族同样指向 accent 家族（品牌色单一来源；
+   --violet 是接力徽章的独立语义色，保留不桥接） */
+:root {
+  --teal: var(--accent);
+  --teal-soft: var(--accent-soft);
+  --teal-line: color-mix(in srgb, var(--accent) 42%, transparent);
+}
+html.light {
+  --teal: var(--accent);
+  --teal-soft: var(--accent-soft);
+  --teal-line: color-mix(in srgb, var(--accent) 36%, transparent);
+}
 
 /* ---- 主 CTA（新建任务）：唯一的 accent 电弧光 ---- */
 .new-task-btn,

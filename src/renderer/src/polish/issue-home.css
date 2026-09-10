@@ -4,3 +4,128 @@
    约定：只覆盖本页类名；颜色一律引用令牌变量（tokens.css），
    不得硬编码色值；按钮全局体系归 foundation.css 管。
    ============================================================ */
+
+/* ---------- 行：grid → flex，子项数量可变也不换行悬空 ---------- */
+.issue-home-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 6px 14px;
+  margin: 0 -14px;
+  border-top: 1px solid var(--border);
+  cursor: pointer;
+  transition: background var(--duration-base) var(--ease-in-out),
+    border-color var(--duration-base) var(--ease-in-out);
+}
+.issue-home-row:hover {
+  background: var(--bg-hover);
+  border-top-color: transparent;
+}
+.issue-home-row:hover + .issue-home-row { border-top-color: transparent; }
+.issue-home-row:focus-within { background: var(--bg-hover); }
+
+/* 标题：唯一可伸缩主体，单行截断 */
+.issue-home-row .issue-home-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-label);
+  font-weight: 560;
+  color: var(--text);
+}
+.issue-home-row:hover .issue-home-title { color: var(--text); }
+
+/* 标识符：mono 弱化 */
+.issue-home-row .issue-identifier {
+  flex: 0 0 auto;
+  margin: 0;
+  color: var(--text-faint);
+  font: var(--text-micro)/1 var(--mono);
+  letter-spacing: 0.3px;
+}
+
+/* 状态点 */
+.issue-home-row .dot { flex: 0 0 auto; }
+
+/* ---------- 徽标降噪：元数据而非控件 ---------- */
+.issue-home-row .badge {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  background: var(--bg-inset);
+  color: var(--text-faint);
+  font-size: var(--text-micro);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.issue-home-row .badge-delegate {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.issue-home-row .badge-handoff {
+  background: rgba(139, 92, 246, 0.12);
+  color: var(--violet, #8b5cf6);
+}
+.issue-home-row .priority-urgent { background: var(--status-failed-bg); color: var(--err); font-weight: 650; }
+.issue-home-row .priority-high { background: var(--status-queued-bg); color: var(--warn); font-weight: 650; }
+
+/* ---------- 相对时间 ---------- */
+.issue-row-time {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font: var(--text-micro)/1 var(--mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ---------- 状态搬运：hover/focus 才浮现，还页面以安静 ---------- */
+.issue-home-row .issue-row-move {
+  flex: 0 0 auto;
+  width: 96px;
+  padding: 3px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-faint);
+  font-size: var(--text-micro);
+  opacity: 0;
+  transition: opacity var(--duration-quick) var(--ease-out),
+    border-color var(--duration-base) var(--ease-in-out),
+    background var(--duration-base) var(--ease-in-out);
+}
+.issue-home-row:hover .issue-row-move,
+.issue-home-row:focus-within .issue-row-move { opacity: 1; }
+.issue-home-row .issue-row-move:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-inset);
+  color: var(--text);
+}
+
+/* ---------- 分组头：密度收紧 ---------- */
+.issue-list-group { margin-bottom: 6px; }
+.issue-list-group-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 0 14px;
+  color: var(--text-dim);
+  font-size: var(--text-caption);
+}
+.issue-list-group-head strong { font-weight: 620; color: var(--text-dim); }
+.issue-list-group-head span {
+  color: var(--text-faint);
+  font: var(--text-micro)/1 var(--mono);
+}
+
+/* ---------- 窄屏：徽标/时间/搬运控件退场，标题优先 ---------- */
+@media (max-width: 720px) {
+  .issue-home-row { gap: 7px; padding: 6px 10px; margin: 0 -10px; }
+  .issue-home-row .badge,
+  .issue-home-row .issue-row-time,
+  .issue-home-row .issue-row-move { display: none; }
+}

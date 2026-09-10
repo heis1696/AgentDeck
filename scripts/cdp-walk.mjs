@@ -10,7 +10,7 @@ import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
 
-const BASE = 'http://localhost:9222'
+const BASE = 'http://127.0.0.1:9222'
 const get = (p) => new Promise((res, rej) =>
   http.get(BASE + p, (r) => { let d = ''; r.on('data', (c) => (d += c)); r.on('end', () => res(JSON.parse(d))) }).on('error', rej))
 

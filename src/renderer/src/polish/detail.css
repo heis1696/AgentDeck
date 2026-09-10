@@ -425,3 +425,17 @@ html.light .detail-actions .detail-btn-ghost-danger {
   min-height: 36px;
   padding: 0 14px;
 }
+
+/* ---------- 任务标签条：历史代际的 --surface-1 无亮色映射，收敛为画布令牌 ---------- */
+.tab-bar,
+html.light .tab-bar {
+  background: var(--bg);
+  border-bottom-color: var(--border);
+}
+.tab.active,
+html.light .tab.active {
+  background: var(--bg-raised);
+  border-color: var(--border-strong);
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+.tab-close:hover { background: var(--bg-hover); }
