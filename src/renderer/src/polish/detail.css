@@ -5,3 +5,423 @@
    约定：只覆盖详情页类名；颜色一律引用令牌变量；
    全局 .btn 体系归 foundation.css 管，页内只做局部覆盖。
    ============================================================ */
+
+/* ---------- 1. 头部 chrome 减负：一行 meta（身份 | 状态 | 来源） ---------- */
+.detail-header.page-header-bar {
+  align-items: flex-start;
+  padding-top: 16px;
+  padding-bottom: 12px;
+}
+.detail .detail-title-wrap .detail-title {
+  margin-bottom: 9px;
+  color: var(--text);
+  font-size: clamp(19px, 1.7vw, 23px);
+  font-weight: 680;
+  letter-spacing: -0.2px;
+}
+.detail .detail-meta {
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+.detail .detail-meta .meta-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.detail .detail-meta .meta-divider {
+  flex: 0 0 auto;
+  width: 1px;
+  height: 12px;
+  background: var(--border);
+}
+.detail .detail-eyebrow {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: var(--text-micro);
+  font-weight: 650;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+}
+.detail .detail-meta .link { color: var(--text-dim); }
+.detail .detail-meta .link:hover { color: var(--accent); }
+.detail .detail-meta .backend-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 1px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-inset);
+  color: var(--text-dim);
+  font: 600 var(--text-micro) var(--font-ui);
+}
+.detail .detail-meta .retry-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 1px 9px;
+  border: 1px solid color-mix(in srgb, var(--status-queued) 34%, transparent);
+  border-radius: var(--radius-pill);
+  background: var(--status-queued-bg);
+  color: var(--status-queued);
+  font: 600 var(--text-micro) var(--font-ui);
+}
+.detail .detail-meta .workspace-chip {
+  min-height: 22px;
+  padding: 1px 9px;
+  background: var(--bg-inset);
+}
+/* 原始指令：收成 meta 行里的徽章；展开时独占一行 */
+.detail .detail-meta .detail-prompt { margin: 0; }
+.detail .detail-meta .detail-prompt[open] { flex-basis: 100%; }
+.detail .detail-prompt summary {
+  padding: 2px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-inset);
+  color: var(--text-faint);
+  font-size: var(--text-micro);
+  transition: color var(--duration-base) var(--ease-in-out), border-color var(--duration-base) var(--ease-in-out);
+}
+.detail .detail-prompt summary:hover { color: var(--text-dim); border-color: var(--border-strong); }
+.detail .detail-prompt[open] summary { color: var(--text-dim); border-color: var(--border-strong); }
+.detail .detail-prompt p {
+  max-width: 100%;
+  margin: 8px 0 2px;
+  padding: 9px 12px;
+  border-left: 2px solid var(--border-strong);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: var(--bg-inset);
+  color: var(--text-dim);
+  font-size: var(--text-caption);
+  line-height: 1.6;
+}
+
+/* ---------- 2. tab 条：active = accent 文字 + 2px accent 底线 ---------- */
+.detail-page .detail-main > .tabs {
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
+}
+.detail-page .detail-main > .tabs button {
+  padding: 9px 12px 8px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: var(--text-label);
+  transition: color var(--duration-base) var(--ease-in-out), background var(--duration-base) var(--ease-in-out), border-color var(--duration-base) var(--ease-in-out);
+}
+.detail-page .detail-main > .tabs button:hover { color: var(--text); background: var(--bg-hover); }
+.detail-page .detail-main > .tabs button.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: none;
+  font-weight: 650;
+}
+.detail-page .detail-main > .tabs button.active:hover { background: var(--accent-soft); color: var(--accent); }
+.detail-page .detail-main > .tabs button:disabled {
+  opacity: 1;
+  color: var(--text-faint);
+  cursor: default;
+}
+.detail-page .detail-main > .tabs button:disabled:hover { background: transparent; color: var(--text-faint); }
+
+/* 顶部任务标签条（TabBar）：去掉深色内阴影胶囊，改浅底 + accent 底线 */
+.detail-page .tab-bar .tab {
+  border-color: transparent;
+  border-bottom: 0;
+  background: transparent;
+  color: var(--text-dim);
+  transition: color var(--duration-base) var(--ease-in-out), background var(--duration-base) var(--ease-in-out), box-shadow var(--duration-base) var(--ease-in-out);
+}
+.detail-page .tab-bar .tab:hover { color: var(--text); background: var(--bg-hover); }
+.detail-page .tab-bar .tab.active {
+  border-color: transparent;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+.detail-page .tab-bar .tab.active .dot { box-shadow: 0 0 0 3px var(--accent-soft); }
+
+/* ---------- 3. 操作按钮层级（只覆盖本页类名，不动全局 .btn） ---------- */
+.detail-header .detail-actions { gap: 8px; align-items: center; }
+.detail-actions .detail-btn-emphasis,
+html.light .detail-actions .detail-btn-emphasis {
+  border: 1px solid color-mix(in srgb, var(--accent) 52%, transparent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 650;
+  box-shadow: none;
+}
+.detail-actions .detail-btn-emphasis:hover {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.detail-actions .detail-btn-emphasis:disabled { opacity: 0.5; }
+.detail-actions .detail-btn-ghost,
+html.light .detail-actions .detail-btn-ghost {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+}
+.detail-actions .detail-btn-ghost:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.detail-actions .detail-btn-ghost-danger,
+html.light .detail-actions .detail-btn-ghost-danger {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+}
+.detail-actions .detail-btn-ghost-danger:hover {
+  border-color: color-mix(in srgb, var(--err) 46%, transparent);
+  background: var(--status-failed-bg);
+  color: var(--err);
+}
+
+/* ---------- 4. 时间线：间距收紧、标记对齐、时间戳、Run 事件合并感 ---------- */
+.detail-body .chat { gap: 12px; }
+.detail-body .turn { gap: 8px; }
+.detail-body .worklog summary {
+  transition: color var(--duration-base) var(--ease-in-out), background var(--duration-base) var(--ease-in-out);
+}
+.detail-body .worklog summary:hover { color: var(--text); }
+
+.detail-body .issue-timeline { padding: 16px 24px 48px; }
+.detail-body .timeline-intro { margin-bottom: 8px; }
+.detail-body .timeline-item {
+  gap: 10px;
+  padding: 9px 0 11px;
+  border-top-color: var(--border);
+}
+/* 同一条 Run 的连续事件收紧成一组，弱化组内分隔 */
+.detail-body .timeline-run + .timeline-run { border-top-color: color-mix(in srgb, var(--border) 50%, transparent); }
+.detail-body .timeline-marker {
+  width: 8px;
+  height: 8px;
+  margin: 5px 2px 0;
+  background: var(--text-faint);
+}
+.detail-body .timeline-marker.dot-running {
+  width: 9px;
+  height: 9px;
+  background: var(--status-running);
+  box-shadow: 0 0 0 4px var(--status-running-bg);
+}
+.detail-body .timeline-marker.dot-done { background: var(--status-done); }
+.detail-body .timeline-marker.dot-failed { background: var(--status-failed); }
+.detail-body .timeline-marker.dot-cancelled { background: var(--status-cancelled); }
+.detail-body .timeline-avatar { margin-top: 0; }
+.detail-body .timeline-head { align-items: baseline; gap: 8px; }
+.detail-body .timeline-head strong { font-size: var(--text-caption); }
+.detail-body .timeline-head time {
+  margin-left: auto;
+  color: var(--text-faint);
+  font: var(--text-micro) var(--mono);
+  white-space: nowrap;
+}
+.detail-body .timeline-content > p { color: var(--text-dim); font-size: var(--text-caption); }
+
+/* 属性栏里的执行记录：点的大小/颜色按 --status-* 区分，行距收紧成一组 */
+.detail-panel .run-history { gap: 3px; margin: 6px 0 2px; }
+.detail-panel .run-history-row {
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+}
+.detail-panel .run-history-row:last-child { border-bottom: 0; }
+.detail-panel .run-history-row .dot { width: 7px; height: 7px; background: var(--status-cancelled); }
+.detail-panel .run-history-row .dot-running {
+  width: 9px;
+  height: 9px;
+  background: var(--status-running);
+  box-shadow: 0 0 0 3px var(--status-running-bg);
+}
+.detail-panel .run-history-row .dot-done { background: var(--status-done); }
+.detail-panel .run-history-row .dot-failed { background: var(--status-failed); }
+.detail-panel .run-history-row .dot-cancelled { width: 5px; height: 5px; background: var(--status-cancelled); }
+
+/* ---------- 5. 错误横幅：图标 + 标题 + 副文 + 折叠原文 ---------- */
+.detail .error-banner {
+  width: calc(100% - 48px);
+  max-width: 936px;
+  margin: 0 auto 10px;
+  padding: 12px 16px;
+  border: 1px solid color-mix(in srgb, var(--err) 36%, transparent);
+  border-radius: var(--radius-md);
+  background: var(--status-failed-bg);
+  color: var(--text);
+  font-size: var(--text-caption);
+}
+.detail .error-banner .error-head { display: flex; align-items: center; gap: 8px; }
+.detail .error-banner .error-icon { color: var(--err); font-size: var(--text-label); line-height: 1; }
+.detail .error-banner .error-title {
+  color: var(--err);
+  font-size: var(--text-label);
+  font-weight: 650;
+}
+.detail .error-banner .failure-code {
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--err) 16%, transparent);
+  color: var(--err);
+  font: var(--text-micro) var(--mono);
+}
+.detail .error-banner .failure-retryable {
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--status-queued-bg);
+  color: var(--status-queued);
+  font-size: var(--text-micro);
+}
+.detail .error-banner .error-hint {
+  margin-top: 6px;
+  color: var(--text-dim);
+  font-size: var(--text-caption);
+  line-height: 1.55;
+}
+.detail .error-banner .failure-raw { margin-top: 8px; opacity: 1; }
+.detail .error-banner .failure-raw summary {
+  color: var(--text-faint);
+  font-size: var(--text-micro);
+  cursor: pointer;
+  user-select: none;
+  transition: color var(--duration-base) var(--ease-in-out);
+}
+.detail .error-banner .failure-raw summary:hover { color: var(--text-dim); }
+.detail .error-banner .failure-raw pre {
+  max-height: 140px;
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  color: var(--text-dim);
+  font: var(--text-micro)/1.5 var(--mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---------- 6. 右侧属性栏：定宽 label、右对齐控件、分组分隔线 ---------- */
+.detail-panel .prop-label {
+  width: 64px;
+  flex: 0 0 64px;
+  margin-right: auto;
+  color: var(--text-faint);
+  font-size: var(--text-caption);
+  font-weight: 550;
+}
+.detail-panel .issue-meta-edit .prop-label { margin-right: 0; }
+.detail-panel .prop-row {
+  gap: 10px;
+  min-height: 28px;
+  padding: 5px 0;
+  border-bottom: 0;
+}
+.detail-panel .prop-row .prop-value {
+  text-align: right;
+  color: var(--text);
+  font-size: var(--text-label);
+}
+.detail-panel .prop-row .prop-value.dim { color: var(--text-faint); }
+.detail-panel .prop-sep { margin: 10px 0; border-top: 1px solid var(--border); }
+.detail-panel .prop-group-label {
+  margin: 2px 0 6px;
+  color: var(--text-dim);
+  font-size: var(--text-micro);
+  font-weight: 650;
+  letter-spacing: 0.4px;
+}
+.detail-panel .issue-meta-edit { gap: 10px; margin-bottom: 10px; }
+.detail-panel .issue-meta-edit .prop-label { width: 64px; flex: 0 0 64px; }
+.detail-panel .issue-meta-edit select,
+.detail-panel .issue-meta-edit input {
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  color: var(--text);
+  font-size: var(--text-caption);
+  text-align: right;
+  transition: border-color var(--duration-base) var(--ease-in-out), box-shadow var(--duration-base) var(--ease-in-out);
+}
+.detail-panel .issue-meta-edit select:focus,
+.detail-panel .issue-meta-edit input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+.detail-panel .issue-labels { margin-left: 74px; }
+
+/* 状态胶囊：颜色全部走 --status-* 令牌 */
+.detail .status-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 9px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  font: 600 var(--text-micro) var(--font-ui);
+}
+.detail .status-chip.status-running {
+  background: var(--status-running-bg);
+  border-color: color-mix(in srgb, var(--status-running) 34%, transparent);
+  color: var(--status-running);
+}
+.detail .status-chip.status-queued {
+  background: var(--status-queued-bg);
+  border-color: color-mix(in srgb, var(--status-queued) 34%, transparent);
+  color: var(--status-queued);
+}
+.detail .status-chip.status-done {
+  background: var(--status-done-bg);
+  border-color: color-mix(in srgb, var(--status-done) 34%, transparent);
+  color: var(--status-done);
+}
+.detail .status-chip.status-failed {
+  background: var(--status-failed-bg);
+  border-color: color-mix(in srgb, var(--status-failed) 34%, transparent);
+  color: var(--status-failed);
+}
+.detail .status-chip.status-cancelled {
+  background: var(--status-cancelled-bg);
+  border-color: color-mix(in srgb, var(--status-cancelled) 34%, transparent);
+  color: var(--status-cancelled);
+}
+
+/* ---------- 7. 底部追问输入区：同檐对齐 + accent 焦点光环 ---------- */
+.detail-page .detail-main > .followup {
+  gap: 8px;
+  align-items: flex-end;
+  padding: 12px 24px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
+.detail-page .detail-main > .followup textarea {
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-inset);
+  color: var(--text);
+  font: var(--text-label)/1.5 var(--font-ui);
+  transition: border-color var(--duration-base) var(--ease-in-out), box-shadow var(--duration-base) var(--ease-in-out);
+}
+.detail-page .detail-main > .followup textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+/* 输入框与按钮同高，底檐对齐成一条线 */
+.detail-page .detail-main > .followup .btn {
+  min-height: 36px;
+  padding: 0 14px;
+}
