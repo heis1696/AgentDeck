@@ -87,7 +87,9 @@ export function resolveCli(name: string): ResolvedCli | null {
     }
   }
   for (const c of candidates) {
-    if (c.isJs) return { command: process.execPath, prefixArgs: [c.file], origin: found }
+    // node 脚本必须用真 node 跑：打包版 exe 收到 .js 参数会忽略并启动自己，
+    // dev 下 electron.exe 恰好把 .js 当单文件入口执行才掩盖了这个 bug
+    if (c.isJs) return { command: findSystemNode() ?? process.execPath, prefixArgs: [c.file], origin: found }
     return { command: c.file, prefixArgs: [], origin: found }
   }
   return null

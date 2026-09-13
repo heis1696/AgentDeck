@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### 修复发布版连不上 codex/claude/opencode（npm 垫片类 CLI 全军覆没）
+
+- **根因**：npm 全局安装的 CLI 只有 `.cmd` 垫片（本机 codex 即如此），`resolveCli` 解析出 JS 入口后返回 `process.execPath` 充当 node 去跑它，且 spawn 时不带 `ELECTRON_RUN_AS_NODE=1`——**打包版 exe 收到 `.js` 参数会忽略并把自己再启动一遍**（实测 `AgentDeck.exe codex.js --version` 打开的是 AgentDeck 的 Chromium，codex 从未执行），发布版因此永远连不上；dev 版正常纯属侥幸（dev 的 electron.exe 恰好把 `.js` 参数当单文件应用入口执行）。dsh/zcode/sidecar 各自已有正确处理，唯独 claude/codex/opencode 共用的 `resolveCli` + `runCliJsonl` 链路漏了。
+- **修复**：`cli-locator.ts` JS 入口改用 `findSystemNode() ?? process.execPath`（与 dsh 一致，优先真 node）；`cli-common.ts` `runCliJsonl` 兜底注入 `ELECTRON_RUN_AS_NODE=1`（命令即 `process.execPath` 时，与 zcode-transport 同款守卫）——裸机没装系统 node 时发布版也能跑。
+- `smoke:clis` 实测 codex/opencode 真实跑通一轮（claude 因账户 403 额度不足跳过，与本修复无关）。
+
 ### dsh 专属回合预算（修复超 10 分钟任务被误杀）
 
 - **修复 dsh 任务一旦超过 10 分钟必被看门狗掐断**：dsh headless 是一次性纯文本 CLI——整个运行期 stdout 完全静默、退出前才打印最终回复（无 JSON 流、无 resume，源码契约见 deepseek-harness `packages/bundle/headless`），既产生不了任何续命事件，也没有中间输出刷新 `cli-common` 的空闲看门狗，两层「10 分钟无输出即死」的看门狗都从进程启动起跑且永不重置。现在 dsh 改按**固定回合总预算**裁决（默认 60 分钟，`AGENTDECK_DSH_TURN_MS` 可覆盖）：`dsh.ts` 新增 `DSH_TURN_BUDGET_MS` 并传入 `runCliJsonl` 的 `idleTimeoutMs`，`runner.ts` 的 `turnBudgetMs` 按 backend 取预算供回合层看门狗（武装/续命/超时文案）使用。代价：dsh 真卡死时要等满预算才被判败。

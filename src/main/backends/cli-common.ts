@@ -1,6 +1,7 @@
 // 一次性 CLI 进程的公共基座：spawn + JSONL 行解析 + 看门狗 + 进程清理
 // 适用于 claude / codex / opencode（zcode 是常驻服务，单独实现）
 import { spawn, type ChildProcess } from 'node:child_process'
+import path from 'node:path'
 import type { TaskEvent } from '../../shared/types'
 
 export type JsonPrimitive = string | number | boolean | null
@@ -92,9 +93,15 @@ export function runCliJsonl(opts: {
   /** 附加环境变量（默认继承主进程 env） */
   env?: Record<string, string>
 }): CliJsonlRunner {
+  // 兜底场景 command = process.execPath（electron 充当 node，见 cli-locator）：
+  // 不带 ELECTRON_RUN_AS_NODE 打包版会忽略脚本参数把自己再启动一遍
+  const env: NodeJS.ProcessEnv = opts.env ? { ...process.env, ...opts.env } : { ...process.env }
+  if (process.versions.electron && path.resolve(opts.command).toLowerCase() === path.resolve(process.execPath).toLowerCase()) {
+    env.ELECTRON_RUN_AS_NODE = '1'
+  }
   const child = spawn(opts.command, [...opts.prefixArgs, ...opts.args], {
     cwd: opts.cwd,
-    ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}),
+    env,
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true
   })
