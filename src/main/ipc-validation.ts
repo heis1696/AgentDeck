@@ -141,17 +141,38 @@ function stringArrayValue(value: unknown, label: string, required = false): stri
 /** Validate Goal IPC input at the main-process boundary. */
 export function parseGoalCreate(value: unknown): GoalCreateInput {
   const input = record(value, 'Goal parameters')
-  assertKeys(input, ['text', 'issueId', 'completionConditions', 'stopConditions', 'maxRuns', 'maxDurationMs', 'blockCap', 'noProgressCap', 'workdir', 'agentId', 'backend', 'startNow'], 'Goal parameters')
+  assertKeys(input, ['text', 'issueId', 'completionConditions', 'acceptanceCriteria', 'stopConditions', 'maxRuns', 'maxDurationMs', 'blockCap', 'noProgressCap', 'workdir', 'agentId', 'backend', 'startNow'], 'Goal parameters')
   if (input.startNow !== undefined && typeof input.startNow !== 'boolean') throw new Error('startNow must be boolean')
   if (input.maxRuns === undefined || typeof input.maxRuns !== 'number' || !Number.isInteger(input.maxRuns) || input.maxRuns < 1 || input.maxRuns > 10000) throw new Error('maxRuns must be an integer between 1 and 10000')
   const maxDurationMs = input.maxDurationMs
   if (typeof maxDurationMs !== 'number' || !Number.isFinite(maxDurationMs) || maxDurationMs < 1 || maxDurationMs > 365 * 24 * 60 * 60 * 1000) throw new Error('maxDurationMs must be between 1ms and 365 days')
   if (input.blockCap !== undefined && (typeof input.blockCap !== 'number' || !Number.isInteger(input.blockCap) || input.blockCap < 1 || input.blockCap > 1000)) throw new Error('blockCap must be an integer between 1 and 1000')
   if (input.noProgressCap !== undefined && (typeof input.noProgressCap !== 'number' || !Number.isInteger(input.noProgressCap) || input.noProgressCap < 1 || input.noProgressCap > 1000)) throw new Error('noProgressCap must be an integer between 1 and 1000')
+  const acceptanceCriteria = input.acceptanceCriteria === undefined ? undefined : (() => {
+    if (!Array.isArray(input.acceptanceCriteria) || input.acceptanceCriteria.length > 100) throw new Error('acceptanceCriteria must be an array of at most 100 entries')
+    const ids = new Set<string>()
+    const parsed = input.acceptanceCriteria.map((item, index) => {
+      if (typeof item === 'string') {
+        const text = stringValue(item, `acceptanceCriteria[${index}]`)!
+        const id = `ac_${index}`
+        if (ids.has(id)) throw new Error(`acceptanceCriteria contains duplicate id: ${id}`)
+        ids.add(id)
+        return text
+      }
+      const criterion = record(item, `acceptanceCriteria[${index}]`)
+      assertKeys(criterion, ['id', 'text'], `acceptanceCriteria[${index}]`)
+      const id = stringValue(criterion.id, `acceptanceCriteria[${index}].id`)!
+      if (ids.has(id)) throw new Error(`acceptanceCriteria contains duplicate id: ${id}`)
+      ids.add(id)
+      return { id, text: stringValue(criterion.text, `acceptanceCriteria[${index}].text`)! }
+    })
+    return parsed
+  })()
   return {
     text: stringValue(input.text, 'text')!,
     issueId: stringValue(input.issueId, 'issueId')!,
     completionConditions: stringArrayValue(input.completionConditions, 'completionConditions', true),
+    acceptanceCriteria,
     stopConditions: stringArrayValue(input.stopConditions, 'stopConditions'),
     maxRuns: input.maxRuns,
     maxDurationMs,

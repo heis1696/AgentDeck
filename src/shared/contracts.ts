@@ -1,4 +1,4 @@
-import type { AcceptanceCriterion, Automation, AppSettings, AnalyticsSummary, Comment, Goal, GoalCheckpoint, GoalEvolutionPatch, GoalSpecSnapshot, GoalRun, Issue, IssuePriority, IssueStatus, Notification, Run, RunTrigger, RuntimeSnapshot, Task, TaskEvent } from './types'
+import type { AcceptanceCriterion, Automation, AppSettings, AnalyticsSummary, Comment, Goal, GoalCheckpoint, GoalEvolutionPatch, GoalSpecDecision, GoalSpecSnapshot, GoalRun, Issue, IssuePriority, IssueStatus, Notification, Run, RunTrigger, RuntimeSnapshot, Task, TaskEvent } from './types'
 import type { SkillDetail, SkillMeta, SkillTarget, SyncState } from './skills'
 
 /** Loop 4 规格进化输入：patch 为提议的规格变更，approve=true 才会应用（结果闸门结论随行记录）。 */
@@ -171,7 +171,9 @@ export interface AgentDeckApi {
     runs: (id: string) => Promise<GoalRun[]>
     checkpoints: (id: string) => Promise<GoalCheckpoint[]>
     snapshots: (id: string) => Promise<GoalSpecSnapshot[]>
+    decisions: (id: string) => Promise<GoalSpecDecision[]>
     evolve: (id: string, input: GoalEvolveInput) => Promise<{ ok: boolean; error?: string; goal?: Goal; snapshot?: GoalSpecSnapshot; questions?: string[] }>
+    evolveStep: (id: string, input: GoalEvolveInput) => Promise<{ ok: boolean; error?: string; goal?: Goal; snapshot?: GoalSpecSnapshot; questions?: string[] }>
     rollback: (id: string, generation: number) => Promise<{ ok: boolean; error?: string; goal?: Goal; snapshot?: GoalSpecSnapshot }>
     start: (id: string) => Promise<{ ok: boolean; error?: string }>
     pause: (id: string) => Promise<{ ok: boolean; error?: string }>

@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { isGoalStatus, type AcceptanceCriterion, type Goal, type GoalCheckpoint, type GoalRun, type GoalSpecSnapshot, type GoalStatus, type Task, type TaskUsage } from '../shared/types'
+import { isGoalStatus, type AcceptanceCriterion, type Goal, type GoalCheckpoint, type GoalRun, type GoalSpecDecision, type GoalSpecSnapshot, type GoalStatus, type Task, type TaskUsage } from '../shared/types'
 import { executionRecordFromTask } from '../shared/taskflow'
 
 /** Versioned durable index for long-running goals. */
@@ -12,6 +12,7 @@ export interface GoalIndexDocument {
   runs: GoalRun[]
   checkpoints: GoalCheckpoint[]
   specSnapshots?: GoalSpecSnapshot[]
+  specDecisions?: GoalSpecDecision[]
 }
 
 export interface GoalCreateRecord {
@@ -52,6 +53,10 @@ function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string').map((item) => item.trim()).filter(Boolean) : []
 }
 
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
+}
+
 function normalizeAcceptance(value: unknown, fallback: string[] = []): AcceptanceCriterion[] {
   const source = Array.isArray(value) ? value : fallback
   return source.flatMap((item, index) => {
@@ -86,7 +91,7 @@ function validGoal(value: unknown): value is Goal {
 export class GoalStore {
   private readonly dir: string
   private readonly file: string
-  private data: GoalIndexDocument = { schemaVersion: GOAL_INDEX_SCHEMA_VERSION, goals: [], runs: [], checkpoints: [], specSnapshots: [] }
+  private data: GoalIndexDocument = { schemaVersion: GOAL_INDEX_SCHEMA_VERSION, goals: [], runs: [], checkpoints: [], specSnapshots: [], specDecisions: [] }
 
   constructor(userDataDir: string) {
     this.dir = path.join(userDataDir, 'goals')
@@ -160,7 +165,39 @@ export class GoalStore {
         completionConditions: stringArray(snapshot.completionConditions),
         stopConditions: stringArray(snapshot.stopConditions)
       })) : []
-      this.data = { schemaVersion: GOAL_INDEX_SCHEMA_VERSION, goals, runs, checkpoints, specSnapshots }
+      for (const snapshot of specSnapshots) {
+        if (snapshot.goalSnapshot) snapshot.goalSnapshot = { ...snapshot.goalSnapshot, acceptanceCriteria: normalizeAcceptance(snapshot.goalSnapshot.acceptanceCriteria, stringArray(snapshot.goalSnapshot.completionConditions)) }
+        if (snapshot.checkpoint) snapshot.checkpoint = { ...snapshot.checkpoint, completedConditions: stringArray(snapshot.checkpoint.completedConditions), incompleteConditions: stringArray(snapshot.checkpoint.incompleteConditions), blockers: stringArray(snapshot.checkpoint.blockers) }
+      }
+      const specDecisions = Array.isArray(parsed.specDecisions) ? parsed.specDecisions.filter((item): item is GoalSpecDecision => record(item)
+        && typeof item.id === 'string' && !!item.id
+        && typeof item.goalId === 'string' && !!item.goalId
+        && typeof item.generation === 'number' && Number.isInteger(item.generation) && item.generation >= 1
+        && (item.decision === 'applied' || item.decision === 'rejected' || item.decision === 'rollback')
+        && typeof item.createdAt === 'number' && typeof item.reason === 'string') : []
+      this.data = { schemaVersion: GOAL_INDEX_SCHEMA_VERSION, goals, runs, checkpoints, specSnapshots, specDecisions }
+      // Legacy v1 goals predate Loop 4 snapshots. Materialize their current
+      // spec as generation 1 so later rollback/replay has a complete lineage.
+      let backfilled = false
+      for (const goal of goals) {
+        if (specSnapshots.some((snapshot) => snapshot.goalId === goal.id)) continue
+        specSnapshots.push({
+          id: this.id('spec'),
+          goalId: goal.id,
+          generation: 1,
+          text: goal.text,
+          acceptanceCriteria: normalizeAcceptance(goal.acceptanceCriteria, stringArray(goal.completionConditions)),
+          completionConditions: [...goal.completionConditions],
+          stopConditions: [...goal.stopConditions],
+          createdAt: goal.createdAt,
+          outcomeGatePassed: false,
+          decision: 'initial',
+          goalSnapshot: { ...goal, acceptanceCriteria: goal.acceptanceCriteria?.map((criterion) => ({ ...criterion })) },
+          reason: 'backfilled from legacy Goal record'
+        })
+        backfilled = true
+      }
+      if (backfilled) this.save()
     } catch (error) {
       throw error instanceof Error ? error : new Error(String(error))
     }
@@ -218,7 +255,8 @@ export class GoalStore {
       completionConditions: goal.completionConditions,
       stopConditions: goal.stopConditions,
       outcomeGatePassed: false,
-      decision: 'initial'
+      decision: 'initial',
+      goalSnapshot: { ...goal, acceptanceCriteria: goal.acceptanceCriteria?.map((criterion) => ({ ...criterion })) }
     })
     this.save()
     return goal
@@ -240,6 +278,7 @@ export class GoalStore {
     this.data.runs = this.data.runs.filter((run) => run.goalId !== id)
     this.data.checkpoints = this.data.checkpoints.filter((checkpoint) => checkpoint.goalId !== id)
     this.data.specSnapshots = (this.data.specSnapshots ?? []).filter((snapshot) => snapshot.goalId !== id)
+    this.data.specDecisions = (this.data.specDecisions ?? []).filter((decision) => decision.goalId !== id)
     this.save()
     return true
   }
@@ -281,7 +320,7 @@ export class GoalStore {
   snapshots(goalId: string): GoalSpecSnapshot[] {
     return (this.data.specSnapshots ?? []).filter((snapshot) => snapshot.goalId === goalId)
       .sort((a, b) => (a.generation - b.generation) || (a.createdAt - b.createdAt))
-      .map((snapshot) => ({ ...snapshot, acceptanceCriteria: snapshot.acceptanceCriteria.map((criterion) => ({ ...criterion })) }))
+      .map(cloneJson)
   }
 
   snapshotForGeneration(goalId: string, generation: number) {
@@ -297,13 +336,35 @@ export class GoalStore {
       completionConditions: [...input.completionConditions],
       stopConditions: [...input.stopConditions]
     }
+    if (snapshot.goalSnapshot) snapshot.goalSnapshot = { ...snapshot.goalSnapshot, acceptanceCriteria: snapshot.goalSnapshot.acceptanceCriteria?.map((criterion) => ({ ...criterion })) }
+    if (snapshot.checkpoint) snapshot.checkpoint = { ...snapshot.checkpoint, completedConditions: [...snapshot.checkpoint.completedConditions], incompleteConditions: [...snapshot.checkpoint.incompleteConditions], blockers: [...snapshot.checkpoint.blockers] }
     const snapshots = this.data.specSnapshots ?? (this.data.specSnapshots = [])
     const existing = snapshots.find((item) => item.id === snapshot.id)
-    if (existing) Object.assign(existing, snapshot)
-    else snapshots.push(snapshot)
+    if (existing) Object.assign(existing, cloneJson(snapshot))
+    else snapshots.push(cloneJson(snapshot))
     this.save()
-    return { ...snapshot, acceptanceCriteria: snapshot.acceptanceCriteria.map((criterion) => ({ ...criterion })) }
+    return cloneJson(snapshot)
   }
+
+  /** Record an accepted/rejected decision independently of committed snapshots. */
+  recordSpecDecision(input: Omit<GoalSpecDecision, 'id' | 'createdAt'> & { id?: string; createdAt?: number }): GoalSpecDecision {
+    const decision: GoalSpecDecision = { ...input, id: input.id ?? this.id('decision'), createdAt: input.createdAt ?? Date.now() }
+    const decisions = this.data.specDecisions ?? (this.data.specDecisions = [])
+    const existing = decisions.find((item) => item.id === decision.id)
+    if (existing) Object.assign(existing, cloneJson(decision))
+    else decisions.push(cloneJson(decision))
+    this.save()
+    return cloneJson(decision)
+  }
+
+  /** Replayable decision history, including rejected proposals. */
+  decisions(goalId: string): GoalSpecDecision[] {
+    return (this.data.specDecisions ?? []).filter((decision) => decision.goalId === goalId)
+      .sort((a, b) => (a.generation - b.generation) || (a.createdAt - b.createdAt))
+      .map(cloneJson)
+  }
+
+  replaySpecDecisions(goalId: string) { return this.decisions(goalId) }
 
   checkpointForRun(runId: string) {
     return this.data.checkpoints.find((checkpoint) => checkpoint.runId === runId) ?? null

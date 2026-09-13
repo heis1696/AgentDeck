@@ -24,7 +24,8 @@ const ok = (condition, label) => {
 
 const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-goal-spec-data-'))
 const tasks = []
-const controller = new GoalController(new GoalStore(userData), {
+const goalStore = new GoalStore(userData)
+const controller = new GoalController(goalStore, {
   createTask: (input) => {
     const task = { id: `task_${tasks.length + 1}`, ...input, status: 'queued', createdAt: Date.now(), eventCount: 0, sessionId: 'session_1' }
     tasks.push(task)
@@ -49,11 +50,15 @@ const goal = controller.create({
 const initial = controller.snapshots(goal.id)
 ok(initial.length === 1 && initial[0].generation === 1 && initial[0].decision === 'initial', 'create records the initial spec snapshot at generation 1')
 ok(initial[0].acceptanceCriteria.length === 2 && initial[0].acceptanceCriteria[0].id === 'ac_0' && initial[0].acceptanceCriteria[0].text === 'AC1 installer exists', 'acceptance criteria are stored as first-class records')
+ok(tasks[0].prompt.includes('AC1 installer exists') && tasks[0].prompt.includes('AC2 smoke passes'), 'first-class acceptance criteria are injected into the execution prompt')
 
 // 无补丁 / 未批准 → 拒绝且无副作用
 ok(controller.evolve(goal.id, {}).ok === false, 'evolve without patch is rejected')
 ok(controller.evolve(goal.id, { patch: { criteria: [], provenance: { source: 'user', rationale: 'test' } } }).ok === false, 'evolve without approval is rejected')
 ok(controller.snapshots(goal.id).length === 1, 'rejected evolve leaves no snapshot')
+ok(controller.decisions(goal.id).some((decision) => decision.decision === 'rejected'), 'rejected evolve is durably replayable')
+
+goalStore.addCheckpoint({ goalId: goal.id, runId: 'run_spec_1', phaseIndex: 0, summary: 'generation evidence', completedConditions: [], incompleteConditions: ['AC1 installer exists'], nextPlan: 'refine the spec', blockers: [] })
 
 // 应用补丁：改文本 + 修订 ac_0 + 保留 ac_1 + 新增标准
 const evolved = controller.evolve(goal.id, {
@@ -74,7 +79,9 @@ const revised = evolved.goal?.acceptanceCriteria ?? []
 ok(revised.length === 3 && revised[0].text === 'AC1 signed installer exists' && revised[0].status === 'pending', 'revised criterion replaces text and resets to pending')
 ok(revised[1].text === 'AC2 smoke passes', 'kept criterion is unchanged')
 ok(revised[2].text === 'AC3 release notes published' && revised[2].id.startsWith('ac_'), 'added criterion receives a generated stable id')
-ok(evolved.snapshot?.generation === 2 && evolved.snapshot?.decision === 'applied' && evolved.snapshot?.outcomeGatePassed === true, 'applied evolve records a generation-2 snapshot with gate outcome')
+ok(evolved.snapshot?.generation === 2 && evolved.snapshot?.decision === 'applied' && evolved.snapshot?.outcomeGatePassed === false, 'applied evolve records a generation-2 snapshot with deterministic gate outcome')
+ok(evolved.snapshot?.goalSnapshot?.text === 'Ship the release candidate' && evolved.snapshot?.checkpoint?.summary === 'generation evidence', 'generation snapshot captures goal, spec, and checkpoint together')
+ok(controller.decisions(goal.id).some((decision) => decision.decision === 'applied' && decision.generation === 2), 'applied evolve decision carries provenance in the ledger')
 
 // 修订不存在的标准 → 拒绝且无副作用
 const criteriaBefore = controller.get(goal.id)?.acceptanceCriteria?.length
@@ -92,6 +99,41 @@ ok(controller.rollback(goal.id, 99).ok === false, 'rollback to unknown generatio
 ok(controller.rollback(goal.id, 0).ok === false, 'rollback requires a positive integer generation')
 ok(controller.rollback(goal.id, 3).ok === false, 'rollback target cannot itself be a rollback record')
 ok(controller.snapshots(goal.id).map((snapshot) => snapshot.generation).join(',') === '1,2,3', 'snapshot history is append-only in generation order')
+ok(controller.decisions(goal.id).some((decision) => decision.decision === 'rollback' && decision.generation === 3), 'rollback decision is durably replayable')
+
+// Passed criteria are immutable; ambiguity is a clarification gate.
+const passedGoal = controller.create({ text: 'Passed guard', issueId: 'issue_spec_passed', completionConditions: ['x'], acceptanceCriteria: [{ id: 'passed', text: 'immutable evidence' }, { id: 'pending', text: 'still pending' }], stopConditions: [], maxRuns: 2, maxDurationMs: 10000, workdir: root, startNow: false })
+passedGoal.acceptanceCriteria[0].status = 'passed'
+const revisedPassed = controller.evolve(passedGoal.id, { approve: true, patch: { criteria: [{ action: 'revise', criterionId: 'passed', text: 'weakened' }], provenance: { source: 'test', rationale: 'should reject' } } })
+ok(revisedPassed.ok === false && controller.get(passedGoal.id)?.acceptanceCriteria?.[0].text === 'immutable evidence', 'passed acceptance criteria cannot be revised')
+const rolledPassed = controller.rollback(passedGoal.id, 1)
+ok(rolledPassed.ok === true && rolledPassed.goal?.acceptanceCriteria?.[0].status === 'passed', 'rollback preserves the monotonic PASS status of unchanged criteria')
+const beforeAmbiguitySnapshots = controller.snapshots(passedGoal.id).length
+const ambiguous = controller.evolve(passedGoal.id, { ambiguityScore: 0.9, approve: true, patch: { criteria: [], provenance: { source: 'test', rationale: 'clarify' } } })
+ok(ambiguous.ok === false && (ambiguous.questions?.length ?? 0) > 0 && controller.snapshots(passedGoal.id).length === beforeAmbiguitySnapshots, 'ambiguity gate returns questions without evolving the spec')
+const gateGoal = controller.create({ text: 'Already complete', issueId: 'issue_spec_gate', completionConditions: ['done'], stopConditions: [], maxRuns: 2, maxDurationMs: 10000, workdir: root, startNow: false })
+gateGoal.acceptanceCriteria[0].status = 'passed'
+const gateResult = controller.evolve(gateGoal.id, { outcomeGatePassed: false })
+ok(gateResult.ok === true && gateResult.snapshot?.generation === 1, 'outcome gate short-circuits generation-1 evolution ceremony')
+const stepResult = controller.evolveStep(gateGoal.id, { outcomeGatePassed: false, approve: true, patch: { criteria: [{ action: 'add', text: 'would spend a generation' }], provenance: { source: 'test', rationale: 'must not run after pass' } } })
+ok(stepResult.ok === true && controller.snapshots(gateGoal.id).length === 1 && !(stepResult.goal?.acceptanceCriteria ?? []).some((criterion) => criterion.text === 'would spend a generation'), 'evolveStep gives the result gate priority over generation evolution')
+const costGoal = controller.create({ text: 'Cost stop', issueId: 'issue_spec_cost', completionConditions: ['done'], stopConditions: [], maxRuns: 2, maxDurationMs: 10, workdir: root, startNow: false })
+costGoal.totalDurationMs = 10
+const costStop = controller.evolveStep(costGoal.id, { approve: true, patch: { criteria: [], provenance: { source: 'test', rationale: 'over budget' } } })
+ok(costStop.ok === false && costStop.goal?.stopReason === 'duration_budget' && controller.snapshots(costGoal.id).length === 1, 'cost fuse stops evolution before a new generation')
+const stagnantGoal = controller.create({ text: 'Stagnation stop', issueId: 'issue_spec_stagnant', completionConditions: ['done'], stopConditions: [], maxRuns: 2, maxDurationMs: 10000, noProgressCap: 2, workdir: root, startNow: false })
+stagnantGoal.noProgress = 2
+const stagnantStop = controller.evolveStep(stagnantGoal.id, { approve: true, patch: { criteria: [], provenance: { source: 'test', rationale: 'stagnant' } } })
+ok(stagnantStop.ok === false && stagnantStop.goal?.stopReason === 'no_progress' && controller.snapshots(stagnantGoal.id).length === 1, 'stagnation fuse stops evolution before a new generation')
+const customGateGoal = controller.create({ text: 'Custom gate', issueId: 'issue_spec_custom_gate', completionConditions: ['legacy fallback'], acceptanceCriteria: [{ id: 'custom', text: 'custom result passes' }], stopConditions: [], maxRuns: 2, maxDurationMs: 10000, workdir: root, startNow: false })
+const customGateTask = tasks.at(-1)
+customGateTask.status = 'done'
+customGateTask.runId = 'run_custom_gate'
+customGateTask.startedAt = customGateTask.createdAt
+customGateTask.endedAt = customGateTask.createdAt + 10
+customGateTask.result = JSON.stringify({ summary: 'custom evidence', completedConditions: ['custom result passes'], incompleteConditions: [], nextPlan: '', blockers: [] })
+controller.onTaskChanged(customGateTask)
+ok(controller.get(customGateGoal.id)?.status === 'completed' && controller.get(customGateGoal.id)?.acceptanceCriteria?.[0].status === 'passed', 'custom acceptance criteria drive checkpoint projection and the result gate')
 
 // 持久化：同目录重开 store，快照与回滚后的规格均还在
 const reopened = new GoalStore(userData)

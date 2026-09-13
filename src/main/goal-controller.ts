@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { Goal, GoalRun, GoalSpecSnapshot, GoalStatus, Task, TaskEvent } from '../shared/types'
+import type { Goal, GoalRun, GoalSpecDecision, GoalSpecSnapshot, GoalStatus, Task, TaskEvent } from '../shared/types'
 import type { GoalCheckpointInput, GoalCreateInput, GoalEvolveInput } from '../shared/contracts'
 import { isTerminalGoalStatus, validateGoalTransition } from '../shared/taskflow'
 import { GoalStore, type GoalCreateRecord } from './goal-store'
@@ -10,6 +10,8 @@ export const DEFAULT_NO_PROGRESS_CAP = 2
 export const DEFAULT_MAX_RETRY_ATTEMPTS = 2
 export const MAX_PHASE_EXECUTIONS = DEFAULT_MAX_RETRY_ATTEMPTS + 1
 export const DOOM_LOOP_THRESHOLD = 3
+/** Ambiguity above this value must be clarified before execution/evolution. */
+export const AMBIGUITY_THRESHOLD = 0.2
 
 export interface GoalToolCall {
   /** Canonical backend field; `name` is accepted for raw event fixtures. */
@@ -151,6 +153,17 @@ function mentions(text: string, condition: string) {
   return !!wanted && normalize(text).includes(wanted)
 }
 
+function acceptanceTexts(goal: Pick<Goal, 'acceptanceCriteria' | 'completionConditions'>) {
+  const criteria = goal.acceptanceCriteria?.map((criterion) => criterion.text.trim()).filter(Boolean) ?? []
+  return criteria.length ? criteria : goal.completionConditions
+}
+
+function resultGatePassed(goal: Goal) {
+  if (goal.status === 'completed') return true
+  const criteria = goal.acceptanceCriteria ?? []
+  return criteria.length > 0 && criteria.every((criterion) => criterion.status === 'passed')
+}
+
 /** Parse the small, optional checkpoint envelope an agent can return. */
 function parseCheckpoint(result: string, conditions: string[]): ParsedCheckpoint | null {
   const candidates = [result.trim()]
@@ -212,11 +225,22 @@ export class GoalController {
   get(id: string) { return this.goals.get(id) }
   runs(id: string) { return this.goals.runs(id) }
   checkpoints(id: string) { return this.goals.checkpoints(id) }
+  decisions(id: string): GoalSpecDecision[] { return this.goals.decisions(id) }
 
   /** Loop 4 规格快照：按 generation 升序只读返回；目标不存在时返回空表。 */
   snapshots(id: string): GoalSpecSnapshot[] {
     const goal = this.goals.get(id)
     return goal ? this.goals.snapshots(goal.id) : []
+  }
+
+  /** Advance one Loop 4 step. The result gate is checked before any patch or
+   * generation work so a passing generation never pays for evolution. */
+  evolveStep(id: string, input: GoalEvolveInput): { ok: boolean; error?: string; goal?: Goal; snapshot?: GoalSpecSnapshot; questions?: string[] } {
+    const goal = this.goals.get(id)
+    if (!goal) return { ok: false, error: '目标不存在' }
+    const latest = this.goals.snapshots(goal.id).at(-1)
+    if (resultGatePassed(goal)) return { ok: true, goal, snapshot: latest, questions: [] }
+    return this.evolve(id, input)
   }
 
   /**
@@ -226,24 +250,73 @@ export class GoalController {
   evolve(id: string, input: GoalEvolveInput): { ok: boolean; error?: string; goal?: Goal; snapshot?: GoalSpecSnapshot; questions?: string[] } {
     const goal = this.goals.get(id)
     if (!goal) return { ok: false, error: '目标不存在' }
+    const reject = (reason: string, patch?: GoalEvolveInput['patch']) => {
+      this.goals.recordSpecDecision({
+        goalId: goal.id,
+        generation: this.nextGeneration(goal.id),
+        decision: 'rejected',
+        reason,
+        ...(patch ? { patch, provenance: patch.provenance } : {})
+      })
+      return { ok: false as const, error: reason }
+    }
+    // The outcome gate is authoritative. A goal that already passed in its
+    // initial generation must not spend tokens on an evolution ceremony.
+    if (resultGatePassed(goal)) {
+      return { ok: true, goal, snapshot: this.goals.snapshots(goal.id).at(-1), questions: [] }
+    }
+    if (goal.totalDurationMs >= goal.maxDurationMs) {
+      const reason = `Goal duration budget exhausted (${goal.totalDurationMs}/${goal.maxDurationMs}ms)`
+      const decision = reject(reason, input.patch)
+      const updated = this.goals.update(goal.id, { status: 'blocked', blockedReason: reason, stopReason: 'duration_budget' }) ?? goal
+      this.emit(updated)
+      this.options.onGuard?.(updated, 'duration_budget', reason)
+      return { ...decision, goal: updated }
+    }
+    if ((goal.noProgress ?? 0) >= (goal.noProgressCap ?? DEFAULT_NO_PROGRESS_CAP)) {
+      const reason = `No progress guard reached (${goal.noProgress ?? 0}/${goal.noProgressCap ?? DEFAULT_NO_PROGRESS_CAP}); waiting for user`
+      const decision = reject(reason, input.patch)
+      const updated = this.goals.update(goal.id, { status: 'waiting_user', blockedReason: reason, stopReason: 'no_progress' }) ?? goal
+      this.emit(updated)
+      this.options.onGuard?.(updated, 'no_progress', reason)
+      return { ...decision, goal: updated }
+    }
+    if (input.ambiguityScore !== undefined && input.ambiguityScore > AMBIGUITY_THRESHOLD) {
+      const questions = (goal.acceptanceCriteria ?? []).filter((criterion) => criterion.status !== 'passed')
+        .map((criterion) => `Clarify acceptance criterion ${criterion.id}: ${criterion.text}`)
+      const reason = `Goal ambiguity ${input.ambiguityScore.toFixed(3)} exceeds threshold ${AMBIGUITY_THRESHOLD}`
+      reject(reason, input.patch)
+      return { ok: false, error: reason, questions: questions.length ? questions : ['Clarify the goal outcome and constraints before execution'] }
+    }
     const patch = input.patch
-    if (!patch || !Array.isArray(patch.criteria)) return { ok: false, error: '缺少规格进化补丁（patch）' }
-    if (input.approve !== true) return { ok: false, error: '规格进化需用户批准（approve=true）后才能应用' }
+    if (!patch || !Array.isArray(patch.criteria)) return reject('缺少规格进化补丁（patch）')
+    if (input.approve !== true) return reject('规格进化需用户批准（approve=true）后才能应用', patch)
+    if (!patch.provenance?.source?.trim() || !patch.provenance.rationale?.trim()) return reject('规格进化补丁必须包含 provenance.source 和 provenance.rationale', patch)
     const criteria = (goal.acceptanceCriteria ?? []).map((criterion) => ({ ...criterion }))
+    const seen = new Set<string>()
     for (const [index, criterionPatch] of patch.criteria.entries()) {
+      if (criterionPatch.action !== 'keep' && criterionPatch.action !== 'revise' && criterionPatch.action !== 'add') {
+        return reject(`第 ${index + 1} 条补丁 action 必须是 keep/revise/add`, patch)
+      }
       if (criterionPatch.action === 'add') {
         const text = criterionPatch.text?.trim()
-        if (!text) return { ok: false, error: `第 ${index + 1} 条 add 补丁缺少 text` }
-        criteria.push({ id: criterionPatch.criterionId?.trim() || `ac_${Date.now().toString(36)}_${index}`, text, status: 'pending' })
+        if (!text) return reject(`第 ${index + 1} 条 add 补丁缺少 text`, patch)
+        const id = criterionPatch.criterionId?.trim() || `ac_${Date.now().toString(36)}_${index}`
+        if (criteria.some((criterion) => criterion.id === id) || seen.has(id)) return reject(`验收标准 ${id} 已存在`, patch)
+        seen.add(id)
+        criteria.push({ id, text, status: 'pending' })
         continue
       }
       const criterionId = criterionPatch.criterionId?.trim()
-      if (!criterionId) return { ok: false, error: `第 ${index + 1} 条 ${criterionPatch.action} 补丁缺少 criterionId` }
+      if (!criterionId) return reject(`第 ${index + 1} 条 ${criterionPatch.action} 补丁缺少 criterionId`, patch)
+      if (seen.has(criterionId)) return reject(`验收标准 ${criterionId} 在同一补丁中重复`, patch)
+      seen.add(criterionId)
       const target = criteria.find((criterion) => criterion.id === criterionId)
-      if (!target) return { ok: false, error: `验收标准 ${criterionId} 不存在` }
+      if (!target) return reject(`验收标准 ${criterionId} 不存在`, patch)
       if (criterionPatch.action === 'revise') {
         const text = criterionPatch.text?.trim()
-        if (!text) return { ok: false, error: `验收标准 ${criterionId} 的 revise 补丁缺少 text` }
+        if (!text) return reject(`验收标准 ${criterionId} 的 revise 补丁缺少 text`, patch)
+        if (target.status === 'passed') return reject(`已通过验收标准 ${criterionId} 不得 revise`, patch)
         target.text = text
         // 修订后的标准视为未验收，需要重新通过结果闸门
         target.status = 'pending'
@@ -253,6 +326,8 @@ export class GoalController {
       // 'keep'：不改内容，仅随快照记录保留意图
     }
     const text = patch.text?.trim() || goal.text
+    const goalSnapshot: Goal = { ...goal, text, acceptanceCriteria: criteria.map((criterion) => ({ ...criterion })) }
+    const checkpoint = this.goals.checkpoints(goal.id).at(-1)
     const snapshot = this.goals.saveSpecSnapshot({
       goalId: goal.id,
       generation: this.nextGeneration(goal.id),
@@ -260,10 +335,20 @@ export class GoalController {
       acceptanceCriteria: criteria,
       completionConditions: goal.completionConditions,
       stopConditions: goal.stopConditions,
-      outcomeGatePassed: input.outcomeGatePassed === true,
+      outcomeGatePassed: resultGatePassed(goal),
       decision: 'applied',
+      goalSnapshot,
+      ...(checkpoint ? { checkpoint } : {}),
       patch,
       ...(patch.provenance?.rationale ? { reason: patch.provenance.rationale } : {})
+    })
+    this.goals.recordSpecDecision({
+      goalId: goal.id,
+      generation: snapshot.generation,
+      decision: 'applied',
+      reason: patch.provenance.rationale,
+      patch,
+      provenance: patch.provenance
     })
     const updated = this.goals.update(goal.id, { text, acceptanceCriteria: criteria })!
     this.emit(updated)
@@ -276,22 +361,41 @@ export class GoalController {
     if (!goal) return { ok: false, error: '目标不存在' }
     if (!Number.isInteger(generation) || generation < 1) return { ok: false, error: 'generation 必须是正整数' }
     const base = this.goals.snapshotForGeneration(goal.id, generation)
+    const passedBeforeRollback = (goal.acceptanceCriteria ?? []).filter((criterion) => criterion.status === 'passed')
+    const rollbackTargets = base ? new Map(base.acceptanceCriteria.map((criterion) => [criterion.id, criterion])) : new Map<string, { text: string }>()
+    if (base && passedBeforeRollback.some((criterion) => rollbackTargets.get(criterion.id)?.text !== criterion.text)) {
+      this.goals.recordSpecDecision({ goalId: goal.id, generation: this.nextGeneration(goal.id), decision: 'rejected', reason: 'cannot weaken a passed acceptance criterion' })
+      return { ok: false, error: 'cannot weaken a passed acceptance criterion' }
+    }
+    const preservedPassed = new Map(passedBeforeRollback.map((criterion) => [criterion.id, criterion]))
+    const rollbackCriteria = base ? base.acceptanceCriteria.map((criterion) => {
+      const passed = preservedPassed.get(criterion.id)
+      return passed ? { ...criterion, status: 'passed' as const, passedAt: passed.passedAt, evidence: passed.evidence } : { ...criterion }
+    }) : []
     if (!base) return { ok: false, error: `规格快照 generation ${generation} 不存在` }
     if (base.decision === 'rollback') return { ok: false, error: `generation ${generation} 本身是回滚记录，不能作为回滚目标` }
     const snapshot = this.goals.saveSpecSnapshot({
       goalId: goal.id,
       generation: this.nextGeneration(goal.id),
       text: base.text,
-      acceptanceCriteria: base.acceptanceCriteria.map((criterion) => ({ ...criterion })),
+      acceptanceCriteria: rollbackCriteria,
       completionConditions: base.completionConditions,
       stopConditions: base.stopConditions,
       outcomeGatePassed: base.outcomeGatePassed,
+      decision: 'rollback',
+      goalSnapshot: { ...goal, text: base.text, acceptanceCriteria: rollbackCriteria, completionConditions: base.completionConditions, stopConditions: base.stopConditions },
+      ...(this.goals.checkpoints(goal.id).at(-1) ? { checkpoint: this.goals.checkpoints(goal.id).at(-1)! } : {}),
+      reason: `回滚到 generation ${generation}`
+    })
+    this.goals.recordSpecDecision({
+      goalId: goal.id,
+      generation: snapshot.generation,
       decision: 'rollback',
       reason: `回滚到 generation ${generation}`
     })
     const updated = this.goals.update(goal.id, {
       text: base.text,
-      acceptanceCriteria: base.acceptanceCriteria.map((criterion) => ({ ...criterion })),
+      acceptanceCriteria: rollbackCriteria,
       completionConditions: base.completionConditions,
       stopConditions: base.stopConditions
     })!
@@ -615,10 +719,11 @@ export class GoalController {
     const update = { runCount, totalDurationMs, currentRunId: projected.id }
     this.goals.update(goal.id, update)
     const resultText = task.result ?? task.error ?? ''
-    const parsed = parseCheckpoint(resultText, goal.completionConditions) ?? {
+    const resultConditions = acceptanceTexts(goal)
+    const parsed = parseCheckpoint(resultText, resultConditions) ?? {
       summary: resultText.trim() || (task.status === 'cancelled' ? 'Run cancelled' : 'Run ended without a checkpoint'),
       completedConditions: [],
-      incompleteConditions: [...goal.completionConditions],
+      incompleteConditions: [...resultConditions],
       nextPlan: '',
       blockers: task.status === 'cancelled' ? ['Run cancelled'] : task.status === 'failed' ? [task.error || 'Run failed'] : []
     }
@@ -630,6 +735,17 @@ export class GoalController {
       durationMs: projected.durationMs ?? duration,
       usage: projected.usage
     })
+    // Project deterministic checkpoint evidence onto first-class criteria.
+    // A passed criterion is monotonic for the life of a specification.
+    const completedEvidence = parsed.completedConditions.map(normalize)
+    const acceptanceCriteria = (goal.acceptanceCriteria ?? []).map((criterion) => {
+      if (criterion.status === 'passed') return { ...criterion }
+      const matched = completedEvidence.some((item) => item === normalize(criterion.id) || item === normalize(criterion.text) || mentions(item, criterion.text))
+      return matched ? { ...criterion, status: 'passed' as const, passedAt: Date.now(), evidence: parsed.summary } : { ...criterion }
+    })
+    if (acceptanceCriteria.some((criterion, index) => JSON.stringify(criterion) !== JSON.stringify(goal.acceptanceCriteria?.[index]))) {
+      this.goals.update(goal.id, { acceptanceCriteria })
+    }
     // Progress is derived from the visible model output only. Evaluator prose,
     // timing and failure wording are intentionally excluded so the same output
     // cannot evade the no-progress guard by changing its explanation.
@@ -703,7 +819,12 @@ export class GoalController {
       return { status: 'active', complete: false, shouldContinue: false, reason, stopReason: 'defer', defer: true }
     }
     const completed = checkpoint?.completedConditions ?? []
-    const complete = goal.completionConditions.every((condition) => completed.some((item) => normalize(item) === normalize(condition) || mentions(completed.join(' '), condition)))
+    const completedNormalized = completed.map(normalize)
+    const criteria = goal.acceptanceCriteria ?? goal.completionConditions.map((text, index) => ({ id: `ac_${index}`, text, status: 'pending' as const }))
+    // Acceptance criteria are the result gate. Legacy completionConditions are
+    // retained as a compatibility fallback when no first-class list exists.
+    const complete = criteria.every((criterion) => criterion.status === 'passed'
+      || completedNormalized.some((item) => item === normalize(criterion.id) || item === normalize(criterion.text) || mentions(item, criterion.text)))
     if (complete) return { status: 'completed', complete: true, shouldContinue: false }
     const stop = goal.stopConditions.find((condition) => mentions(`${checkpoint?.summary ?? ''} ${checkpoint?.blockers.join(' ') ?? ''}`, condition))
     if (stop) return { status: 'waiting_user', complete: false, shouldContinue: false, reason: `Stop condition: ${stop}`, stopReason: 'stop_condition' }
@@ -730,6 +851,7 @@ export class GoalController {
     if (goal.totalDurationMs >= goal.maxDurationMs) return { ok: false, error: `Goal duration budget exhausted (${goal.totalDurationMs}/${goal.maxDurationMs}ms)` }
     const phaseIndex = goal.runCount
     const previous = this.goals.checkpoints(goal.id).at(-1)
+    const resultConditions = acceptanceTexts(goal)
     // v2：首个 Task（phaseIndex=0）注入目标模式块（§4.1）
     const GOAL_BLOCK = `【目标模式（自动推进协议）】
 本任务在目标模式下运行：每轮回合结束后系统会检查进度并自动让你继续，直到完成条件全部达成。
@@ -741,10 +863,10 @@ export class GoalController {
 - 确需换新会话的阶段边界才用 <continue>（简报自包含）；一般推进不要硬切会话。
 - 遇到必须人工决策或命中停止条件的事，写进 blockers，不要自行猜测执行。`
     const prompt = phaseIndex === 0
-      ? `${goal.text}\n\n完成条件：\n${goal.completionConditions.map((condition) => `- ${condition}`).join('\n')}${goal.stopConditions.length ? `\n\n停止条件：\n${goal.stopConditions.map((condition) => `- ${condition}`).join('\n')}` : ''}\n\n${GOAL_BLOCK}`
+      ? `${goal.text}\n\n完成条件：\n${resultConditions.map((condition) => `- ${condition}`).join('\n')}${goal.stopConditions.length ? `\n\n停止条件：\n${goal.stopConditions.map((condition) => `- ${condition}`).join('\n')}` : ''}\n\n${GOAL_BLOCK}`
       : previous?.nextPlan
         ? `${goal.text}\n\nCheckpoint summary:\n${previous.summary}\n\nNext plan:\n${previous.nextPlan}`
-        : `${goal.text}\n\nCompletion conditions:\n${goal.completionConditions.map((condition) => `- ${condition}`).join('\n')}${goal.stopConditions.length ? `\n\nStop conditions:\n${goal.stopConditions.map((condition) => `- ${condition}`).join('\n')}` : ''}`
+        : `${goal.text}\n\nCompletion conditions:\n${resultConditions.map((condition) => `- ${condition}`).join('\n')}${goal.stopConditions.length ? `\n\nStop conditions:\n${goal.stopConditions.map((condition) => `- ${condition}`).join('\n')}` : ''}`
     try {
       const task = this.options.createTask({
         title: goal.text.slice(0, 120),
@@ -786,7 +908,7 @@ export class GoalController {
       const failures = goal.failures ?? 0
       let content = `【系统·目标模式】第 ${goal.runCount} 轮已结束并记录 checkpoint。\n`
       content += `- 摘要：${previous?.summary ?? '（无 checkpoint）'}\n`
-      content += `- 未完成条件：${(previous?.incompleteConditions ?? goal.completionConditions).map((c) => `${c}`).join('、')}\n`
+      content += `- 未完成条件：${(previous?.incompleteConditions ?? acceptanceTexts(goal)).map((c) => `${c}`).join('、')}\n`
       if (previous?.nextPlan) content += `- 上一轮下一步计划：${previous.nextPlan}\n`
       if (previous?.blockers?.length) content += `- 阻塞：${previous.blockers.join('、')}\n`
       if (failures > 0) content += `- 上一轮失败原因：${task.error || '（未知）'}（自动续轮 ${failures}/2）\n`

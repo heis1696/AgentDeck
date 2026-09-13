@@ -63,8 +63,23 @@ export interface GoalSpecSnapshot {
   createdAt: number
   outcomeGatePassed: boolean
   decision: 'initial' | 'applied' | 'rejected' | 'rollback'
+  /** Full runtime/spec view and latest checkpoint captured for this generation. */
+  goalSnapshot?: Goal
+  checkpoint?: GoalCheckpoint
   patch?: GoalEvolutionPatch
   reason?: string
+}
+
+/** Durable decision ledger for both accepted and rejected Loop 4 proposals. */
+export interface GoalSpecDecision {
+  id: string
+  goalId: string
+  generation: number
+  decision: 'applied' | 'rejected' | 'rollback'
+  createdAt: number
+  patch?: GoalEvolutionPatch
+  reason: string
+  provenance?: GoalPatchProvenance
 }
 
 export function isGoalStatus(value: unknown): value is GoalStatus {
