@@ -7,6 +7,8 @@ import { IssueStore } from './issue-store'
 import { GoalStore } from './goal-store'
 import { GoalController } from './goal-controller'
 import { AgentSessionRegistry } from './agent-sessions'
+import { MeetingController } from './meeting-controller'
+import { MeetingStore } from './meeting-store'
 import { TaskService } from './task-service'
 import { AutomationStore } from './automation-store'
 import { loadSettings, saveSettings } from './settings'
@@ -35,6 +37,7 @@ let goalController!: GoalController
 let automationStore: AutomationStore
 let taskService: TaskService
 let agentSessions!: AgentSessionRegistry
+let meetingController!: MeetingController
 let sidecarManager: SidecarManager
 let automationTimer: NodeJS.Timeout | undefined
 let quitInProgress = false
@@ -183,6 +186,22 @@ app.whenReady().then(async () => {
       { collectFinal: true, consultDepth: depth + 1 })
     return result.ok ? (result.finalText ?? '（对方未返回文字意见）') : `咨询失败：${result.error ?? '未知错误'}`
   })
+  meetingController = new MeetingController({
+    store: new MeetingStore(app.getPath('userData')),
+    offices: agentSessions,
+    getAgents: () => agents,
+    taskService,
+    startTask: (taskId) => {
+      const task = store.get(taskId)
+      if (!task || task.status !== 'queued') return
+      store.update(taskId, { parked: undefined })
+      runner.enqueue(store.get(taskId)!)
+    },
+    issueExists: (issueId) => !!issueStore.get(issueId),
+    addIssueComment: (issueId, content, authorId) => { issueStore.addComment(issueId, content, { type: 'agent', id: authorId ?? 'meeting' }) },
+    cancelTask: (taskId) => runner.cancel(taskId)
+  })
+  meetingController.recover()
   // 启动对账：执行存在于主进程内存里，快照里遗留的 running 在重启后必然是僵尸。
   // store 的加载迁移已把它们翻成 failed 并登记在案（直接按 status 过滤会扑空——
   // 轮到这里的它们早已不是 running，时间线会永远死止在最后一刻，比如卡在"⟳ 自动重试"）。
@@ -354,6 +373,7 @@ app.whenReady().then(async () => {
     runner,
     issueStore,
     goalController,
+    meetingController,
     automationStore,
     backends,
     zcode,

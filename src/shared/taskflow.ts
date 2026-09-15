@@ -1,4 +1,9 @@
 import type { ExecutionRecord, GoalStatus, IssueStatus, RunStatus, Task, TaskStatus } from './types'
+import type { MeetingActor, MeetingStatus } from './meeting'
+import { canTransitionMeeting as canTransitionMeetingState, isTerminalMeetingStatus, validateMeetingTransition as validateMeetingTransitionState } from './meeting'
+
+export { canTransitionMeetingState as canTransitionMeeting, isTerminalMeetingStatus, validateMeetingTransitionState as validateMeetingTransition }
+export type { MeetingActor, MeetingStatus }
 
 /**
  * The task lifecycle is shared by the runner, IPC handlers, and projections.

@@ -3,6 +3,7 @@ import type { Agent } from '../agents'
 import type { ApiPreset } from '../presets'
 import type { AutomationStore } from '../automation-store'
 import type { GoalController } from '../goal-controller'
+import type { MeetingController } from '../meeting-controller'
 import type { IssueStore } from '../issue-store'
 import type { TaskRunner } from '../runner'
 import type { TaskStore } from '../store'
@@ -23,6 +24,7 @@ export interface IpcContext {
   readonly runner: TaskRunner
   readonly issueStore: IssueStore
   readonly goalController: GoalController
+  readonly meetingController: MeetingController
   readonly automationStore: AutomationStore
   readonly backends: Map<string, AgentBackend>
   readonly zcode: AgentBackend

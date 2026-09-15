@@ -7,6 +7,7 @@ import { confirmDialog } from '../../ui/Confirm'
 import { GOAL_STATUS_LABELS } from '../../labels'
 import type { Goal, GoalCheckpoint, GoalRun, Task } from '../../../../shared/types'
 import type { AgentInfo } from '../../../../shared/contracts'
+import { MeetingPanel } from '../meeting/MeetingPanel'
 
 /** 状态色：进行中蓝、等待琥珀、完成绿、其余灰/红（与旧目标页一致） */
 const STATUS_COLORS: Record<Goal['status'], string> = {
@@ -147,7 +148,7 @@ export function GoalPanel({ task, issueId }: { task: Task; issueId: string }) {
   const agent = agents.find((a) => a.id === goal?.agentId)
   const canCreate = draft.text.trim().length > 0 && lines(draft.completion).length > 0
 
-  return <div className="goal-panel">
+  return <><MeetingPanel issueId={issueId} /><div className="goal-panel">
     <div className="goal-panel-head">
       <Target size={13} className="page-icon" />
       <span className="prop-group-label" style={{ margin: 0 }}>目标模式</span>
@@ -236,5 +237,5 @@ export function GoalPanel({ task, issueId }: { task: Task; issueId: string }) {
         </div>
       </div>
     )}
-  </div>
+  </div></>
 }

@@ -439,3 +439,36 @@ html.light .tab.active {
   box-shadow: inset 0 2px 0 var(--accent);
 }
 .tab-close:hover { background: var(--bg-hover); }
+/* Structured meeting panel: a compact status rail for repeated Issue review. */
+.meeting-panel { margin-bottom: 12px; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-inset); }
+.meeting-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.meeting-kicker { display: flex; align-items: center; gap: 5px; margin-bottom: 3px; color: var(--text-faint); font-size: var(--text-caption); }
+.meeting-head-icon { color: var(--teal); }
+.meeting-create { display: flex; flex-direction: column; gap: 7px; }
+.meeting-create input, .meeting-selects select, .meeting-interject input { min-width: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--ink); }
+.meeting-create input { min-height: 30px; padding: 0 8px; }
+.meeting-selects { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }
+.meeting-selects label { display: flex; flex-direction: column; gap: 3px; color: var(--text-faint); font-size: 10px; }
+.meeting-selects select { width: 100%; min-height: 27px; padding: 0 4px; font-size: 11px; }
+.meeting-create-btn { align-self: flex-start; min-height: 29px; padding: 0 9px; font-size: var(--text-caption); }
+.meeting-status-line { display: flex; align-items: center; gap: 7px; padding: 6px 7px; border-left: 2px solid var(--teal); background: var(--surface); color: var(--ink-dim); font-size: var(--text-caption); }
+.meeting-status-line.status-concluded { border-left-color: var(--status-done); }
+.meeting-status-line.status-failed { border-left-color: var(--status-failed); }
+.meeting-status-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--teal); }
+.meeting-stop-reason { margin-left: auto; overflow: hidden; color: var(--text-faint); text-overflow: ellipsis; white-space: nowrap; }
+.meeting-participants { display: flex; flex-direction: column; gap: 3px; margin: 8px 0; }
+.meeting-participant { display: grid; grid-template-columns: 34px minmax(0, 1fr) 7px; align-items: center; gap: 6px; min-height: 23px; color: var(--ink-dim); font-size: var(--text-caption); }
+.meeting-role { color: var(--text-faint); font-size: 10px; }
+.meeting-mini-status { width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); }
+.meeting-mini-status.active { background: var(--teal); box-shadow: 0 0 0 3px color-mix(in srgb, var(--teal) 13%, transparent); }
+.meeting-mini-status.waiting_user { background: var(--warn); }
+.meeting-mini-status.concluded { background: var(--status-done); }
+.meeting-minutes { margin: 8px 0; padding-top: 7px; border-top: 1px solid var(--border); }
+.meeting-minutes p { margin: 4px 0; color: var(--ink-dim); font-size: var(--text-caption); line-height: 1.45; }
+.meeting-open { color: var(--warn); font-size: 10px; line-height: 1.4; }
+.meeting-actions { display: flex; align-items: center; gap: 5px; margin-top: 7px; }
+.meeting-interject { display: flex; flex: 1; min-width: 0; gap: 4px; }
+.meeting-interject input { width: 100%; min-height: 27px; padding: 0 7px; font-size: 11px; }
+.meeting-action-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; padding: 6px 7px; border-top: 1px solid var(--border); color: var(--ink-dim); font-size: var(--text-caption); }
+.meeting-approval { display: inline-flex; gap: 3px; }
+@media (max-width: 600px) { .meeting-selects { grid-template-columns: 1fr; } }

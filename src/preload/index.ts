@@ -23,7 +23,7 @@ import type {
   SkillsFromUrlResult,
   SkillsShEntry
 } from '../shared/extensions'
-import type { AgentDeckApi, AgentInfo, AgentModelCatalog, GoalCheckpointInput, GoalCreateInput, PermissionRequest, PresetInfo, SidecarSnapshot, TaskCreateInput } from '../shared/contracts'
+import type { AgentDeckApi, AgentInfo, AgentModelCatalog, GoalCheckpointInput, GoalCreateInput, MeetingCreateInput, PermissionRequest, PresetInfo, SidecarSnapshot, TaskCreateInput } from '../shared/contracts'
 
 const api: AgentDeckApi = {
   worktrees: {
@@ -123,6 +123,28 @@ const api: AgentDeckApi = {
       const h = (_e: unknown, goalId: string) => cb(goalId)
       ipcRenderer.on('goals:deleted', h)
       return () => ipcRenderer.removeListener('goals:deleted', h)
+    }
+  },
+  meetings: {
+    list: (): Promise<import('../shared/meeting').Meeting[]> => ipcRenderer.invoke('meetings:list'),
+    get: (id: string): Promise<import('../shared/meeting').Meeting | null> => ipcRenderer.invoke('meetings:get', id),
+    create: (input: MeetingCreateInput): Promise<import('../shared/meeting').Meeting> => ipcRenderer.invoke('meetings:create', input),
+    start: (id: string) => ipcRenderer.invoke('meetings:start', id) as Promise<{ ok: boolean; error?: string }>,
+    pause: (id: string) => ipcRenderer.invoke('meetings:pause', id) as Promise<{ ok: boolean; error?: string }>,
+    resume: (id: string) => ipcRenderer.invoke('meetings:resume', id) as Promise<{ ok: boolean; error?: string }>,
+    interject: (id: string, note: string) => ipcRenderer.invoke('meetings:interject', id, note) as Promise<{ ok: boolean; error?: string }>,
+    cancel: (id: string) => ipcRenderer.invoke('meetings:cancel', id) as Promise<{ ok: boolean; error?: string }>,
+    approveAction: (id: string, index: number, verdict: 'approved' | 'rejected') => ipcRenderer.invoke('meetings:approve-action', id, index, verdict) as Promise<{ ok: boolean; error?: string }>,
+    delete: (id: string) => ipcRenderer.invoke('meetings:delete', id) as Promise<{ ok: boolean; error?: string }>,
+    onUpdated: (cb: (meeting: import('../shared/meeting').Meeting) => void) => {
+      const h = (_e: unknown, meeting: import('../shared/meeting').Meeting) => cb(meeting)
+      ipcRenderer.on('meetings:updated', h)
+      return () => ipcRenderer.removeListener('meetings:updated', h)
+    },
+    onDeleted: (cb: (meetingId: string) => void) => {
+      const h = (_e: unknown, meetingId: string) => cb(meetingId)
+      ipcRenderer.on('meetings:deleted', h)
+      return () => ipcRenderer.removeListener('meetings:deleted', h)
     }
   },
   automations: {

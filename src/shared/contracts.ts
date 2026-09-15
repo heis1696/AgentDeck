@@ -1,5 +1,7 @@
 import type { AcceptanceCriterion, Automation, AppSettings, AnalyticsSummary, Comment, Goal, GoalApprovalSnapshot, GoalCheckpoint, GoalEvolutionPatch, GoalSpecDecision, GoalSpecSnapshot, GoalRun, Issue, IssuePriority, IssueStatus, Notification, Run, RunTrigger, RuntimeSnapshot, Task, TaskEvent } from './types'
 import type { SkillDetail, SkillMeta, SkillTarget, SyncState } from './skills'
+import type { Meeting, MeetingCreateInput } from './meeting'
+export type { MeetingCreateInput } from './meeting'
 import type {
   CatalogEntry,
   DiscoveredAsset,
@@ -216,6 +218,20 @@ export interface AgentDeckApi {
     delete: (id: string) => Promise<{ ok: boolean; error?: string }>
     onUpdated: (cb: (goal: Goal) => void) => () => void
     onDeleted: (cb: (goalId: string) => void) => () => void
+  }
+  meetings: {
+    list: () => Promise<Meeting[]>
+    get: (id: string) => Promise<Meeting | null>
+    create: (input: MeetingCreateInput) => Promise<Meeting>
+    start: (id: string) => Promise<IpcResult>
+    pause: (id: string) => Promise<IpcResult>
+    resume: (id: string) => Promise<IpcResult>
+    interject: (id: string, note: string) => Promise<IpcResult>
+    cancel: (id: string) => Promise<IpcResult>
+    approveAction: (meetingId: string, itemIndex: number, verdict: 'approved' | 'rejected') => Promise<IpcResult>
+    delete: (id: string) => Promise<IpcResult>
+    onUpdated: (cb: (meeting: Meeting) => void) => () => void
+    onDeleted: (cb: (meetingId: string) => void) => () => void
   }
   automations: {
     list: () => Promise<Automation[]>
