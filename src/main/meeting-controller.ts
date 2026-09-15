@@ -221,6 +221,7 @@ export class MeetingController {
     } else if (meeting.status !== 'active') {
       return { ok: false, error: `会议当前状态不可启动: ${meeting.status}` }
     }
+    if (this.store.list().some((item) => item.status === 'active' && item.id !== id)) return { ok: false, error: '已有会议正在进行' }
     if (this.running.has(id)) return { ok: false, error: '会议正在运行' }
     this.running.add(id)
     try {
