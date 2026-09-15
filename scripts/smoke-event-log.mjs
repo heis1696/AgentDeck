@@ -73,6 +73,10 @@ const first = direct.append({ ts: 1, kind: 'status', text: 'one', eventId: 'evt-
 if (!first || first.seq !== 1 || first.v !== 1 || first.durability !== 'durable') throw new Error('new events were not normalized to durable v1')
 const duplicate = direct.append({ ts: 1, kind: 'status', text: 'one', eventId: 'evt-1' })
 if (!duplicate || duplicate.seq !== first.seq || direct.count() !== 1) throw new Error('duplicate eventId was not idempotent')
+const taskEvent = store.appendEvent(task.id, { ts: 10, kind: 'status', text: 'idempotent', eventId: 'task-idem' })
+const taskDuplicate = store.appendEvent(task.id, { ts: 10, kind: 'status', text: 'idempotent', eventId: 'task-idem' })
+const duplicateTask = store.get(task.id)
+if (!taskEvent || !taskDuplicate || taskDuplicate.seq !== taskEvent.seq || duplicateTask?.eventCount !== 3) throw new Error(`duplicate event inflated task eventCount: ${duplicateTask?.eventCount}`)
 const directLive = direct.append({ ts: 2, kind: 'text', type: 'text.delta', text: 'fragment', eventId: 'live-1' })
 if (!directLive || directLive.durability !== 'live' || Number.isInteger(directLive.seq) || direct.count() !== 1 || direct.read().length !== 1) throw new Error('live-only event crossed durable replay boundary')
 const final = direct.append({ ts: 3, kind: 'final', type: 'text.ended', text: 'done', eventId: 'evt-final' })
@@ -84,6 +88,12 @@ if (!afterTornTail || afterTornTail.seq !== 3) throw new Error('torn tail was no
 if (recoveredDirect.read().map((event) => event.seq).join(',') !== '1,2,3') throw new Error('recovered durable sequence diverged')
 const directReplay = recoveredDirect.verifyReplay(recoveredDirect.read().map((event) => ({ seq: event.seq, ts: event.ts, kind: event.kind, text: event.text, eventId: event.eventId, type: event.type })))
 if (!directReplay.ok) throw new Error('legacy replay candidate did not normalize to current event schema')
+const batch = new EventLog(path.join(tmp, 'batch-events.jsonl'))
+const batched = batch.appendBatch([
+  { ts: 1, kind: 'status', text: 'batch-1', eventId: 'batch-1', durable: { aggregate: 'task', seq: 99, version: 1 } },
+  { ts: 2, kind: 'status', text: 'batch-2', eventId: 'batch-2' }
+])
+if (batched.length !== 2 || batched[0].seq !== 1 || batched[0].durable?.seq !== 1 || batched[1].seq !== 2 || batched[1].durable?.seq !== 2) throw new Error('appendBatch durable sequence metadata diverged')
 const migratedUnknown = migrateTaskEvent({ seq: 1, ts: 1, kind: 'future.provider.event', text: 'kept' })
 if (!migratedUnknown || migratedUnknown.kind !== 'raw' || migratedUnknown.rawKind !== 'future.provider.event') throw new Error('unknown event kind was not compatibility-normalized')
 

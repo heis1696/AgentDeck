@@ -69,6 +69,12 @@ check('pending resume is visible', resumed.pendingResume)
 check('resume resolves once', resumed.resolveResume(resumeTurn, 'done') && resumeValue === 'done')
 check('duplicate terminal cannot resolve again', !resumed.resolveResume(resumeTurn, 'late'))
 clear()
+const staleTurn = resumed.begin()
+let staleCalls = 0
+resumed.registerResume(staleTurn, () => { staleCalls++ })
+resumed.invalidate()
+check('generation invalidation clears pending resume', !resumed.pendingResume && staleCalls === 0)
+check('invalidated terminal cannot resolve', !resumed.resolveResume(staleTurn, 'late'))
 
 if (failed) {
   console.error(`\nTURN LIFECYCLE SMOKE FAILED (${failed})`)

@@ -13,8 +13,11 @@ const expectReject = (fn, label) => {
 
 const task = validation.parseTaskCreate({ title: 'x', prompt: 'p', workdir: '' })
 if (task.title !== 'x' || task.prompt !== 'p') throw new Error('valid task was rejected')
+const replayable = validation.parseTaskCreate({ title: 'x', prompt: 'p', workdir: '', requestId: ' req-1 ', idempotencyKey: 'idem-1' })
+if (replayable.requestId !== 'req-1' || replayable.idempotencyKey !== 'idem-1') throw new Error('request idempotency keys were not normalized')
 expectReject(() => validation.parseTaskCreate({ title: '', prompt: 'p', workdir: '' }), 'empty title')
 expectReject(() => validation.parseTaskCreate({ title: 'x', prompt: 'p', workdir: '', unknown: true }), 'unknown task field')
+expectReject(() => validation.parseTaskCreate({ title: 'x', prompt: 'p', workdir: '', requestId: 1 }), 'non-string request id')
 expectReject(() => validation.parseIssuePatch({ status: 'running' }), 'invalid issue status')
 expectReject(() => validation.parseSettingsPatch({ concurrency: 0 }), 'invalid concurrency')
 expectReject(() => validation.parseSettingsPatch({ unknown: true }), 'unknown setting')

@@ -22,6 +22,7 @@ import { ensureSharedDir } from './skills'
 import { sweepWorktrees } from './git'
 import { registerIpcHandlers, type CreateTaskInput } from './ipc/register'
 import { SidecarManager } from './sidecar'
+import { verifyAcceptance } from './acceptance-verifier'
 
 let mainWindow: BrowserWindow | null = null
 let settings: AppSettings
@@ -34,6 +35,8 @@ let automationStore: AutomationStore
 let taskService: TaskService
 let sidecarManager: SidecarManager
 let automationTimer: NodeJS.Timeout | undefined
+let quitInProgress = false
+let quitReady = false
 let agents: Agent[]
 let presets: ApiPreset[]
 const backends = new Map<string, AgentBackend>()
@@ -86,7 +89,7 @@ function createWindow() {
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   settings = loadSettings()
   // 共享目录解析集中在主进程：settings.sharedDir 非空用之，否则 home 默认；首次启动即初始化 README + skills/
   const resolveSharedDir = () => {
@@ -94,6 +97,19 @@ app.whenReady().then(() => {
     return custom || path.join(app.getPath('home'), '.agentdeck')
   }
   ensureSharedDir(resolveSharedDir())
+  // Claim raw orphan runs before TaskStore performs restart migration. The
+  // sidecar is the durable owner of this boundary; otherwise the compatibility
+  // store would eagerly rewrite `running` to `failed` before takeover sees it.
+  sidecarManager = new SidecarManager({
+    userDataDir: app.getPath('userData'),
+    entrypoint: path.join(__dirname, 'sidecar-server.js'),
+    preferredPort: Number(process.env.AGENTDECK_SIDECAR_PORT) || undefined
+  })
+  sidecarManager.onStatus((snapshot) => {
+    const { token: _token, ...publicSnapshot } = snapshot
+    mainWindow?.webContents.send('sidecar:status', publicSnapshot)
+  })
+  try { await sidecarManager.reconnect() } catch { /* compatibility fallback keeps main-process execution available */ }
   store = new TaskStore(app.getPath('userData'))
   issueStore = new IssueStore(app.getPath('userData'))
   issueStore.sync(store.list())
@@ -106,20 +122,6 @@ app.whenReady().then(() => {
   }
   goalStore = new GoalStore(app.getPath('userData'))
   automationStore = new AutomationStore(app.getPath('userData'))
-
-  // The business brain owns a loopback process and durable-file projection.
-  // Startup is deliberately best-effort: the established in-process runner
-  // remains the compatibility path when a packaged sidecar is unavailable.
-  sidecarManager = new SidecarManager({
-    userDataDir: app.getPath('userData'),
-    entrypoint: path.join(__dirname, 'sidecar-server.js'),
-    preferredPort: Number(process.env.AGENTDECK_SIDECAR_PORT) || undefined
-  })
-  sidecarManager.onStatus((snapshot) => {
-    const { token: _token, ...publicSnapshot } = snapshot
-    mainWindow?.webContents.send('sidecar:status', publicSnapshot)
-  })
-  void sidecarManager.reconnect().catch(() => {})
 
   const zcode = createZcodeBackend(() => ({ nodePath: settings.nodePath, zcodePath: settings.zcodePath }))
   backends.set(zcode.id, zcode)
@@ -190,6 +192,12 @@ app.whenReady().then(() => {
       : { status: 'failed', endedAt: Date.now() })
     if (note) runner.pushEvent(stale.id, note)
     notifyTaskChanged(store.get(stale.id) ?? stale)
+    // 委派领队被重启打断时，队员可能已交付——报告摘要留到 Issue，别随领队一起失联
+    const kids = store.list().filter((t) => t.parentTaskId === stale.id && (t.status === 'done' || t.status === 'failed'))
+    if (stale.issueId && kids.length) {
+      const excerpts = kids.slice(0, 5).map((kid) => `- **${kid.title}**（${kid.status}）：${(kid.result ?? '').slice(0, 400) || '（无最终输出）'}`).join('\n')
+      issueStore.addComment(stale.issueId, `⚠ 委派报告未送达：领队执行被应用重启打断。以下为队员报告摘要：\n${excerpts}`, { type: 'agent', id: 'relay' })
+    }
   }
   // 排队启动依赖事件（enqueue / 上一跑落幕触发 pump），重启后事件源全消失，
   // 遗留的 queued 会永远滞留——硬切接力的后继任务正是这么卡死的。启动对账分两路：
@@ -228,6 +236,9 @@ app.whenReady().then(() => {
         issueStore.addComment(child.issueId, `审核${verdict === 'pass' ? '通过' : '退回'}：${note}`, { type: 'agent', id: 'reviewer' })
       }
       publishIssueUpdate(child)
+    },
+    addIssueComment: (issueId, text) => {
+      issueStore.addComment(issueId, text, { type: 'agent', id: 'relay' })
     }
   })
 
@@ -251,6 +262,8 @@ app.whenReady().then(() => {
       startNow: input.startNow
     }, input.trigger),
     doomLoopThreshold: () => settings.doomLoopThreshold,
+    maxRetryAttempts: () => settings.maxRetryAttempts,
+    verifyAcceptance: (goal, task) => verifyAcceptance(goal, task),
     enqueueTask: (task) => runner.enqueue(task),
     startTask: (task) => {
       store.update(task.id, { parked: undefined })
@@ -289,7 +302,16 @@ app.whenReady().then(() => {
     const task = taskService.createHandoffTask({ sourceTaskId, issueId, brief, start })
     if (!task) return null
     if (start !== 'parked' && task.status === 'queued') runner.enqueue(task)
-    else notifyTaskChanged(task)
+    else {
+      notifyTaskChanged(task)
+      // 停放的后继对用户是隐形的（调度泵与重启对账都跳过 parked）——落一条 Issue 评论
+      // 把"等你启动"喊到用户看得到的地方，而不是只留在旧执行的时间线尾部。
+      // 只对新建（10s 内）落评论，幂等复用/重放不刷屏。
+      if (task.parked && task.issueId && Date.now() - task.createdAt < 10_000) {
+        const firstLine = task.prompt.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? task.title
+        issueStore.addComment(task.issueId, `⏸ 阶段接力已备好：${firstLine.slice(0, 80)}——下一阶段在等你启动（打开该 Issue 的最新执行，点「▶ 启动」）`, { type: 'agent', id: source.agentId ?? 'relay' })
+      }
+    }
     return task
   })
 
@@ -338,13 +360,24 @@ app.whenReady().then(() => {
   })
 })
 
-app.on('before-quit', async () => {
+app.on('before-quit', (event) => {
+  if (quitReady) return
+  event.preventDefault()
+  if (quitInProgress) return
+  quitInProgress = true
   if (automationTimer) clearInterval(automationTimer)
-  await runner?.shutdown()
-  await sidecarManager?.stop()
-  store?.flush()
+  void (async () => {
+    await runner?.shutdown()
+    await sidecarManager?.stop()
+    store?.flush()
+  })().finally(() => {
+    quitReady = true
+    app.quit()
+  })
 })
 
 app.on('window-all-closed', () => {
-  app.quit()
+  // Keep the main process (and its runner) alive when the renderer window is
+  // closed. A later window can reconnect to the same in-process state; only an
+  // explicit application quit should tear down execution.
 })

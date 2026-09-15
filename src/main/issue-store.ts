@@ -26,6 +26,22 @@ export class IssueStore {
         nextIdentifier: typeof parsed.nextIdentifier === 'number' ? parsed.nextIdentifier : 1
       }
     } catch { /* first launch */ }
+    this.backfillIssueIds()
+  }
+
+  /** 存量数据兜底：id 缺失的 Issue 补一个持久化的稳定 id，保证 UI 复制与 get()/sync() 按 id 检索可用 */
+  private backfillIssueIds() {
+    const used = new Set(this.data.issues.map((issue) => issue.id).filter(Boolean))
+    let patched = false
+    for (const issue of this.data.issues) {
+      if (issue.id) continue
+      // 旧版投影的缺 id Issue 沿用 sync 的 iss_<taskId> 派生约定（与 task.issueId 缺省时的关联键一致），
+      // 冲突时退回随机 id；补完立即 save()，之后每次加载保持同一个 id
+      issue.id = issue.taskId && !used.has(`iss_${issue.taskId}`) ? `iss_${issue.taskId}` : this.id('iss')
+      used.add(issue.id)
+      patched = true
+    }
+    if (patched) this.save()
   }
 
   private save() {

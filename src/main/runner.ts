@@ -23,10 +23,11 @@ export type ContinueHandler = (input: { sourceTaskId: string; issueId: string; b
 const CONTINUE_BLOCK = `【阶段接力（仅多阶段任务使用）】
 若本任务是分阶段施工的其中一阶段、且下一阶段的目标已明确，在回复的最后一行输出：
 <continue start="auto">下一阶段简报</continue>
-- 标记必须是整个回复的结尾（其后不能再有任何正文）——系统只识别位于末尾的标记；正文、示例或讨论里出现标记字样不会触发接力。
+- 标记必须是整个回复的结尾（其后最多跟空白）——系统只识别位于末尾的标记；正文、示例或讨论里出现标记字样不会触发接力。
 - 简报必须自包含：阶段目标、方案文档路径、上阶段成果（commit/关键文件:行号）、约束与验收。接手的会话看不到本会话上下文，一切靠简报。
-- start="auto"：下一阶段目标已明确、可立即执行时用（系统立即在同一 Issue 上以新会话开始执行）。
-- start="parked"：你主动备好下一阶段、等用户确认时用；不确定能否直接开工时一律用 parked。
+- 自主硬切默认 auto：下一阶段目标已明确就照常 auto（缺省/写错也按 auto 处理），系统立即在同一 Issue 上以新会话开始执行。
+- start="parked" 仅限你明确需要用户做某件事才能继续（如：等你确认方案、等你提供凭据），并且必须在正文里写明"我停在阶段 N，等你 <X>"；只有显式写 parked 才会停放。
+- 环境受限（无头跑不了 GUI、缺权限、缺依赖）不算等用户的理由——照常 auto，把风险与规避办法写进简报，让下一阶段自行绕开。
 - 没有明确的下一阶段就不要输出该标记；输出了就不再写"后续可以…"之类的口头交接。
 - 示例：<continue start="auto">阶段2：按 docs/plan.md §3 实现模型选择 UI；阶段1 已完成数据管道（commit 09a47a4，src/main/presets.ts）；验收：两个不同模型的 agent 并发执行成功</continue>`
 
@@ -80,6 +81,16 @@ const TURN_IDLE_TIMEOUT_MS = Number(process.env.AGENTDECK_TURN_IDLE_MS) > 0
   : 10 * 60 * 1000
 const turnTimeoutError = (budgetMs = TURN_IDLE_TIMEOUT_MS): BackendTurnResult =>
   ({ ok: false, response: '', error: `回合超时（${Math.round(budgetMs / 60000)} 分钟无进展，已停止本回合）` })
+/**
+ * 标题回合硬预算：改标题是装饰性收尾，且在 titleMode 下事件不落日志——它一挂，
+ * 用户看到的就是"结果早出来了，任务却一直运行中"（实测 zcode 终态丢失时拖满
+ * 30 分钟回合上限）。到点放弃标题、护栏当回合、按原结果立即收尾。
+ * AGENTDECK_RETITLE_MS 可覆盖（测试加速用）。
+ */
+const RETITLE_TURN_BUDGET_MS = Number(process.env.AGENTDECK_RETITLE_MS) > 0
+  ? Number(process.env.AGENTDECK_RETITLE_MS)
+  : 90_000
+const RETITLE_BUDGET_EXCEEDED = 'retitle-budget-exceeded'
 /** 后端连接已死的特征：命中后丢弃内存会话、降级 resume 重建（不再需要重启应用） */
 const SESSION_DEAD_RE = /连接已关闭|进程退出|EPIPE|ENOTCONN|ECONNRESET|ECONNREFUSED|disconnected/i
 
@@ -100,7 +111,6 @@ export class TaskRunner {
   private launchHandles = new Map<string, { stop: () => void | Promise<unknown> }>()
   /** Delayed provider retries must be cancellable and must not outlive shutdown. */
   private retryTimers = new Map<string, NodeJS.Timeout>()
-  private pendingResume = new Map<string, (v: BackendTurnResult) => void>()
   /** Last accepted terminal payload, used to quarantine duplicate callbacks
    * from the preceding turn while an internal title turn is in flight. */
   private lastTerminalResponses = new Map<string, string>()
@@ -112,8 +122,7 @@ export class TaskRunner {
   private ports: RunnerPorts
   /** 回合空转看门狗：等待终态期间任务有新事件即续命，长时间无进展才判超时 */
   private turnWatchdogs = new Map<string, { timer: NodeJS.Timeout; expire: () => void }>()
-  /** 回合代号：防止已放弃回合的迟到终态误 resolve 新回合的等待 */
-  private turnGen = new Map<string, number>()
+  /** Lifecycle gate: prevents abandoned-turn callbacks from resolving a newer waiter. */
   /** One gate/lifecycle per task. The Task remains the durable compatibility
    * record; these objects only own in-memory callback admission state. */
   private turnLifecycles = new Map<string, TurnLifecycle>()
@@ -200,7 +209,7 @@ export class TaskRunner {
   /** 事件管道：落盘 + 推 UI；onTurnEnd 可挂回调 */
   private makeEvents(taskId: string, onTurnEnd?: (r: BackendTurnResult) => void, context?: { generation: number; sessionOwner?: string }) {
     const life = this.lifecycle(taskId)
-    const active = (kind?: string, terminal = false) => {
+      const active = (kind?: string, terminal = false) => {
       const task = this.store.get(taskId)
       life.setStatus(task?.status ?? 'queued')
       const token = context ? { generation: context.generation, sessionOwner: context.sessionOwner } : life.gate.token()
@@ -211,7 +220,14 @@ export class TaskRunner {
         if (!active(e.kind)) return
         this.touchWatchdog(taskId)
         if (e.kind === 'text') this.sniffDelegates(taskId, e.text)
-        if (e.kind === 'tool') this.observeToolCall(taskId, e)
+        if (e.kind === 'tool') {
+          this.observeToolCall(taskId, e)
+          // The runner owns the live PermissionBroker decision in production.
+          // Mark the forwarded event so GoalController does not run a second
+          // doom-loop state machine for the same tool invocation.
+          const data = e.data && typeof e.data === 'object' ? e.data as Record<string, unknown> : {}
+          e = { ...e, data: { ...data, runnerDoomHandled: true } }
+        }
         this.ports.onTaskEvent?.(taskId, e)
         const full = this.store.appendEvent(taskId, e)
         if (full) this.pushEvent(taskId, full)
@@ -219,15 +235,14 @@ export class TaskRunner {
       onHeartbeat: () => { if (active()) this.touchWatchdog(taskId) },
       onTurnEnd: (r: BackendTurnResult) => {
         if (!active('final', true)) return
+        const token = context ? { generation: context.generation, sessionOwner: context.sessionOwner } : life.gate.token()
         const response = typeof r.response === 'string' ? r.response.trim() : ''
         if (life.gate.state.titleMode && this.lastTerminalResponses.get(taskId) === response) return
         this.lastTerminalResponses.set(taskId, response)
         onTurnEnd?.(r)
-        const waiter = this.pendingResume.get(taskId)
-        if (waiter) {
-          this.pendingResume.delete(taskId)
-          waiter(r)
-        }
+        // TurnLifecycle owns the one-shot waiter and generation check. This
+        // keeps terminal admission on the same gate as ordinary events.
+        life.resolveResume(token, r)
       },
       onLaunch: (handle: { stop: () => void | Promise<unknown> }) => {
         if (!active()) {
@@ -401,16 +416,13 @@ export class TaskRunner {
     this.turnWatchdogs.delete(taskId)
   }
   private bumpTurnGen(taskId: string) {
-    const gen = (this.turnGen.get(taskId) ?? 0) + 1
-    this.turnGen.set(taskId, gen)
     const life = this.lifecycle(taskId)
-    // Keep the compatibility counter and gate generation in lockstep. A new
+    // TurnLifecycle is the authority for callback generations. A new
     // generation starts ownerless so synchronous start callbacks can be
     // admitted; the session owner is installed as soon as start resolves.
-    life.gate.invalidate()
+    const gen = life.invalidate()
     life.gate.setStatus(this.store.get(taskId)?.status ?? 'queued')
     life.gate.setSessionOwner(undefined)
-    life.gate.setPendingResume(false)
     return gen
   }
 
@@ -431,7 +443,6 @@ export class TaskRunner {
   async forget(taskId: string) {
     this.clearRetry(taskId)
     this.disarmWatchdog(taskId)
-    this.pendingResume.delete(taskId)
     this.launchHandles.delete(taskId)
     const session = this.sessions.get(taskId)
     this.sessions.delete(taskId)
@@ -443,7 +454,6 @@ export class TaskRunner {
     this.toolWindows.delete(taskId)
     this.earlySpawns.delete(taskId)
     this.lastTerminalResponses.delete(taskId)
-    this.turnGen.delete(taskId)
     this.turnLifecycles.get(taskId)?.dispose()
     this.turnLifecycles.delete(taskId)
   }
@@ -507,15 +517,20 @@ export class TaskRunner {
     this.attachTaskCreator(creator)
   }
 
-  private issueOps: { reviewStatus: (childId: string, verdict: 'pass' | 'fail', note?: string) => void } | null = null
-  /** Issue 操作接口（委派审核流用） */
-  attachIssueOps(ops: { reviewStatus: (childId: string, verdict: 'pass' | 'fail', note?: string) => void }) {
+  private issueOps: { reviewStatus: (childId: string, verdict: 'pass' | 'fail', note?: string) => void; addIssueComment?: (issueId: string, text: string) => void } | null = null
+  /** Issue 操作接口（委派审核流用；addIssueComment 供回灌失败兜底落评论） */
+  attachIssueOps(ops: { reviewStatus: (childId: string, verdict: 'pass' | 'fail', note?: string) => void; addIssueComment?: (issueId: string, text: string) => void }) {
     this.issueOps = ops
   }
 
   /** 审核子任务（委派循环调用，runner 负责调度 issueOps 写状态） */
   applyChildReview(childId: string, verdict: 'pass' | 'fail', note?: string) {
     this.issueOps?.reviewStatus(childId, verdict, note)
+  }
+
+  /** Issue 评论（委派回灌失败兜底：报告摘要落到用户可见渠道） */
+  addIssueComment(issueId: string, text: string) {
+    this.issueOps?.addIssueComment?.(issueId, text)
   }
 
   /** 执行日志留痕（状态类事件：落盘 + 推 UI） */
@@ -770,7 +785,8 @@ export class TaskRunner {
           }),
           pushTask: (id) => this.pushTask(id),
           pushEvent: (id, e) => this.pushEvent(id, e),
-          applyReview: (childId, verdict, note) => this.applyChildReview(childId, verdict, note)
+          applyReview: (childId, verdict, note) => this.applyChildReview(childId, verdict, note),
+          addIssueComment: (issueId, text) => this.addIssueComment(issueId, text)
         })
         finalText = outcome.finalText || r.response
         scanTexts = outcome.scanTexts
@@ -815,22 +831,41 @@ export class TaskRunner {
       return stripped
     }
     if (!ok) return stripped
-    note(`阶段接力：下一阶段已${cont.start === 'auto' ? '开始执行' : '备好（待启动）'}（同一 Issue 的新执行 #${handoffCount + 1}）`)
-    return `${stripped}\n\n→ 阶段接力：下一阶段已${cont.start === 'auto' ? '开始执行' : '备好（待启动）'}，见该 Issue 的最新执行。`
+    note(`阶段接力：下一阶段已${cont.start === 'auto' ? '开始执行' : '备好（等你启动）'}（同一 Issue 的新执行 #${handoffCount + 1}）`)
+    return `${stripped}\n\n→ 阶段接力：下一阶段已${cont.start === 'auto' ? '开始执行' : '备好（等你启动，见该 Issue 的「▶ 启动」）'}，见该 Issue 的最新执行。`
   }
 
   /**
    * 隐藏回合：让 agent 根据执行内容重起一个简短标题。
    * 调用方需先把事件管道切到静默（titleMode），失败静默返回 false，不影响任务本体。
+   * 硬预算：标题是装饰性收尾，绝不许把已完成的回合拖在 running。
    */
   private async retitleByAgent(taskId: string, session: BackendSession): Promise<boolean> {
+    let budgetTimer: NodeJS.Timeout | undefined
     try {
-      const r = await this.sendTurn(
-        taskId,
-        session,
-        '【系统】请根据这次任务的执行内容，用不超过 24 个字重起一个简短标题（概括做了什么，不要复述指令原文）。只输出标题本身：不要编号、引号、书名号或任何解释。'
-      )
-      if (!r.ok) return false
+      const r = await Promise.race([
+        this.sendTurn(
+          taskId,
+          session,
+          '【系统】请根据这次任务的执行内容，用不超过 24 个字重起一个简短标题（概括做了什么，不要复述指令原文）。只输出标题本身：不要编号、引号、书名号或任何解释。'
+        ),
+        new Promise<BackendTurnResult>((resolve) => {
+          budgetTimer = setTimeout(() => resolve({ ok: false, response: '', error: RETITLE_BUDGET_EXCEEDED }), RETITLE_TURN_BUDGET_MS)
+        })
+      ])
+      if (!r.ok) {
+        if (r.error === RETITLE_BUDGET_EXCEEDED) {
+          // 预算耗尽：作废标题回合的代数（迟到的终态/回调一律拒绝）、停掉服务端
+          // 仍在跑的标题回合，任务按原标题立即收尾
+          this.bumpTurnGen(taskId)
+          this.disarmWatchdog(taskId)
+          void Promise.resolve(session.stop()).catch(() => {})
+          this.note(taskId, `标题生成超时（${Math.round(RETITLE_TURN_BUDGET_MS / 1000)}s 无响应），保留原标题收尾`)
+        } else {
+          this.note(taskId, `标题生成失败（${r.error || '未知原因'}），保留原标题收尾`)
+        }
+        return false
+      }
       const line = r.response
         .split(/\r?\n/)
         .map((s) => s.replace(/^[#>*\-\s]+/, '').replace(/["'「」《》`*]/g, '').trim())
@@ -840,6 +875,8 @@ export class TaskRunner {
       return true
     } catch {
       return false
+    } finally {
+      if (budgetTimer) clearTimeout(budgetTimer)
     }
   }
 
@@ -855,7 +892,8 @@ export class TaskRunner {
     }
     // A task owns at most one provider turn. This also prevents a delayed
     // orchestration callback from replacing the waiter for a live turn.
-    if (this.pendingResume.has(taskId)) {
+    const life = this.lifecycle(taskId)
+    if (life.pendingResume) {
       return { ok: false, response: '', error: 'Task already has an active turn' }
     }
     const gen = this.bumpTurnGen(taskId)
@@ -866,15 +904,12 @@ export class TaskRunner {
     // EventGate before this generation can be observed.
     if (context) context.generation = gen
     let settleTurn: (v: BackendTurnResult) => void = () => {}
+    let unregisterResume: () => void = () => {}
     const turn = new Promise<BackendTurnResult>((resolve) => {
       settleTurn = resolve
-      this.pendingResume.set(taskId, (v) => {
-        if ((this.turnGen.get(taskId) ?? 0) !== gen) return // 已放弃回合的迟到终态：丢弃，不污染新回合
-        resolve(v)
-      })
+      const token = life.gate.token()
+      unregisterResume = life.registerResume(token, (v) => resolve(v as BackendTurnResult))
     })
-    const life = this.lifecycle(taskId)
-    life.gate.setPendingResume(true)
     let idleFired = false
     const { timeout, cancel } = this.idleSentinel(taskId, () => { idleFired = true })
     try {
@@ -883,11 +918,13 @@ export class TaskRunner {
       void session.send(content).catch((e) => {
         settleTurn(idleFired ? turnTimeoutError(this.turnBudgetMs(taskId)) : { ok: false, response: '', error: e instanceof Error ? e.message : String(e) })
       })
-      return await Promise.race([turn, timeout])
+      const result = await Promise.race([turn, timeout])
+      return result ?? { ok: false, response: '', error: '回合已失效' }
     } finally {
       cancel()
-      this.pendingResume.delete(taskId)
-      life.gate.setPendingResume(false)
+      // 已放弃回合（预算超时后被护栏的）不得清理后继回合的等待句柄；
+      // lifecycle generation 守卫只允许清理属于自己的那一回合。
+      if (life.generation === gen) unregisterResume()
     }
   }
 
@@ -940,7 +977,6 @@ export class TaskRunner {
     const sentinel = this.idleSentinel(taskId)
     try {
       // 标题回合的事件不进对话流（text/final/usage 静默），onTurnEnd 照常驱动 sendTurn
-      let titleMode = false
       const baseEvents = this.makeEvents(taskId, (r) => firstTurnDone?.(r), eventContext)
       const session = await this.executor.start(
         () => backend.start({
@@ -955,15 +991,14 @@ export class TaskRunner {
           events: {
             ...baseEvents,
             onEvent: (e) => {
-              if ((this.turnGen.get(taskId) ?? 0) !== eventContext.generation || this.store.get(taskId)?.status !== 'running') return
+              if (!this.lifecycle(taskId).accepts({ generation: eventContext.generation, sessionOwner: eventContext.sessionOwner })) return
               this.touchWatchdog(taskId) // 静默事件（标题回合增量）不进日志，但同样是进展信号
-              if (titleMode && e.kind !== 'error') return
               baseEvents.onEvent(e)
             }
           }
         }),
         sentinel.timeout,
-        () => (this.turnGen.get(taskId) ?? 0) === eventContext.generation && this.store.get(taskId)?.status === 'running'
+        () => this.lifecycle(taskId).accepts({ generation: eventContext.generation, sessionOwner: eventContext.sessionOwner })
       )
       eventContext.sessionOwner = session.sessionId
       this.lifecycle(taskId).gate.setSessionOwner(session.sessionId)
@@ -983,10 +1018,8 @@ export class TaskRunner {
       if (r.ok) {
         // 自动派生标题的任务：让 agent 总结重起标题（隐藏回合；worker/dsh 除外——前者会与回灌争用会话，后者不支持续聊）
         if (task.titleAuto && !task.parentTaskId && task.backend !== 'dsh') {
-          titleMode = true
           this.lifecycle(taskId).setTitleMode(true)
           const titled = await this.retitleByAgent(taskId, session)
-          titleMode = false
           this.lifecycle(taskId).setTitleMode(false)
           if (titled) this.pushTask(taskId)
         }
@@ -1104,7 +1137,19 @@ export class TaskRunner {
 
     const beginRun = () => {
       this.toolWindows.delete(taskId)
-      this.store.update(taskId, { status: 'running', startedAt: Date.now(), runId: this.newRunId(taskId), endedAt: undefined, error: undefined, failure: undefined })
+      const current = this.store.get(taskId)
+      this.store.update(taskId, {
+        status: 'running',
+        startedAt: Date.now(),
+        runId: this.newRunId(taskId),
+        // A follow-up on the same compatibility Task is still a new Goal
+        // phase. Advance the phase index so maxRuns/runCount account for
+        // continuation turns instead of remaining pinned at phase zero.
+        ...(current?.goalId ? { phaseIndex: (current.phaseIndex ?? 0) + 1 } : {}),
+        endedAt: undefined,
+        error: undefined,
+        failure: undefined
+      })
       this.pushTask(taskId)
     }
 
@@ -1148,17 +1193,15 @@ export class TaskRunner {
     // 看门狗在 backend.start 之前武装：resume 重建阶段挂死同样按空转判败，
     // 不永久卡住 running 状态（此前只能重启应用）
     const sentinel = this.idleSentinel(taskId)
+    let unregisterResume: () => void = () => {}
     try {
       const gen = this.bumpTurnGen(taskId)
       const eventContext: { generation: number; sessionOwner?: string } = { generation: gen }
       const life = this.lifecycle(taskId)
       const turn = new Promise<BackendTurnResult>((resolve) => {
-        this.pendingResume.set(taskId, (v) => {
-          if ((this.turnGen.get(taskId) ?? 0) !== gen) return
-          resolve(v)
-        })
+        const token = life.gate.token()
+        unregisterResume = life.registerResume(token, (v) => resolve(v as BackendTurnResult))
       })
-      life.gate.setPendingResume(true)
       resumeSession = await this.executor.start(
         () => backend.start({
           prompt: turnContent,
@@ -1170,7 +1213,7 @@ export class TaskRunner {
           events: this.makeEvents(taskId, undefined, eventContext)
         }),
         sentinel.timeout,
-        () => (this.turnGen.get(taskId) ?? 0) === eventContext.generation && this.store.get(taskId)?.status === 'running'
+        () => this.lifecycle(taskId).accepts({ generation: eventContext.generation, sessionOwner: eventContext.sessionOwner })
       )
       this.sessionEventContexts.set(resumeSession, eventContext)
       eventContext.sessionOwner = resumeSession.sessionId
@@ -1181,18 +1224,16 @@ export class TaskRunner {
       this.pushTask(taskId)
       try {
         const r = await Promise.race([turn, sentinel.timeout])
-        if (!r.ok) throw new Error(r.error || '续聊回合失败')
+        if (!r?.ok) throw new Error(r?.error || '续聊回合失败')
         const finalText = await this.completeTurn(taskId, resumeSession, r)
         if (this.opts().notify) this.notify(task, '完成', finalText)
         return { ok: true }
       } finally {
         sentinel.cancel()
-        this.pendingResume.delete(taskId)
-        life.gate.setPendingResume(false)
+        if (life.generation === gen) unregisterResume()
       }
     } catch (e) {
-      this.pendingResume.delete(taskId)
-      this.lifecycle(taskId).gate.setPendingResume(false)
+      unregisterResume()
       this.disarmWatchdog(taskId)
       const msg = e instanceof Error ? e.message : String(e)
       this.failTask(taskId, msg)

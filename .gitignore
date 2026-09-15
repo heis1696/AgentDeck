@@ -15,6 +15,7 @@ release/
 # Logs
 *.log
 logs/
+.sessions/
 
 # OS files
 .DS_Store

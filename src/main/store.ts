@@ -23,7 +23,7 @@ const TASK_INDEX_FIELDS = [
   'suppressIssue', 'runId', 'goalId', 'phaseIndex', 'parentTaskId', 'workerIndex', 'integration', 'status',
   'createdAt', 'startedAt', 'endedAt', 'result', 'error', 'failure', 'attempt',
   'roundsUsed', 'handoff', 'continuesFrom', 'parked', 'backgroundRunning', 'titleAuto', 'sessionId',
-  'gitDiff', 'gitStat', 'usage', 'eventCount', 'unavailableReason', 'worktree', 'workVersion'
+  'gitDiff', 'gitStat', 'usage', 'eventCount', 'unavailableReason', 'worktree', 'workVersion', 'dedupeKey'
 ] as const
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -35,7 +35,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * only interpreted for version 0, so future schema additions do not grow an
  * implicit compatibility branch.
  */
-export function migrateTaskRecord(raw: unknown, sourceVersion = 0, now = Date.now()): Task | null {
+export function migrateTaskRecord(raw: unknown, sourceVersion = 0, now = Date.now(), options: { recoverRunning?: boolean } = {}): Task | null {
   if (!isRecord(raw)) return null
   const old = raw as LegacyTask
   const out: Record<string, unknown> = {}
@@ -73,7 +73,7 @@ export function migrateTaskRecord(raw: unknown, sourceVersion = 0, now = Date.no
 
   // A running task cannot survive an application restart. This recovery is
   // deliberately idempotent: the persisted result is terminal on next load.
-  if (out.status === 'running') {
+  if (out.status === 'running' && options.recoverRunning !== false) {
     const hadLegacySquad = sourceVersion < TASK_INDEX_SCHEMA_VERSION && isRecord(old.squad)
     out.status = 'failed'
     if (typeof out.error !== 'string' || !out.error) {
@@ -96,7 +96,7 @@ export function migrateTaskRecord(raw: unknown, sourceVersion = 0, now = Date.no
  * document always uses the current shape; callers can compare it with the
  * source to decide whether an atomic rewrite is needed.
  */
-export function migrateTaskIndex(raw: unknown, now = Date.now()): TaskIndexDocument {
+export function migrateTaskIndex(raw: unknown, now = Date.now(), options: { recoverRunning?: boolean } = {}): TaskIndexDocument {
   let sourceVersion = 0
   let entries: unknown[] = []
   if (Array.isArray(raw)) {
@@ -121,7 +121,7 @@ export function migrateTaskIndex(raw: unknown, now = Date.now()): TaskIndexDocum
   return {
     schemaVersion: TASK_INDEX_SCHEMA_VERSION,
     tasks: entries
-      .map((entry) => migrateTaskRecord(entry, sourceVersion, now))
+      .map((entry) => migrateTaskRecord(entry, sourceVersion, now, options))
       .filter((task): task is Task => task !== null)
   }
 }
@@ -143,8 +143,10 @@ export class TaskStore {
    * restart-interrupted turn (e.g. one waiting on an auto-retry) would leave a
    * timeline that dead-ends at its last live event with no explanation. */
   private restartInterrupted = new Set<string>()
+  private readonly recoverRunning: boolean
 
-  constructor(userDataDir: string) {
+  constructor(userDataDir: string, options: { recoverRunning?: boolean } = {}) {
+    this.recoverRunning = options.recoverRunning !== false
     this.dir = path.join(userDataDir, 'tasks')
     fs.mkdirSync(this.dir, { recursive: true })
     this.loadIndex()
@@ -179,13 +181,13 @@ export class TaskStore {
     }
 
     const parsed = JSON.parse(raw) as unknown
-    const document = migrateTaskIndex(parsed)
+    const document = migrateTaskIndex(parsed, Date.now(), { recoverRunning: this.recoverRunning })
     // Record zombie-running flips while the raw status is still visible. The
     // flip itself stays silent and idempotent; startup reconciliation reads
     // this ledger once and appends the visible "interrupted" trace.
     const rawEntries = Array.isArray(parsed) ? parsed : isRecord(parsed) && Array.isArray(parsed.tasks) ? parsed.tasks : []
     for (const entry of rawEntries) {
-      if (isRecord(entry) && entry.status === 'running' && typeof entry.id === 'string' && entry.id.trim()) {
+      if (this.recoverRunning && isRecord(entry) && entry.status === 'running' && typeof entry.id === 'string' && entry.id.trim()) {
         this.restartInterrupted.add(entry.id)
       }
     }
@@ -242,7 +244,16 @@ export class TaskStore {
     }
   }
 
-  create(input: Pick<Task, 'title' | 'prompt' | 'workdir' | 'backend'> & Partial<Pick<Task, 'parentTaskId' | 'workerIndex' | 'integration' | 'agentId' | 'handoff' | 'continuesFrom' | 'parked' | 'backgroundRunning' | 'suppressIssue' | 'trigger' | 'issueId' | 'goalId' | 'phaseIndex' | 'titleAuto' | 'unavailableReason' | 'worktree' | 'workVersion'>>): Task {
+  /** Reload durable task/index state for a sidecar takeover barrier. */
+  reload() {
+    this.tasks.clear()
+    this.logs.clear()
+    this.restartInterrupted.clear()
+    this.pendingSnapshots.clear()
+    this.loadIndex()
+  }
+
+  create(input: Pick<Task, 'title' | 'prompt' | 'workdir' | 'backend'> & Partial<Pick<Task, 'parentTaskId' | 'workerIndex' | 'integration' | 'agentId' | 'handoff' | 'continuesFrom' | 'parked' | 'backgroundRunning' | 'suppressIssue' | 'trigger' | 'issueId' | 'goalId' | 'phaseIndex' | 'titleAuto' | 'unavailableReason' | 'worktree' | 'workVersion' | 'dedupeKey'>>): Task {
     const task: Task = {
       id: `t_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
       title: input.title,
@@ -266,6 +277,7 @@ export class TaskStore {
       ...(input.suppressIssue ? { suppressIssue: true } : {}),
       ...(input.titleAuto ? { titleAuto: true } : {}),
       ...(input.workVersion ? { workVersion: input.workVersion } : {}),
+      ...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}),
       status: 'queued',
       createdAt: Date.now(),
       eventCount: 0
@@ -329,10 +341,13 @@ export class TaskStore {
     if (!t) return null
     fs.mkdirSync(this.taskDir(id), { recursive: true })
     // Synchronous append keeps readEvents/finalization and crash recovery consistent.
-    const full = this.eventLog(id).append(e)
+    const log = this.eventLog(id)
+    const full = log.append(e)
     if (!full) return null
     if (isTaskEventDurable(full)) {
-      t.eventCount = (t.eventCount ?? 0) + 1
+      // EventLog deduplicates producer ids and requested sequence numbers;
+      // reconcile from its durable index so replay never inflates the count.
+      t.eventCount = log.count()
       this.pendingSnapshots.add(id)
       this.scheduleFlush()
     }

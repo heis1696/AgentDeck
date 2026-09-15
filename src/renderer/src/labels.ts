@@ -5,6 +5,12 @@ export const TASK_STATUS_LABELS: Record<Task['status'], string> = {
   queued: '排队中', running: '执行中', done: '完成', failed: '失败', cancelled: '已取消'
 }
 
+/** queued 且 parked：停放在队列外、等用户手动启动（如硬切后继），区别于系统自动调度的普通排队 */
+export const isParkedQueued = (task: Pick<Task, 'status' | 'parked'>): boolean => task.status === 'queued' && task.parked === true
+
+/** parked 任务统一口径文案（主进程侧新指引/评论同口径，勿用「待启动」） */
+export const PARKED_QUEUED_LABEL = '⏸ 等你启动'
+
 export const ISSUE_STATUS_LABELS: Record<IssueStatus, string> = {
   backlog: '待梳理', todo: '待办', in_progress: '进行中', in_review: '审查中', done: '已完成', blocked: '受阻', cancelled: '已取消'
 }

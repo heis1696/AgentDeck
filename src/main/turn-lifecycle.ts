@@ -95,6 +95,8 @@ export class EventGate {
   }
 
   /** Invalidate all previously issued tokens without changing task status. */
+  /** Advance the callback generation and drop any pending turn waiter. */
+  /** Advance the callback generation and drop any pending turn waiter. */
   invalidate() {
     this.stateValue = { ...this.stateValue, generation: this.stateValue.generation + 1 }
     return this.stateValue.generation
@@ -308,7 +310,15 @@ export class TurnLifecycle {
   }
 
   invalidate() {
-    return this.gate.invalidate()
+    const generation = this.gate.invalidate()
+    // Invalidate also owns the pending-resume boundary. A late terminal
+    // callback must not leave a waiter behind that blocks the next turn. Do
+    // not resolve it here: watchdog timeout/cancellation owns the result and
+    // must preserve its explicit error semantics.
+    this.pending.clear()
+    this.gate.setPendingResume(false)
+    this.gate.setSessionOwner(undefined)
+    return generation
   }
 
   /** Cancel is idempotent and awaits both provider stop and close. */

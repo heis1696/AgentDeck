@@ -34,6 +34,10 @@ export interface SidecarSyncState {
   goals: unknown[]
   runs?: unknown[]
   checkpoints?: unknown[]
+  specSnapshots?: unknown[]
+  specDecisions?: unknown[]
+  specApprovals?: unknown[]
+  goalEvents?: unknown[]
   orphanRuns: unknown[]
 }
 
@@ -198,10 +202,11 @@ export class SidecarManager {
         status: 'ready',
         ...(handshake.pid || prior?.pid ? { pid: handshake.pid ?? prior?.pid } : {})
       }
+      // Internal RPC may proceed after the handshake. The ready notification
+      // is intentionally deferred until reconnect() completes state sync.
       this.status = 'ready'
       const orphans = (handshake.orphanRuns ?? []).map((run) => String(run.runId ?? run.id ?? '')).filter(Boolean)
       this.orphanRuns = orphans
-      this.emit(orphans)
       return { ...this.state, url: this.url(), orphanRuns: orphans }
     } catch (error) {
       // A reachable process speaking another protocol is an invariant
@@ -272,11 +277,7 @@ export class SidecarManager {
           // A sidecar crash must not require an Electron restart. Reconnect in
           // the background; queued renderer calls are flushed in order once
           // the authoritative state sync has completed.
-          void this.start().then(async () => {
-            await this.sync()
-            await this.recoverOrphans()
-            await this.flushRpcQueue()
-          }).catch((error) => this.rejectRpcQueue(error))
+          void this.reconnect().catch((error) => this.rejectRpcQueue(error))
         }
       }
     })
@@ -341,7 +342,7 @@ export class SidecarManager {
     if (this.rpcQueue.length >= 100) throw new SidecarProtocolError('Sidecar reconnect queue is full', 429)
     return new Promise<T>((resolve, reject) => {
       this.rpcQueue.push({ method, params, resolve: resolve as (value: unknown) => void, reject })
-      void this.start().then(async () => { await this.sync(); await this.recoverOrphans(); await this.flushRpcQueue() }).catch((error) => this.rejectRpcQueue(error))
+      void this.reconnect().catch((error) => this.rejectRpcQueue(error))
     })
   }
 
@@ -389,11 +390,21 @@ export class SidecarManager {
     await this.sync()
     await this.recoverOrphans()
     await this.flushRpcQueue()
-    return snapshot
+    this.setStatus('ready')
+    this.emit(this.orphanRuns)
+    return { ...snapshot, status: 'ready', orphanRuns: [...this.orphanRuns] }
   }
 
   async recoverOrphans() {
-    return this.rpc<{ adopted: string[]; orphanRuns: unknown[] }>('runs.takeover')
+    const result = await this.rpc<{ adopted: string[]; orphanRuns: unknown[] }>('runs.takeover')
+    this.orphanRuns = (result.orphanRuns ?? []).map((run) => {
+      if (run && typeof run === 'object') {
+        const value = run as { runId?: unknown; id?: unknown }
+        return String(value.runId ?? value.id ?? '')
+      }
+      return String(run ?? '')
+    }).filter(Boolean)
+    return result
   }
 
   async claimOrphans() { return this.recoverOrphans() }

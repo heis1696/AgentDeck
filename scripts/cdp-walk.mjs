@@ -2,6 +2,8 @@
 // 用法: node scripts/cdp-walk.mjs <cmd> [args...]
 //   shot <name>              截图到 gui-test-screenshots/<name>.png
 //   click <selector>         按选择器取中心坐标，用 Input 事件真实点击
+//   clickfind <sel> <expr>   在 sel 命中元素里找第一个满足 expr（变量 r）的并点击
+//   type <text>              向当前聚焦控件插入文本（Input.insertText）
 //   press <combo>            组合键（如 ctrl+k、escape、enter）
 //   eval <expr>              只读求值，输出 JSON
 //   scroll <selector> <dy>   在元素上滚动
@@ -50,12 +52,21 @@ const [cmd, ...args] = process.argv.slice(2)
 if (cmd === 'shot') {
   const dir = path.resolve('gui-test-screenshots')
   fs.mkdirSync(dir, { recursive: true })
-  const r = await send('Page.captureScreenshot', { format: 'png' })
+  let r
+  try {
+    // 默认从前台合成面截图；窗口失焦/后台合成挂起时 4s 超时改走离屏纹理
+    r = await Promise.race([
+      send('Page.captureScreenshot', { format: 'png' }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('surface-shot-timeout')), 4000))
+    ])
+  } catch {
+    r = await send('Page.captureScreenshot', { format: 'png', fromSurface: false })
+  }
   const file = path.join(dir, args[0] + '.png')
   fs.writeFileSync(file, Buffer.from(r.result.data, 'base64'))
   console.log('saved', file)
 } else if (cmd === 'click' || cmd === 'hover') {
-  const rect = await evalJson(`(() => { const el = document.querySelector(${JSON.stringify(args[0])}); if (!el) return null; const r = el.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2, w: r.width, h: r.height } })()`)
+  const rect = await evalJson(`(() => { const el = document.querySelector(${JSON.stringify(args[0])}); if (!el) return null; el.scrollIntoView({ block: 'center' }); const r = el.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2, w: r.width, h: r.height } })()`)
   if (!rect) throw new Error('element not found: ' + args[0])
   if (cmd === 'hover') {
     await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: rect.x, y: rect.y })
@@ -69,11 +80,21 @@ if (cmd === 'shot') {
   const parts = combo.split('+')
   const key = parts[parts.length - 1]
   const modifiers = (parts.includes('ctrl') ? 2 : 0) | (parts.includes('shift') ? 8 : 0) | (parts.includes('alt') ? 1 : 0)
-  const code = key.length === 1 ? 'Key' + key.toUpperCase() : key.charAt(0).toUpperCase() + key.slice(1)
-  const opts = { modifiers, key, code, windowsVirtualKeyCode: key.length === 1 ? key.charCodeAt(0) : 0 }
+  // 命名键的 key 必须首字母大写（'Enter'/'Escape'），否则 React 的 e.key === 'Enter' 不匹配
+  const keyName = key.length === 1 ? key : key.charAt(0).toUpperCase() + key.slice(1)
+  const code = key.length === 1 ? 'Key' + key.toUpperCase() : keyName
+  const opts = { modifiers, key: keyName, code, windowsVirtualKeyCode: key.length === 1 ? key.charCodeAt(0) : 0 }
   await send('Input.dispatchKeyEvent', { type: 'keyDown', ...opts })
   await send('Input.dispatchKeyEvent', { type: 'keyUp', ...opts })
   console.log('pressed', args[0])
+} else if (cmd === 'clickfind') {
+  const rect = await evalJson(`(() => { const el = [...document.querySelectorAll(${JSON.stringify(args[0])})].find((r) => ${args[1]}); if (!el) return null; el.scrollIntoView({ block: 'center' }); const r = el.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 } })()`)
+  if (!rect) throw new Error('element not found: ' + args[0] + ' / ' + args[1])
+  await realClick(rect.x, rect.y)
+  console.log('clicked', args[0], rect)
+} else if (cmd === 'type') {
+  await send('Input.insertText', { text: args[0] ?? '' })
+  console.log('typed', JSON.stringify(args[0] ?? ''))
 } else if (cmd === 'eval') {
   console.log(JSON.stringify(await evalJson(args[0]), null, 1))
 } else if (cmd === 'scroll') {

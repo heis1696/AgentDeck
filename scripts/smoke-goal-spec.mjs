@@ -15,12 +15,16 @@ const bundle = async (entry, name) => {
 const { GoalController } = await import(await bundle('src/main/goal-controller.ts', 'goal-controller.cjs'))
 const { GoalStore } = await import(await bundle('src/main/goal-store.ts', 'goal-store.cjs'))
 const { parseGoalEvolve } = await import(await bundle('src/main/ipc-validation.ts', 'ipc-validation.cjs'))
+const { verifyAcceptance } = await import(await bundle('src/main/acceptance-verifier.ts', 'acceptance-verifier.cjs'))
 
 let failed = 0
 const ok = (condition, label) => {
   console.log(`  ${condition ? 'OK' : 'FAIL'} ${label}`)
   if (!condition) failed++
 }
+const verifierFixtureGoal = { workdir: root, acceptanceCriteria: [{ id: 'file', text: 'file exists: package.json', status: 'pending' }, { id: 'natural', text: 'release is excellent', status: 'pending' }] }
+const verifierEvidence = verifyAcceptance(verifierFixtureGoal, { workdir: root, gitDiff: '' })
+ok(verifierEvidence?.find((item) => item.criterionId === 'file')?.passed === true && verifierEvidence?.find((item) => item.criterionId === 'natural')?.passed === false, 'host verifier checks explicit machine rules and fails closed for natural language')
 
 const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-goal-spec-data-'))
 const tasks = []
@@ -34,6 +38,11 @@ const controller = new GoalController(goalStore, {
   listTasks: () => tasks,
   continueTask: () => ({ ok: true })
 })
+const ambiguousCreate = controller.create({
+  text: 'Ambiguous launch', issueId: 'issue_spec_ambiguous', completionConditions: ['done'], stopConditions: [],
+  maxRuns: 2, maxDurationMs: 10_000, workdir: root, startNow: true, ambiguityScore: 0.9
+})
+ok(ambiguousCreate.status === 'waiting_user' && tasks.length === 0 && ambiguousCreate.stopReason === 'ambiguity', 'creation ambiguity gate blocks execution before Task launch')
 const goal = controller.create({
   text: 'Ship the release',
   issueId: 'issue_spec_1',
@@ -64,6 +73,7 @@ goalStore.addCheckpoint({ goalId: goal.id, runId: 'run_spec_1', phaseIndex: 0, s
 const evolved = controller.evolve(goal.id, {
   approve: true,
   outcomeGatePassed: true,
+  approvalSnapshot: controller.approveEvolution(goal.id, 'user'),
   patch: {
     text: 'Ship the release candidate',
     criteria: [
@@ -81,7 +91,7 @@ ok(revised[1].text === 'AC2 smoke passes', 'kept criterion is unchanged')
 ok(revised[2].text === 'AC3 release notes published' && revised[2].id.startsWith('ac_'), 'added criterion receives a generated stable id')
 ok(evolved.snapshot?.generation === 2 && evolved.snapshot?.decision === 'applied' && evolved.snapshot?.outcomeGatePassed === false, 'applied evolve records a generation-2 snapshot with deterministic gate outcome')
 ok(evolved.snapshot?.goalSnapshot?.text === 'Ship the release candidate' && evolved.snapshot?.checkpoint?.summary === 'generation evidence', 'generation snapshot captures goal, spec, and checkpoint together')
-ok(controller.decisions(goal.id).some((decision) => decision.decision === 'applied' && decision.generation === 2), 'applied evolve decision carries provenance in the ledger')
+ok(controller.decisions(goal.id).some((decision) => decision.decision === 'applied' && decision.generation === 2 && decision.approvalSnapshot?.requestId), 'applied evolve decision carries provenance and approval in the ledger')
 
 // 修订不存在的标准 → 拒绝且无副作用
 const criteriaBefore = controller.get(goal.id)?.acceptanceCriteria?.length
@@ -134,11 +144,40 @@ customGateTask.endedAt = customGateTask.createdAt + 10
 customGateTask.result = JSON.stringify({ summary: 'custom evidence', completedConditions: ['custom result passes'], incompleteConditions: [], nextPlan: '', blockers: [] })
 controller.onTaskChanged(customGateTask)
 ok(controller.get(customGateGoal.id)?.status === 'completed' && controller.get(customGateGoal.id)?.acceptanceCriteria?.[0].status === 'passed', 'custom acceptance criteria drive checkpoint projection and the result gate')
+const customSnapshot = controller.snapshots(customGateGoal.id)[0]
+ok(customSnapshot?.generation === 1 && customSnapshot.outcomeGatePassed === true && customSnapshot.goalSnapshot?.status === 'completed' && customSnapshot.checkpoint?.runId === 'run_custom_gate', 'generation-1 snapshot is updated with passing checkpoint evidence for replay')
+
+// A model can claim every condition while a deterministic host verifier rejects the evidence.
+const verifierTasks = []
+const verifierController = new GoalController(new GoalStore(path.join(outDir, 'goal-verifier-data')), {
+  createTask: (input) => {
+    const task = { id: `verifier_task_${verifierTasks.length + 1}`, ...input, status: 'queued', createdAt: Date.now(), eventCount: 0 }
+    verifierTasks.push(task)
+    return task
+  },
+  listTasks: () => verifierTasks,
+  verifyAcceptance: (_goal, _task, _checkpoint) => [{ criterionId: 'artifact', passed: false, evidence: 'host check failed' }]
+})
+const verifierGoal = verifierController.create({
+  text: 'Verifier conflict', issueId: 'issue_spec_verifier_conflict', completionConditions: ['artifact built'],
+  acceptanceCriteria: [{ id: 'artifact', text: 'artifact built' }], stopConditions: [], maxRuns: 2,
+  maxDurationMs: 10_000, workdir: root, startNow: false
+})
+const verifierTask = verifierTasks.at(-1)
+verifierTask.status = 'done'
+verifierTask.runId = 'run_verifier_conflict'
+verifierTask.startedAt = verifierTask.createdAt
+verifierTask.endedAt = verifierTask.createdAt + 10
+verifierTask.result = JSON.stringify({ summary: 'model claims success', completedConditions: ['artifact built'], incompleteConditions: [], nextPlan: '', blockers: [] })
+verifierController.onTaskChanged(verifierTask)
+const verifierConflict = verifierController.get(verifierGoal.id)
+ok(verifierConflict?.status !== 'completed' && verifierConflict?.acceptanceCriteria?.[0].status !== 'passed', 'deterministic verifier rejects conflicting model self-report (fail-closed)')
 
 // 持久化：同目录重开 store，快照与回滚后的规格均还在
 const reopened = new GoalStore(userData)
 ok(reopened.snapshots(goal.id).length === 3, 'spec snapshots survive a store reload')
 ok(reopened.get(goal.id)?.text === 'Ship the release' && reopened.get(goal.id)?.acceptanceCriteria?.length === 2, 'rolled-back goal spec survives a store reload')
+ok(reopened.events(goal.id).some((event) => event.text === 'goal.spec.applied') && reopened.events(goal.id).some((event) => event.text === 'goal.spec.rollback'), 'Goal specification decisions and evidence are replayable from the durable Goal EventLog')
 
 // IPC 边界校验
 ok(parseGoalEvolve({}).patch === undefined, 'parseGoalEvolve tolerates a probe call without patch')
@@ -153,6 +192,16 @@ try { parseGoalEvolve({ unknown: true }) } catch { threw = true }
 ok(threw, 'parseGoalEvolve rejects unknown top-level fields')
 const parsed = parseGoalEvolve({ approve: true, patch: { text: 't', criteria: [{ action: 'add', text: 'n' }], provenance: { source: 'user', rationale: 'r' } } })
 ok(parsed.approve === true && parsed.patch?.criteria[0].action === 'add' && parsed.patch?.provenance.rationale === 'r', 'parseGoalEvolve passes a valid patch through')
+const approval = { requestId: 'approval_1', goalId: goal.id, specGeneration: 3, workVersion: controller.snapshots(goal.id).at(-1).id, approvedAt: Date.now(), actor: 'user' }
+const parsedApproval = parseGoalEvolve({ approve: true, approvalSnapshot: approval, patch: { criteria: [], provenance: { source: 'user', rationale: 'approved' } } })
+ok(parsedApproval.approvalSnapshot?.requestId === 'approval_1' && parsedApproval.approvalSnapshot?.goalId === goal.id, 'parseGoalEvolve preserves the independent approval snapshot')
+threw = false
+try { parseGoalEvolve({ approvalSnapshot: { ...approval, specGeneration: 0 } }) } catch { threw = true }
+ok(threw, 'parseGoalEvolve rejects invalid approval generations')
+const noApproval = controller.evolve(goal.id, { approve: true, patch: { criteria: [], provenance: { source: 'user', rationale: 'legacy' } } })
+ok(noApproval.ok === true, 'legacy in-process approve=true remains compatible')
+const staleApproval = controller.evolve(goal.id, { approve: true, approvalSnapshot: { ...approval, specGeneration: 99 }, patch: { criteria: [], provenance: { source: 'user', rationale: 'stale' } } })
+ok(staleApproval.ok === false && controller.decisions(goal.id).some((decision) => decision.reason.includes('stale')), 'stale approval snapshots are rejected and durably recorded')
 
 console.log(failed ? `\n${failed} check(s) failed` : '\nAll goal spec evolution checks passed')
 process.exit(failed ? 1 : 0)

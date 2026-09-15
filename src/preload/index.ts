@@ -2,7 +2,28 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { Task, TaskEvent, AppSettings, Issue, Run, Comment, Notification, Automation, RuntimeSnapshot, AnalyticsSummary, IssuePriority, IssueStatus, RunTrigger } from '../shared/types'
 import type { SkillDetail, SkillMeta, SkillTarget, SyncState } from '../shared/skills'
-import type { AgentDeckApi, AgentInfo, AgentModelCatalog, GoalCheckpointInput, GoalCreateInput, PermissionRequest, PresetInfo, SidecarSnapshot } from '../shared/contracts'
+import type {
+  CatalogEntry,
+  DiscoveredAsset,
+  ExtSourceMeta,
+  HookDetail,
+  HookGroup,
+  HookMeta,
+  HookTarget,
+  MarketplacePluginInfo,
+  MarketplaceRegisterResult,
+  MarketplaceStatus,
+  McpMeta,
+  McpTarget,
+  McpTransport,
+  PluginCliResult,
+  PluginInventoryItem,
+  RegisteredMarketplace,
+  SkillDiscoveryGroup,
+  SkillsFromUrlResult,
+  SkillsShEntry
+} from '../shared/extensions'
+import type { AgentDeckApi, AgentInfo, AgentModelCatalog, GoalCheckpointInput, GoalCreateInput, PermissionRequest, PresetInfo, SidecarSnapshot, TaskCreateInput } from '../shared/contracts'
 
 const api: AgentDeckApi = {
   worktrees: {
@@ -12,7 +33,7 @@ const api: AgentDeckApi = {
     list: (): Promise<Task[]> => ipcRenderer.invoke('tasks:list'),
     get: (id: string): Promise<Task | null> => ipcRenderer.invoke('tasks:get', id),
     events: (id: string, afterSeq = 0): Promise<TaskEvent[]> => ipcRenderer.invoke('tasks:events', id, afterSeq),
-    create: (input: { title: string; prompt: string; workdir: string; backend?: string; agentId?: string; handoff?: string; startNow?: boolean; trigger?: RunTrigger }) =>
+    create: (input: TaskCreateInput) =>
       ipcRenderer.invoke('tasks:create', input) as Promise<Task>,
     cancel: (id: string) => ipcRenderer.invoke('tasks:cancel', id) as Promise<{ ok: boolean; error?: string }>,
     followUp: (id: string, content: string, opts?: { relay?: boolean }) =>
@@ -82,6 +103,7 @@ const api: AgentDeckApi = {
     checkpoints: (id: string): Promise<import('../shared/types').GoalCheckpoint[]> => ipcRenderer.invoke('goals:checkpoints', id),
     snapshots: (id: string): Promise<import('../shared/types').GoalSpecSnapshot[]> => ipcRenderer.invoke('goals:snapshots', id),
     decisions: (id: string): Promise<import('../shared/types').GoalSpecDecision[]> => ipcRenderer.invoke('goals:decisions', id),
+    approveEvolution: (id: string, actor?: string) => ipcRenderer.invoke('goals:approve-evolution', id, actor) as Promise<import('../shared/types').GoalApprovalSnapshot | null>,
     evolve: (id: string, input: import('../shared/contracts').GoalEvolveInput) => ipcRenderer.invoke('goals:evolve', id, input) as Promise<{ ok: boolean; error?: string; goal?: import('../shared/types').Goal; snapshot?: import('../shared/types').GoalSpecSnapshot; questions?: string[] }>,
     evolveStep: (id: string, input: import('../shared/contracts').GoalEvolveInput) => ipcRenderer.invoke('goals:evolve-step', id, input) as Promise<{ ok: boolean; error?: string; goal?: import('../shared/types').Goal; snapshot?: import('../shared/types').GoalSpecSnapshot; questions?: string[] }>,
     rollback: (id: string, generation: number) => ipcRenderer.invoke('goals:rollback', id, generation) as Promise<{ ok: boolean; error?: string; goal?: import('../shared/types').Goal; snapshot?: import('../shared/types').GoalSpecSnapshot }>,
@@ -160,10 +182,65 @@ const api: AgentDeckApi = {
       ipcRenderer.invoke('skills:save', name, input),
     delete: (name: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('skills:delete', name),
     import: (sourcePath: string): Promise<SkillMeta> => ipcRenderer.invoke('skills:import', sourcePath),
+    installFromUrl: (ref: string): Promise<SkillsFromUrlResult> => ipcRenderer.invoke('skills:install-from-url', ref),
+    searchOnline: (query: string, limit?: number, offset?: number): Promise<{ entries: SkillsShEntry[]; total: number }> =>
+      ipcRenderer.invoke('skills:search-online', query, limit, offset),
+    installOnline: (entry: { skillId: string; owner: string; repo: string }): Promise<{ name: string }> =>
+      ipcRenderer.invoke('skills:install-online', entry),
+    openExternal: (url: string): Promise<void> => ipcRenderer.invoke('skills:open-external', url),
     targets: (): Promise<{ targets: SkillTarget[]; states: Record<string, Record<string, SyncState>> }> => ipcRenderer.invoke('skills:targets'),
     install: (name: string, targetId: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('skills:install', name, targetId),
     uninstall: (name: string, targetId: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('skills:uninstall', name, targetId),
     openDir: (): Promise<void> => ipcRenderer.invoke('skills:open-dir')
+  },
+  mcp: {
+    list: (): Promise<{ servers: McpMeta[] }> => ipcRenderer.invoke('mcp:list'),
+    save: (def: { name: string; description: string; transport: McpTransport }, originName?: string): Promise<McpMeta> =>
+      ipcRenderer.invoke('mcp:save', def, originName),
+    delete: (name: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('mcp:delete', name),
+    targets: (): Promise<{ targets: McpTarget[]; states: Record<string, Record<string, SyncState>> }> => ipcRenderer.invoke('mcp:targets'),
+    install: (name: string, targetId: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('mcp:install', name, targetId),
+    uninstall: (name: string, targetId: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('mcp:uninstall', name, targetId)
+  },
+  hooks: {
+    list: (): Promise<{ hooks: HookMeta[] }> => ipcRenderer.invoke('hooks:list'),
+    get: (name: string): Promise<HookDetail | null> => ipcRenderer.invoke('hooks:get', name),
+    save: (
+      name: string,
+      input: { description: string; body: string; events: Record<string, HookGroup[]>; originName?: string }
+    ): Promise<HookMeta> => ipcRenderer.invoke('hooks:save', name, input),
+    delete: (name: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('hooks:delete', name),
+    targets: (): Promise<{ targets: HookTarget[]; states: Record<string, Record<string, SyncState>> }> => ipcRenderer.invoke('hooks:targets'),
+    install: (name: string, targetId: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('hooks:install', name, targetId),
+    uninstall: (name: string, targetId: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('hooks:uninstall', name, targetId)
+  },
+  plugins: {
+    inventory: (): Promise<{ items: PluginInventoryItem[] }> => ipcRenderer.invoke('plugins:inventory'),
+    setEnabled: (input: { cli: 'claude'; name: string; marketplace: string; enabled: boolean }): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('plugins:set-enabled', input),
+    openDir: (cli: 'claude' | 'zcode' | 'codex'): Promise<void> => ipcRenderer.invoke('plugins:open-dir', cli),
+    install: (input: { cli: 'claude'; spec: string }): Promise<PluginCliResult> => ipcRenderer.invoke('plugins:install', input),
+    uninstall: (input: { cli: 'claude'; spec: string }): Promise<PluginCliResult> => ipcRenderer.invoke('plugins:uninstall', input)
+  },
+  marketplaces: {
+    status: (): Promise<MarketplaceStatus> => ipcRenderer.invoke('marketplaces:status'),
+    register: (sourceId: string, assetPath: string): Promise<MarketplaceRegisterResult> =>
+      ipcRenderer.invoke('marketplaces:register', sourceId, assetPath),
+    listPlugins: (sourceId: string, assetPath: string): Promise<{ plugins: MarketplacePluginInfo[] }> =>
+      ipcRenderer.invoke('marketplaces:list-plugins', sourceId, assetPath),
+    listRegistered: (): Promise<{ marketplaces: RegisteredMarketplace[] }> => ipcRenderer.invoke('marketplaces:list-registered')
+  },
+  sources: {
+    catalog: (): Promise<{ entries: CatalogEntry[] }> => ipcRenderer.invoke('sources:catalog'),
+    list: (): Promise<{ sources: ExtSourceMeta[] }> => ipcRenderer.invoke('sources:list'),
+    add: (ref: string, name?: string): Promise<ExtSourceMeta> => ipcRenderer.invoke('sources:add', ref, name),
+    quickAdd: (ref: string, name?: string): Promise<{ source: ExtSourceMeta; assets: DiscoveredAsset[] }> =>
+      ipcRenderer.invoke('sources:quick-add', ref, name),
+    remove: (id: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('sources:remove', id),
+    sync: (id: string): Promise<ExtSourceMeta> => ipcRenderer.invoke('sources:sync', id),
+    browse: (id: string): Promise<{ assets: DiscoveredAsset[] }> => ipcRenderer.invoke('sources:browse', id),
+    listSkills: (): Promise<{ groups: SkillDiscoveryGroup[] }> => ipcRenderer.invoke('sources:list-skills'),
+    importSkill: (id: string, relPath: string): Promise<{ name: string }> => ipcRenderer.invoke('sources:import-skill', id, relPath)
   }
 }
 

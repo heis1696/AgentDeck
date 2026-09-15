@@ -122,6 +122,33 @@
   font: var(--text-micro)/1 var(--mono);
 }
 
+/* ---------- parked（等你启动）：琥珀左侧条 + 徽标 + 一键启动 ---------- */
+.issue-home-row.is-parked { box-shadow: inset 2px 0 0 var(--status-queued); }
+.issue-home-row .badge-parked {
+  background: var(--status-queued-bg);
+  border-color: color-mix(in srgb, var(--status-queued) 42%, transparent);
+  color: var(--warn);
+  font-weight: 650;
+}
+.issue-home-row .issue-row-start {
+  flex: 0 0 auto;
+  min-height: 24px;
+  padding: 0 9px;
+  border: 1px solid color-mix(in srgb, var(--status-queued) 42%, transparent);
+  border-radius: var(--radius-pill);
+  background: var(--status-queued-bg);
+  color: var(--warn);
+  font-size: var(--text-micro);
+  font-weight: 650;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.issue-home-row .issue-row-start:hover {
+  border-color: var(--status-queued);
+  background: var(--status-queued-glow);
+}
+.issue-home-row .issue-row-start:disabled { opacity: 0.55; cursor: default; }
+
 /* ---------- 窄屏：徽标/时间/搬运控件退场，标题优先 ---------- */
 @media (max-width: 720px) {
   .issue-home-row { gap: 7px; padding: 6px 10px; margin: 0 -10px; }

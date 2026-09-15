@@ -54,7 +54,8 @@ export interface ContinueCall {
  * 解析位于回复末尾的 <continue start="auto|parked">简报</continue>。
  * 末尾锚定：标记后只允许空白——协议即"在回复最后一行输出"，正文/示例/复述文档里
  * 出现标记字样不构成接力意图（防止讨论方案或引用本文档时被误切会话）。
- * start 只有显式 "auto" 才立即执行；缺省/写错一律按 parked 备好待人工启动。
+ * start 属性解析容忍多属性/大小写；只有显式 "auto" 才立即执行，
+ * 缺省/非法/无引号一律按 parked 备好待人工启动，防止复述协议时误切会话。
  */
 export function parseContinue(text: string): ContinueCall[] {
   const out: ContinueCall[] = []
@@ -62,7 +63,8 @@ export function parseContinue(text: string): ContinueCall[] {
   if (!m) return out
   const brief = m[2].trim()
   if (!brief) return out
-  const start = /^\s*start\s*=\s*["']auto["']\s*$/.test(m[1]) ? 'auto' : 'parked'
+  const attr = m[1].match(/\bstart\s*=\s*(["'])(auto|parked)\1/i)
+  const start = attr && attr[2].toLowerCase() === 'auto' ? 'auto' : 'parked'
   out.push({ brief, start })
   return out
 }
@@ -250,6 +252,8 @@ export interface DelegationContext {
   pushEvent: (taskId: string, e: TaskEvent) => void
   /** 审核子任务（pass → done，fail → blocked） */
   applyReview?: (childId: string, verdict: 'pass' | 'fail', note?: string) => void
+  /** Issue 评论（回灌失败兜底：领队已死时把队员报告摘要落到用户看得到的地方） */
+  addIssueComment?: (issueId: string, text: string) => void
 }
 
 export interface DelegationOutcome {
@@ -418,6 +422,16 @@ export async function runDelegationLoop(
       finalResponse = turn.response
     } catch (e) {
       note(`⚠ 回灌失败: ${e instanceof Error ? e.message : String(e)}`)
+      // 领队会话已死（如应用重启）时回灌无处可去——把队员报告摘要落到 Issue 评论，
+      // 别让成果随领队静默丢失；不自动重启领队，是否续跑留给用户
+      const issueId = task.issueId
+      if (issueId && allChildren.length) {
+        const excerpts = allChildren.slice(0, 5).map((id) => {
+          const child = store.get(id)
+          return `- **${child?.title ?? id}**（${child?.status ?? '?'}）：${(child?.result ?? '').slice(0, 400) || '（无最终输出）'}`
+        }).join('\n')
+        ctx.addIssueComment?.(issueId, `⚠ 委派报告未送达：领队会话已结束（回灌失败）。以下为队员报告摘要：\n${excerpts}`)
+      }
       break
     }
   }

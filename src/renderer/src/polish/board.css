@@ -108,3 +108,34 @@
 .board-col-dot-done { background: var(--status-done); }
 .board-col-dot-blocked { background: var(--status-failed); }
 .board-col-dot-cancelled { background: var(--status-cancelled); }
+
+/* ---------- parked（等你启动）：停放队列外，区别于系统自动调度的排队 ---------- */
+.board-card.issue-card.is-parked {
+  border-style: dashed;
+  background: linear-gradient(180deg, var(--status-queued-bg) 0%, transparent 60%), var(--bg-raised);
+}
+.board-card .badge-parked {
+  background: var(--status-queued-bg);
+  border-color: color-mix(in srgb, var(--status-queued) 42%, transparent);
+  color: var(--warn);
+  font-weight: 650;
+}
+.board-card .board-card-start {
+  flex-shrink: 0;
+  margin-left: auto;
+  min-height: 22px;
+  padding: 0 8px;
+  border: 1px solid color-mix(in srgb, var(--status-queued) 42%, transparent);
+  border-radius: var(--radius-pill);
+  background: var(--status-queued-bg);
+  color: var(--warn);
+  font-size: 10px;
+  font-weight: 650;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.board-card .board-card-start:hover {
+  border-color: var(--status-queued);
+  background: var(--status-queued-glow);
+}
+.board-card .board-card-start:disabled { opacity: 0.55; cursor: default; }

@@ -268,7 +268,11 @@ export function createOpencodeBackend(config: OpencodeBackendOptions = {}): Agen
         return session
       } catch (error) {
         if (sidecar && sidecar.users === 0) await stopSidecar()
-        if (required || error instanceof OpencodeServerVersionError) throw error
+        // Only transport/process unavailability is safe to retry through the
+        // legacy CLI. Provider/auth/session failures may already have caused
+        // side effects and must fail loudly instead of being re-executed with
+        // permission bypass flags.
+        if (required || error instanceof OpencodeServerVersionError || !(error instanceof OpencodeServerUnavailableError)) throw error
         // Keep the old adapter as a deliberate fallback for an unavailable
         // sidecar. The original error remains diagnostic in probe output.
         return cliBackend.start(options)

@@ -29,8 +29,12 @@ export interface TaskCreateInput {
   workerIndex?: number
   unavailableReason?: string
   worktree?: WorktreeInfo
-  /** Process-local idempotency key for replayed internal creation requests. */
+  /** Durable idempotency key for replayed creation requests. */
   dedupeKey?: string
+  /** Public request id accepted by the Task IPC boundary. */
+  requestId?: string
+  /** Alias used by integrations that call this an idempotency key. */
+  idempotencyKey?: string
 }
 
 /** Compatibility name used by IPC context and callers from the first stage. */
@@ -97,10 +101,27 @@ export class TaskService {
     this.defaultBackend = options.defaultBackend ?? 'zcode'
   }
 
-  /** Return the task registered for a process-local idempotency key. */
+  /** Return the task registered for a durable idempotency key. */
   deduped(key: string): Task | null {
-    const id = this.dedupe.get(key)
-    return id ? this.store.get(id) ?? null : null
+    key = key.trim()
+    if (!key) return null
+    const cached = this.dedupe.get(key)
+    if (cached) {
+      const task = this.store.get(cached)
+      if (task) return task
+      this.dedupe.delete(key)
+    }
+    const persisted = this.store.list().find((task) => task.dedupeKey === key)
+    if (persisted) this.dedupe.set(key, persisted.id)
+    return persisted ?? null
+  }
+
+  private normalizeDedupeKey(input: TaskCreateInput): string | undefined {
+    const aliases = [input.dedupeKey, input.requestId, input.idempotencyKey]
+      .map((candidate) => typeof candidate === 'string' ? candidate.trim() : '')
+      .filter(Boolean)
+    if (new Set(aliases).size > 1) throw new Error('Conflicting task idempotency keys')
+    return aliases[0]
   }
 
   /** Alias used by internal callers that model this as a request service. */
@@ -109,8 +130,9 @@ export class TaskService {
   }
 
   createTask(input: TaskCreateInput, trigger: RunTrigger = input.trigger ?? 'assignment'): Task {
-    if (input.dedupeKey) {
-      const existing = this.deduped(input.dedupeKey)
+    const dedupeKey = this.normalizeDedupeKey(input)
+    if (dedupeKey) {
+      const existing = this.deduped(dedupeKey)
       if (existing) {
         if (existing.status === 'queued' && existing.parked && input.startNow !== false && !input.parked) {
           this.store.update(existing.id, { parked: undefined })
@@ -141,7 +163,8 @@ export class TaskService {
       ...(input.workerIndex !== undefined ? { workerIndex: input.workerIndex } : {}),
       ...(input.unavailableReason ? { unavailableReason: input.unavailableReason } : {}),
       ...(input.worktree ? { worktree: input.worktree } : {}),
-      ...(input.titleAuto ? { titleAuto: true } : {})
+      ...(input.titleAuto ? { titleAuto: true } : {}),
+      ...(dedupeKey ? { dedupeKey } : {})
     })
     // A caller may explicitly own an Issue. Otherwise every visible Task gets
     // one stable Issue id before projection; run-only automation is explicit.
@@ -150,7 +173,7 @@ export class TaskService {
     }
     const projected = this.store.get(task.id)!
     this.issueStore?.sync(this.store.list())
-    if (input.dedupeKey) this.dedupe.set(input.dedupeKey, projected.id)
+    if (dedupeKey) this.dedupe.set(dedupeKey, projected.id)
     return projected
   }
 

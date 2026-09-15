@@ -93,8 +93,8 @@ Issue（目标、状态、负责人、评论时间线）
 
 `AgentBackend`（probe/start）+ `BackendSession`（send/stop/close）统一两种进程模型：
 
-- **常驻服务型**（zcode）：stdio JSON 协议，会话存活多轮，`send` 即续聊
-- **一次性进程型**（claude/codex/opencode/dsh）：每回合一进程，resume 参数续聊；dsh 无 resume
+- **常驻服务型**（zcode；dsh 走 ACP 时同属此类）：stdio JSON 协议，会话存活多轮，`send` 即续聊
+- **一次性进程型**（claude/codex/opencode；dsh 无 ACP 组件时的 headless 回退）：每回合一进程，resume 参数续聊；dsh 无跨进程 resume（ACP 会话随进程存亡）
 
 会话事件除日志/回合终态外还有 `onHeartbeat`（连接上有任何消息即回调，供空转看门狗续命——模型长思考、后台子代理不误判超时）与 `onSessionId`（provider session id 一经知晓立即持久化，首轮 429 也能续会话）。
 
@@ -109,7 +109,7 @@ src/
 ├── main/                     主进程
 │   ├── index.ts              窗口、依赖装配、createTask 单一创建路径、
 │   │                         启动清扫（sweepWorktrees + goalController.recover）
-│   ├── ipc/                  领域注册器：goals/tasks/issues/catalog/skills/system
+│   ├── ipc/                  领域注册器：goals/tasks/issues/catalog/skills/extensions/system
 │   │   ├── context.ts        IpcContext（依赖容器：stores/runner/agents/createTask…）
 │   │   └── register.ts       装配入口；全部写入口 main 侧收 unknown 并校验
 │   ├── ipc-validation.ts     parseId/parseContent/parseTaskCreate… 纯校验器
@@ -136,6 +136,14 @@ src/
 │   ├── failure.ts            失败分类：11 类稳定 code + 人话标题 + 处置提示
 │   ├── skills.ts             共享目录技能库：SKILL.md 解析/CRUD/导入（纯 Node，目录参数注入）
 │   ├── skill-targets.ts      技能安装目标注册表与同步状态（claude/codex/zcode/agents，路径逃逸校验）
+│   ├── mcp-store.ts          共享目录 MCP 服务器库：<name>.mcp.json CRUD + transport 严格校验
+│   ├── hook-store.ts         共享目录 Hook 库：HOOK.md + hook.json（事件/匹配组校验）
+│   ├── config-editor.ts      用户配置安全合并器：装/卸 MCP/Hook 到三 CLI 用户级配置，
+│   │                         写前 .agentdeck-bak 备份；codex TOML 块级文本操作（无 toml 依赖）
+│   ├── plugin-inventory.ts   插件/市场只读盘点（claude/zcode/codex，单 CLI 缺失容错）+ claude 启停 + marketplaceStatus
+│   ├── plugin-cli.ts         插件装卸：借 claude 官方 CLI plugin install/uninstall 代跑（60s 总超时，spec 校验）
+│   ├── sources.ts            扩展源仓库：git/local 源 clone/同步/移除 + 浏览发现资产 + 一键导入技能 + 市场注册
+│   ├── extension-catalog.ts  内置精选扩展源目录（一键添加）
 │   ├── agents.ts             队伍持久化 + 预置 + 迁移补员
 │   ├── presets.ts            API 预设（baseURL/apiKey）持久化 + 连通性探测
 │   ├── settings.ts           设置持久化（theme/concurrency/…/sharedDir）
@@ -150,7 +158,8 @@ src/
 │       ├── claude.ts         -p stream-json（含费用）
 │       ├── codex.ts          exec --json（Windows 必须 bypass 沙箱）
 │       ├── opencode.ts       run --format json
-│       ├── dsh.ts            --profile headless（纯文本，无流无 resume）
+│       ├── dsh.ts            优先 ACP 常驻服务；缺组件/握手失败回退 --profile headless
+│       ├── dsh-acp.ts        ACP 客户端（NDJSON JSON-RPC：流式 text/续聊/权限桥）+ 内嵌组合配置
 │       ├── cli-common.ts     JSONL 行解析 + 空闲超时 + 输出上限
 │       └── cli-locator.ts    Windows npm .cmd 垫片解析（防 EINVAL）
 ├── preload/index.ts          contextBridge 桥（window.agentdeck，契约 = shared/contracts.ts）
@@ -158,7 +167,8 @@ src/
 │   ├── types.ts              Task/TaskEvent/Issue/Run/Goal/AppSettings…
 │   ├── contracts.ts          AgentDeckApi 桥接口 + 各 *CreateInput + PermissionRequest
 │   ├── taskflow.ts           任务状态转换、Issue/Run 派生、ExecutionRecord 唯一映射
-│   └── skills.ts             SkillMeta/SkillDetail/SkillTarget/SyncState
+│   ├── skills.ts             SkillMeta/SkillDetail/SkillTarget/SyncState
+│   └── extensions.ts         McpDef/HookDef/PluginInventoryItem/ExtSourceMeta/CatalogEntry/DiscoveredAsset
 └── renderer/src/             React UI
     ├── App.tsx               视图路由 + 侧栏（Issue/看板/Agent/收件箱/自动化/技能/用量/设置）
     │                         + 命令面板 Ctrl+K + Toast/确认框/菜单
@@ -247,7 +257,8 @@ delegate 标记 → 目标解析（限 subordinates，名字/平台 id 忽略大
 
 ## 6. 已知限制
 
-- dsh 无流式过程与续聊（协议本身不提供），也不能当领队
+- dsh 工具活动不上 ACP 协议（committed assistant 消息有流式；纯工具长跑静默期靠固定回合预算兜底），也不能当领队
+- dsh ACP 仅新建会话：应用重启后无法按 sessionId 恢复（会话随服务进程存亡）
 - 领队自己动手的改动留在主工作区（不自动提交，设计使然）
 - 委派最多 3 层、单领队循环最多 6 轮、全链最多 8 轮；不支持无上限递归派发
 - 日志无虚拟滚动（单任务万级事件才需要）
@@ -293,6 +304,7 @@ delegate 标记 → 目标解析（限 subordinates，名字/平台 id 忽略大
 | `npm run smoke` | runner 状态机：完成/续聊/取消/失败/超时/迟到 session 隔离 |
 | `npm run smoke:goal` | 目标模式：Issue 收养、checkpoint envelope 完成判定与 Issue 自动归档、预算/停止条件/连续失败护栏、重启恢复、无续聊新任务兜底、remove 清除 |
 | `npm run smoke:skills` | 共享目录技能库：CRUD/导入/安装同步/逃逸校验 |
+| `npm run smoke:extensions` | 扩展模块：MCP/Hook 库、三 CLI 配置装/卸与 .agentdeck-bak 备份、codex TOML 块操作、插件盘点、扩展源仓库（本地 git fixture，不联网） |
 | `npm run smoke:delegate` | 委派循环（假后端）：多轮派发/剥离/集成/worktree 回收/取消 + 单号报告与 `<review>` 审核 |
 | `npm run smoke:stage7` | typecheck + stage6（taskflow/turn-model/migration/issues）+ smoke + goal 串行 |
 | `npm run smoke:all` | 全量矩阵：上述全部 + 事件日志/权限/执行服务/IPC 校验/CLI 错误/git 错误/迁移/失败分类/diff/重试/flow/resume/自动化/用量分析/model/continue/round 等 25 个纯本地套件串行 |

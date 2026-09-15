@@ -2,8 +2,10 @@ import { useMemo, useState } from 'react'
 import { CheckCircle2, CircleAlert, CircleDot, Clock3, Eye, ListTodo, Plus, Search } from 'lucide-react'
 import type { Issue, IssueStatus, Task } from '../../../shared/types'
 import { bridge, useIssues } from '../api'
-import { ISSUE_STATUS_LABELS } from '../labels'
+import { ISSUE_STATUS_LABELS, isParkedQueued, PARKED_QUEUED_LABEL } from '../labels'
+import { taskService } from '../task-service'
 import { EmptyState } from '../ui/EmptyState'
+import { IssueIdChip } from '../ui/IssueIdChip'
 import { toast } from '../ui/Toasts'
 
 type Scope = 'all' | 'mine' | 'agents'
@@ -40,6 +42,7 @@ export function IssuesView({ tasks, onOpen, onCreate }: { tasks: Task[]; onOpen:
   const [scope, setScope] = useState<Scope>('all')
   const [query, setQuery] = useState('')
   const [status, setStatus] = useState<IssueStatus | 'all'>('all')
+  const [starting, setStarting] = useState<string | null>(null)
   const taskById = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks])
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -56,6 +59,13 @@ export function IssuesView({ tasks, onOpen, onCreate }: { tasks: Task[]; onOpen:
   const move = async (issue: Issue, next: IssueStatus) => {
     const result = await bridge.issues.update(issue.id, { status: next })
     if (!result) toast.error('更新 Issue 失败')
+  }
+  /** parked 任务一键启动：tasks:start 已实现清 parked + 入队 */
+  const start = async (taskId: string) => {
+    setStarting(taskId)
+    const result = await taskService.start(taskId)
+    setStarting(null)
+    if (!result.ok) toast.error(result.error ?? '启动失败')
   }
 
   return (
@@ -78,24 +88,27 @@ export function IssuesView({ tasks, onOpen, onCreate }: { tasks: Task[]; onOpen:
         <div className="issue-list-view">{STATUS_ORDER.map(({ key, icon: Icon }) => {
           const items = visible.filter((issue) => issue.status === key)
           if (!items.length) return null
-          return <section className="issue-list-group" key={key}><div className="issue-list-group-head"><Icon size={14} /><strong>{ISSUE_STATUS_LABELS[key]}</strong><span>{items.length}</span></div>{items.map((issue) => <IssueRow key={issue.id} issue={issue} task={taskById.get(issue.taskId)!} onOpen={onOpen} onMove={move} />)}</section>
+          return <section className="issue-list-group" key={key}><div className="issue-list-group-head"><Icon size={14} /><strong>{ISSUE_STATUS_LABELS[key]}</strong><span>{items.length}</span></div>{items.map((issue) => <IssueRow key={issue.id} issue={issue} task={taskById.get(issue.taskId)!} onOpen={onOpen} onMove={move} onStart={start} starting={starting === issue.taskId} />)}</section>
         })}</div>
       )}
     </div>
   )
 }
 
-function IssueRow({ issue, task, onOpen, onMove }: { issue: Issue; task: Task; onOpen: (id: string) => void; onMove: (issue: Issue, status: IssueStatus) => void }) {
+function IssueRow({ issue, task, onOpen, onMove, onStart, starting }: { issue: Issue; task: Task; onOpen: (id: string) => void; onMove: (issue: Issue, status: IssueStatus) => void; onStart: (id: string) => void; starting: boolean }) {
   // 行内已有状态分组头作语境，行内不再重复状态文字；搬运控件 hover 才浮现
-  return <article className="issue-home-row" role="button" tabIndex={0} onClick={() => onOpen(task.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onOpen(task.id) } }}>
+  const parked = isParkedQueued(task)
+  return <article className={`issue-home-row${parked ? ' is-parked' : ''}`} role="button" tabIndex={0} onClick={() => onOpen(task.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onOpen(task.id) } }}>
     <span className={`dot dot-${task.status}`} />
-    <span className="issue-identifier">{issue.identifier}</span>
+    <span className="issue-home-id"><span className="issue-identifier">{issue.identifier}</span><IssueIdChip id={issue.id} /></span>
     <strong className="issue-home-title">{issue.title}</strong>
     {issue.createdBy === 'agent' && <span className="badge badge-delegate">⚡ 委派</span>}
     {task.trigger === 'handoff' && <span className="badge badge-handoff">⇥ 接力</span>}
+    {parked && <span className="badge badge-parked" title="任务停放在队列外，等你手动启动">{PARKED_QUEUED_LABEL}</span>}
     {issue.priority !== 'none' && <span className={`badge priority-${issue.priority}`}>{PRIORITY[issue.priority]}</span>}
     <span className="badge badge-meta">{issue.labels[0] && issue.labels[0] !== '委派' ? issue.labels[0] : task.backend}</span>
     <span className="issue-row-time" title={new Date(issue.updatedAt).toLocaleString()}>{relativeTime(issue.updatedAt)}</span>
+    {parked && <button className="btn issue-row-start" disabled={starting} title="清停放并加入执行队列" onClick={(event) => { event.stopPropagation(); onStart(task.id) }} onKeyDown={(event) => event.stopPropagation()}>▶ 启动</button>}
     <select className="issue-row-move" value={issue.status} aria-label="移动 Issue" onClick={(event) => event.stopPropagation()} onChange={(event) => void onMove(issue, event.target.value as IssueStatus)}>{STATUS_ORDER.map(({ key }) => <option value={key} key={key}>{ISSUE_STATUS_LABELS[key]}</option>)}</select>
   </article>
 }

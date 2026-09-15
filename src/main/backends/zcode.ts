@@ -28,6 +28,12 @@ function asRecord(value: unknown): JsonObject {
 }
 const asString = zcodeString
 
+/** 回合裁决硬上限：send 之后服务端迟迟不给终态时的兜底（测试用 AGENTDECK_TURN_CAP_MS 缩短） */
+function turnSettleCapMs(): number {
+  const env = Number(process.env.AGENTDECK_TURN_CAP_MS)
+  return Number.isFinite(env) && env > 0 ? env : 30 * 60 * 1000
+}
+
 export function zcodeDefaultPaths(): string[] {
   return defaultPaths()
 }
@@ -281,6 +287,26 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
             if (payload.usage && !alreadyEnded) {
               emit({ kind: 'usage', data: payload.usage })
             }
+          } else if (type === 'turn.completed' || type === 'turn.failed' || asString(payload.kind) === 'turn.terminal') {
+            // 0.16.x 服务端的回合终态事实：kind:"turn.terminal" + status/resultType +
+            // tokenCount/durationMs/toolCallCount，payload 里没有 response/usage 字段
+            // （旧分支在 0.16.5 实测永不命中，漏认会让回合在 send 侧挂到 30 分钟上限）
+            const alreadyEnded = lastTurnEnd !== null
+            const status = asString(payload.status)
+            const failed = type === 'turn.failed' || status === 'failed'
+            const interrupted = status === 'interrupted'
+            handleTurnEnd({
+              response: currentText,
+              ok: !failed && !interrupted,
+              error: failed
+                ? (asString(payload.errorMessage) || asString(payload.errorCode) || `turn ended: ${type}`)
+                : interrupted
+                  ? `turn interrupted: ${asString(payload.resultType) || 'user stopped'}`
+                  : undefined
+            })
+            if (!alreadyEnded && (payload.tokenCount !== undefined || payload.durationMs !== undefined)) {
+              emit({ kind: 'usage', data: { tokenCount: payload.tokenCount, durationMs: payload.durationMs, toolCallCount: payload.toolCallCount } })
+            }
           } else if (type === 'checkpoint.created') {
             emit({ kind: 'status', text: 'checkpoint' })
           } else if (type === 'model.request.status') {
@@ -423,13 +449,15 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
           textOverflowed = false
           turnActive = true
           let timer: NodeJS.Timeout | undefined
+          const capMs = turnSettleCapMs()
           const p = new Promise<void>((resolve, reject) => {
             timer = setTimeout(() => {
               turnResolver = null
               turnActive = false
               flushTurnEndWaiters()
-              reject(new Error('等待回合结束超时（30 分钟）'))
-            }, 30 * 60 * 1000)
+              const budget = capMs >= 120_000 ? `${Math.round(capMs / 60000)} 分钟` : `${Math.round(capMs / 1000)} 秒`
+              reject(new Error(`等待回合结束超时（${budget}）`))
+            }, capMs)
             turnResolver = (r) => {
               clearTimeout(timer)
               turnActive = false
@@ -440,10 +468,26 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
           // 调用方可能已放弃等待（runner 超时/连接死亡时 send 提前失败或被中断），
           // 这时 p 的 rejection 无人接——不挂兜底会以 unhandled rejection 打崩主进程
           p.catch(() => {})
+          // send 请求的 ack 与回合终态必须赛跑裁决：若 ack 永远不回（进程半死/响应帧
+          // 丢失），旧实现卡在 await conn.request、p 的 30 分钟 rejection 被 catch 兜底
+          // 吞掉——send 永久悬挂，任务永久卡在 running。现在 p 先裁决就以上抛收场。
+          const reqP = conn.request('session/send', { sessionId, content })
+          reqP.catch(() => {})
+          let reqError: Error | null = null
+          const reqSettled = reqP.then(
+            () => 'ack' as const,
+            (e) => { reqError = e instanceof Error ? e : new Error(String(e)); throw reqError }
+          )
           try {
-            await conn.request('session/send', { sessionId, content })
+            const winner = await Promise.race([
+              p.then(() => 'turn' as const, (e) => { throw e }),
+              reqSettled
+            ])
+            if (winner === 'ack') await p
+            // winner === 'turn'：回合已有裁决（正常结束或超时），ack 的迟到结果不再左右
+            // 本回合结论——回合终态是权威，send 请求此后的失败留给下一回合暴露
           } catch (e) {
-            // send 请求本身失败：撤掉本回合的等待句柄——悬挂的 30 分钟定时器
+            // send 请求本身失败或回合超时：撤掉本回合的等待句柄——悬挂的定时器
             // 之后触发时会误杀新回合的 turnResolver
             if (timer) clearTimeout(timer)
             turnResolver = null
@@ -451,7 +495,6 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
             flushTurnEndWaiters()
             throw e
           }
-          await p
         },
         async stop() {
           try {

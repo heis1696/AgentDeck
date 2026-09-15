@@ -100,6 +100,41 @@ ok(doom.doomLoop && controller.get(doomGoal.id)?.status === 'waiting_user' && co
 
 const budget = explainGoalBudget({ runCount: 2, maxRuns: 5, failures: 1 }, { attempt: 1 })
 ok(budget.phaseExecutions === 2 && budget.maxPhaseExecutions === 3 && budget.goalFailures === 1 && budget.maxGoalFailures === 2, 'retry and Goal failure budgets have one explanation')
+const customBudget = explainGoalBudget({ runCount: 2, maxRuns: 5, failures: 1 }, { attempt: 1 }, 4)
+ok(customBudget.maxPhaseExecutions === 5, 'budget explanation follows configured retry attempts')
+
+const noRetryTasks = []
+const noRetryController = new GoalController(new GoalStore(path.join(outDir, 'no-retry')), {
+  createTask: (input) => {
+    const task = { id: `no_retry_${noRetryTasks.length + 1}`, ...input, status: 'queued', createdAt: Date.now(), eventCount: 0 }
+    noRetryTasks.push(task)
+    return task
+  },
+  listTasks: () => noRetryTasks,
+  continueTask: () => ({ ok: true }),
+  maxRetryAttempts: 0
+})
+const noRetryGoal = noRetryController.create({ text: 'No retries', issueId: 'issue_no_retry', completionConditions: ['done'], stopConditions: [], maxRuns: 4, maxDurationMs: 100000, workdir: out, startNow: true })
+const noRetryTask = noRetryTasks.at(-1)
+Object.assign(noRetryTask, { status: 'failed', runId: 'run_no_retry', endedAt: Date.now(), error: 'timeout', failure: { code: 'timeout', title: 'Timeout', hint: '', retryable: true }, attempt: 0 })
+const noRetryDecision = noRetryController.onTaskChanged(noRetryTask)
+ok(noRetryDecision?.shouldContinue === true && noRetryController.get(noRetryGoal.id)?.failures === 1, 'zero-retry setting does not leave Goal waiting for Runner')
+
+const highRetryTasks = []
+const highRetryController = new GoalController(new GoalStore(path.join(outDir, 'high-retry')), {
+  createTask: (input) => {
+    const task = { id: `high_retry_${highRetryTasks.length + 1}`, ...input, status: 'queued', createdAt: Date.now(), eventCount: 0 }
+    highRetryTasks.push(task)
+    return task
+  },
+  listTasks: () => highRetryTasks,
+  maxRetryAttempts: () => 4
+})
+const highRetryGoal = highRetryController.create({ text: 'High retries', issueId: 'issue_high_retry', completionConditions: ['done'], stopConditions: [], maxRuns: 4, maxDurationMs: 100000, workdir: out, startNow: true })
+const highRetryTask = highRetryTasks.at(-1)
+Object.assign(highRetryTask, { status: 'failed', runId: 'run_high_retry', endedAt: Date.now(), error: 'timeout', failure: { code: 'timeout', title: 'Timeout', hint: '', retryable: true }, attempt: 2 })
+const highRetryDecision = highRetryController.onTaskChanged(highRetryTask)
+ok(highRetryDecision?.shouldContinue === false && (highRetryController.get(highRetryGoal.id)?.failures ?? 0) === 0, 'higher retry setting leaves Goal active while Runner owns retry')
 
 fs.rmSync(outDir, { recursive: true, force: true })
 if (failed) process.exitCode = 1

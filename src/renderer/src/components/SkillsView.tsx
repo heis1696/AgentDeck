@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { FolderOpen, Plus, RefreshCw, Search, Sparkles, Trash2, Upload } from 'lucide-react'
+import { Plus, RefreshCw, Search, Sparkles, Trash2, Upload } from 'lucide-react'
 import { bridge, fmtTime, useSettings } from '../api'
 import { toast } from '../ui/Toasts'
 import { confirmDialog } from '../ui/Confirm'
@@ -25,8 +25,9 @@ function aggregateState(states: Record<string, SyncState> | undefined, targets: 
   return 'warn'
 }
 
-/** 技能页：共享目录技能库（SKILL.md 标准，可一键同步到各 agent CLI 技能目录） */
-export function SkillsView() {
+/** 技能 tab：共享目录技能库（SKILL.md 标准，可一键同步到各 agent CLI 技能目录）。
+ *  由 ExtensionsView 挂载；外壳（page-surface / page-header-bar / tab 条）在扩展页统一提供。 */
+export function SkillsTab() {
   const { settings } = useSettings()
   const [root, setRoot] = useState('')
   const [skills, setSkills] = useState<SkillMeta[]>([])
@@ -153,26 +154,16 @@ export function SkillsView() {
 
   const currentStates = draft?.originName ? states[draft.originName] : undefined
 
-  return <div className="skills-view page-surface">
-    <header className="page-header-bar">
-      <div className="detail-title-wrap">
-        <div className="page-title-row">
-          <Sparkles size={16} className="page-icon" />
-          <h2 className="page-title">技能</h2>
-          <span className="page-desc">SKILL.md 技能库，可共享到各 agent CLI 的技能目录。</span>
-        </div>
-        <button className="skills-root-link" onClick={() => void bridge.skills.openDir()} title="打开共享目录">
-          <FolderOpen size={13} /><span>{root || '…'}</span>
-        </button>
-      </div>
+  return <div className="skills-tab">
+    <div className="ext-tab-toolbar">
+      <span className="ext-tab-desc">SKILL.md 技能库，可共享到各 agent CLI 的技能目录。</span>
       <div className="skills-header-actions">
         <button className="btn" onClick={syncAll} disabled={busy || skills.length === 0}><RefreshCw size={14} /> 全部同步</button>
         <button className="btn" onClick={importFromDir}><Upload size={14} /> 导入…</button>
         <button className="btn primary" onClick={newSkill}><Plus size={14} /> 新建技能</button>
       </div>
-    </header>
-    <div className="page-content market-content skills-content">
-      {skills.length === 0 && !draft ? (
+    </div>
+    {skills.length === 0 && !draft ? (
         <EmptyState
           icon={Sparkles}
           title="还没有技能"
@@ -271,6 +262,5 @@ export function SkillsView() {
           </section>
         </div>
       )}
-    </div>
   </div>
 }

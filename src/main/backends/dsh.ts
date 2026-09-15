@@ -1,5 +1,8 @@
-// DeepSeek Harness (dsh) 适配器（一次性、纯文本输出）
-// 无头：dsh --profile headless "<task>" → 打印最终回复并退出（无 JSON 流、无 resume）
+// DeepSeek Harness (dsh) 适配器
+// 首选 ACP 常驻服务（dsh-acp.ts）：NDJSON JSON-RPC over stdio，committed
+// assistant 消息流式推送（心跳+UI 可见）、同连接续聊、权限确认桥接。
+// ACP 组件缺失或握手失败时回退 headless 一次性纯文本模式：
+// dsh --profile headless "<task>" → 打印最终回复并退出（无 JSON 流、无 resume）
 // 源码安装常见于任意目录（本机 D:\Program files\deepseek-harness），自动扫描 + 设置页可指定
 import fs from 'node:fs'
 import path from 'node:path'
@@ -7,6 +10,7 @@ import os from 'node:os'
 import type { AgentBackend, BackendSession, BackendSessionEvents } from './types'
 import { runCliJsonl } from './cli-common'
 import { resolveCli, findOnPath, findSystemNode } from './cli-locator'
+import { findDshAcpBin, startDshAcpSession, AcpBootError } from './dsh-acp'
 
 const DSH_BIN = path.join('apps', 'cli', 'lib', 'bin.js')
 
@@ -120,6 +124,8 @@ export function createDshBackend(getPaths: () => { dshPath: string }): AgentBack
     async probe() {
       const dsh = findDshBin(getPaths().dshPath || undefined)
       if (!dsh) return { ok: false, detail: '找不到 deepseek-harness 安装（可指定 apps/cli/lib/bin.js 路径）' }
+      const acp = findDshAcpBin(getPaths().dshPath || undefined)
+      const acpNote = acp ? ' · ACP 模式（流式事件/续聊/权限确认）' : ' · headless 模式（无 ACP 组件，仅最终回复）'
       const { execFile } = await import('node:child_process')
       return new Promise((resolve) => {
         // dsh.node 可能是 electron.exe 充当 node（findDshBin 的回退），
@@ -130,12 +136,24 @@ export function createDshBackend(getPaths: () => { dshPath: string }): AgentBack
           { timeout: 15000, windowsHide: true, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } },
           (err, stdout) => {
             if (err) resolve({ ok: false, detail: 'dsh 执行失败: ' + String(err.message).slice(0, 80) })
-            else resolve({ ok: true, detail: `dsh ${stdout.trim().slice(0, 40)} · headless 模式` })
+            else resolve({ ok: true, detail: `dsh ${stdout.trim().slice(0, 40)}${acpNote}` })
           }
         )
       })
     },
-    async start({ prompt, workdir, events }) {
+    async start(args) {
+      const { prompt, workdir, events, mode, model } = args
+      // ACP 组件在才尝试：缺失时直接 headless，不产生额外延迟
+      const acp = findDshAcpBin(getPaths().dshPath || undefined)
+      if (acp) {
+        try {
+          return await startDshAcpSession({ prompt, workdir, mode, model, events, acp })
+        } catch (e) {
+          if (!(e instanceof AcpBootError)) throw e
+          // 启动期失败（握手/建会话/进程早退）：降级 headless，任务仍能跑
+          events.onEvent({ kind: 'status', ts: Date.now(), text: `dsh ACP 启动失败，降级 headless：${e.message.slice(0, 160)}` })
+        }
+      }
       let own: { kill: () => void } | null = null
       const r = await runOnce(prompt, workdir, events, (runner) => { own = runner })
       if (!r.ok) throw new Error(r.error || 'dsh 回合失败')

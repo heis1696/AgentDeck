@@ -20,7 +20,7 @@ preload 以 `contextBridge` 暴露，全部经 `ipcRenderer.invoke/on` 与主进
 | `create` | `(input: TaskCreateInput) => Promise<Task>` | 创建并按 `startNow` 决定是否立即入队。`input: { title, prompt, workdir, backend?, agentId?, handoff?, startNow?, trigger? }`。`agentId` 优先于 `backend`；领队身份由该 agent 的 `subordinates` 决定；`startNow: false` 落为 parked（等 `start` 手动拉起） |
 | `start` | `(id) => Promise<IpcResult>` | 启动 parked 任务（仅 queued+parked 可启动） |
 | `cancel` | `(id) => Promise<IpcResult>` | 取消排队/运行中任务；**级联取消其运行中子任务** |
-| `followUp` | `(id, content, opts?: { relay?: boolean }) => Promise<IpcResult>` | 在已完成任务会话上追问（done/failed/cancelled 均可）；无活跃会话走 resume；dsh 不支持。`relay: true` 仅由「接力下一阶段」按钮传入，触发 `<continue>` 语义的 handoff |
+| `followUp` | `(id, content, opts?: { relay?: boolean }) => Promise<IpcResult>` | 在已完成任务会话上追问（done/failed/cancelled 均可）；无活跃会话走 resume（dsh ACP 无跨进程 resume，重启后追问会新建会话）。`relay: true` 仅由「接力下一阶段」按钮传入，触发 `<continue>` 语义的 handoff |
 | `delete` | `(id) => Promise<IpcResult>` | 删除任务及日志（连带子任务），并回收名下委派 worktree；运行中拒绝 |
 | `retry` | `(id) => Promise<IpcResult>` | 清空结果/会话/attempt 重置为 queued 重跑 |
 | `move` | `(id, status) => Promise<IpcResult>` | 看板拖动的状态流转；`validateMove`（shared/taskflow）校验合法性，→ running 仅限 queued 且解除 parked |
@@ -439,10 +439,10 @@ interface BackendSessionEvents {
 
 | 模型 | 代表 | 会话 | 续聊实现 |
 |---|---|---|---|
-| 常驻服务 | zcode（app-server stdio 协议） | 连接存活期间多轮 | `session/send` |
-| 一次性进程 | claude / codex / opencode / dsh | 每回合一个进程 | 重新 spawn + resume 参数（`--resume` / `exec resume` / `-s`；dsh 无 resume，`send` 直接抛错） |
+| 常驻服务 | zcode（app-server stdio 协议）；dsh（ACP，`dsh-acp.ts`） | 连接存活期间多轮 | `session/send`（dsh ACP 无跨进程 resume，会话随服务进程存亡） |
+| 一次性进程 | claude / codex / opencode；dsh（无 ACP 组件时的 headless 回退） | 每回合一个进程 | 重新 spawn + resume 参数（`--resume` / `exec resume` / `-s`；headless dsh 无 resume，`send` 直接抛错） |
 
-公共基建：`cli-common.ts`（JSONL 行解析、10 分钟空闲超时、5MB 输出上限看门狗）；`cli-locator.ts`（Windows npm `.cmd` 垫片解析到原生 exe / node 脚本，绕开 EINVAL）。
+公共基建：`cli-common.ts`（JSONL 行解析、10 分钟空闲超时、5MB 输出上限看门狗）；`cli-locator.ts`（Windows npm `.cmd` 垫片解析到原生 exe / node 脚本，绕开 EINVAL）。dsh ACP 的组合配置内嵌于 `dsh-acp.ts`，启动时写入 dsh 仓库 `examples/acp-agent/agentdeck.cordis.yml`（loader 以 config 目录为锚解析插件），会话落盘 `~/.agentdeck/dsh-sessions`。
 
 ---
 
@@ -511,7 +511,7 @@ interface BackendSessionEvents {
        无实际合并时如实标注
 ```
 
-约束：取消领队级联取消子任务；领队自己的改动留在主工作区不自动提交；dsh 不能当领队（无 send）；子任务未绑定 Issue 时审核结论只留痕、不写看板状态；二层委派时子领队的集成分支递归合入领队集成分支。
+约束：取消领队级联取消子任务；领队自己的改动留在主工作区不自动提交；dsh 不能当领队（runner 侧守卫保留——ACP 虽已支持 send，但委派链路未对 dsh 开放）；子任务未绑定 Issue 时审核结论只留痕、不写看板状态；二层委派时子领队的集成分支递归合入领队集成分支。
 
 ---
 

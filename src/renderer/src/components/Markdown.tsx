@@ -7,14 +7,22 @@ import { isValidElement, useMemo, useState, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
-// 委派标记切分（属性顺序不定，reason 可省略；出现在代码块内也统一卡片化，简单处理）。
-// 开标签必须带 to 才构成匹配（与 delegate.ts 解析同规则）：无 to 的裸标记字样不当卡片，
-// 否则非贪婪体会延伸到后方真实派单的闭合标签，把正文一并吞进卡片（幻影配对）。
-const DELEGATE_RE = /<delegate\b(?=[^>]*\bto\s*=)([^>]*)>([\s\S]*?)<\/delegate>/g
+// 协议标签统一识别（宽容版）：delegate / continue 成对，round / review 自闭合（漏写斜杠也认）。
+// 只要文本里出现协议标签，就一定在进入 ReactMarkdown 前被消费成卡片/芯片——本项目未启用
+// rehype-raw，原始 HTML 节点不被渲染，且 CommonMark 的 HTML block 会一路吞到下一个空行，
+// 正文会整段消失。旧实现先按 DELEGATE_RE.split 再对普通片段二次扫描，两处都要求"完整匹配"，
+// 未闭合 / 缺 to 的标记会原样漏进 ReactMarkdown；且非贪婪体会让未闭合的开标签认领后方真实
+// 派的闭合标签（幻影吞单），把后面的卡片和正文一起吞掉。
+const PROTOCOL_TAG_RE = /<(\/)?(delegate|continue)\b[^>]*>|<(round|review)\b[^>]*?\/?>/g
+// 同类标签查找：body 内若先撞到同类开标签，说明前一个标记未闭合，不能再认领后面的闭合标签
+const FAMILY_RE: Record<string, RegExp> = {
+  delegate: /<(\/)?delegate\b[^>]*>/g,
+  continue: /<(\/)?continue\b[^>]*>/g
+}
 const DELEGATE_TO_RE = /\bto\s*=\s*"([^"]*)"/
 const DELEGATE_REASON_RE = /\breason\s*=\s*"([^"]*)"/
-// 其余三族：continue（成对）与 round/review（自闭合），在普通片段里二次扫描
-const SIDE_TAG_RE = /<continue\b[^>]*>([\s\S]*?)<\/continue>|<(?:round|review)\b[^>]*?\/>/g
+// 无 to 的委派降级卡片 / 未闭合标记的提示文案
+const TRUNCATED_HINT = '未闭合'
 const CONTINUE_START_RE = /\bstart\s*=\s*"([^"]*)"/
 const ROUND_OUTCOME_RE = /\boutcome\s*=\s*"([^"]*)"/
 const ROUND_REASON_RE = /\breason\s*=\s*"([^"]*)"/
@@ -34,8 +42,9 @@ function excerptOf(prompt: string): string {
   return firstLine.length > EXCERPT_MAX ? `${firstLine.slice(0, EXCERPT_MAX)}…` : firstLine
 }
 
-// 委派卡片：头部展示目标队员与理由，指令体折叠展示（不跑 Markdown，保留换行）
-export function DelegateCard({ to, reason, prompt }: { to: string; reason?: string; prompt: string }) {
+// 委派卡片：头部展示目标队员与理由，指令体折叠展示（不跑 Markdown，保留换行）。
+// truncated：标记未闭合（流式被截断）时展开正文并提示，避免被吞进来的内容藏在折叠区里看不到。
+export function DelegateCard({ to, reason, prompt, truncated }: { to: string; reason?: string; prompt: string; truncated?: boolean }) {
   const body = prompt.trim()
   const excerpt = excerptOf(body)
   return (
@@ -46,8 +55,9 @@ export function DelegateCard({ to, reason, prompt }: { to: string; reason?: stri
         <span className="delegate-card-to">{to}</span>
         <span className="delegate-card-arrow">→</span>
         {reason ? <span className="delegate-card-reason">· {reason}</span> : null}
+        {truncated ? <span className="delegate-card-reason" title="协议标记未闭合，以下内容按原文展示">{`· ${TRUNCATED_HINT}`}</span> : null}
       </div>
-      <details className="delegate-card-body">
+      <details className="delegate-card-body" open={truncated ? true : undefined}>
         <summary>
           <span className="delegate-card-summary-label">子任务指令</span>
           {excerpt ? <span className="delegate-card-excerpt">{excerpt}</span> : null}
@@ -59,7 +69,7 @@ export function DelegateCard({ to, reason, prompt }: { to: string; reason?: stri
 }
 
 // 属性解析失败（缺 to）时的降级卡片：不崩、不露原始标签，指令整段按纯文本展示
-function DelegateFallbackCard({ prompt }: { prompt: string }) {
+function DelegateFallbackCard({ prompt, truncated }: { prompt: string; truncated?: boolean }) {
   const body = prompt.trim()
   const excerpt = excerptOf(body)
   return (
@@ -68,8 +78,9 @@ function DelegateFallbackCard({ prompt }: { prompt: string }) {
         <span className="delegate-card-icon">⚡</span>
         <span className="delegate-card-tag">委派</span>
         <span className="delegate-card-reason">未指明成员</span>
+        {truncated ? <span className="delegate-card-reason" title="协议标记未闭合，以下内容按原文展示">{`· ${TRUNCATED_HINT}`}</span> : null}
       </div>
-      <details className="delegate-card-body">
+      <details className="delegate-card-body" open={truncated ? true : undefined}>
         <summary>
           <span className="delegate-card-summary-label">子任务指令</span>
           {excerpt ? <span className="delegate-card-excerpt">{excerpt}</span> : null}
@@ -82,7 +93,7 @@ function DelegateFallbackCard({ prompt }: { prompt: string }) {
 
 // 硬切接力卡片：领队输出 <continue start> 时，本回合在此硬切新会话，简报是唯一携带物。
 // 紫色系对齐看板上已有的「阶段接力」徽章（.badge-handoff）。
-function ContinueCard({ start, brief }: { start?: string; brief: string }) {
+function ContinueCard({ start, brief, truncated }: { start?: string; brief: string; truncated?: boolean }) {
   const body = brief.trim()
   const excerpt = excerptOf(body)
   return (
@@ -91,9 +102,10 @@ function ContinueCard({ start, brief }: { start?: string; brief: string }) {
         <span className="continue-card-icon">⏭</span>
         <span className="continue-card-tag">硬切</span>
         <span className="continue-card-title">阶段接力</span>
-        <span className="continue-card-mode">{start === 'parked' ? '待启动' : '自动开始'}</span>
+        <span className="continue-card-mode">{start === 'parked' ? '等你启动' : '自动开始'}</span>
+        {truncated ? <span className="continue-card-mode" title="协议标记未闭合，以下内容按原文展示">{TRUNCATED_HINT}</span> : null}
       </div>
-      <details className="continue-card-body">
+      <details className="continue-card-body" open={truncated ? true : undefined}>
         <summary>
           <span className="continue-card-summary-label">交接简报</span>
           {excerpt ? <span className="continue-card-excerpt">{excerpt}</span> : null}
@@ -387,33 +399,100 @@ const MD_COMPONENTS = {
   )
 }
 
-// 普通文本入队：先过 continue/round/review 二次扫描，其余走 Markdown
+// 未闭合标记的正文边界：到下一个协议标签或第一个空行为止（对齐 CommonMark HTML block 的终止条件），
+// 避免一个残缺的开标签把整段回复都吞进卡片
+function unclosedEnd(text: string, from: number, next: number): number {
+  const blank = /\n[ \t]*\n/.exec(text.slice(from))
+  const blankIndex = blank ? from + blank.index : text.length
+  return Math.min(next, blankIndex)
+}
+
+// 下一个协议标签的起点；未闭合标记用它来确定正文边界（不让它吞掉后面的协议标记）
+function nextProtocolIndex(text: string, from: number): number | undefined {
+  PROTOCOL_TAG_RE.lastIndex = from
+  const m = PROTOCOL_TAG_RE.exec(text)
+  PROTOCOL_TAG_RE.lastIndex = 0
+  return m ? m.index : undefined
+}
+
+// 协议标记 → 卡片/芯片；truncated 表示标记未闭合（流式被截断），此时展开正文避免内容被折叠隐藏
+function pushProtocolCard(name: string, openTag: string, body: string, truncated: boolean, nodes: ReactNode[]) {
+  if (name === 'continue') {
+    nodes.push(<ContinueCard key={nodes.length} start={tagAttr(openTag, CONTINUE_START_RE)} brief={body} truncated={truncated} />)
+    return
+  }
+  const to = tagAttr(openTag, DELEGATE_TO_RE)
+  const reason = tagAttr(openTag, DELEGATE_REASON_RE)
+  nodes.push(
+    to ? (
+      <DelegateCard key={nodes.length} to={to} reason={reason} prompt={body} truncated={truncated} />
+    ) : (
+      <DelegateFallbackCard key={nodes.length} prompt={body} truncated={truncated} />
+    )
+  )
+}
+
+// 协议标记统一扫描：所有 delegate/continue/round/review 都在此被消费成卡片/芯片，绝不原样进入
+// ReactMarkdown。未闭合的标记（流式断掉）只把正文算到下一个协议标签或第一个空行为止——不能去
+// 认领后面真实派单的闭合标签，否则幻影配对会把后面的卡片和正文一起吞进当前卡片。
 function pushMarkdown(mdText: string, nodes: ReactNode[]) {
   if (!mdText) return
+  const text = mdText
   let last = 0
   let m: RegExpExecArray | null
-  SIDE_TAG_RE.lastIndex = 0
-  while ((m = SIDE_TAG_RE.exec(mdText))) {
-    const before = mdText.slice(last, m.index)
-    if (before) pushRawMarkdown(before, nodes)
-    const tag = m[0]
-    if (tag.startsWith('<continue')) {
-      nodes.push(<ContinueCard key={nodes.length} start={tagAttr(tag, CONTINUE_START_RE)} brief={m[1] ?? ''} />)
-    } else if (tag.startsWith('<round')) {
-      nodes.push(<RoundChip key={nodes.length} outcome={tagAttr(tag, ROUND_OUTCOME_RE)} reason={tagAttr(tag, ROUND_REASON_RE)} />)
-    } else {
+  PROTOCOL_TAG_RE.lastIndex = 0
+  while ((m = PROTOCOL_TAG_RE.exec(text))) {
+    const start = m.index
+    if (start < last) { PROTOCOL_TAG_RE.lastIndex = last; continue }
+    const before = last < start ? text.slice(last, start) : ''
+    const name = m[2] ?? m[3]
+    if (name === 'round' || name === 'review') {
+      if (before) pushRawMarkdown(before, nodes)
       nodes.push(
-        <ReviewChip
-          key={nodes.length}
-          of={tagAttr(tag, REVIEW_OF_RE)}
-          verdict={tagAttr(tag, REVIEW_VERDICT_RE)}
-          note={tagAttr(tag, REVIEW_NOTE_RE)}
-        />
+        name === 'round' ? (
+          <RoundChip key={nodes.length} outcome={tagAttr(m[0], ROUND_OUTCOME_RE)} reason={tagAttr(m[0], ROUND_REASON_RE)} />
+        ) : (
+          <ReviewChip
+            key={nodes.length}
+            of={tagAttr(m[0], REVIEW_OF_RE)}
+            verdict={tagAttr(m[0], REVIEW_VERDICT_RE)}
+            note={tagAttr(m[0], REVIEW_NOTE_RE)}
+          />
+        )
       )
+      last = start + m[0].length
+      PROTOCOL_TAG_RE.lastIndex = last
+      continue
     }
-    last = m.index + tag.length
+    const openEnd = start + m[0].length
+    if (m[1] === '/') {
+      // 游离闭合标签：没有对应开标签，直接吞掉，不把协议残渣漏给 Markdown
+      if (before) pushRawMarkdown(before, nodes)
+      last = openEnd
+      PROTOCOL_TAG_RE.lastIndex = last
+      continue
+    }
+    // 成对标记：向后找同类闭合标签；中途先撞到同类开标签则判定当前未闭合
+    const family = FAMILY_RE[name]
+    family.lastIndex = openEnd
+    const same = family.exec(text)
+    let body: string
+    let truncated: boolean
+    if (same && same[1] === '/') {
+      body = text.slice(openEnd, same.index)
+      last = same.index + same[0].length
+      truncated = false
+    } else {
+      const stop = unclosedEnd(text, openEnd, nextProtocolIndex(text, openEnd) ?? text.length)
+      body = text.slice(openEnd, stop)
+      last = stop
+      truncated = true
+    }
+    if (before) pushRawMarkdown(before, nodes)
+    pushProtocolCard(name, m[0], body, truncated, nodes)
+    PROTOCOL_TAG_RE.lastIndex = last
   }
-  const rest = mdText.slice(last)
+  const rest = text.slice(last)
   if (rest) pushRawMarkdown(rest, nodes)
 }
 
@@ -426,26 +505,10 @@ function pushRawMarkdown(mdText: string, nodes: ReactNode[]) {
   )
 }
 
-// 按 DELEGATE_RE 切成 [普通片段, attrs, 指令, ...] 交替序列，逐段渲染
+// 整段交给协议扫描，卡片与 Markdown 片段按出现顺序交替入队
 function renderSegments(text: string): ReactNode[] {
   const nodes: ReactNode[] = []
-  const segments = text.split(DELEGATE_RE)
-  for (let i = 0; i < segments.length; i += 3) {
-    pushMarkdown(segments[i] ?? '', nodes)
-    const attrs = segments[i + 1]
-    if (attrs !== undefined) {
-      const prompt = segments[i + 2] ?? ''
-      const to = attrs.match(DELEGATE_TO_RE)?.[1] ?? ''
-      const reason = attrs.match(DELEGATE_REASON_RE)?.[1]
-      nodes.push(
-        to ? (
-          <DelegateCard key={nodes.length} to={to} reason={reason} prompt={prompt} />
-        ) : (
-          <DelegateFallbackCard key={nodes.length} prompt={prompt} />
-        )
-      )
-    }
-  }
+  pushMarkdown(text, nodes)
   return nodes
 }
 

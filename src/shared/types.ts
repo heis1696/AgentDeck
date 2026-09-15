@@ -52,6 +52,15 @@ export interface GoalEvolutionPatch {
   criteria: GoalAcceptancePatch[]
   provenance: GoalPatchProvenance
 }
+/** Independent, auditable approval issued for one exact Goal specification. */
+export interface GoalApprovalSnapshot {
+  requestId: string
+  goalId: string
+  specGeneration: number
+  workVersion: string
+  approvedAt: number
+  actor: string
+}
 export interface GoalSpecSnapshot {
   id: string
   goalId: string
@@ -68,6 +77,7 @@ export interface GoalSpecSnapshot {
   checkpoint?: GoalCheckpoint
   patch?: GoalEvolutionPatch
   reason?: string
+  approvalSnapshot?: GoalApprovalSnapshot
 }
 
 /** Durable decision ledger for both accepted and rejected Loop 4 proposals. */
@@ -80,6 +90,7 @@ export interface GoalSpecDecision {
   patch?: GoalEvolutionPatch
   reason: string
   provenance?: GoalPatchProvenance
+  approvalSnapshot?: GoalApprovalSnapshot
 }
 
 export function isGoalStatus(value: unknown): value is GoalStatus {
@@ -401,6 +412,8 @@ export interface Task {
   sessionId?: string
   /** Stable snapshot of task content used to invalidate stale approvals. */
   workVersion?: string
+  /** Durable idempotency key for replayed creation requests. */
+  dedupeKey?: string
   /** 完成时抓取的 git 改动 */
   gitDiff?: string
   gitStat?: string

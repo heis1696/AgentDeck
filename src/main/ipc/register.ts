@@ -1,5 +1,6 @@
 import type { IpcContext } from './context'
 import { registerCatalogIpc } from './catalog'
+import { registerExtensionsIpc } from './extensions'
 import { registerGoalIpc } from './goals'
 import { registerIssueIpc } from './issues'
 import { registerSkillsIpc } from './skills'
@@ -14,5 +15,6 @@ export function registerIpcHandlers(ctx: IpcContext) {
   registerIssueIpc(ctx)
   registerCatalogIpc(ctx)
   registerSkillsIpc(ctx)
+  registerExtensionsIpc(ctx)
   registerSystemIpc(ctx)
 }

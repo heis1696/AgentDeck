@@ -105,6 +105,35 @@ try {
     const second = service.create({ title: 'replay', prompt: 'replay', workdir: '', issueId: goal.issueId, goalId: goal.id, phaseIndex: 2, dedupeKey: key })
     check(first.id === second.id && service.deduped(key)?.id === first.id, 'replayed dedupeKey returns the original Task')
     check(issueStore.list().length === issueCount, 'dedupe replay adds no Issue or notification projection')
+
+    // Public request/idempotency aliases map to one durable key. The second
+    // request deliberately changes the payload to prove the first Task wins.
+    const requestKey = `request_${goal.id}:create`
+    const requestTask = service.create({ title: 'request replay', prompt: 'request replay', workdir: '', issueId: goal.issueId, requestId: requestKey })
+    const aliasTask = service.create({ title: 'request replay changed', prompt: 'request replay changed', workdir: '', issueId: goal.issueId, idempotencyKey: requestKey })
+    check(requestTask.id === aliasTask.id, 'requestId and idempotencyKey aliases dedupe to one Task')
+    let conflictRejected = false
+    try {
+      service.create({ title: 'conflict', prompt: 'conflict', workdir: '', requestId: 'request-a', idempotencyKey: 'request-b' })
+    } catch {
+      conflictRejected = true
+    }
+    check(conflictRejected, 'conflicting idempotency aliases fail closed')
+
+    // A fresh service/store instance must reconstruct the key from tasks.json;
+    // process-local caches alone are insufficient for replay after restart.
+    store.flush()
+    const reloadedStore = new TaskStore(data)
+    const reloadedIssues = new IssueStore(data)
+    const reloadedService = new TaskService({ store: reloadedStore, issueStore: reloadedIssues })
+    const taskCountAfterRestart = reloadedStore.list().length
+    const issueCountAfterRestart = reloadedIssues.list().length
+    const replayedAfterRestart = reloadedService.create({ title: 'replay changed', prompt: 'replay changed', workdir: '', issueId: goal.issueId, goalId: goal.id, phaseIndex: 2, dedupeKey: key })
+    check(replayedAfterRestart.id === first.id, 'replayed dedupeKey survives a service/store restart')
+    const requestReplay = reloadedService.create({ title: 'request restart replay', prompt: 'request restart replay', workdir: '', issueId: goal.issueId, requestId: requestKey })
+    check(requestReplay.id === requestTask.id, 'requestId survives a TaskService restart')
+    check(reloadedStore.list().length === taskCountAfterRestart && reloadedIssues.list().length === issueCountAfterRestart, 'restart replay adds no Task or Issue projection')
+
     const reloaded = new TaskStore(data).get(handoff.id)
     check(reloaded?.goalId === goal.id && reloaded.phaseIndex === 1 && reloaded.continuesFrom === phase0.id, 'tasks.json reload preserves handoff metadata')
     // Runner notes append asynchronously flushed snapshots; drain them before

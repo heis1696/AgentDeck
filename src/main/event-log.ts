@@ -308,7 +308,10 @@ export class EventLog {
       if (!normalized.durable || typeof normalized.durable === 'boolean') {
         normalized.durable = { aggregate: 'task', seq: normalized.seq, version: TASK_EVENT_SCHEMA_VERSION }
       } else {
-        normalized.durable = { ...normalized.durable, seq: normalized.durable.seq ?? normalized.seq, version: normalized.durable.version ?? TASK_EVENT_SCHEMA_VERSION }
+        // The enclosing durable sequence is authoritative. Do not preserve a
+        // caller-supplied durable.seq that disagrees with the assigned log
+        // cursor; otherwise replay sees contradictory sequence metadata.
+        normalized.durable = { ...normalized.durable, seq: normalized.seq, version: normalized.durable.version ?? TASK_EVENT_SCHEMA_VERSION }
       }
       result.push(normalized)
       lines.push(JSON.stringify(normalized) + '\n')

@@ -1,5 +1,5 @@
 import { ipcMain } from 'electron'
-import { parseGoalCheckpoint, parseGoalCreate, parseGoalEvolve, parseId } from '../ipc-validation'
+import { parseContent, parseGoalCheckpoint, parseGoalCreate, parseGoalEvolve, parseId } from '../ipc-validation'
 import type { IpcContext } from './context'
 
 export function registerGoalIpc(ctx: IpcContext) {
@@ -10,8 +10,29 @@ export function registerGoalIpc(ctx: IpcContext) {
   ipcMain.handle('goals:checkpoints', (_e, id: unknown) => ctx.goalController.checkpoints(parseId(id, 'goalId')))
   ipcMain.handle('goals:snapshots', (_e, id: unknown) => ctx.goalController.snapshots(parseId(id, 'goalId')))
   ipcMain.handle('goals:decisions', (_e, id: unknown) => ctx.goalController.decisions(parseId(id, 'goalId')))
-  ipcMain.handle('goals:evolve', (_e, id: unknown, input: unknown) => ctx.goalController.evolve(parseId(id, 'goalId'), parseGoalEvolve(input)))
-  ipcMain.handle('goals:evolve-step', (_e, id: unknown, input: unknown) => ctx.goalController.evolveStep(parseId(id, 'goalId'), parseGoalEvolve(input)))
+  ipcMain.handle('goals:approve-evolution', (_e, id: unknown, actor: unknown) => ctx.goalController.approveEvolution(parseId(id, 'goalId'), actor === undefined ? 'user' : parseContent(actor, 'actor')))
+  ipcMain.handle('goals:evolve', (_e, id: unknown, input: unknown) => {
+    const goalId = parseId(id, 'goalId')
+    let parsed
+    try { parsed = parseGoalEvolve(input) } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      ctx.goalController.rejectEvolution(goalId, reason)
+      throw error
+    }
+    if (parsed.approve === true && !parsed.approvalSnapshot) throw new Error('approvalSnapshot is required for Goal spec evolution')
+    return ctx.goalController.evolve(goalId, parsed)
+  })
+  ipcMain.handle('goals:evolve-step', (_e, id: unknown, input: unknown) => {
+    const goalId = parseId(id, 'goalId')
+    let parsed
+    try { parsed = parseGoalEvolve(input) } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      ctx.goalController.rejectEvolution(goalId, reason)
+      throw error
+    }
+    if (parsed.approve === true && !parsed.approvalSnapshot) throw new Error('approvalSnapshot is required for Goal spec evolution')
+    return ctx.goalController.evolveStep(goalId, parsed)
+  })
   ipcMain.handle('goals:rollback', (_e, id: unknown, generation: unknown) => ctx.goalController.rollback(parseId(id, 'goalId'), generation as number))
   ipcMain.handle('goals:start', (_e, id: unknown) => ctx.goalController.start(parseId(id, 'goalId')))
   ipcMain.handle('goals:pause', (_e, id: unknown) => ctx.goalController.pause(parseId(id, 'goalId')))

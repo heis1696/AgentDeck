@@ -4,11 +4,16 @@ import http from 'node:http'
 import crypto from 'node:crypto'
 import { SIDECAR_PROTOCOL_VERSION } from './sidecar'
 import { SIDECAR_PROTOCOL } from './sidecar/protocol'
+import { EventLog } from './event-log'
+import type { TaskEvent } from '../shared/types'
+import { SidecarRuntime } from './sidecar-runtime'
 
 type JsonRecord = Record<string, unknown>
-let liveSequence = 0
-
 function record(value: unknown): JsonRecord { return value && typeof value === 'object' && !Array.isArray(value) ? value as JsonRecord : {} }
+function processAlive(pid: unknown) {
+  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return false
+  try { process.kill(pid, 0); return true } catch { return false }
+}
 function json(res: http.ServerResponse, status: number, value: unknown) {
   const body = JSON.stringify(value)
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store' })
@@ -81,20 +86,16 @@ function durableState(userDataDir: string) {
     try { return JSON.parse(fs.readFileSync(path.join(userDataDir, 'goals', 'index.json'), 'utf8')) as JsonRecord } catch { return {} }
   })()
   const checkpoints = Array.isArray(goalDocument.checkpoints) ? goalDocument.checkpoints : []
+  const specSnapshots = Array.isArray(goalDocument.specSnapshots) ? goalDocument.specSnapshots : []
+  const specDecisions = Array.isArray(goalDocument.specDecisions) ? goalDocument.specDecisions : []
+  const specApprovals = Array.isArray(goalDocument.specApprovals) ? goalDocument.specApprovals : []
+  const goalEvents = new EventLog(path.join(userDataDir, 'goals', 'events.jsonl')).read()
   const orphanRuns = tasks.filter((task) => record(task).status === 'running')
-  return { tasks, issues, runs, comments, notifications, goals, checkpoints, orphanRuns }
+  return { tasks, issues, runs, comments, notifications, goals, checkpoints, specSnapshots, specDecisions, specApprovals, goalEvents, orphanRuns }
 }
 
 function readEvents(userDataDir: string, taskId: string, afterSeq = 0) {
-  const file = eventFile(userDataDir, taskId)
-  try {
-    return fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean).flatMap((line) => {
-      try {
-        const event = JSON.parse(line) as JsonRecord
-        return typeof event.seq === 'number' && event.seq > afterSeq ? [event] : []
-      } catch { return [] }
-    })
-  } catch { return [] }
+  return new EventLog(eventFile(userDataDir, taskId)).read(afterSeq)
 }
 
 function eventFile(userDataDir: string, taskId: string) {
@@ -106,26 +107,48 @@ function eventFile(userDataDir: string, taskId: string) {
 }
 
 function appendEvent(userDataDir: string, taskId: string, input: unknown) {
-  const file = eventFile(userDataDir, taskId)
-  const event = record(input)
-  const lines = (() => { try { return fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean) } catch { return [] } })()
-  const prior = lines.flatMap((line) => { try { return [JSON.parse(line) as JsonRecord] } catch { return [] } })
-  const identity = typeof event.eventId === 'string' ? event.eventId : typeof event.id === 'string' ? event.id : ''
-  if (identity) {
-    const duplicate = prior.find((candidate) => candidate.eventId === identity || candidate.id === identity)
-    if (duplicate) return duplicate
+  return new EventLog(eventFile(userDataDir, taskId)).append(record(input) as Omit<TaskEvent, 'seq'>)
+}
+
+/** Convert claimed stale executions back into runnable durable tasks. The
+ * operation is idempotent: only tasks still marked `running` are changed. */
+function claimOrphanTasks(userDataDir: string, runIds: readonly string[], owner: string) {
+  const file = path.join(userDataDir, 'tasks', 'tasks.json')
+  let document: JsonRecord
+  try { document = JSON.parse(fs.readFileSync(file, 'utf8')) as JsonRecord } catch { return [] }
+  if (!Array.isArray(document.tasks)) return []
+  const wanted = new Set(runIds)
+  const adopted: string[] = []
+  const adoptedTaskIds: string[] = []
+  for (const task of document.tasks) {
+    const value = record(task)
+    const id = String(value.id || '')
+    const runId = String(value.runId || '')
+    if (value.status !== 'running' || (!wanted.has(id) && !wanted.has(runId))) continue
+    value.status = 'queued'
+    delete value.startedAt
+    delete value.endedAt
+    delete value.runId
+    value.error = `Orphan run adopted by sidecar ${owner}; queued for resume`
+    adopted.push(runId || id)
+    if (id) adoptedTaskIds.push(id)
   }
-  const maxSeq = prior.reduce((max, candidate) => typeof candidate.seq === 'number' && Number.isFinite(candidate.seq) ? Math.max(max, candidate.seq) : max, 0)
-  const live = event.durability === 'live' || event.durable === false
-  if (live) {
-    const liveSeq = maxSeq + (++liveSequence / 1_000_000)
-    return { ...event, seq: liveSeq, ts: typeof event.ts === 'number' ? event.ts : Date.now(), v: 1, version: 1, durability: 'live', durable: false }
+  if (!adopted.length) return []
+  for (const taskId of adoptedTaskIds) {
+    appendEvent(userDataDir, taskId, {
+      eventId: `orphan-claim:${owner}:${taskId}`,
+      kind: 'status',
+      text: `orphan run claimed by sidecar ${owner}`,
+      data: { orphanClaim: owner }
+    })
+    const task = document.tasks.find((entry) => String(record(entry).id || '') === taskId)
+    if (task) record(task).eventCount = new EventLog(eventFile(userDataDir, taskId)).count()
   }
-  const normalized = { ...event, seq: maxSeq + 1, ts: typeof event.ts === 'number' ? event.ts : Date.now(), v: 1, version: 1, durability: 'durable', durable: { aggregate: 'task', seq: maxSeq + 1, version: 1 } }
+  const tmp = `${file}.tmp`
   fs.mkdirSync(path.dirname(file), { recursive: true })
-  const fd = fs.openSync(file, 'a')
-  try { fs.writeSync(fd, JSON.stringify(normalized) + '\n', undefined, 'utf8'); fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
-  return normalized
+  fs.writeFileSync(tmp, JSON.stringify(document, null, 2), 'utf8')
+  fs.renameSync(tmp, file)
+  return adopted
 }
 
 /** Start the standalone business process. It is intentionally dependency-free
@@ -134,6 +157,7 @@ export function startSidecarServer(options: SidecarServerOptions): SidecarServer
   if (!options.token) throw new Error('sidecar token is required')
   const instanceId = options.instanceId || crypto.randomUUID()
   const startedAt = Date.now()
+  const runtime = new SidecarRuntime(options.userDataDir)
   let closing = false
   const server = http.createServer(async (req, res) => {
     try {
@@ -181,8 +205,39 @@ export function startSidecarServer(options: SidecarServerOptions): SidecarServer
       if (method === 'health') {
         result = healthPayload()
       } else if (method === 'state.sync') {
-        const state = durableState(options.userDataDir)
+        const state = { ...durableState(options.userDataDir), ...runtime.state() }
         result = { protocol: SIDECAR_PROTOCOL, version: SIDECAR_PROTOCOL_VERSION, protocolVersion: SIDECAR_PROTOCOL_VERSION, instanceId, generatedAt: Date.now(), sidecar: { ...healthPayload(), orphanRuns: state.orphanRuns }, ...state }
+      } else if (method === 'tasks.list') {
+        result = runtime.state().tasks
+      } else if (method === 'tasks.get') {
+        result = typeof params.id === 'string' ? runtime.state().tasks.find((task) => task.id === params.id) ?? null : null
+      } else if (method === 'tasks.create') {
+        runtime.refreshIfIdle()
+        const input = record(params.input)
+        const trigger = typeof params.trigger === 'string' ? params.trigger : undefined
+        result = runtime.taskService.createTask(input as never, trigger as never)
+      } else if (method === 'tasks.start') {
+        const task = typeof params.id === 'string' ? runtime.store.get(params.id) : null
+        if (!task || task.status !== 'queued') throw new Error('task is not queued')
+        runtime.store.update(task.id, { parked: undefined })
+        runtime.start()
+        runtime.runner.enqueue(runtime.store.get(task.id)!)
+        result = runtime.store.get(task.id)
+      } else if (method === 'tasks.cancel') {
+        if (typeof params.id !== 'string') throw new Error('task id is required')
+        result = await runtime.runner.cancel(params.id)
+      } else if (method === 'tasks.retry') {
+        if (typeof params.id !== 'string') throw new Error('task id is required')
+        const task = runtime.store.get(params.id)
+        if (!task || task.status === 'running' || task.status === 'queued') throw new Error('task cannot be retried')
+        await runtime.runner.closeSession(task.id)
+        runtime.store.update(task.id, { status: 'queued', error: undefined, failure: undefined, result: undefined, sessionId: undefined, attempt: undefined, runId: undefined })
+        runtime.start()
+        runtime.runner.enqueue(runtime.store.get(task.id)!)
+        result = { ok: true }
+      } else if (method === 'tasks.followup') {
+        if (typeof params.id !== 'string' || typeof params.content !== 'string') throw new Error('task id and content are required')
+        result = await runtime.runner.followUp(params.id, params.content, params.options as { relay?: boolean } | undefined)
       } else if (method === 'events.replay' || method === 'events.read') {
         const taskId = typeof params.taskId === 'string' ? params.taskId : ''
         if (!taskId) throw new Error('taskId is required')
@@ -194,11 +249,28 @@ export function startSidecarServer(options: SidecarServerOptions): SidecarServer
       } else if (method === 'runs.takeover' || method === 'runs.claim') {
         const state = durableState(options.userDataDir)
         const file = path.join(options.userDataDir, 'sidecar-orphans.json')
-        const takeover = { protocolVersion: SIDECAR_PROTOCOL_VERSION, instanceId, claimedAt: Date.now(), runIds: state.orphanRuns.map((task) => record(task).runId || record(task).id).filter(Boolean) }
+        const now = Date.now()
+        const prior = (() => { try { return JSON.parse(fs.readFileSync(file, 'utf8')) as JsonRecord } catch { return {} } })()
+        const priorLease = typeof prior.leaseExpiresAt === 'number' ? prior.leaseExpiresAt : 0
+        const leaseActive = priorLease > now && (prior.instanceId === instanceId || processAlive(prior.pid))
+        const candidates = state.orphanRuns.map((task) => String(record(task).runId || record(task).id || '')).filter(Boolean)
+        // A live lease prevents two sidecars from both claiming the same run.
+        // Expired leases are safely replaced and remain auditable on disk.
+        const runIds = leaseActive && Array.isArray(prior.runIds) ? [] : candidates
+        const takeover = {
+          protocolVersion: SIDECAR_PROTOCOL_VERSION,
+          instanceId,
+          pid: process.pid,
+          claimedAt: now,
+          leaseExpiresAt: now + 30_000,
+          runIds
+        }
         fs.mkdirSync(path.dirname(file), { recursive: true })
         fs.writeFileSync(`${file}.tmp`, JSON.stringify(takeover, null, 2), 'utf8')
         fs.renameSync(`${file}.tmp`, file)
-        result = { adopted: takeover.runIds, orphanRuns: state.orphanRuns }
+        const adopted = runIds.length ? claimOrphanTasks(options.userDataDir, runIds, instanceId) : []
+        if (adopted.length) runtime.refreshAfterTakeover()
+        result = { adopted, orphanRuns: durableState(options.userDataDir).orphanRuns, lease: takeover }
       } else {
         return json(res, 404, { protocol: SIDECAR_PROTOCOL, version: SIDECAR_PROTOCOL_VERSION, id: body.id, ok: false, error: { code: 'unknown_method', message: `unknown sidecar method: ${method}` } })
       }
@@ -224,8 +296,9 @@ export function startSidecarServer(options: SidecarServerOptions): SidecarServer
     }
   }
   const close = () => new Promise<void>((resolve) => {
-    if (closing && !server.listening) return resolve()
-    server.close(() => resolve())
+    const finish = () => { void runtime.close().finally(resolve) }
+    if (closing && !server.listening) return finish()
+    server.close(finish)
   })
   const ready = new Promise<number>((resolve, reject) => {
     server.once('error', reject)

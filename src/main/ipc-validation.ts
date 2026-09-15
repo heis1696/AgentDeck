@@ -68,7 +68,7 @@ export function parseContent(value: unknown, label = '内容') {
 
 export function parseTaskCreate(value: unknown): TaskCreateInput {
   const input = record(value, '任务参数')
-  assertKeys(input, ['title', 'prompt', 'workdir', 'backend', 'agentId', 'handoff', 'startNow', 'trigger'], '任务参数')
+  assertKeys(input, ['title', 'prompt', 'workdir', 'backend', 'agentId', 'handoff', 'startNow', 'trigger', 'requestId', 'idempotencyKey'], '任务参数')
   const trigger = input.trigger
   if (trigger !== undefined && (typeof trigger !== 'string' || !triggers.has(trigger as RunTrigger))) throw new Error('trigger 无效')
   if (input.startNow !== undefined && typeof input.startNow !== 'boolean') throw new Error('startNow 必须是布尔值')
@@ -80,13 +80,15 @@ export function parseTaskCreate(value: unknown): TaskCreateInput {
     agentId: optionalString(input.agentId, 'agentId'),
     handoff: optionalString(input.handoff, 'handoff'),
     startNow: input.startNow as boolean | undefined,
-    trigger: trigger as RunTrigger | undefined
+    trigger: trigger as RunTrigger | undefined,
+    requestId: optionalString(input.requestId, 'requestId'),
+    idempotencyKey: optionalString(input.idempotencyKey, 'idempotencyKey')
   }
 }
 
 export function parseIssueCreate(value: unknown): IssueCreateInput {
   const input = record(value, 'Issue 参数')
-  assertKeys(input, ['title', 'description', 'workdir', 'backend', 'agentId', 'handoff', 'startNow', 'trigger', 'titleAuto'], 'Issue 参数')
+  assertKeys(input, ['title', 'description', 'workdir', 'backend', 'agentId', 'handoff', 'startNow', 'trigger', 'titleAuto', 'requestId', 'idempotencyKey'], 'Issue 参数')
   const task = parseTaskCreate({
     title: input.title,
     prompt: input.description,
@@ -95,7 +97,9 @@ export function parseIssueCreate(value: unknown): IssueCreateInput {
     agentId: input.agentId,
     handoff: input.handoff,
     startNow: input.startNow,
-    trigger: input.trigger
+    trigger: input.trigger,
+    requestId: input.requestId,
+    idempotencyKey: input.idempotencyKey
   })
   if (input.titleAuto !== undefined && typeof input.titleAuto !== 'boolean') throw new Error('titleAuto 必须是布尔值')
   return {
@@ -107,7 +111,9 @@ export function parseIssueCreate(value: unknown): IssueCreateInput {
     handoff: task.handoff,
     startNow: task.startNow,
     trigger: task.trigger,
-    titleAuto: input.titleAuto as boolean | undefined
+    titleAuto: input.titleAuto as boolean | undefined,
+    requestId: task.requestId,
+    idempotencyKey: task.idempotencyKey
   }
 }
 
@@ -141,13 +147,14 @@ function stringArrayValue(value: unknown, label: string, required = false): stri
 /** Validate Goal IPC input at the main-process boundary. */
 export function parseGoalCreate(value: unknown): GoalCreateInput {
   const input = record(value, 'Goal parameters')
-  assertKeys(input, ['text', 'issueId', 'completionConditions', 'acceptanceCriteria', 'stopConditions', 'maxRuns', 'maxDurationMs', 'blockCap', 'noProgressCap', 'workdir', 'agentId', 'backend', 'startNow'], 'Goal parameters')
+  assertKeys(input, ['text', 'issueId', 'completionConditions', 'acceptanceCriteria', 'stopConditions', 'maxRuns', 'maxDurationMs', 'blockCap', 'noProgressCap', 'workdir', 'agentId', 'backend', 'startNow', 'ambiguityScore'], 'Goal parameters')
   if (input.startNow !== undefined && typeof input.startNow !== 'boolean') throw new Error('startNow must be boolean')
   if (input.maxRuns === undefined || typeof input.maxRuns !== 'number' || !Number.isInteger(input.maxRuns) || input.maxRuns < 1 || input.maxRuns > 10000) throw new Error('maxRuns must be an integer between 1 and 10000')
   const maxDurationMs = input.maxDurationMs
   if (typeof maxDurationMs !== 'number' || !Number.isFinite(maxDurationMs) || maxDurationMs < 1 || maxDurationMs > 365 * 24 * 60 * 60 * 1000) throw new Error('maxDurationMs must be between 1ms and 365 days')
   if (input.blockCap !== undefined && (typeof input.blockCap !== 'number' || !Number.isInteger(input.blockCap) || input.blockCap < 1 || input.blockCap > 1000)) throw new Error('blockCap must be an integer between 1 and 1000')
   if (input.noProgressCap !== undefined && (typeof input.noProgressCap !== 'number' || !Number.isInteger(input.noProgressCap) || input.noProgressCap < 1 || input.noProgressCap > 1000)) throw new Error('noProgressCap must be an integer between 1 and 1000')
+  if (input.ambiguityScore !== undefined && (typeof input.ambiguityScore !== 'number' || !Number.isFinite(input.ambiguityScore) || input.ambiguityScore < 0 || input.ambiguityScore > 1)) throw new Error('ambiguityScore must be between 0 and 1')
   const acceptanceCriteria = input.acceptanceCriteria === undefined ? undefined : (() => {
     if (!Array.isArray(input.acceptanceCriteria) || input.acceptanceCriteria.length > 100) throw new Error('acceptanceCriteria must be an array of at most 100 entries')
     const ids = new Set<string>()
@@ -181,7 +188,8 @@ export function parseGoalCreate(value: unknown): GoalCreateInput {
     workdir: stringValue(input.workdir, 'workdir', false) ?? '',
     agentId: optionalString(input.agentId, 'agentId'),
     backend: optionalString(input.backend, 'backend'),
-    startNow: input.startNow as boolean | undefined
+    startNow: input.startNow as boolean | undefined,
+    ambiguityScore: input.ambiguityScore as number | undefined
   }
 }
 
@@ -236,12 +244,30 @@ function parseGoalEvolutionPatch(value: unknown): GoalEvolutionPatch {
 /** Validate Goal spec-evolution IPC input at the main-process boundary. */
 export function parseGoalEvolve(value: unknown): GoalEvolveInput {
   const input = record(value, 'Goal evolve parameters')
-  assertKeys(input, ['patch', 'approve', 'outcomeGatePassed', 'ambiguityScore'], 'Goal evolve parameters')
+  assertKeys(input, ['patch', 'approve', 'outcomeGatePassed', 'ambiguityScore', 'approvalSnapshot'], 'Goal evolve parameters')
+  let approvalSnapshot: GoalEvolveInput['approvalSnapshot']
+  if (input.approvalSnapshot !== undefined) {
+    const snapshot = record(input.approvalSnapshot, 'approvalSnapshot')
+    assertKeys(snapshot, ['requestId', 'goalId', 'specGeneration', 'workVersion', 'approvedAt', 'actor'], 'approvalSnapshot')
+    const specGeneration = snapshot.specGeneration
+    const approvedAt = snapshot.approvedAt
+    if (typeof specGeneration !== 'number' || !Number.isInteger(specGeneration) || specGeneration < 1) throw new Error('approvalSnapshot.specGeneration must be a positive integer')
+    if (typeof approvedAt !== 'number' || !Number.isFinite(approvedAt) || approvedAt <= 0) throw new Error('approvalSnapshot.approvedAt must be a positive timestamp')
+    approvalSnapshot = {
+      requestId: stringValue(snapshot.requestId, 'approvalSnapshot.requestId')!,
+      goalId: stringValue(snapshot.goalId, 'approvalSnapshot.goalId')!,
+      specGeneration,
+      workVersion: stringValue(snapshot.workVersion, 'approvalSnapshot.workVersion')!,
+      approvedAt,
+      actor: stringValue(snapshot.actor, 'approvalSnapshot.actor')!
+    }
+  }
   return {
     patch: input.patch === undefined ? undefined : parseGoalEvolutionPatch(input.patch),
     approve: input.approve === undefined ? undefined : booleanValue(input.approve, 'approve'),
     outcomeGatePassed: input.outcomeGatePassed === undefined ? undefined : booleanValue(input.outcomeGatePassed, 'outcomeGatePassed'),
-    ambiguityScore: finiteNumber(input.ambiguityScore, 'ambiguityScore', false)
+    ambiguityScore: finiteNumber(input.ambiguityScore, 'ambiguityScore', false),
+    approvalSnapshot
   }
 }
 

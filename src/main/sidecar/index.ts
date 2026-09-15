@@ -2,6 +2,7 @@
  * split without changing imports used by the Electron shell or smoke tests. */
 export * from '../sidecar'
 export * from '../sidecar-server'
+export * from '../sidecar-runtime'
 export {
   SIDECAR_PROTOCOL,
   assertSidecarVersion,

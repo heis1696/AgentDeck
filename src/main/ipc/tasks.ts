@@ -16,7 +16,14 @@ export function registerTaskIpc(ctx: IpcContext) {
 
   ipcMain.handle('tasks:list', () => ctx.store.list())
   ipcMain.handle('tasks:get', (_e, id: unknown) => ctx.store.get(parseId(id)) ?? null)
-  ipcMain.handle('tasks:events', (_e, id: unknown, afterSeq: unknown) => ctx.store.readEvents(parseId(id), afterSeq === undefined ? 0 : parseNonNegativeInteger(afterSeq, 'afterSeq')))
+  ipcMain.handle('tasks:events', async (_e, id: unknown, afterSeq: unknown) => {
+    const taskId = parseId(id)
+    const cursor = afterSeq === undefined ? 0 : parseNonNegativeInteger(afterSeq, 'afterSeq')
+    if (ctx.sidecar?.currentStatus === 'ready') {
+      try { return await ctx.sidecar.readEvents(taskId, cursor) } catch { /* compatibility fallback below */ }
+    }
+    return ctx.store.readEvents(taskId, cursor)
+  })
   ipcMain.handle('tasks:create', (_e, input: unknown) => {
     const parsed = parseTaskCreate(input)
     const task = ctx.createTask(parsed, parsed.trigger ?? 'assignment')

@@ -189,7 +189,7 @@ export function listWorktreeMetadata(repoDir: string): WorktreeInfo[] {
 
 function updateMetadata(metadata: WorktreeInfo, patch: Partial<WorktreeInfo>) {
   const next = { ...metadata, ...patch }
-  try { writeMetadata(next) } catch {}
+  writeMetadata(next)
   return next
 }
 
@@ -233,7 +233,14 @@ export async function createWorktree(
     createdAt: Date.now(),
     cleanupStatus: 'active'
   }
-  try { writeMetadata(metadata) } catch {}
+  try { writeMetadata(metadata) } catch {
+    // Do not report a successful isolated worktree whose ownership metadata
+    // could not be persisted. Best-effort rollback prevents an untracked
+    // managed branch from leaking into the repository.
+    await runGit(root, ['worktree', 'remove', '--force', wtPath], 30000)
+    await deleteBranch(root, branch)
+    return null
+  }
   return { path: wtPath, branch, metadata }
 }
 
@@ -338,9 +345,10 @@ async function resolveManagedWorktree(wtDir: string): Promise<{ repoDir: string;
 }
 
 async function worktreeDirty(wtDir: string) {
-  if (!fs.existsSync(wtDir)) return false
+  if (!fs.existsSync(wtDir)) return { ok: true, dirty: false }
   const result = await runGit(wtDir, ['status', '--porcelain', '--untracked-files=all'], 15000)
-  return result.ok && !!result.stdout.trim()
+  if (!result.ok) return { ok: false, dirty: false }
+  return { ok: true, dirty: !!result.stdout.trim() }
 }
 
 /** Reclaim an isolated worktree with structured fail-closed status. */
@@ -355,11 +363,16 @@ export async function reclaimWorktree(
   // branch name, so they can still be reclaimed without touching user refs.
   const branch = metadata?.branch || `${MANAGED_BRANCH_PREFIX}${name}`
   if (metadata?.manualKeep) {
-    updateMetadata(metadata, { cleanupStatus: 'retained', cleanupReason: 'manual keep requested' })
+    try { updateMetadata(metadata, { cleanupStatus: 'retained', cleanupReason: 'manual keep requested' }) } catch {}
     return { ok: false, status: 'retained', path: wtDir, branch, reason: 'manual keep requested' }
   }
-  if (!options.force && await worktreeDirty(wtDir)) {
-    if (metadata) updateMetadata(metadata, { cleanupStatus: 'retained', cleanupReason: 'uncommitted changes' })
+  const cleanliness = await worktreeDirty(wtDir)
+  if (!options.force && !cleanliness.ok) {
+    try { if (metadata) updateMetadata(metadata, { cleanupStatus: 'failed', cleanupReason: 'could not determine worktree status' }) } catch {}
+    return { ok: false, status: 'failed', path: wtDir, branch, reason: 'could not determine worktree status' }
+  }
+  if (!options.force && cleanliness.dirty) {
+    try { if (metadata) updateMetadata(metadata, { cleanupStatus: 'retained', cleanupReason: 'uncommitted changes' }) } catch {}
     return { ok: false, status: 'retained', path: wtDir, branch, reason: 'uncommitted changes' }
   }
   if (!fs.existsSync(wtDir)) {
@@ -377,11 +390,13 @@ export async function reclaimWorktree(
     const deleted = !present || await deleteBranch(repoDir, branch)
     if (!deleted) {
       const reason = `worktree removed but branch ${branch} could not be deleted`
-      if (metadata) updateMetadata(metadata, { cleanupStatus: 'retained', cleanupReason: reason })
+      try { if (metadata) updateMetadata(metadata, { cleanupStatus: 'retained', cleanupReason: reason }) } catch {}
       return { ok: false, status: 'retained', path: wtDir, branch, reason }
     }
   }
-  if (metadata) updateMetadata(metadata, { cleanupStatus: 'removed', cleanedAt: Date.now(), cleanupReason: undefined })
+  try { if (metadata) updateMetadata(metadata, { cleanupStatus: 'removed', cleanedAt: Date.now(), cleanupReason: undefined }) } catch {
+    return { ok: false, status: 'failed', path: wtDir, branch, reason: 'cleanup metadata could not be persisted' }
+  }
   return { ok: true, status: 'removed', path: wtDir, branch }
 }
 
@@ -389,11 +404,13 @@ export async function reclaimWorktree(
 export async function setWorktreeManualKeep(wtDir: string, manualKeep = true): Promise<boolean> {
   const resolved = await resolveManagedWorktree(wtDir)
   if (!resolved?.metadata) return false
-  updateMetadata(resolved.metadata, {
-    manualKeep,
-    cleanupStatus: manualKeep ? 'retained' : resolved.metadata.cleanupStatus,
-    cleanupReason: manualKeep ? 'manual keep requested' : undefined
-  })
+  try {
+    updateMetadata(resolved.metadata, {
+      manualKeep,
+      cleanupStatus: manualKeep ? 'retained' : resolved.metadata.cleanupStatus,
+      cleanupReason: manualKeep ? 'manual keep requested' : undefined
+    })
+  } catch { return false }
   return true
 }
 
@@ -402,7 +419,7 @@ export async function setWorktreeOwner(wtDir: string, ownerTaskId: string): Prom
   if (!ownerTaskId.trim()) return false
   const resolved = await resolveManagedWorktree(wtDir)
   if (!resolved?.metadata) return false
-  updateMetadata(resolved.metadata, { ownerTaskId: ownerTaskId.trim() })
+  try { updateMetadata(resolved.metadata, { ownerTaskId: ownerTaskId.trim() }) } catch { return false }
   return true
 }
 
@@ -414,11 +431,13 @@ export async function markWorktreeCleanup(
 ): Promise<boolean> {
   const resolved = await resolveManagedWorktree(wtDir)
   if (!resolved?.metadata) return false
-  updateMetadata(resolved.metadata, {
-    cleanupStatus,
-    cleanupReason,
-    ...(cleanupStatus === 'removed' ? { cleanedAt: Date.now() } : {})
-  })
+  try {
+    updateMetadata(resolved.metadata, {
+      cleanupStatus,
+      cleanupReason,
+      ...(cleanupStatus === 'removed' ? { cleanedAt: Date.now() } : {})
+    })
+  } catch { return false }
   return true
 }
 

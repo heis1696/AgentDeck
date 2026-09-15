@@ -10,7 +10,7 @@ export function registerIssueIpc(ctx: IpcContext) {
   ipcMain.handle('issues:get', (_e, id: unknown) => ctx.issueStore.get(parseId(id, 'issueId')) ?? null)
   ipcMain.handle('issues:create', (_e, input: unknown) => {
     const parsed = parseIssueCreate(input)
-    const task = ctx.createTask({ title: parsed.title, prompt: parsed.description, workdir: parsed.workdir, agentId: parsed.agentId, backend: parsed.backend, handoff: parsed.handoff, startNow: parsed.startNow, titleAuto: parsed.titleAuto }, parsed.trigger ?? 'assignment')
+    const task = ctx.createTask({ title: parsed.title, prompt: parsed.description, workdir: parsed.workdir, agentId: parsed.agentId, backend: parsed.backend, handoff: parsed.handoff, startNow: parsed.startNow, titleAuto: parsed.titleAuto, requestId: parsed.requestId, idempotencyKey: parsed.idempotencyKey }, parsed.trigger ?? 'assignment')
     if (parsed.startNow === false) ctx.publishIssueUpdate(task)
     else ctx.runner.enqueue(task)
     const issue = ctx.issueStore.get(task.issueId ?? `iss_${task.id}`)

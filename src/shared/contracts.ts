@@ -1,5 +1,26 @@
-import type { AcceptanceCriterion, Automation, AppSettings, AnalyticsSummary, Comment, Goal, GoalCheckpoint, GoalEvolutionPatch, GoalSpecDecision, GoalSpecSnapshot, GoalRun, Issue, IssuePriority, IssueStatus, Notification, Run, RunTrigger, RuntimeSnapshot, Task, TaskEvent } from './types'
+import type { AcceptanceCriterion, Automation, AppSettings, AnalyticsSummary, Comment, Goal, GoalApprovalSnapshot, GoalCheckpoint, GoalEvolutionPatch, GoalSpecDecision, GoalSpecSnapshot, GoalRun, Issue, IssuePriority, IssueStatus, Notification, Run, RunTrigger, RuntimeSnapshot, Task, TaskEvent } from './types'
 import type { SkillDetail, SkillMeta, SkillTarget, SyncState } from './skills'
+import type {
+  CatalogEntry,
+  DiscoveredAsset,
+  ExtSourceMeta,
+  HookDetail,
+  HookGroup,
+  HookMeta,
+  HookTarget,
+  MarketplacePluginInfo,
+  MarketplaceRegisterResult,
+  MarketplaceStatus,
+  McpMeta,
+  McpTarget,
+  McpTransport,
+  PluginCliResult,
+  PluginInventoryItem,
+  RegisteredMarketplace,
+  SkillDiscoveryGroup,
+  SkillsFromUrlResult,
+  SkillsShEntry
+} from './extensions'
 
 /** Loop 4 规格进化输入：patch 为提议的规格变更，approve=true 才会应用（结果闸门结论随行记录）。 */
 export interface GoalEvolveInput {
@@ -7,6 +28,8 @@ export interface GoalEvolveInput {
   approve?: boolean
   outcomeGatePassed?: boolean
   ambiguityScore?: number
+  /** Independent approval record; required on the production IPC path. */
+  approvalSnapshot?: GoalApprovalSnapshot
 }
 
 export interface PermissionRequest {
@@ -59,6 +82,10 @@ export interface TaskCreateInput {
   handoff?: string
   startNow?: boolean
   trigger?: RunTrigger
+  /** Stable request key for replay-safe Task creation across restarts. */
+  requestId?: string
+  /** Alias accepted by API clients. */
+  idempotencyKey?: string
 }
 
 export interface IssueCreateInput {
@@ -71,6 +98,8 @@ export interface IssueCreateInput {
   startNow?: boolean
   trigger?: RunTrigger
   titleAuto?: boolean
+  requestId?: string
+  idempotencyKey?: string
 }
 
 export interface IssueUpdatePatch {
@@ -98,6 +127,8 @@ export interface GoalCreateInput {
   agentId?: string
   backend?: string
   startNow?: boolean
+  /** Optional pre-execution ambiguity score; high values require clarification. */
+  ambiguityScore?: number
 }
 
 export interface GoalCheckpointInput {
@@ -172,6 +203,7 @@ export interface AgentDeckApi {
     checkpoints: (id: string) => Promise<GoalCheckpoint[]>
     snapshots: (id: string) => Promise<GoalSpecSnapshot[]>
     decisions: (id: string) => Promise<GoalSpecDecision[]>
+    approveEvolution: (id: string, actor?: string) => Promise<GoalApprovalSnapshot | null>
     evolve: (id: string, input: GoalEvolveInput) => Promise<{ ok: boolean; error?: string; goal?: Goal; snapshot?: GoalSpecSnapshot; questions?: string[] }>
     evolveStep: (id: string, input: GoalEvolveInput) => Promise<{ ok: boolean; error?: string; goal?: Goal; snapshot?: GoalSpecSnapshot; questions?: string[] }>
     rollback: (id: string, generation: number) => Promise<{ ok: boolean; error?: string; goal?: Goal; snapshot?: GoalSpecSnapshot }>
@@ -226,9 +258,64 @@ export interface AgentDeckApi {
     save: (name: string, input: { description: string; body: string; originName?: string }) => Promise<SkillMeta>
     delete: (name: string) => Promise<IpcResult>
     import: (sourcePath: string) => Promise<SkillMeta>
+    /** 从 git URL 直装：clone + 扫描 + 技能型资产全部导入共享库（入口在技能 tab） */
+    installFromUrl: (ref: string) => Promise<SkillsFromUrlResult>
+    /** 在线搜索 skills.sh 公共技能目录（发现区「skills.sh」来源；离线/超时返回空不报错） */
+    searchOnline: (query: string, limit?: number, offset?: number) => Promise<{ entries: SkillsShEntry[]; total: number }>
+    /** 从 skills.sh 条目安装：clone owner/repo 后定位 skillId 目录导入共享库 */
+    installOnline: (entry: { skillId: string; owner: string; repo: string }) => Promise<{ name: string }>
+    /** 浏览器打开外部链接（发现卡「查看 README」；仅允许 https） */
+    openExternal: (url: string) => Promise<void>
     targets: () => Promise<{ targets: SkillTarget[]; states: Record<string, Record<string, SyncState>> }>
     install: (name: string, targetId: string) => Promise<IpcResult>
     uninstall: (name: string, targetId: string) => Promise<IpcResult>
     openDir: () => Promise<void>
+  }
+  mcp: {
+    list: () => Promise<{ servers: McpMeta[] }>
+    save: (def: { name: string; description: string; transport: McpTransport }, originName?: string) => Promise<McpMeta>
+    delete: (name: string) => Promise<IpcResult>
+    targets: () => Promise<{ targets: McpTarget[]; states: Record<string, Record<string, SyncState>> }>
+    install: (name: string, targetId: string) => Promise<IpcResult>
+    uninstall: (name: string, targetId: string) => Promise<IpcResult>
+  }
+  hooks: {
+    list: () => Promise<{ hooks: HookMeta[] }>
+    get: (name: string) => Promise<HookDetail | null>
+    save: (name: string, input: { description: string; body: string; events: Record<string, HookGroup[]>; originName?: string }) => Promise<HookMeta>
+    delete: (name: string) => Promise<IpcResult>
+    targets: () => Promise<{ targets: HookTarget[]; states: Record<string, Record<string, SyncState>> }>
+    install: (name: string, targetId: string) => Promise<IpcResult>
+    uninstall: (name: string, targetId: string) => Promise<IpcResult>
+  }
+  plugins: {
+    inventory: () => Promise<{ items: PluginInventoryItem[] }>
+    setEnabled: (input: { cli: 'claude'; name: string; marketplace: string; enabled: boolean }) => Promise<IpcResult>
+    openDir: (cli: 'claude' | 'zcode' | 'codex') => Promise<void>
+    /** 安装插件（v1 仅 claude，借官方 CLI；spec = plugin@marketplace） */
+    install: (input: { cli: 'claude'; spec: string }) => Promise<PluginCliResult>
+    uninstall: (input: { cli: 'claude'; spec: string }) => Promise<PluginCliResult>
+  }
+  marketplaces: {
+    status: () => Promise<MarketplaceStatus>
+    /** 把源内发现的 marketplace.json 注册为 Claude/ZCode 市场（两侧成败独立返回） */
+    register: (sourceId: string, assetPath: string) => Promise<MarketplaceRegisterResult>
+    /** 读源内 marketplace.json 的插件清单（供浏览/筛选/逐项安装；installed 为 claude 侧交叉） */
+    listPlugins: (sourceId: string, assetPath: string) => Promise<{ plugins: MarketplacePluginInfo[] }>
+    /** 聚合已注册市场（AgentDeck 源 + claude/zcode 市场缓存）及其插件清单（入口在插件 tab） */
+    listRegistered: () => Promise<{ marketplaces: RegisteredMarketplace[] }>
+  }
+  sources: {
+    catalog: () => Promise<{ entries: CatalogEntry[] }>
+    list: () => Promise<{ sources: ExtSourceMeta[] }>
+    add: (ref: string, name?: string) => Promise<ExtSourceMeta>
+    /** 从 URL 一键安装：addSource + 自动浏览，UI 收到后直接展开该源的资产面板 */
+    quickAdd: (ref: string, name?: string) => Promise<{ source: ExtSourceMeta; assets: DiscoveredAsset[] }>
+    remove: (id: string) => Promise<IpcResult>
+    sync: (id: string) => Promise<ExtSourceMeta>
+    browse: (id: string) => Promise<{ assets: DiscoveredAsset[] }>
+    /** 聚合所有已添加源的技能资产（技能 tab「发现」区，按源分组） */
+    listSkills: () => Promise<{ groups: SkillDiscoveryGroup[] }>
+    importSkill: (id: string, relPath: string) => Promise<{ name: string }>
   }
 }

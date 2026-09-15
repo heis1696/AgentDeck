@@ -4,6 +4,33 @@
 
 ## [Unreleased]
 
+### 硬切接力「卡队列」修复：parked 语义纠偏 + 全链路可见性（自主硬切后继滞留排查结论）
+
+- **根因**：模型按旧指引「不确定时一律 parked」输出 `<continue start="parked">`，后继建成 queued+parked 后调度泵（scheduler）与重启对账都跳过 parked，看板又按普通排队展示——用户看到"没有运行中任务、队列却卡死"。auto 接力链路本身零延迟无回归。
+- **指引重写**（`CONTINUE_BLOCK`）：自主硬切默认 `auto`；`parked` 仅限"明确需要用户做 X 才能继续"（确认方案/提供凭据），环境受限（无头跑不了 GUI 等）不算等用户的理由——照常 auto 并在简报写明风险。
+- **解析器加固**（`delegate.ts parseContinue`）：start 属性容忍多属性/无引号/大小写；缺省或非 `parked` 一律按 auto（显式 parked 才停放），消除 auto 被语法偏差误判成 parked 的暗坑。
+- **parked 落地必有信号**（`index.ts attachContinue`）：新建停放后继时给 Issue 落 agent 评论「⏸ 阶段接力已备好……等你启动」（10s 新鲜窗口防幂等重放刷屏）。
+- **回灌失败兜底**（`delegate.ts` 委派循环 catch）：领队会话已死时把队员报告摘要落为 Issue 评论，不再静默丢弃；重启对账对被打断的委派领队同样补队员报告摘要（`index.ts drainRestartInterrupted`）。runner 的 issueOps 相应扩展 `addIssueComment` 通道。
+- **UI 可见可点**（`BoardView` / `IssuesView` / `Markdown` / `labels.ts` / `polish/*.css`）：queued+parked 显示「⏸ 等你启动」徽标（区别于普通排队，卡片/行有 is-parked 视觉层级），看板卡与 Issue 行提供「▶ 启动」一键清停放入队（复用 `tasks:start`）；硬切卡片文案统一为「等你启动」口径。
+
+### dsh 接入 ACP 常驻服务（流式事件 + 续聊 + 权限桥接）
+
+- **dsh 后端升级为双模式**：优先接入 deepseek-harness 自带的 ACP server（`packages/examples/acp-demo`，NDJSON JSON-RPC over stdio），ACP 组件缺失或启动握手失败时自动回退原 headless 一次性模式（回退会在事件流里注明原因），backend id 仍为 `dsh`，任务/设置/契约零变化。probe 详情现在标注当前生效模式。
+- **ACP 模式解决 dsh 三大短板**：① 每条 committed assistant 消息经 `session/update` 实时推送，UI 不再全程黑箱，且每条协议通知都触发 `onHeartbeat` 给看门狗续命；② 同一服务进程内 `session/prompt` 多轮即续聊（`BackendSession.send` 真正可用，headless 时代「不支持续聊」的限制解除）；③ `session/request_permission` 桥接到 PermissionBroker，非 yolo 模式下 dsh 工具执行有人工审批（yolo 照旧 `DSH_PERMISSION_MODE=danger-full-access` 全放行）。
+- **实现**：新增 [src/main/backends/dsh-acp.ts](src/main/backends/dsh-acp.ts)——手写 NDJSON JSON-RPC 双向路由（响应按 id 分发/通知回调/服务端请求应答，无新依赖）+ 内嵌 cordis 组合配置（基于 `examples/acp-agent/cordis.yml`，改动：`dsh-credentials-local` 凭证行接管 `~/.dsh/.credentials.yaml`、shell 沙箱按平台分行——Windows 用 pwsh 行规避 Linux 向 bash-sandbox 的 E_ACCESSDENIED、provider/model/会话落盘根经 `AGENTDECK_DSH_*` 环境变量参数化，落盘默认 `~/.agentdeck/dsh-sessions`）。组合配置写到 dsh 仓库 `examples/acp-agent/agentdeck.cordis.yml`（loader 以 config 所在目录为锚解析插件，examples 是唯一同时链接 acp-demo 与 llm/credentials 的工作区）；Windows 下自愈补 `dsh-pwsh-sandbox` 的 junction 链接（pnpm install 会清掉、下次启动重建）。`dsh.ts` 的 `start` 优先走 ACP，`AcpBootError` 才降级。
+- **协议限制（已知）**：工具活动不上协议——纯工具长跑静默期仍无心跳，dsh 固定回合预算（60 分钟）继续兜底；ACP 仅新建会话，应用重启后无法按 sessionId 恢复（会话随服务进程存亡）；dsh 仍不能当领队（runner 侧 `backend !== 'dsh'` 守卫未放开，属后续工作）。
+- 新增 `smoke:dsh-acp`（fake ACP server 覆盖握手/事件流/续聊/权限/取消/关闭/启动失败 15 断言，已入 `smoke:all`）与 `smoke:dsh-acp-real`（真机：真实会话、回复 OK、流式可见、续聊、工具执行贯通）。
+
+### 扩展模块（Extensions Hub）主进程侧（设计见 docs/EXTENSIONS-HUB.md）
+
+- **技能页升级为扩展模块的主进程落地**：统一管理 Skills / MCP 服务器 / Hooks / 插件四类扩展资产（存放于共享目录 `~/.agentdeck` 下 `mcp/`、`hooks/` 新布局），可一键安装到各 agent CLI 的用户级配置；新增扩展源仓库层（内置精选目录 + 自定义 git/本地源）。
+- **新增主进程模块**：`mcp-store.ts`（`<name>.mcp.json` CRUD，transport 严格校验——拒绝未知 type/未知字段）、`hook-store.ts`（HOOK.md + hook.json，事件/匹配组校验）、`config-editor.ts`（用户配置安全合并器）、`plugin-inventory.ts`（三 CLI 插件/市场只读盘点 + claude 启停）、`sources.ts`（git/local 源 add/sync/remove/browse/导入技能）、`extension-catalog.ts`（内置精选源目录）。
+- **用户配置安全合并器（`config-editor.ts`）**：写任何用户配置前先备份 `<file>.agentdeck-bak`（已存在 .bak 不覆盖，保住用户最初状态）；JSON 配置只增删自己的键、其余键原样保留，zcode 侧严格只写 canonical 字段（schema 严格，未知字段会导致服务器被丢弃）；codex 的 `~/.codex/config.toml` 用**块级文本操作**（从块头到下一块头），不引入 toml 依赖；hook 装到 zcode 时强制 `hooks.enabled = true`，卸载按 command 集合精确匹配、不惊扰用户手工配置的组。
+- **扩展源仓库**：内置 7 个精选仓库（anthropics/skills、claude-plugins-official、superpowers 等）一键添加；自定义源支持 git URL（浅克隆）与本地目录；浏览扫描发现 SKILL.md / marketplace.json 资产（跳过 .git/node_modules、深度与文件数上限防大仓库卡死）并一键导入技能库（自动 -2 去重）。
+- IPC `src/main/ipc/extensions.ts`（mcp/hooks/plugins/sources 四组 channel，契约见 `src/shared/contracts.ts`）；目标路径全部由主进程从 `os.homedir()` 推导，渲染层不传路径。
+- **插件市场闭环（§8.1 主进程侧）**：仓库 tab 发现的 `marketplace.json` 一键注册为 Claude/ZCode 市场——`config-editor.ts` 新增 `registerMarketplaceToClaude`（settings.json `extraKnownMarketplaces`，repo 限 owner/repo github 形式，已注册幂等不覆盖）与 `registerMarketplaceToZcode`（`known_marketplaces.json` 数组 append，不写 ZCode CLI 自维护的 lastUpdated/cacheTransactionId）；`plugin-inventory.ts` 新增 `marketplaceStatus`（两 CLI 已注册市场清单，容错）；新模块 `plugin-cli.ts` 借 claude 官方 CLI `plugin install/uninstall` 代跑（复用 backends 的 CLI 解析/spawn 基建，60s 总超时，spec 校验 `plugin@marketplace`，输出尾部 ≤2000 字符）；`sources.ts` browse 为 marketplace 资产填 `pluginCount`，并新增 `registerMarketplaceAsset`（assetPath 越界/非 marketplace.json/缺 name 拒绝，local 与非 github 源明确报错，claude/zcode 成败独立返回）；IPC 新增 `marketplaces:status/register` 与 `plugins:install/uninstall`；`smoke:extensions` 增设市场闭环场景（假 home + 假 claude CLI 垫片，不 spawn 真 claude 不联网）。
+- 新增 `smoke:extensions`（纯 Node + 临时目录 + 本地 git fixture，不碰真实家目录不联网，已并入 `smoke:all` 链尾）。
+
 ### 修复发布版连不上 codex/claude/opencode（npm 垫片类 CLI 全军覆没）
 
 - **根因**：npm 全局安装的 CLI 只有 `.cmd` 垫片（本机 codex 即如此），`resolveCli` 解析出 JS 入口后返回 `process.execPath` 充当 node 去跑它，且 spawn 时不带 `ELECTRON_RUN_AS_NODE=1`——**打包版 exe 收到 `.js` 参数会忽略并把自己再启动一遍**（实测 `AgentDeck.exe codex.js --version` 打开的是 AgentDeck 的 Chromium，codex 从未执行），发布版因此永远连不上；dev 版正常纯属侥幸（dev 的 electron.exe 恰好把 `.js` 参数当单文件应用入口执行）。dsh/zcode/sidecar 各自已有正确处理，唯独 claude/codex/opencode 共用的 `resolveCli` + `runCliJsonl` 链路漏了。

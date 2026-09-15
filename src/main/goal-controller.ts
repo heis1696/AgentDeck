@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { Goal, GoalRun, GoalSpecDecision, GoalSpecSnapshot, GoalStatus, Task, TaskEvent } from '../shared/types'
+import type { Goal, GoalApprovalSnapshot, GoalCheckpoint, GoalRun, GoalSpecDecision, GoalSpecSnapshot, GoalStatus, Task, TaskEvent } from '../shared/types'
 import type { GoalCheckpointInput, GoalCreateInput, GoalEvolveInput } from '../shared/contracts'
 import { isTerminalGoalStatus, validateGoalTransition } from '../shared/taskflow'
 import { GoalStore, type GoalCreateRecord } from './goal-store'
@@ -67,12 +67,13 @@ export interface GoalBudgetExplanation {
 }
 
 /** Human-readable accounting shared by retry and Goal failure paths. */
-export function explainGoalBudget(goal: Pick<Goal, 'runCount' | 'maxRuns' | 'failures'>, task: Pick<Task, 'attempt'>): GoalBudgetExplanation {
+export function explainGoalBudget(goal: Pick<Goal, 'runCount' | 'maxRuns' | 'failures'>, task: Pick<Task, 'attempt'>, maxRetryAttempts = DEFAULT_MAX_RETRY_ATTEMPTS): GoalBudgetExplanation {
   const phaseAttempt = Math.max(0, task.attempt ?? 0)
+  const retryBudget = Number.isFinite(maxRetryAttempts) ? Math.max(0, Math.floor(maxRetryAttempts)) : DEFAULT_MAX_RETRY_ATTEMPTS
   return {
     phaseAttempt,
     phaseExecutions: phaseAttempt + 1,
-    maxPhaseExecutions: MAX_PHASE_EXECUTIONS,
+    maxPhaseExecutions: retryBudget + 1,
     goalFailures: Math.max(0, goal.failures ?? 0),
     maxGoalFailures: 2,
     goalRuns: Math.max(0, goal.runCount),
@@ -80,8 +81,8 @@ export function explainGoalBudget(goal: Pick<Goal, 'runCount' | 'maxRuns' | 'fai
   }
 }
 
-function budgetText(goal: Goal, task: Task, nextFailure?: number) {
-  const budget = explainGoalBudget(goal, task)
+function budgetText(goal: Goal, task: Task, nextFailure?: number, maxRetryAttempts = DEFAULT_MAX_RETRY_ATTEMPTS) {
+  const budget = explainGoalBudget(goal, task, maxRetryAttempts)
   const failures = nextFailure ?? budget.goalFailures
   return `Phase execution ${budget.phaseExecutions}/${budget.maxPhaseExecutions}; Goal failures ${failures}/${budget.maxGoalFailures}; Goal runs ${budget.goalRuns}/${budget.maxGoalRuns}`
 }
@@ -107,6 +108,28 @@ export interface GoalTaskInput {
   dedupeKey?: string
 }
 
+/**
+ * Deterministic evidence returned by the host-side acceptance verifier.  The
+ * model may suggest completedConditions in its checkpoint, but only this
+ * callback can mark a criterion as passed when it is configured.
+ */
+export interface GoalAcceptanceEvidence {
+  criterionId: string
+  passed: boolean
+  evidence?: string
+}
+
+export type GoalAcceptanceVerifierResult =
+  | readonly GoalAcceptanceEvidence[]
+  | Record<string, { passed: boolean; evidence?: string }>
+  | null
+
+export type GoalAcceptanceVerifier = (
+  goal: Goal,
+  task: Task,
+  checkpoint: GoalCheckpoint
+) => GoalAcceptanceVerifierResult
+
 export interface GoalControllerOptions {
   /** Creates a compatibility Task and, when requested, enqueues it. */
   createTask: (input: GoalTaskInput) => Task
@@ -125,6 +148,14 @@ export interface GoalControllerOptions {
   onGuard?: (goal: Goal, reason: string, detail: string) => void
   /** doom-loop 审批阈值（固定值或实时读设置的取值函数；缺省用 DOOM_LOOP_THRESHOLD） */
   doomLoopThreshold?: number | (() => number)
+  /** Must match TaskRunner's automatic retry setting (attempts are zero-based). */
+  maxRetryAttempts?: number | (() => number)
+  /**
+   * Optional host-side result gate. When supplied, model-reported
+   * completedConditions are advisory only; missing, malformed or thrown
+   * verification is treated as a failed gate.
+   */
+  verifyAcceptance?: GoalAcceptanceVerifier
 }
 
 export interface GoalDecision {
@@ -216,6 +247,13 @@ export class GoalController {
     if (options.onUpdated) this.updateListeners.add(options.onUpdated)
   }
 
+  private retryAttempts() {
+    const value = typeof this.options.maxRetryAttempts === 'function'
+      ? this.options.maxRetryAttempts()
+      : this.options.maxRetryAttempts
+    return Number.isFinite(value) ? Math.max(0, Math.floor(value as number)) : DEFAULT_MAX_RETRY_ATTEMPTS
+  }
+
   subscribe(listener: (goal: Goal) => void) {
     this.updateListeners.add(listener)
     return () => this.updateListeners.delete(listener)
@@ -226,6 +264,35 @@ export class GoalController {
   runs(id: string) { return this.goals.runs(id) }
   checkpoints(id: string) { return this.goals.checkpoints(id) }
   decisions(id: string): GoalSpecDecision[] { return this.goals.decisions(id) }
+
+  /** Issue a durable approval for the current specification generation. */
+  approveEvolution(id: string, actor = 'user'): GoalApprovalSnapshot | null {
+    const goal = this.goals.get(id)
+    const spec = goal ? this.goals.snapshots(id).at(-1) : null
+    if (!goal || !spec || !actor.trim()) return null
+    const approval: GoalApprovalSnapshot = {
+      requestId: `approval_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      goalId: id,
+      specGeneration: spec.generation,
+      workVersion: spec.id,
+      approvedAt: Date.now(),
+      actor: actor.trim()
+    }
+    return this.goals.saveSpecApproval(approval)
+  }
+
+  /** Record a malformed/denied production proposal without applying it. */
+  rejectEvolution(id: string, reason: string) {
+    const goal = this.goals.get(id)
+    if (!goal) return { ok: false as const, error: '目标不存在' }
+    this.goals.recordSpecDecision({
+      goalId: id,
+      generation: this.nextGeneration(id),
+      decision: 'rejected',
+      reason: reason.trim() || 'invalid evolution proposal'
+    })
+    return { ok: false as const, error: reason }
+  }
 
   /** Loop 4 规格快照：按 generation 升序只读返回；目标不存在时返回空表。 */
   snapshots(id: string): GoalSpecSnapshot[] {
@@ -289,9 +356,18 @@ export class GoalController {
       return { ok: false, error: reason, questions: questions.length ? questions : ['Clarify the goal outcome and constraints before execution'] }
     }
     const patch = input.patch
+    const approval = input.approvalSnapshot
+    if (approval) {
+      const currentSpec = this.goals.snapshots(goal.id).at(-1)
+      const approvalError = this.validateApprovalSnapshot(goal, approval, currentSpec?.generation ?? 1, currentSpec?.id)
+      if (approvalError) return reject(approvalError, patch)
+    }
     if (!patch || !Array.isArray(patch.criteria)) return reject('缺少规格进化补丁（patch）')
     if (input.approve !== true) return reject('规格进化需用户批准（approve=true）后才能应用', patch)
     if (!patch.provenance?.source?.trim() || !patch.provenance.rationale?.trim()) return reject('规格进化补丁必须包含 provenance.source 和 provenance.rationale', patch)
+    if (approval && !patch.text?.trim() && patch.criteria.every((criterion) => criterion.action === 'keep')) {
+      return reject('规格进化补丁不能是空操作（至少 revise/add 一条标准或修改目标文本）', patch)
+    }
     const criteria = (goal.acceptanceCriteria ?? []).map((criterion) => ({ ...criterion }))
     const seen = new Set<string>()
     for (const [index, criterionPatch] of patch.criteria.entries()) {
@@ -328,7 +404,7 @@ export class GoalController {
     const text = patch.text?.trim() || goal.text
     const goalSnapshot: Goal = { ...goal, text, acceptanceCriteria: criteria.map((criterion) => ({ ...criterion })) }
     const checkpoint = this.goals.checkpoints(goal.id).at(-1)
-    const snapshot = this.goals.saveSpecSnapshot({
+    const snapshotInput = {
       goalId: goal.id,
       generation: this.nextGeneration(goal.id),
       text,
@@ -336,23 +412,38 @@ export class GoalController {
       completionConditions: goal.completionConditions,
       stopConditions: goal.stopConditions,
       outcomeGatePassed: resultGatePassed(goal),
-      decision: 'applied',
+      decision: 'applied' as const,
       goalSnapshot,
       ...(checkpoint ? { checkpoint } : {}),
       patch,
-      ...(patch.provenance?.rationale ? { reason: patch.provenance.rationale } : {})
-    })
-    this.goals.recordSpecDecision({
+      ...(patch.provenance?.rationale ? { reason: patch.provenance.rationale } : {}),
+      ...(approval ? { approvalSnapshot: approval } : {})
+    }
+    const decisionInput = {
       goalId: goal.id,
-      generation: snapshot.generation,
-      decision: 'applied',
+      generation: snapshotInput.generation,
+      decision: 'applied' as const,
       reason: patch.provenance.rationale,
       patch,
-      provenance: patch.provenance
-    })
-    const updated = this.goals.update(goal.id, { text, acceptanceCriteria: criteria })!
+      provenance: patch.provenance,
+      ...(approval ? { approvalSnapshot: approval } : {})
+    }
+    const snapshot = this.goals.commitSpecEvolution({ goalId: goal.id, goalPatch: { text, acceptanceCriteria: criteria }, snapshot: snapshotInput, decision: decisionInput })!
+    const updated = this.goals.get(goal.id)!
     this.emit(updated)
     return { ok: true, goal: updated, snapshot, questions: [] }
+  }
+
+  private validateApprovalSnapshot(goal: Goal, approval: GoalApprovalSnapshot, currentGeneration: number, currentWorkVersion?: string) {
+    if (approval.goalId !== goal.id) return 'approvalSnapshot.goalId does not match Goal'
+    if (approval.specGeneration !== currentGeneration) return `approvalSnapshot is stale (expected generation ${currentGeneration})`
+    if (!approval.requestId.trim() || !approval.workVersion.trim() || !approval.actor.trim()) return 'approvalSnapshot identity fields are required'
+    if (currentWorkVersion && approval.workVersion !== currentWorkVersion) return 'approvalSnapshot.workVersion does not match current specification'
+    if (!Number.isFinite(approval.approvedAt) || approval.approvedAt <= 0) return 'approvalSnapshot.approvedAt is invalid'
+    const issued = this.goals.specApproval(approval.requestId)
+    if (!issued || JSON.stringify(issued) !== JSON.stringify(approval)) return 'approvalSnapshot was not issued by the approval gate'
+    if (this.goals.decisions(goal.id).some((decision) => decision.approvalSnapshot?.requestId === approval.requestId)) return 'approvalSnapshot.requestId has already been consumed'
+    return null
   }
 
   /** 规格回滚：以历史快照覆盖当前规格并落 'rollback' 记录；generation 只增不减，历史不可变。 */
@@ -374,7 +465,17 @@ export class GoalController {
     }) : []
     if (!base) return { ok: false, error: `规格快照 generation ${generation} 不存在` }
     if (base.decision === 'rollback') return { ok: false, error: `generation ${generation} 本身是回滚记录，不能作为回滚目标` }
-    const snapshot = this.goals.saveSpecSnapshot({
+    const rollbackComplete = rollbackCriteria.length > 0 && rollbackCriteria.every((criterion) => criterion.status === 'passed')
+    const rollbackPatch = {
+      text: base.text,
+      acceptanceCriteria: rollbackCriteria,
+      completionConditions: base.completionConditions,
+      stopConditions: base.stopConditions,
+      ...(rollbackComplete
+        ? { status: 'completed' as const, blockedReason: undefined, stopReason: undefined }
+        : { status: 'waiting_user' as const, blockedReason: `Specification rolled back to generation ${generation}; review before continuing`, stopReason: 'spec_rollback' })
+    }
+    const snapshotInput = {
       goalId: goal.id,
       generation: this.nextGeneration(goal.id),
       text: base.text,
@@ -382,23 +483,19 @@ export class GoalController {
       completionConditions: base.completionConditions,
       stopConditions: base.stopConditions,
       outcomeGatePassed: base.outcomeGatePassed,
-      decision: 'rollback',
+      decision: 'rollback' as const,
       goalSnapshot: { ...goal, text: base.text, acceptanceCriteria: rollbackCriteria, completionConditions: base.completionConditions, stopConditions: base.stopConditions },
       ...(this.goals.checkpoints(goal.id).at(-1) ? { checkpoint: this.goals.checkpoints(goal.id).at(-1)! } : {}),
       reason: `回滚到 generation ${generation}`
-    })
-    this.goals.recordSpecDecision({
+    }
+    const decisionInput = {
       goalId: goal.id,
-      generation: snapshot.generation,
-      decision: 'rollback',
+      generation: snapshotInput.generation,
+      decision: 'rollback' as const,
       reason: `回滚到 generation ${generation}`
-    })
-    const updated = this.goals.update(goal.id, {
-      text: base.text,
-      acceptanceCriteria: rollbackCriteria,
-      completionConditions: base.completionConditions,
-      stopConditions: base.stopConditions
-    })!
+    }
+    const snapshot = this.goals.commitSpecEvolution({ goalId: goal.id, goalPatch: rollbackPatch, snapshot: snapshotInput, decision: decisionInput })!
+    const updated = this.goals.get(goal.id)!
     this.emit(updated)
     return { ok: true, goal: updated, snapshot }
   }
@@ -453,6 +550,7 @@ export class GoalController {
   onTaskEvent(taskId: string, event: Pick<TaskEvent, 'kind' | 'data' | 'text'>) {
     if (event.kind !== 'tool') return { doomLoop: false as const }
     const data = event.data && typeof event.data === 'object' ? event.data as Record<string, unknown> : {}
+    if (data.runnerDoomHandled === true) return { doomLoop: false as const }
     if (data.phase !== undefined && data.phase !== 'started') return { doomLoop: false as const }
     const toolName = typeof event.text === 'string' ? event.text
       : typeof data.toolName === 'string' ? data.toolName
@@ -503,6 +601,20 @@ export class GoalController {
       ...(input.backend ? { backend: input.backend } : {})
     }
     const goal = this.goals.create(record)
+    // Interview gate runs before any Task is adopted, created, or enqueued.
+    // Ambiguous goals remain visible for clarification without consuming a
+    // run, duration, or retry budget.
+    if (input.ambiguityScore !== undefined && input.ambiguityScore > AMBIGUITY_THRESHOLD) {
+      const reason = `Goal ambiguity ${input.ambiguityScore.toFixed(3)} exceeds threshold ${AMBIGUITY_THRESHOLD}; clarification required`
+      const waiting = this.goals.update(goal.id, {
+        status: 'waiting_user',
+        blockedReason: reason,
+        stopReason: 'ambiguity'
+      })!
+      this.emit(waiting)
+      this.options.onGuard?.(waiting, 'ambiguity', reason)
+      return waiting
+    }
     // v2：收养该 Issue 现有最新 Task（无则建首个；有则登记为当前阶段任务）
     const knownTasks = this.options.listTasks?.() ?? []
     const existing = knownTasks.filter((t) => t.issueId === issueId).sort((a, b) => b.createdAt - a.createdAt)[0]
@@ -694,9 +806,9 @@ export class GoalController {
     if (!['done', 'failed', 'cancelled'].includes(task.status)) return null
     const projected = this.goals.upsertRunFromTask(task)
     if (!projected) return null
-    const retrying = task.status === 'failed' && task.failure?.retryable && (task.attempt ?? 0) < 2
+    const retrying = task.status === 'failed' && task.failure?.retryable && (task.attempt ?? 0) < this.retryAttempts()
     if (retrying) {
-      const reason = `${budgetText(goal, task)}; retrying transient failure: ${task.error || 'Run failed'}`
+      const reason = `${budgetText(goal, task, undefined, this.retryAttempts())}; retrying transient failure: ${task.error || 'Run failed'}`
       const updated = this.goals.update(goal.id, { currentRunId: projected.id, status: 'active', blockedReason: reason, stopReason: undefined })
       this.emit(updated)
       return { status: 'active', complete: false, shouldContinue: false, reason }
@@ -727,7 +839,7 @@ export class GoalController {
       nextPlan: '',
       blockers: task.status === 'cancelled' ? ['Run cancelled'] : task.status === 'failed' ? [task.error || 'Run failed'] : []
     }
-    this.goals.addCheckpoint({
+    const checkpointRecord = this.goals.addCheckpoint({
       goalId: goal.id,
       runId: projected.id,
       phaseIndex: projected.phaseIndex,
@@ -735,11 +847,30 @@ export class GoalController {
       durationMs: projected.durationMs ?? duration,
       usage: projected.usage
     })
-    // Project deterministic checkpoint evidence onto first-class criteria.
-    // A passed criterion is monotonic for the life of a specification.
+    // Project evidence onto first-class criteria. A configured host-side
+    // verifier is authoritative: model completedConditions remain advisory
+    // and cannot mark a criterion PASS on their own.
+    const verification = this.verifyAcceptance(goal, task, checkpointRecord)
     const completedEvidence = parsed.completedConditions.map(normalize)
     const acceptanceCriteria = (goal.acceptanceCriteria ?? []).map((criterion) => {
       if (criterion.status === 'passed') return { ...criterion }
+      if (verification) {
+        const evidence = verification.get(criterion.id)
+        if (!evidence) return { ...criterion }
+        if (evidence.passed) {
+          return {
+            ...criterion,
+            status: 'passed' as const,
+            passedAt: Date.now(),
+            ...(evidence.evidence ? { evidence: evidence.evidence } : {})
+          }
+        }
+        return {
+          ...criterion,
+          status: 'failed' as const,
+          ...(evidence.evidence ? { evidence: evidence.evidence } : {})
+        }
+      }
       const matched = completedEvidence.some((item) => item === normalize(criterion.id) || item === normalize(criterion.text) || mentions(item, criterion.text))
       return matched ? { ...criterion, status: 'passed' as const, passedAt: Date.now(), evidence: parsed.summary } : { ...criterion }
     })
@@ -753,7 +884,7 @@ export class GoalController {
     const nextProgressKey = progressKeyForOutput(output)
     const nextNoProgress = goal.progressKey === nextProgressKey ? (goal.noProgress ?? 0) + 1 : 0
     this.goals.update(goal.id, { progressKey: nextProgressKey, noProgress: nextNoProgress })
-    const decision = this.decide(goal, task, parsed)
+    const decision = this.decide(goal, task, parsed, !!verification)
     // v2：完成时调用 finalizeIssue（归档 Issue）；非重试失败自动续轮（failures 上限 2）
     if (decision.complete && decision.status === 'completed') {
       this.options.finalizeIssue?.(goal.issueId)
@@ -768,6 +899,18 @@ export class GoalController {
       if (decision.stopReason) this.options.onGuard?.(next, decision.stopReason, decision.reason ?? decision.stopReason)
     } else {
       this.emit(this.goals.get(goal.id))
+    }
+    // Runtime evidence belongs to the current specification generation. Keep
+    // generation 1 replayable with the final lifecycle state after the result
+    // gate and budget decision have been durably applied.
+    const currentGoal = this.goals.get(goal.id) ?? goal
+    const currentSpec = this.goals.snapshots(goal.id).at(-1)
+    if (currentSpec) {
+      this.goals.updateSpecSnapshot(goal.id, currentSpec.generation, {
+        checkpoint: checkpointRecord,
+        outcomeGatePassed: resultGatePassed(currentGoal),
+        goalSnapshot: { ...currentGoal, acceptanceCriteria: currentGoal.acceptanceCriteria?.map((criterion) => ({ ...criterion })) }
+      })
     }
     // v2：续轮引擎（首选同会话续聊 continueTask，兜底 launchNext 新任务）
     if (decision.shouldContinue && decision.status === 'active') {
@@ -784,7 +927,37 @@ export class GoalController {
     return decision
   }
 
-  private decide(goal: Goal, task: Task, checkpoint: ParsedCheckpoint | null): GoalDecision {
+  /**
+   * Invoke the injected verifier defensively. A callback error or malformed
+   * response yields an empty map, keeping the result gate closed while still
+   * preserving the model checkpoint for explanatory/replay purposes.
+   */
+  private verifyAcceptance(goal: Goal, task: Task, checkpoint: GoalCheckpoint): Map<string, GoalAcceptanceEvidence> | null {
+    const verifier = this.options.verifyAcceptance
+    if (!verifier) return null
+    try {
+      const result = verifier(goal, task, checkpoint)
+      const verified = new Map<string, GoalAcceptanceEvidence>()
+      const entries: Array<[string, unknown]> = Array.isArray(result)
+        ? result.map((item) => [typeof item?.criterionId === 'string' ? item.criterionId : '', item] as [string, unknown])
+        : result && typeof result === 'object'
+          ? Object.entries(result)
+          : []
+      for (const [entryId, raw] of entries) {
+        const item = raw && typeof raw === 'object' ? raw as Record<string, unknown> : null
+        if (!item || typeof item !== 'object') continue
+        const criterionId = (typeof item.criterionId === 'string' ? item.criterionId : entryId).trim()
+        if (!criterionId || typeof item.passed !== 'boolean' || verified.has(criterionId)) continue
+        const evidence = typeof item.evidence === 'string' ? item.evidence.trim() : ''
+        verified.set(criterionId, { criterionId, passed: item.passed, ...(evidence ? { evidence } : {}) })
+      }
+      return verified
+    } catch {
+      return new Map()
+    }
+  }
+
+  private decide(goal: Goal, task: Task, checkpoint: ParsedCheckpoint | null, verifierActive = false): GoalDecision {
     // A user cancellation wins over the compatibility Task's eventual
     // cancellation callback. Do not resurrect a terminal Goal to waiting_user.
     if (goal.status === 'cancelled') return { status: 'cancelled', complete: false, shouldContinue: false, reason: goal.blockedReason, stopReason: goal.stopReason }
@@ -798,17 +971,17 @@ export class GoalController {
     // TaskRunner may perform a bounded automatic retry for transient failures.
     // Keep the Goal active while that same phase is being re-queued; only a
     // non-retryable or exhausted failure becomes a user-visible failed Goal.
-    if (task.status === 'failed' && task.failure?.retryable && (task.attempt ?? 0) < 2) {
-      return { status: 'active', complete: false, shouldContinue: false, reason: `${budgetText(goal, task)}; retrying transient failure: ${task.error || 'Run failed'}` }
+    if (task.status === 'failed' && task.failure?.retryable && (task.attempt ?? 0) < this.retryAttempts()) {
+      return { status: 'active', complete: false, shouldContinue: false, reason: `${budgetText(goal, task, undefined, this.retryAttempts())}; retrying transient failure: ${task.error || 'Run failed'}` }
     }
     // v2：非重试失败自动续轮（failures 上限 2；续轮成功后清零）
     if (task.status === 'failed') {
       const failures = (goal.failures ?? 0) + 1
       this.goals.update(goal.id, { failures })
       if (failures < 2) {
-        return { status: 'active', complete: false, shouldContinue: true, reason: `${budgetText(goal, task, failures)}; auto-continue after failure: ${task.error || 'Run failed'}` }
+        return { status: 'active', complete: false, shouldContinue: true, reason: `${budgetText(goal, task, failures, this.retryAttempts())}; auto-continue after failure: ${task.error || 'Run failed'}` }
       }
-      return { status: 'failed', complete: false, shouldContinue: false, reason: `${budgetText(goal, task, failures)}; failure limit reached: ${task.error || 'Run failed'}`, stopReason: 'failure_cap' }
+      return { status: 'failed', complete: false, shouldContinue: false, reason: `${budgetText(goal, task, failures, this.retryAttempts())}; failure limit reached: ${task.error || 'Run failed'}`, stopReason: 'failure_cap' }
     }
     // 成功续轮时清零 failures
     if (task.status === 'done' && goal.failures) {
@@ -823,8 +996,12 @@ export class GoalController {
     const criteria = goal.acceptanceCriteria ?? goal.completionConditions.map((text, index) => ({ id: `ac_${index}`, text, status: 'pending' as const }))
     // Acceptance criteria are the result gate. Legacy completionConditions are
     // retained as a compatibility fallback when no first-class list exists.
-    const complete = criteria.every((criterion) => criterion.status === 'passed'
-      || completedNormalized.some((item) => item === normalize(criterion.id) || item === normalize(criterion.text) || mentions(item, criterion.text)))
+    // With a verifier configured, only persisted criterion statuses count;
+    // model self-reports are deliberately ignored.
+    const complete = verifierActive
+      ? criteria.length > 0 && criteria.every((criterion) => criterion.status === 'passed')
+      : criteria.every((criterion) => criterion.status === 'passed'
+        || completedNormalized.some((item) => item === normalize(criterion.id) || item === normalize(criterion.text) || mentions(item, criterion.text)))
     if (complete) return { status: 'completed', complete: true, shouldContinue: false }
     const stop = goal.stopConditions.find((condition) => mentions(`${checkpoint?.summary ?? ''} ${checkpoint?.blockers.join(' ') ?? ''}`, condition))
     if (stop) return { status: 'waiting_user', complete: false, shouldContinue: false, reason: `Stop condition: ${stop}`, stopReason: 'stop_condition' }

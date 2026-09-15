@@ -2,6 +2,7 @@ import { Undo2 } from 'lucide-react'
 import { useEffect, useRef, useState, type CSSProperties, type RefObject } from 'react'
 import { Markdown, renderStreamingMarkers } from '../Markdown'
 import { fmtDuration } from '../../api'
+import { PARKED_QUEUED_LABEL } from '../../labels'
 import type { Task, TaskEvent } from '../../../../shared/types'
 import type { Turn } from '../../hooks/turnModel'
 import { classifyTool, navSummary } from '../../hooks/turnModel'
@@ -162,7 +163,7 @@ export function TurnTimeline({ task, turns, activeNav, onNavigate, onRewind, log
               return <div className="bubble agent" key={itemIndex}>{item.closed ? <Markdown text={item.text} /> : <pre className="streaming">{renderStreamingMarkers(item.text)}</pre>}{streaming && !item.closed && <div className="log-running"><span className="dots"><i /><i /><i /></span>回复中…</div>}{turn.usage && finalIndex < 0 && itemIndex === lastBubbleIndex && <UsageBadge usage={turn.usage} />}</div>
             })}
             {streaming && !endsWithOpenText && finalIndex < 0 && <div className="bubble agent"><div className="log-running"><span className="dots"><i /><i /><i /></span>回复中…</div></div>}
-            {pending && <div className="bubble agent"><div className="log-running"><span className="dots"><i /><i /><i /></span>排队等待执行…</div></div>}
+            {pending && <div className="bubble agent"><div className="log-running">{task.parked ? PARKED_QUEUED_LABEL : <><span className="dots"><i /><i /><i /></span>排队等待执行…</>}</div></div>}
           </div>
         })}
         {turns.length === 0 && <div className="list-empty">（无对话内容）</div>}
