@@ -186,6 +186,20 @@ app.whenReady().then(async () => {
       { collectFinal: true, consultDepth: depth + 1 })
     return result.ok ? (result.finalText ?? '（对方未返回文字意见）') : `咨询失败：${result.error ?? '未知错误'}`
   })
+  runner.attachInvestigate(async ({ sourceTaskId, call, depth }) => {
+    if (depth >= 1) return '调查深度已达上限；请基于已有信息判断。'
+    const child = await runner.spawnInvestigateChild(sourceTaskId, call)
+    if (!child) return `调查未能接单：${call.to}`
+    const deadline = Date.now() + 10 * 60 * 1000
+    for (;;) {
+      const current = store.get(child.id)
+      if (!current) return `调查任务已消失：${child.id}`
+      if (current.status === 'done') return current.result ?? '（调查没有返回文字）'
+      if (current.status === 'failed' || current.status === 'cancelled') return `调查任务 ${current.status}：${current.error ?? '无最终报告'}`
+      if (Date.now() >= deadline) return `调查任务超时：${child.id}`
+      await new Promise((resolve) => setTimeout(resolve, 500))
+    }
+  })
   meetingController = new MeetingController({
     store: new MeetingStore(app.getPath('userData')),
     offices: agentSessions,

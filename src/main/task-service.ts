@@ -50,6 +50,8 @@ export interface ChildTaskCreateInput {
   workerIndex?: number
   unavailableReason?: string
   worktree?: WorktreeInfo
+  suppressIssue?: boolean
+  trigger?: RunTrigger
 }
 
 export interface HandoffTaskCreateInput {
@@ -188,8 +190,9 @@ export class TaskService {
       workerIndex: input.workerIndex,
       unavailableReason: input.unavailableReason,
       worktree: input.worktree,
+      suppressIssue: input.suppressIssue,
       titleAuto: true
-    }, 'assignment')
+    }, input.trigger ?? 'assignment')
   }
 
   /**

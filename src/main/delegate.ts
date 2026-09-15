@@ -81,6 +81,41 @@ export function parseConsultsMerged(...texts: string[]): ConsultCall[] {
   return out
 }
 
+export interface InvestigateCall {
+  to: string
+  prompt: string
+  reason?: string
+}
+
+export function parseInvestigates(text: string): InvestigateCall[] {
+  const out: InvestigateCall[] = []
+  const re = /<investigate\b(?=[^>]*\bto\s*=)([^>]*)>([\s\S]*?)<\/investigate>/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(text))) {
+    const prompt = m[2].trim()
+    const to = tagAttr(m[1], 'to')
+    const reason = tagAttr(m[1], 'reason')
+    if (prompt && to) out.push({ to, prompt, ...(reason ? { reason } : {}) })
+  }
+  return out
+}
+
+export function stripInvestigates(text: string): string {
+  return text.replace(/<investigate\b(?=[^>]*\bto\s*=)[^>]*>[\s\S]*?<\/investigate>/g, '').trim()
+}
+
+export function parseInvestigatesMerged(...texts: string[]): InvestigateCall[] {
+  const seen = new Set<string>()
+  const out: InvestigateCall[] = []
+  for (const text of texts) for (const call of parseInvestigates(text)) {
+    const key = `${call.to}\n${call.prompt}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(call)
+  }
+  return out
+}
+
 // ---- 阶段接力（<continue>）：多阶段任务在阶段边界硬切新会话，简报为唯一携带物 ----
 
 export interface ContinueCall {

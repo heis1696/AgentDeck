@@ -4,7 +4,7 @@ import type { Task, TaskEvent, WorktreeInfo } from '../shared/types'
 import { createHash } from 'node:crypto'
 import type { TaskStore } from './store'
 import type { AgentBackend, BackendSession, PermissionRequest, BackendTurnResult } from './backends/types'
-import { buildAgentPrompt, buildDelegationBlock, runDelegationLoop, parseContinueMerged, stripContinue, parseDelegates, parseConsultsMerged, stripConsults, ancestorBudget, buildChildPrompt, sanitizeChildPrompt, MAX_DEPTH, MAX_TOTAL_ROUNDS, type AgentLike, type DelegateCall, type ConsultCall } from './delegate'
+import { buildAgentPrompt, buildDelegationBlock, runDelegationLoop, parseContinueMerged, stripContinue, parseDelegates, parseConsultsMerged, stripConsults, parseInvestigatesMerged, stripInvestigates, ancestorBudget, buildChildPrompt, sanitizeChildPrompt, MAX_DEPTH, MAX_TOTAL_ROUNDS, type AgentLike, type DelegateCall, type ConsultCall, type InvestigateCall } from './delegate'
 import { isGitRepo, createWorktree, currentBranch, setWorktreeOwner } from './git'
 
 /** API 预设（主进程 presets.ts 的 ApiPreset 的运行时子集，避免环依赖） */
@@ -22,6 +22,7 @@ export type ContinueHandler = (input: { sourceTaskId: string; issueId: string; b
 /** Cross-leader consultation hook. The runner owns source-session turn order;
  * the host resolves the target office session and returns its final answer. */
 export type ConsultHandler = (input: { sourceTaskId: string; call: ConsultCall; depth: number }) => Promise<string | null>
+export type InvestigateHandler = (input: { sourceTaskId: string; call: InvestigateCall; depth: number }) => Promise<string | null>
 
 /** Maximum source-session consultation回合 per turn; target depth is capped separately. */
 export const MAX_CONSULT_ROUNDS = 2
@@ -66,6 +67,8 @@ export interface ChildTaskCreator {
     workerIndex: number
     unavailableReason?: string
     worktree?: WorktreeInfo
+    suppressIssue?: boolean
+    trigger?: import('../shared/types').RunTrigger
   }): Task
 }
 export type TaskCreationRequest = Parameters<ChildTaskCreator['createChildTask']>[0]
@@ -510,6 +513,7 @@ export class TaskRunner {
 
   private onContinue: ContinueHandler | null = null
   private onConsult: ConsultHandler | null = null
+  private onInvestigate: InvestigateHandler | null = null
   /** 阶段接力处理器（主进程接 createTask：同 issue 新 run、新会话硬切） */
   attachContinue(handler: ContinueHandler) {
     this.onContinue = handler
@@ -518,6 +522,10 @@ export class TaskRunner {
   /** Attach the host-side resolver for `<consult>` tags emitted by a leader. */
   attachConsult(handler: ConsultHandler) {
     this.onConsult = handler
+  }
+
+  attachInvestigate(handler: InvestigateHandler) {
+    this.onInvestigate = handler
   }
 
   private taskCreator: TaskCreator | null = null
@@ -750,6 +758,39 @@ export class TaskRunner {
     this.enqueue(this.store.get(child.id)!)
     return child
   }
+
+  /** Create a read-only investigation child: no worktree, no integration, no Issue. */
+  async spawnInvestigateChild(taskId: string, call: InvestigateCall): Promise<Task | null> {
+    const task = this.store.get(taskId)
+    if (!task || task.parentTaskId) return null
+    const team = this.getTeam?.() ?? []
+    const me = team.find((agent) => agent.id === task.agentId)
+    const subs = (me?.subordinates ?? []).map((id) => team.find((agent) => agent.id === id)).filter(Boolean) as AgentLike[]
+    const target = subs.find((agent) => agent.name.toLowerCase() === call.to.toLowerCase())
+      ?? subs.find((agent) => agent.backend.toLowerCase() === call.to.toLowerCase())
+    if (!target) { this.note(taskId, `⚠ 未找到可调查队员 "${call.to}"，跳过`); return null }
+    const { inherited } = ancestorBudget(this.store, taskId)
+    const budget = this.opts().delegateMaxTotalRounds ?? MAX_TOTAL_ROUNDS
+    if (budget - inherited <= 0) { this.note(taskId, '⚠ 全链委派轮数预算已耗尽，拒绝调查'); return null }
+    const childInput = {
+      title: `${target.name}: 调查 ${call.prompt.slice(0, 40).replace(/\n/g, ' ')}`,
+      prompt: buildChildPrompt(`只读调查：${call.prompt}\n不要修改代码、不要创建提交，只返回可核验事实与引用。`, task.prompt),
+      workdir: task.workdir,
+      backend: target.backend,
+      ...(target.id ? { agentId: target.id } : {}),
+      parentTaskId: taskId,
+      workerIndex: this.workerCount(taskId) + 1,
+      suppressIssue: true,
+      trigger: 'meeting' as const,
+      unavailableReason: '调查模式：共享工作区只读，不创建 worktree'
+    }
+    const child = this.taskCreator
+      ? (typeof this.taskCreator === 'function' ? this.taskCreator(childInput) : this.taskCreator.createChildTask(childInput))
+      : this.store.create(childInput)
+    this.note(taskId, `⚡ 已接单（调查）：${target.name} ← ${call.prompt.slice(0, 60).replace(/\n/g, ' ')}`)
+    this.enqueue(this.store.get(child.id)!)
+    return child
+  }
   private workerCount(taskId: string) {
     return this.store.list().filter((t) => t.parentTaskId === taskId).length
   }
@@ -804,6 +845,11 @@ export class TaskRunner {
         finalText = outcome.finalText || r.response
         scanTexts = outcome.scanTexts
       }
+      if (this.onInvestigate) {
+        const investigation = await this.completeInvestigates(taskId, session, finalText, scanTexts, task.parentTaskId ? 1 : 0)
+        finalText = investigation.finalText
+        scanTexts = investigation.scanTexts
+      }
       if (this.onConsult) {
         const consultation = await this.completeConsults(taskId, session, finalText, scanTexts, consultDepth)
         finalText = consultation.finalText
@@ -812,6 +858,36 @@ export class TaskRunner {
       finalText = this.handleContinue(taskId, task, scanTexts, finalText)
       await this.finalizeDone(taskId, finalText)
     return finalText
+  }
+
+  private async completeInvestigates(
+    taskId: string,
+    session: BackendSession,
+    initialText: string,
+    initialScanTexts: string[],
+    depth: number
+  ): Promise<{ finalText: string; scanTexts: string[] }> {
+    let finalText = initialText
+    let scanTexts = initialScanTexts
+    const seen = new Set<string>()
+    const calls = parseInvestigatesMerged(...scanTexts).filter((call) => {
+      const key = `${call.to}\n${call.prompt}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    if (!calls.length) return { finalText: stripInvestigates(finalText), scanTexts }
+    const reports: string[] = []
+    for (const call of calls) {
+      const report = await this.onInvestigate?.({ sourceTaskId: taskId, call, depth })
+      if (report?.trim()) reports.push(`### 调查 ${call.to} 的结果\n${report.trim()}`)
+    }
+    if (!reports.length) return { finalText: stripInvestigates(finalText), scanTexts }
+    const turn = await this.sendTurn(taskId, session, `【系统·调查结果】\n${reports.join('\n\n')}\n\n请基于以上只读调查继续处理原任务。`)
+    if (!turn.ok) throw new Error(turn.error || '调查结果回灌回合失败')
+    finalText = turn.response
+    scanTexts = [turn.delegationText ?? '', turn.response]
+    return { finalText: stripInvestigates(finalText), scanTexts }
   }
 
   /**
