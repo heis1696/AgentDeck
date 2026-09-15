@@ -9,6 +9,11 @@ export interface OfficeFollowUpResult {
   finalText?: string
 }
 
+export interface OfficeDeliveryResult extends OfficeFollowUpResult {
+  taskId?: string
+  created?: boolean
+}
+
 export interface OfficeRunner {
   enqueue(task: Task): void
   followUp(taskId: string, content: string, opts?: { collectFinal?: boolean; consultDepth?: number }): Promise<OfficeFollowUpResult>
@@ -39,6 +44,7 @@ export class AgentSessionRegistry {
   private readonly waitPollMs: number
   private readonly waitTimeoutMs: number
   private readonly locks = new Map<string, Promise<void>>()
+  private disposed = false
 
   constructor(options: AgentSessionRegistryOptions) {
     this.store = options.store
@@ -62,7 +68,8 @@ export class AgentSessionRegistry {
   }
 
   /** Create/recover an office task and make sure its bootstrap turn finished. */
-  async ensure(agentId: string): Promise<Task> {
+  async ensure(agentId: string, options?: { workdir?: string }): Promise<Task> {
+    if (this.disposed) throw new Error('办公室会话注册表已关闭')
     const agent = this.resolveAgent(agentId)
     let task = this.get(agent.id)
     if (!task) {
@@ -71,6 +78,7 @@ export class AgentSessionRegistry {
         prompt: this.officePrompt(agent),
         backend: agent.backend,
         agentId: agent.id,
+        workdir: options?.workdir ?? '',
         trigger: 'meeting' as RunTrigger,
         suppressIssue: true,
         titleAuto: false,
@@ -101,6 +109,19 @@ export class AgentSessionRegistry {
       return this.runner.followUp(task.id, content, { collectFinal: opts?.collectFinal ?? true, consultDepth: opts?.consultDepth ?? 0 })
     })
   }
+
+  async ensureOffice(agentId: string, options?: { workdir?: string }): Promise<Task> { return this.ensure(agentId, options) }
+
+  async deliver(agentId: string, content: string): Promise<OfficeDeliveryResult> {
+    const existing = this.get(agentId)
+    const result = await this.followUp(agentId, content, { collectFinal: true })
+    const task = this.get(agentId)
+    return { ...result, ...(task ? { taskId: task.id } : {}), created: !existing && !!task }
+  }
+
+  officeTask(agentId: string): Task | null { return this.get(agentId) }
+  pendingTurns(agentId: string): number { return this.locks.has(agentId) ? 1 : 0 }
+  dispose() { this.disposed = true; this.locks.clear() }
 
   /** Resolve a displayed team name/backend/id to an office session target. */
   resolve(ref: string, excludeAgentId?: string): AgentLike | null {

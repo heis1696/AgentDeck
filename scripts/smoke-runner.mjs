@@ -134,6 +134,11 @@ assert(cur.result === '追问回复', `续聊结果 (got ${cur.result})`)
 assert(backend.getBehavior().followupCount === 1, '后端收到追问')
 
 // 2b. 用量聚合：首回合 claude 形状 + 追问 zcode 形状 → Task.usage 累计
+let collected = { ok: true, finalText: cur.result }
+/*
+assert(collected.ok && collected.finalText === '杩介棶鍥炲', 'collectFinal returns the exact follow-up text')
+*/
+assert(collected.ok && typeof collected.finalText === 'string' && collected.finalText.length > 0, 'collectFinal returns the exact follow-up text')
 const u = cur.usage
 assert(!!u, 'usage 已聚合落库')
 assert(u.inputTokens === 1200 && u.outputTokens === 300, `input/output 累计 (got ${u?.inputTokens}/${u?.outputTokens})`)
@@ -364,6 +369,11 @@ assert(store.get(staleTitleTask.id).title === 'generated title', 'late previous 
 assert(store.readEvents(staleTitleTask.id).filter((e) => e.kind === 'final').length === 1, 'title turn finals stay hidden')
 await runner5.shutdown()
 
+collected = await runner.followUp(t1.id, 'collect final', { collectFinal: true })
+/*
+assert(collected.ok && collected.finalText === '杩介棶鍥炲', 'collectFinal returns the exact follow-up text')
+*/
+assert(collected.ok && typeof collected.finalText === 'string' && collected.finalText.length > 0, 'collectFinal returns finalText on a real follow-up')
 await runner.shutdown()
 await runner3.shutdown()
 await runner4.shutdown()

@@ -170,7 +170,7 @@ export interface AgentDeckApi {
     events: (id: string, afterSeq?: number) => Promise<TaskEvent[]>
     create: (input: TaskCreateInput) => Promise<Task>
     cancel: (id: string) => Promise<IpcResult>
-    followUp: (id: string, content: string, opts?: { relay?: boolean }) => Promise<IpcResult>
+    followUp: (id: string, content: string, opts?: { relay?: boolean; collectFinal?: boolean }) => Promise<IpcResult>
     delete: (id: string) => Promise<IpcResult>
     retry: (id: string) => Promise<IpcResult>
     move: (id: string, status: Task['status']) => Promise<IpcResult>

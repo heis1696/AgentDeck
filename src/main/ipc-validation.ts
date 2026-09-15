@@ -376,11 +376,14 @@ export function parsePresets(value: unknown): ApiPreset[] {
   })
 }
 
-export function parseFollowUpOptions(value: unknown): { relay?: boolean } {
+export function parseFollowUpOptions(value: unknown): { relay?: boolean; collectFinal?: boolean } {
   if (value === undefined) return {}
   const input = record(value, '追问选项')
-  assertKeys(input, ['relay'], '追问选项')
-  return input.relay === undefined ? {} : { relay: booleanValue(input.relay, 'relay') }
+  assertKeys(input, ['relay', 'collectFinal'], '追问选项')
+  return {
+    ...(input.relay === undefined ? {} : { relay: booleanValue(input.relay, 'relay') }),
+    ...(input.collectFinal === undefined ? {} : { collectFinal: booleanValue(input.collectFinal, 'collectFinal') })
+  }
 }
 
 export function parsePermissionDecision(value: unknown): 'allow' | 'deny' {
