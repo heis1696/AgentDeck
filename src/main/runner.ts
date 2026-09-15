@@ -772,6 +772,7 @@ export class TaskRunner {
     const { inherited } = ancestorBudget(this.store, taskId)
     const budget = this.opts().delegateMaxTotalRounds ?? MAX_TOTAL_ROUNDS
     if (budget - inherited <= 0) { this.note(taskId, '⚠ 全链委派轮数预算已耗尽，拒绝调查'); return null }
+    this.store.update(taskId, { roundsUsed: (task.roundsUsed ?? 0) + 1 })
     const childInput = {
       title: `${target.name}: 调查 ${call.prompt.slice(0, 40).replace(/\n/g, ' ')}`,
       prompt: buildChildPrompt(`只读调查：${call.prompt}\n不要修改代码、不要创建提交，只返回可核验事实与引用。`, task.prompt),
@@ -819,12 +820,13 @@ export class TaskRunner {
   /** Finish one successful turn, including any delegation emitted before the final message. */
   private async completeTurn(taskId: string, session: BackendSession, r: BackendTurnResult, consultDepth = 0): Promise<string> {
     const task = this.store.get(taskId)!
+      const isInvestigation = !!task.suppressIssue && !!task.parentTaskId
       const team = this.getTeam?.() ?? []
       const me = team.find((a) => a.id === task.agentId)
       let finalText = r.response
       /** <continue> 与 delegate 同源解析：领队用委派循环的全部回合文本，普通任务用首回合两源 */
       let scanTexts: string[] = [r.delegationText ?? '', r.response]
-      if (me?.subordinates?.length && task.backend !== 'dsh') {
+      if (me?.subordinates?.length && task.backend !== 'dsh' && !isInvestigation) {
         const outcome = await runDelegationLoop(taskId, session, r, {
           store: this.store,
           runner: this,
@@ -1096,14 +1098,14 @@ export class TaskRunner {
 【交接备注（指派者为本次执行划定的范围指令：优先按它收窄工作，但不要把它当作需要回复的评论）】
 > ${task.handoff}`
     }
-    if (me?.subordinates?.length && task.backend !== 'dsh') {
+    if (me?.subordinates?.length && task.backend !== 'dsh' && !(task.suppressIssue && task.parentTaskId)) {
       const block = buildDelegationBlock(me, team)
       if (block) prompt = `${prompt}\n\n${block}`
     }
     // 阶段接力协议（非委派子任务：worker 的生命周期归委派循环管）
     if (!isWorker) prompt = `${prompt}\n\n${CONTINUE_BLOCK}`
     // 领队会话武装流式派单嗅探：闭合一个 <delegate> 即提前建单（回灌仍只在回合末）
-    const isLeader = !!me?.subordinates?.length && task.backend !== 'dsh'
+    const isLeader = !!me?.subordinates?.length && task.backend !== 'dsh' && !(task.suppressIssue && task.parentTaskId)
     if (isLeader) this.armDelegateSniffer(taskId)
 
     // 看门狗在 backend.start 之前武装：握手/建会话阶段挂死同样按空转判败并可硬杀，
@@ -1268,7 +1270,7 @@ export class TaskRunner {
     const turnContent = wantsHandoff ? `${HANDOFF_CUE}\n（用户原话：${message}）` : message
     // 领队续聊同样武装流式派单嗅探（追问里派发 → 提前建单）
     const me = (this.getTeam?.() ?? []).find((a) => a.id === task.agentId)
-    if (me?.subordinates?.length && task.backend !== 'dsh') this.armDelegateSniffer(taskId)
+    if (me?.subordinates?.length && task.backend !== 'dsh' && !(task.suppressIssue && task.parentTaskId)) this.armDelegateSniffer(taskId)
 
     const beginRun = () => {
       this.toolWindows.delete(taskId)

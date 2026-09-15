@@ -442,6 +442,7 @@ html.light .tab.active {
 /* Structured meeting panel: a compact status rail for repeated Issue review. */
 .meeting-panel { margin-bottom: 12px; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-inset); }
 .meeting-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.meeting-head-actions { display: inline-flex; align-items: center; gap: 5px; }
 .meeting-kicker { display: flex; align-items: center; gap: 5px; margin-bottom: 3px; color: var(--text-faint); font-size: var(--text-caption); }
 .meeting-head-icon { color: var(--teal); }
 .meeting-create { display: flex; flex-direction: column; gap: 7px; }

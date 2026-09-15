@@ -42,8 +42,7 @@ export class MeetingStore {
       this.data = { schemaVersion: MEETING_INDEX_SCHEMA_VERSION, meetings: raw.meetings as Meeting[], turns: raw.turns as MeetingTurn[] }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
-      if (error instanceof SyntaxError) throw error
-      if (String(error).includes('Invalid meeting index')) throw error
+      throw error
     }
   }
 

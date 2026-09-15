@@ -77,6 +77,7 @@ check(done?.status === 'done', `leader completes after investigate (got ${done?.
 check(done?.result === 'final answer after evidence', 'investigation result is re-injected into leader session')
 const child = childTask ? store.get(childTask.id) : undefined
 check(child?.parentTaskId === leader.id, 'investigation child keeps parentTaskId for budget ancestry')
+check((done?.roundsUsed ?? 0) >= 1, 'investigation consumes the parent delegation budget')
 check(child?.suppressIssue === true && child?.trigger === 'meeting', 'investigation child is silent and marked meeting trigger')
 check(child?.worktree === undefined && child?.workdir === '', 'investigation child has no worktree and reads shared workspace')
 

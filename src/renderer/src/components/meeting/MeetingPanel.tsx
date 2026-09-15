@@ -18,12 +18,13 @@ export function MeetingPanel({ issueId }: { issueId: string }) {
   const [designer, setDesigner] = useState('')
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
+  const [newMeeting, setNewMeeting] = useState(false)
 
   const refresh = () => bridge.meetings.list().then((items) => setMeetings(items.filter((meeting) => meeting.issueId === issueId))).catch(() => {})
   useEffect(() => {
     refresh()
     bridge.agents.list().then((items) => {
-      const eligible = items.filter((agent) => agent.backend !== 'dsh')
+      const eligible = items.filter((agent) => agent.backend !== 'dsh' && (!!agent.role && /队长|领队|captain|leader/i.test(agent.role) || (agent.subordinates?.length ?? 0) > 0))
       setAgents(eligible)
       setReporter((current) => current || eligible[0]?.id || '')
       setCritic((current) => current || eligible[1]?.id || eligible[0]?.id || '')
@@ -32,7 +33,6 @@ export function MeetingPanel({ issueId }: { issueId: string }) {
     return bridge.meetings.onUpdated((meeting) => { if (meeting.issueId === issueId) refresh() })
   }, [issueId])
 
-  const active = meetings.find((meeting) => meeting.status === 'active' || meeting.status === 'waiting_user') ?? meetings[0]
   const eligible = useMemo(() => agents.filter((agent) => agent.backend !== 'dsh'), [agents])
   const run = async (action: () => Promise<{ ok: boolean; error?: string }>) => {
     setBusy(true)
@@ -53,13 +53,16 @@ export function MeetingPanel({ issueId }: { issueId: string }) {
       ] })
       setMeetings((items) => [meeting, ...items])
       setTopic('')
+      setNewMeeting(false)
       await run(() => bridge.meetings.start(meeting.id))
     } catch (error) { toast.error(error instanceof Error ? error.message : '创建会议失败'); setBusy(false) }
   }
   const selectedName = (id: string) => agents.find((agent) => agent.id === id)?.name ?? id
+  const current = meetings.find((meeting) => meeting.status === 'active' || meeting.status === 'waiting_user')
+  const active = current ?? (newMeeting ? undefined : meetings[0])
 
   return <section className="meeting-panel">
-    <div className="meeting-panel-head"><div><div className="meeting-kicker"><MessageSquare size={13} /> 结构化会议</div><strong>{active ? STATUS_LABEL[active.status] : '围绕这个 Issue 开会'}</strong></div><Users size={16} className="meeting-head-icon" /></div>
+    <div className="meeting-panel-head"><div><div className="meeting-kicker"><MessageSquare size={13} /> 结构化会议</div><strong>{active ? STATUS_LABEL[active.status] : '围绕这个 Issue 开会'}</strong></div><span className="meeting-head-actions">{meetings[0] && !current && !newMeeting && <button className="icon-btn" title="新建会议" onClick={() => setNewMeeting(true)}><Plus size={14} /></button>}<Users size={16} className="meeting-head-icon" /></span></div>
     {!active && <div className="meeting-create">
       <input value={topic} placeholder="会议议题" onChange={(event) => setTopic(event.target.value)} />
       <div className="meeting-selects">
