@@ -173,6 +173,7 @@ export class MeetingController {
   private readonly now: () => number
   private readonly running = new Set<string>()
   private readonly pauseRequested = new Set<string>()
+  private readonly listeners = new Set<(meeting: Meeting) => void>()
 
   constructor(options: MeetingControllerOptions) {
     this.store = options.store
@@ -188,6 +189,12 @@ export class MeetingController {
 
   list() { return this.store.list() }
   get(id: string) { return this.store.get(id) }
+  subscribe(listener: (meeting: Meeting) => void) { this.listeners.add(listener); return () => this.listeners.delete(listener) }
+  private save(id: string, patch: Partial<Meeting>) {
+    const updated = this.store.update(id, patch)
+    if (updated) for (const listener of this.listeners) listener(updated)
+    return updated
+  }
 
   create(input: MeetingCreateInput): Meeting {
     if (this.issueExists && !this.issueExists(input.issueId)) throw new Error(`Issue 不存在: ${input.issueId}`)
@@ -210,7 +217,7 @@ export class MeetingController {
     if (!meeting) return { ok: false, error: '会议不存在' }
     if (meeting.status === 'draft') {
       if (this.store.list().some((item) => item.status === 'active' && item.id !== id)) return { ok: false, error: '已有会议正在进行' }
-      this.store.update(id, { status: 'active', round: 1, stopReason: undefined, blockedReason: undefined })
+      this.save(id, { status: 'active', round: 1, stopReason: undefined, blockedReason: undefined })
     } else if (meeting.status !== 'active') {
       return { ok: false, error: `会议当前状态不可启动: ${meeting.status}` }
     }
@@ -227,7 +234,7 @@ export class MeetingController {
     const meeting = this.store.get(id)
     if (!meeting || meeting.status !== 'waiting_user') return { ok: false, error: '会议不在 waiting_user' }
     if (this.store.list().some((item) => item.status === 'active')) return { ok: false, error: '已有会议正在进行' }
-    this.store.update(id, { status: 'active', stopReason: undefined, blockedReason: undefined })
+    this.save(id, { status: 'active', stopReason: undefined, blockedReason: undefined })
     return this.start(id)
   }
 
@@ -235,7 +242,7 @@ export class MeetingController {
     const meeting = this.store.get(id)
     if (!meeting || meeting.status !== 'active') return { ok: false, error: '会议不在 active' }
     this.pauseRequested.add(id)
-    if (!this.running.has(id)) this.store.update(id, { status: 'waiting_user', stopReason: 'no_progress', blockedReason: '用户请求暂停' })
+    if (!this.running.has(id)) this.save(id, { status: 'waiting_user', stopReason: 'no_progress', blockedReason: '用户请求暂停' })
     return { ok: true, meeting: this.store.get(id) ?? meeting }
   }
 
@@ -247,7 +254,7 @@ export class MeetingController {
       const office = this.offices.get(participant.agentId)
       if (office && this.cancelTask) await this.cancelTask(office.id)
     }
-    this.store.update(id, { status: 'cancelled', stopReason: undefined, blockedReason: '用户取消会议' })
+    this.save(id, { status: 'cancelled', stopReason: undefined, blockedReason: '用户取消会议' })
     return { ok: true, meeting: this.store.get(id) ?? meeting }
   }
 
@@ -256,7 +263,7 @@ export class MeetingController {
     if (!meeting || meeting.status !== 'active') return { ok: false, error: '会议不在 active' }
     const value = note.trim()
     if (!value) return { ok: false, error: '插话不能为空' }
-    this.store.update(id, { pendingChairNotes: [...meeting.pendingChairNotes, value] })
+    this.save(id, { pendingChairNotes: [...meeting.pendingChairNotes, value] })
     return { ok: true, meeting: this.store.get(id) ?? meeting }
   }
 
@@ -275,7 +282,7 @@ export class MeetingController {
     if (!item) return { ok: false, error: '行动项不存在' }
     item.approval = verdict
     if (verdict === 'approved' && item.taskId) this.startTask?.(item.taskId)
-    this.store.update(meetingId, { minutes: meeting.minutes })
+    this.save(meetingId, { minutes: meeting.minutes })
     return { ok: true, meeting: this.store.get(meetingId) ?? meeting }
   }
 
@@ -283,7 +290,7 @@ export class MeetingController {
     const recovered: Meeting[] = []
     for (const meeting of this.store.list()) {
       if (meeting.status !== 'active') continue
-      const updated = this.store.update(meeting.id, { status: 'waiting_user', stopReason: 'failed', blockedReason: '应用重启导致会议中断，请确认继续' })
+      const updated = this.save(meeting.id, { status: 'waiting_user', stopReason: 'failed', blockedReason: '应用重启导致会议中断，请确认继续' })
       if (updated) recovered.push(updated)
     }
     return recovered
@@ -298,7 +305,7 @@ export class MeetingController {
       }
       if (this.pauseRequested.has(id)) {
         this.pauseRequested.delete(id)
-        const updated = this.store.update(id, { status: 'waiting_user', stopReason: 'no_progress', blockedReason: '用户请求暂停' })!
+        const updated = this.save(id, { status: 'waiting_user', stopReason: 'no_progress', blockedReason: '用户请求暂停' })!
         return { ok: true, meeting: updated }
       }
       let round: RoundRun
@@ -308,7 +315,7 @@ export class MeetingController {
         const reason = error instanceof Error ? error.message : String(error)
         const current = this.store.get(id)
         if (current?.status === 'cancelled') return { ok: true, meeting: current }
-        const updated = this.store.update(id, { status: 'failed', stopReason: 'failed', blockedReason: reason })!
+        const updated = this.save(id, { status: 'failed', stopReason: 'failed', blockedReason: reason })!
         return { ok: false, error: reason, meeting: updated }
       }
       const minutes = this.minutesFromRound(meeting.round, round)
@@ -318,7 +325,7 @@ export class MeetingController {
       const noProgress = previousSignature && signature === previousSignature
         ? meeting.noProgress + 1
         : Math.max(0, meeting.noProgress - 1)
-      meeting = this.store.update(id, { minutes: [...meeting.minutes, minutes], round: meeting.round, noProgress })!
+      meeting = this.save(id, { minutes: [...meeting.minutes, minutes], round: meeting.round, noProgress })!
       for (const turn of round.turns) this.store.appendTurn(turn)
       const allAgree = meeting.participants.every((participant) => round.stances.get(participant.agentId)?.verdict === 'agree')
       const allResolved = !!round.envelope && round.objections.every((objection) => objection.resolved)
@@ -327,7 +334,7 @@ export class MeetingController {
       }
       if (meeting.noProgress >= meeting.noProgressCap) return await this.stopAfterSynthesis(meeting, 'no_progress', '连续无进展，请先检查失败根因')
       if (meeting.round >= meeting.maxRounds) return await this.stopAfterSynthesis(meeting, 'budget', '会议轮数预算耗尽')
-      meeting = this.store.update(id, { round: meeting.round + 1 })!
+      meeting = this.save(id, { round: meeting.round + 1 })!
     }
     return { ok: false, error: '会议在执行中被终止', meeting }
   }
@@ -416,7 +423,7 @@ export class MeetingController {
 
   private conclude(meeting: Meeting, minutes: MeetingMinutes): MeetingResult {
     this.materializeActionItems(meeting, minutes)
-    const updated = this.store.update(meeting.id, { status: 'concluded', stopReason: 'converged', concludedAt: this.now(), blockedReason: undefined })!
+    const updated = this.save(meeting.id, { status: 'concluded', stopReason: 'converged', concludedAt: this.now(), blockedReason: undefined })!
     this.addIssueComment?.(meeting.issueId, `【会议纪要·第 ${minutes.round} 轮】\n${JSON.stringify(minutes, null, 2)}`, 'meeting')
     return { ok: true, meeting: updated }
   }
@@ -449,7 +456,7 @@ export class MeetingController {
         synthesis = parseEnvelope(text)
       } catch (error) {
         const reasonText = error instanceof Error ? error.message : String(error)
-        const failed = this.store.update(meeting.id, { status: 'failed', stopReason: 'failed', blockedReason: reasonText })!
+        const failed = this.save(meeting.id, { status: 'failed', stopReason: 'failed', blockedReason: reasonText })!
         return { ok: false, error: reasonText, meeting: failed }
       }
     }
@@ -474,7 +481,7 @@ export class MeetingController {
       provenance: 'consensus:advisory'
     }
     const minutes = last?.summary?.startsWith('强制综合：') ? meeting.minutes : [...meeting.minutes, forced]
-    const updated = this.store.update(meeting.id, { minutes, status: 'waiting_user', stopReason: reason, blockedReason: message })!
+    const updated = this.save(meeting.id, { minutes, status: 'waiting_user', stopReason: reason, blockedReason: message })!
     this.addIssueComment?.(meeting.issueId, `【会议暂停·${reason}】\n${JSON.stringify(forced, null, 2)}`, 'meeting')
     return { ok: true, meeting: updated }
   }

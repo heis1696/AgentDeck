@@ -216,6 +216,7 @@ app.whenReady().then(async () => {
     cancelTask: (taskId) => runner.cancel(taskId)
   })
   meetingController.recover()
+  meetingController.subscribe((meeting) => mainWindow?.webContents.send('meetings:updated', meeting))
   // 启动对账：执行存在于主进程内存里，快照里遗留的 running 在重启后必然是僵尸。
   // store 的加载迁移已把它们翻成 failed 并登记在案（直接按 status 过滤会扑空——
   // 轮到这里的它们早已不是 running，时间线会永远死止在最后一刻，比如卡在"⟳ 自动重试"）。

@@ -51,34 +51,28 @@ export function registerMeetingIpc(ctx: IpcContext) {
   })
   ipcMain.handle('meetings:start', async (_event, id: unknown) => {
     const result = await ctx.meetingController.start(parseId(id, 'meetingId'))
-    if (result.meeting) send('meetings:updated', result.meeting)
     return { ok: result.ok, ...(result.error ? { error: result.error } : {}) }
   })
   ipcMain.handle('meetings:pause', (_event, id: unknown) => {
     const result = ctx.meetingController.pause(parseId(id, 'meetingId'))
-    if (result.meeting) send('meetings:updated', result.meeting)
     return { ok: result.ok, ...(result.error ? { error: result.error } : {}) }
   })
   ipcMain.handle('meetings:resume', async (_event, id: unknown) => {
     const result = await ctx.meetingController.resume(parseId(id, 'meetingId'))
-    if (result.meeting) send('meetings:updated', result.meeting)
     return { ok: result.ok, ...(result.error ? { error: result.error } : {}) }
   })
   ipcMain.handle('meetings:interject', (_event, id: unknown, note: unknown) => {
     const result = ctx.meetingController.interject(parseId(id, 'meetingId'), parseContent(note, '插话'))
-    if (result.meeting) send('meetings:updated', result.meeting)
     return { ok: result.ok, ...(result.error ? { error: result.error } : {}) }
   })
   ipcMain.handle('meetings:cancel', async (_event, id: unknown) => {
     const result = await ctx.meetingController.cancel(parseId(id, 'meetingId'))
-    if (result.meeting) send('meetings:updated', result.meeting)
     return { ok: result.ok, ...(result.error ? { error: result.error } : {}) }
   })
   ipcMain.handle('meetings:approve-action', (_event, id: unknown, index: unknown, verdict: unknown) => {
     const itemIndex = parseNonNegativeInteger(index, 'itemIndex')
     if (verdict !== 'approved' && verdict !== 'rejected') throw new Error('verdict 无效')
     const result = ctx.meetingController.approveAction(parseId(id, 'meetingId'), itemIndex, verdict)
-    if (result.meeting) send('meetings:updated', result.meeting)
     return { ok: result.ok, ...(result.error ? { error: result.error } : {}) }
   })
   ipcMain.handle('meetings:delete', (_event, id: unknown) => {
