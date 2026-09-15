@@ -14,7 +14,7 @@ export function isTaskStatus(value: unknown): value is TaskStatus {
 export type IssueStatus = 'backlog' | 'todo' | 'in_progress' | 'in_review' | 'done' | 'blocked' | 'cancelled'
 export type IssuePriority = 'urgent' | 'high' | 'medium' | 'low' | 'none'
 export type RunStatus = 'running' | 'completed' | 'cancelled' | 'error'
-export type RunTrigger = 'assignment' | 'mention' | 'autopilot' | 'manual' | 'handoff'
+export type RunTrigger = 'assignment' | 'mention' | 'autopilot' | 'manual' | 'handoff' | 'meeting'
 
 /** Lifecycle of a durable, multi-run user goal. */
 export type GoalStatus = 'draft' | 'active' | 'waiting_user' | 'completed' | 'blocked' | 'cancelled' | 'failed'

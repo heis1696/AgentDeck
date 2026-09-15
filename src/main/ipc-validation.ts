@@ -6,7 +6,7 @@ import type { ApiPreset } from './presets'
 const issueStatuses = new Set<IssueStatus>(['backlog', 'todo', 'in_progress', 'in_review', 'done', 'blocked', 'cancelled'])
 const issuePriorities = new Set<IssuePriority>(['urgent', 'high', 'medium', 'low', 'none'])
 const taskStatuses = new Set<TaskStatus>(['queued', 'running', 'done', 'failed', 'cancelled'])
-const triggers = new Set<RunTrigger>(['assignment', 'mention', 'autopilot', 'manual', 'handoff'])
+const triggers = new Set<RunTrigger>(['assignment', 'mention', 'autopilot', 'manual', 'handoff', 'meeting'])
 const backendIds = new Set<string>(BACKEND_IDS)
 const settingsKeys = new Set<keyof AppSettings>(['theme', 'zcodePath', 'dshPath', 'nodePath', 'concurrency', 'notifyOnDone', 'mode', 'workerConcurrency', 'sharedDir', 'turnIdleTimeoutMs', 'permissionTimeoutMs', 'maxRetryAttempts', 'retryBackoffMs', 'maxHandoffChain', 'delegateMaxRounds', 'delegateMaxTotalRounds', 'delegateMaxDepth', 'doomLoopThreshold', 'worktreeMaxAgeDays'])
 

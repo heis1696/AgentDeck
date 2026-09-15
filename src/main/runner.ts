@@ -4,7 +4,7 @@ import type { Task, TaskEvent, WorktreeInfo } from '../shared/types'
 import { createHash } from 'node:crypto'
 import type { TaskStore } from './store'
 import type { AgentBackend, BackendSession, PermissionRequest, BackendTurnResult } from './backends/types'
-import { buildAgentPrompt, buildDelegationBlock, runDelegationLoop, parseContinueMerged, stripContinue, parseDelegates, ancestorBudget, buildChildPrompt, sanitizeChildPrompt, MAX_DEPTH, MAX_TOTAL_ROUNDS, type AgentLike, type DelegateCall } from './delegate'
+import { buildAgentPrompt, buildDelegationBlock, runDelegationLoop, parseContinueMerged, stripContinue, parseDelegates, parseConsultsMerged, stripConsults, ancestorBudget, buildChildPrompt, sanitizeChildPrompt, MAX_DEPTH, MAX_TOTAL_ROUNDS, type AgentLike, type DelegateCall, type ConsultCall } from './delegate'
 import { isGitRepo, createWorktree, currentBranch, setWorktreeOwner } from './git'
 
 /** API 预设（主进程 presets.ts 的 ApiPreset 的运行时子集，避免环依赖） */
@@ -18,6 +18,13 @@ interface PresetLike {
 
 /** 阶段接力处理器：主进程接 createTask（同 issue 新 run、新会话硬切） */
 export type ContinueHandler = (input: { sourceTaskId: string; issueId: string; brief: string; start: 'auto' | 'parked' }) => unknown
+
+/** Cross-leader consultation hook. The runner owns source-session turn order;
+ * the host resolves the target office session and returns its final answer. */
+export type ConsultHandler = (input: { sourceTaskId: string; call: ConsultCall; depth: number }) => Promise<string | null>
+
+/** Maximum source-session consultation回合 per turn; target depth is capped separately. */
+export const MAX_CONSULT_ROUNDS = 2
 
 /** 阶段接力协议：多阶段任务在阶段边界输出 <continue>，系统在同一 Issue 上硬切新会话 */
 const CONTINUE_BLOCK = `【阶段接力（仅多阶段任务使用）】
@@ -502,9 +509,15 @@ export class TaskRunner {
   }
 
   private onContinue: ContinueHandler | null = null
+  private onConsult: ConsultHandler | null = null
   /** 阶段接力处理器（主进程接 createTask：同 issue 新 run、新会话硬切） */
   attachContinue(handler: ContinueHandler) {
     this.onContinue = handler
+  }
+
+  /** Attach the host-side resolver for `<consult>` tags emitted by a leader. */
+  attachConsult(handler: ConsultHandler) {
+    this.onConsult = handler
   }
 
   private taskCreator: TaskCreator | null = null
@@ -763,7 +776,7 @@ export class TaskRunner {
   }
 
   /** Finish one successful turn, including any delegation emitted before the final message. */
-  private async completeTurn(taskId: string, session: BackendSession, r: BackendTurnResult): Promise<string> {
+  private async completeTurn(taskId: string, session: BackendSession, r: BackendTurnResult, consultDepth = 0): Promise<string> {
     const task = this.store.get(taskId)!
       const team = this.getTeam?.() ?? []
       const me = team.find((a) => a.id === task.agentId)
@@ -791,9 +804,54 @@ export class TaskRunner {
         finalText = outcome.finalText || r.response
         scanTexts = outcome.scanTexts
       }
+      if (this.onConsult) {
+        const consultation = await this.completeConsults(taskId, session, finalText, scanTexts, consultDepth)
+        finalText = consultation.finalText
+        scanTexts = consultation.scanTexts
+      }
       finalText = this.handleContinue(taskId, task, scanTexts, finalText)
       await this.finalizeDone(taskId, finalText)
     return finalText
+  }
+
+  /**
+   * Resolve consultations emitted by the current session, then give the
+   * source agent a chance to continue with the answers. Consultation answers
+   * are deliberately sent through sendTurn so the source session remains
+   * single-flight and all resulting events keep their normal task timeline.
+   */
+  private async completeConsults(
+    taskId: string,
+    session: BackendSession,
+    initialText: string,
+    initialScanTexts: string[],
+    consultDepth: number
+  ): Promise<{ finalText: string; scanTexts: string[] }> {
+    let finalText = initialText
+    let scanTexts = initialScanTexts
+    const seen = new Set<string>()
+    let rounds = 0
+    for (;;) {
+      const calls = parseConsultsMerged(...scanTexts).filter((call) => {
+        const key = `${call.to}\n${call.prompt}`
+        if (seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+      if (!calls.length) return { finalText: stripConsults(finalText), scanTexts }
+      if (rounds >= MAX_CONSULT_ROUNDS) return { finalText: stripConsults(finalText), scanTexts }
+      rounds++
+      const answers: string[] = []
+      for (const call of calls) {
+        const answer = await this.onConsult?.({ sourceTaskId: taskId, call, depth: consultDepth })
+        if (answer?.trim()) answers.push(`### 队长 ${call.to} 的意见\n${answer.trim()}`)
+      }
+      if (!answers.length) return { finalText: stripConsults(finalText), scanTexts }
+      const turn = await this.sendTurn(taskId, session, `【系统·咨询回复】\n${answers.join('\n\n')}\n\n请基于以上咨询继续处理原任务。`)
+      if (!turn.ok) throw new Error(turn.error || '咨询回灌回合失败')
+      finalText = turn.response
+      scanTexts = [turn.delegationText ?? '', turn.response]
+    }
   }
 
   /**
@@ -1103,6 +1161,7 @@ export class TaskRunner {
   }
 
   private notify(task: Task, what: string, body: string) {
+    if (task.suppressIssue) return
     if (!this.opts().notify) return
     this.ports.notify(task, what, body)
   }
@@ -1115,7 +1174,7 @@ export class TaskRunner {
 
   /** 续聊：在已完成任务的会话上追加消息，任务回到 running。
    *  opts.relay 仅由「⇥ 接力下一阶段」按钮传入（显式人工入口）；自由追问不再按关键词猜测接力意图。 */
-  async followUp(taskId: string, content: string, opts?: { relay?: boolean }): Promise<{ ok: boolean; error?: string }> {
+  async followUp(taskId: string, content: string, opts?: { relay?: boolean; collectFinal?: boolean; consultDepth?: number }): Promise<{ ok: boolean; error?: string; finalText?: string }> {
     const task = this.store.get(taskId)
     if (!task) return { ok: false, error: '任务不存在' }
     const message = content.trim()
@@ -1160,9 +1219,9 @@ export class TaskRunner {
       try {
         const r = await this.sendTurn(taskId, liveSession, turnContent)
         if (!r.ok) throw new Error(r.error || '续聊回合失败')
-        const finalText = await this.completeTurn(taskId, liveSession, r)
+        const finalText = await this.completeTurn(taskId, liveSession, r, opts?.consultDepth ?? 0)
         if (this.opts().notify) this.notify(task, '完成', finalText)
-        return { ok: true }
+        return opts?.collectFinal ? { ok: true, finalText } : { ok: true }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
         if (!SESSION_DEAD_RE.test(msg)) {
@@ -1225,9 +1284,9 @@ export class TaskRunner {
       try {
         const r = await Promise.race([turn, sentinel.timeout])
         if (!r?.ok) throw new Error(r?.error || '续聊回合失败')
-        const finalText = await this.completeTurn(taskId, resumeSession, r)
+        const finalText = await this.completeTurn(taskId, resumeSession, r, opts?.consultDepth ?? 0)
         if (this.opts().notify) this.notify(task, '完成', finalText)
-        return { ok: true }
+        return opts?.collectFinal ? { ok: true, finalText } : { ok: true }
       } finally {
         sentinel.cancel()
         if (life.generation === gen) unregisterResume()

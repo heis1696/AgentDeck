@@ -41,6 +41,46 @@ export function stripDelegates(text: string): string {
   return text.replace(/<delegate\b(?=[^>]*\bto\s*=)[^>]*>[\s\S]*?<\/delegate>/g, '').trim()
 }
 
+// ---- 队长间咨询（阶段 1）：目标是另一位队长的办公室会话 ----
+
+export interface ConsultCall {
+  to: string
+  prompt: string
+  reason?: string
+}
+
+/** 解析 consult 标签。开标签必须带 to，避免裸标签吞掉后方真实咨询。 */
+export function parseConsults(text: string): ConsultCall[] {
+  const out: ConsultCall[] = []
+  const re = /<consult\b(?=[^>]*\bto\s*=)([^>]*)>([\s\S]*?)<\/consult>/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(text))) {
+    const prompt = m[2].trim()
+    const to = tagAttr(m[1], 'to')
+    const reason = tagAttr(m[1], 'reason')
+    if (prompt && to) out.push({ to, prompt, ...(reason ? { reason } : {}) })
+  }
+  return out
+}
+
+export function stripConsults(text: string): string {
+  return text.replace(/<consult\b(?=[^>]*\bto\s*=)[^>]*>[\s\S]*?<\/consult>/g, '').trim()
+}
+
+export function parseConsultsMerged(...texts: string[]): ConsultCall[] {
+  const seen = new Set<string>()
+  const out: ConsultCall[] = []
+  for (const text of texts) {
+    for (const call of parseConsults(text)) {
+      const key = `${call.to}\n${call.prompt}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push(call)
+    }
+  }
+  return out
+}
+
 // ---- 阶段接力（<continue>）：多阶段任务在阶段边界硬切新会话，简报为唯一携带物 ----
 
 export interface ContinueCall {
