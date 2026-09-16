@@ -4,9 +4,15 @@
 
 ## [Unreleased]
 
+## [0.18.2] - 2026-09-16
+
 ### 修复
 
 - **会议模式实战缺陷三连修（首次真实会议 iss_t_mu3uprnm_hdg3w5 复盘）**：① 答辩轮主持词只说"输出 JSON envelope"未给 schema 与 stance 标记语法，答辩者自由发挥输出 `{"agree":1,"response":null}` 导致 envelope/stance 双双解析失败、整轮纪要为空且收敛永不可达——答辩/质疑/汇报主持词现在内联完整字段 schema 与 `<stance/>` 标记原文（MAST FM-1.5 教训的第二次兑现）；② 与会队长会话同时注入派发协议（delegate/round/review）与会议协议，质疑者被派发协议劫持收尾（输出 round/review 而非 objection），首轮 0 条反对——三类发言主持词统一前置【会议优先】声明；③ 会议回合内 UI 零反馈（Claude opus 单回合 7 分钟 + 调查 6 分钟，整场看起来像卡死）——新增 `Meeting.currentTurn` 实时字段（每次发言开始即推送），MeetingCard 显示"谁在发言（阶段）"；默认时长预算 30→60 分钟。
+
+### 文档
+
+- 新增 [docs/HOT-UPDATE-COMPARISON.md](docs/HOT-UPDATE-COMPARISON.md)：生产环境热更方案对比——electron-updater 全量 / 渲染层热更 / 混合三路线评估（含仓库事实盘点、风险闭环、引用清单），结论推荐混合分阶段：日常渲染层热更先行，主进程改动走全量更新。
 
 ## [0.18.1] - 2026-09-16
 
