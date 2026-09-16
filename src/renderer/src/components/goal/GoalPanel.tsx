@@ -2,20 +2,15 @@ import { useCallback, useEffect, useState } from 'react'
 import { Target, Play, Pause, XCircle, RotateCw, ChevronDown, ChevronRight, CircleCheck, CircleDashed, Zap, Trash2 } from 'lucide-react'
 import { bridge, fmtDuration, fmtTime } from '../../api'
 import { toast } from '../../ui/Toasts'
-import { Menu } from '../../ui/Menu'
 import { confirmDialog } from '../../ui/Confirm'
-import { GOAL_STATUS_LABELS } from '../../labels'
+import { GOAL_STATUS_COLORS, GOAL_STATUS_LABELS } from '../../labels'
 import type { Goal, GoalCheckpoint, GoalRun, Task } from '../../../../shared/types'
 import type { AgentInfo } from '../../../../shared/contracts'
 import { MeetingPanel } from '../meeting/MeetingPanel'
+import { GoalCreateDialog } from './GoalCreateDialog'
 
-/** 状态色：进行中蓝、等待琥珀、完成绿、其余灰/红（与旧目标页一致） */
-const STATUS_COLORS: Record<Goal['status'], string> = {
-  draft: '#8b95a5', active: '#4f8cff', waiting_user: '#e8a13c',
-  completed: '#3cb96e', blocked: '#e8a13c', cancelled: '#8b95a5', failed: '#e05252'
-}
-
-function goalActions(status: Goal['status']): Array<{ key: 'start' | 'pause' | 'continue'; label: string; icon: typeof Play }> {
+/** 目标操作按钮语义：启动/暂停/继续/重试按状态给出（GoalPanel 与全局目标页共用） */
+export function goalActions(status: Goal['status']): Array<{ key: 'start' | 'pause' | 'continue'; label: string; icon: typeof Play }> {
   switch (status) {
     case 'draft': return [{ key: 'start', label: '启动', icon: Play }]
     case 'active': return [{ key: 'pause', label: '暂停', icon: Pause }]
@@ -24,18 +19,6 @@ function goalActions(status: Goal['status']): Array<{ key: 'start' | 'pause' | '
     default: return []
   }
 }
-
-interface CreateDraft {
-  text: string
-  completion: string
-  stop: string
-  maxRuns: number
-  hours: number
-  agentId: string
-  startNow: boolean
-}
-
-const lines = (text: string) => text.split('\n').map((line) => line.trim()).filter(Boolean)
 
 /**
  * 目标模式面板（嵌在 Issue 详情侧栏）：在一个 Issue 内开启自动推进——
@@ -49,7 +32,6 @@ export function GoalPanel({ task, issueId }: { task: Task; issueId: string }) {
   const [runs, setRuns] = useState<GoalRun[]>([])
   const [creating, setCreating] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [draft, setDraft] = useState<CreateDraft>({ text: '', completion: '', stop: '', maxRuns: 8, hours: 8, agentId: '', startNow: true })
 
   useEffect(() => {
     let alive = true
@@ -116,43 +98,15 @@ export function GoalPanel({ task, issueId }: { task: Task; issueId: string }) {
     setBusy(false)
   }
 
-  const startCreate = () => {
-    setDraft({ text: task.title, completion: '', stop: '', maxRuns: 8, hours: 8, agentId: task.agentId ?? '', startNow: true })
-    setCreating(true)
-  }
-
-  const commitCreate = async () => {
-    setBusy(true)
-    try {
-      const agent = agents.find((a) => a.id === draft.agentId)
-      await bridge.goals.create({
-        text: draft.text.trim(),
-        issueId,
-        completionConditions: lines(draft.completion),
-        stopConditions: lines(draft.stop),
-        maxRuns: Math.max(1, Math.floor(draft.maxRuns) || 1),
-        maxDurationMs: Math.max(1, Math.floor(draft.hours * 3600_000) || 3600_000),
-        workdir: task.workdir,
-        agentId: draft.agentId || undefined,
-        backend: agent?.backend ?? task.backend,
-        startNow: draft.startNow
-      })
-      toast.success('目标模式已开启')
-      setCreating(false)
-    } catch (e) {
-      toast.error('开启失败: ' + (e instanceof Error ? e.message : String(e)))
-    }
-    setBusy(false)
-  }
+  const startCreate = () => setCreating(true)
 
   const agent = agents.find((a) => a.id === goal?.agentId)
-  const canCreate = draft.text.trim().length > 0 && lines(draft.completion).length > 0
 
   return <><MeetingPanel issueId={issueId} /><div className="goal-panel">
     <div className="goal-panel-head">
       <Target size={13} className="page-icon" />
       <span className="prop-group-label" style={{ margin: 0 }}>目标模式</span>
-      {goal && <span className="badge" style={{ color: STATUS_COLORS[goal.status] }}>{GOAL_STATUS_LABELS[goal.status]}</span>}
+      {goal && <span className="badge" style={{ color: GOAL_STATUS_COLORS[goal.status] }}>{GOAL_STATUS_LABELS[goal.status]}</span>}
       {goal && !['completed', 'cancelled'].includes(goal.status) && (
         <button className="btn ghost agent-del" title="取消目标" disabled={busy} onClick={() => void cancelGoal()}><XCircle size={13} /></button>
       )}
@@ -205,37 +159,6 @@ export function GoalPanel({ task, issueId }: { task: Task; issueId: string }) {
         <div key={r.id} className="goal-run"><span className="badge">第 {r.phaseIndex + 1} 轮</span><span className="hint">{r.status}{r.startedAt ? ` · ${fmtTime(r.startedAt)}` : ''}{r.durationMs ? ` · ${fmtDuration(r.durationMs)}` : ''}</span></div>
       ))}</div>}
     </div>}
-    {creating && (
-      <div className="overlay" onClick={(e) => e.target === e.currentTarget && setCreating(false)}>
-        <div className="dialog">
-          <h2>开启目标模式</h2>
-          <p className="hint">在本 Issue 上开启自动推进：agent 每轮自评并继续，直到完成条件全部达成（完成条件须可验证）。</p>
-          <label className="field"><span>目标 *</span><textarea value={draft.text} onChange={(e) => setDraft({ ...draft, text: e.target.value })} rows={3} autoFocus placeholder="如：把 docs/ 下的 API 文档全部对齐当前代码" /></label>
-          <label className="field"><span>完成条件 *（每行一条，逐条可验证）</span><textarea value={draft.completion} onChange={(e) => setDraft({ ...draft, completion: e.target.value })} rows={3} placeholder={'每条一行，如：\n所有示例可编译\n接口签名与 src 一致'} /></label>
-          <label className="field"><span>停止条件（每行一条，命中即暂停等你决策）</span><textarea value={draft.stop} onChange={(e) => setDraft({ ...draft, stop: e.target.value })} rows={2} placeholder={'如：\n需要删除用户数据\n需要付费 API 密钥'} /></label>
-          <div className="row" style={{ gap: 12 }}>
-            <label className="field" style={{ flex: 1 }}><span>最大轮数</span><input type="number" min={1} value={draft.maxRuns} onChange={(e) => setDraft({ ...draft, maxRuns: Number(e.target.value) })} /></label>
-            <label className="field" style={{ flex: 1 }}><span>最长总时长（小时）</span><input type="number" min={0.5} step={0.5} value={draft.hours} onChange={(e) => setDraft({ ...draft, hours: Number(e.target.value) })} /></label>
-          </div>
-          <label className="field">
-            <span>执行 Agent</span>
-            <Menu
-              items={[{ value: task.agentId ?? '', label: task.agentId ? '沿用当前 Issue 的 Agent' : '不指定（按平台默认执行）' }, ...agents.filter((a) => a.id !== task.agentId).map((a) => ({ value: a.id, label: a.name }))]}
-              value={draft.agentId}
-              onChange={(v) => setDraft({ ...draft, agentId: v })}
-              trigger={(cur, open) => <button className="btn menu-trigger" type="button">{cur?.label ?? '不指定'} <span className="menu-caret">{open ? '▴' : '▾'}</span></button>}
-            />
-          </label>
-          <label className="field row" style={{ gap: 8, alignItems: 'center' }}>
-            <input type="checkbox" checked={draft.startNow} onChange={(e) => setDraft({ ...draft, startNow: e.target.checked })} />
-            <span>立即开始推进</span>
-          </label>
-          <div className="dialog-footer">
-            <span className="hint">工作目录：{task.workdir || '（未绑定）'}</span>
-            <button className="btn primary" disabled={!canCreate || busy} onClick={() => void commitCreate()}>开启</button>
-          </div>
-        </div>
-      </div>
-    )}
+    {creating && <GoalCreateDialog issueId={issueId} prefill={{ text: task.title, workdir: task.workdir, agentId: task.agentId ?? '', backend: task.backend }} onClose={() => setCreating(false)} />}
   </div></>
 }

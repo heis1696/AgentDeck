@@ -1,13 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Check, MessageSquare, Pause, Play, Plus, Send, Square, Users, X } from 'lucide-react'
+import { MessageSquare, Plus, Users } from 'lucide-react'
 import { bridge, type AgentInfo } from '../../api'
 import { toast } from '../../ui/Toasts'
-import type { Meeting, MeetingRole } from '../../../../shared/meeting'
-
-const STATUS_LABEL: Record<Meeting['status'], string> = {
-  draft: '草稿', active: '进行中', waiting_user: '等你处理', concluded: '已结束', cancelled: '已取消', failed: '失败'
-}
-const ROLE_LABEL: Record<MeetingRole, string> = { reporter: '汇报', critic: '质疑', designer: '答辩' }
+import { captains } from './captains'
+import { MeetingCard, MEETING_STATUS_LABEL } from './MeetingCard'
+import type { Meeting } from '../../../../shared/meeting'
 
 export function MeetingPanel({ issueId }: { issueId: string }) {
   const [meetings, setMeetings] = useState<Meeting[]>([])
@@ -16,7 +13,6 @@ export function MeetingPanel({ issueId }: { issueId: string }) {
   const [reporter, setReporter] = useState('')
   const [critic, setCritic] = useState('')
   const [designer, setDesigner] = useState('')
-  const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
   const [newMeeting, setNewMeeting] = useState(false)
 
@@ -24,7 +20,7 @@ export function MeetingPanel({ issueId }: { issueId: string }) {
   useEffect(() => {
     refresh()
     bridge.agents.list().then((items) => {
-      const eligible = items.filter((agent) => agent.backend !== 'dsh' && (!!agent.role && /队长|领队|captain|leader/i.test(agent.role) || (agent.subordinates?.length ?? 0) > 0))
+      const eligible = captains(items)
       setAgents(eligible)
       setReporter((current) => current || eligible[0]?.id || '')
       setCritic((current) => current || eligible[1]?.id || eligible[0]?.id || '')
@@ -33,7 +29,7 @@ export function MeetingPanel({ issueId }: { issueId: string }) {
     return bridge.meetings.onUpdated((meeting) => {
       if (meeting.issueId !== issueId) return
       // start/resume 的 IPC 要等整场会议结束才返回；会议转入 active 即释放 busy，
-      // 别让暂停/取消/插话禁用到散会（切换视图才恢复的同款缺陷）
+      // 别让暂停/取消/插话禁用到散会（切换视图才恢复的同款缺陷；单卡管控由 MeetingCard 自行释放）
       if (meeting.status === 'active') setBusy(false)
       refresh()
     })
@@ -66,12 +62,11 @@ export function MeetingPanel({ issueId }: { issueId: string }) {
       await run(() => bridge.meetings.start(meeting.id))
     } catch (error) { toast.error(error instanceof Error ? error.message : '创建会议失败') }
   }
-  const selectedName = (id: string) => agents.find((agent) => agent.id === id)?.name ?? id
   const current = meetings.find((meeting) => meeting.status === 'active' || meeting.status === 'waiting_user')
   const active = current ?? (newMeeting ? undefined : meetings[0])
 
   return <section className="meeting-panel">
-    <div className="meeting-panel-head"><div><div className="meeting-kicker"><MessageSquare size={13} /> 结构化会议</div><strong>{active ? STATUS_LABEL[active.status] : '围绕这个 Issue 开会'}</strong></div><span className="meeting-head-actions">{meetings[0] && !current && !newMeeting && <button className="icon-btn" title="新建会议" onClick={() => setNewMeeting(true)}><Plus size={14} /></button>}<Users size={16} className="meeting-head-icon" /></span></div>
+    <div className="meeting-panel-head"><div><div className="meeting-kicker"><MessageSquare size={13} /> 结构化会议</div><strong>{active ? MEETING_STATUS_LABEL[active.status] : '围绕这个 Issue 开会'}</strong></div><span className="meeting-head-actions">{meetings[0] && !current && !newMeeting && <button className="icon-btn" title="新建会议" onClick={() => setNewMeeting(true)}><Plus size={14} /></button>}<Users size={16} className="meeting-head-icon" /></span></div>
     {!active && <div className="meeting-create">
       <input value={topic} placeholder="会议议题" onChange={(event) => setTopic(event.target.value)} />
       <div className="meeting-selects">
@@ -81,18 +76,6 @@ export function MeetingPanel({ issueId }: { issueId: string }) {
       </div>
       <button className="btn primary meeting-create-btn" disabled={busy || eligible.length < 3} onClick={() => void create()}><Plus size={14} /> 开始会议</button>
     </div>}
-    {active && <>
-      <div className={`meeting-status-line status-${active.status}`}><span className="meeting-status-dot" /><span>第 {active.round || 1} / {active.maxRounds} 轮</span><span className="meeting-stop-reason">{active.stopReason ?? '主持人调度中'}</span></div>
-      <div className="meeting-participants">{active.participants.map((participant) => <div className="meeting-participant" key={participant.agentId}><span className="meeting-role">{ROLE_LABEL[participant.role]}</span><span>{selectedName(participant.agentId)}</span><span className={`meeting-mini-status ${active.status}`} /></div>)}</div>
-      {active.minutes.length > 0 && <div className="meeting-minutes"><span className="prop-label">最新纪要</span><p>{active.minutes[active.minutes.length - 1].summary || `${active.minutes[active.minutes.length - 1].decisions.length} 项决定，${active.minutes[active.minutes.length - 1].objections.length} 条反对`}</p>{active.minutes[active.minutes.length - 1].openQuestions.length > 0 && <div className="meeting-open">待处理：{active.minutes[active.minutes.length - 1].openQuestions.join('；')}</div>}</div>}
-      <div className="meeting-actions">
-        {active.status === 'draft' && <button className="icon-btn" title="启动会议" disabled={busy} onClick={() => void run(() => bridge.meetings.start(active.id))}><Play size={14} /></button>}
-        {active.status === 'active' && <button className="icon-btn" title="暂停会议" disabled={busy} onClick={() => void run(() => bridge.meetings.pause(active.id))}><Pause size={14} /></button>}
-        {active.status === 'waiting_user' && <button className="icon-btn" title="继续会议" disabled={busy} onClick={() => void run(() => bridge.meetings.resume(active.id))}><Play size={14} /></button>}
-        {(active.status === 'active' || active.status === 'waiting_user') && <button className="icon-btn danger-icon" title="取消会议" disabled={busy} onClick={() => void run(() => bridge.meetings.cancel(active.id))}><Square size={14} /></button>}
-        <div className="meeting-interject"><input value={note} placeholder="主席插话" onChange={(event) => setNote(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && note.trim()) { void run(() => bridge.meetings.interject(active.id, note)); setNote('') } }} /><button className="icon-btn" title="发送插话" disabled={busy || !note.trim() || active.status !== 'active'} onClick={() => { void run(() => bridge.meetings.interject(active.id, note)); setNote('') }}><Send size={13} /></button></div>
-      </div>
-      {active.status === 'concluded' && active.minutes.at(-1)?.actionItems.map((item, index) => <div className="meeting-action-item" key={`${item.title}-${index}`}><span>{item.title}</span>{item.approval === 'pending' ? <span className="meeting-approval"><button className="icon-btn" title="批准行动项" onClick={() => void run(() => bridge.meetings.approveAction(active.id, index, 'approved'))}><Check size={13} /></button><button className="icon-btn danger-icon" title="拒绝行动项" onClick={() => void run(() => bridge.meetings.approveAction(active.id, index, 'rejected'))}><X size={13} /></button></span> : <span className="badge">{item.approval === 'approved' ? '已批准' : '已拒绝'}</span>}</div>)}
-    </>}
+    {active && <MeetingCard meeting={active} agents={agents} run={run} />}
   </section>
 }
