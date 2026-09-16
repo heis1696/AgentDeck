@@ -363,6 +363,12 @@ app.whenReady().then(async () => {
     return task
   })
 
+  // 【待定】自动化功能未经完整设计（照搬实现后未迭代），已知缺口：
+  // 1) workdir 为空/失效时 zcode 后端兜底到 os.tmpdir()，Agent 在空目录里空跑（表单却标注"可选"）
+  // 2) output='run_only' 带 suppressIssue，渲染层无任何界面展示这类任务，结果不可见
+  // 3) Automation 只存 lastRunAt/nextRunAt，无运行历史、无上次成功/失败状态，运行记录与自动化脱钩
+  // 4) 无重叠保护：间隔 < 执行时长时任务会逐轮堆积；update 改间隔不重算 nextRunAt
+  // 修复方向：workdir 必填校验、run_only 结果回写自动化、task 加 automationId 归组历史、tick 跳过在跑的
   const runAutomation = (id: string) => {
     const automation = automationStore.get(id)
     if (!automation || !automation.enabled || !automation.prompt.trim()) return null
