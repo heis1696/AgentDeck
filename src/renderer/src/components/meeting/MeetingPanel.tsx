@@ -30,16 +30,25 @@ export function MeetingPanel({ issueId }: { issueId: string }) {
       setCritic((current) => current || eligible[1]?.id || eligible[0]?.id || '')
       setDesigner((current) => current || eligible[2]?.id || eligible[0]?.id || '')
     }).catch(() => {})
-    return bridge.meetings.onUpdated((meeting) => { if (meeting.issueId === issueId) refresh() })
+    return bridge.meetings.onUpdated((meeting) => {
+      if (meeting.issueId !== issueId) return
+      // start/resume 的 IPC 要等整场会议结束才返回；会议转入 active 即释放 busy，
+      // 别让暂停/取消/插话禁用到散会（切换视图才恢复的同款缺陷）
+      if (meeting.status === 'active') setBusy(false)
+      refresh()
+    })
   }, [issueId])
 
   const eligible = useMemo(() => agents.filter((agent) => agent.backend !== 'dsh'), [agents])
   const run = async (action: () => Promise<{ ok: boolean; error?: string }>) => {
     setBusy(true)
-    const result = await action()
-    if (!result.ok) toast.error(result.error ?? '会议操作失败')
-    await refresh()
-    setBusy(false)
+    try {
+      const result = await action()
+      if (!result.ok) toast.error(result.error ?? '会议操作失败')
+      await refresh()
+    } finally {
+      setBusy(false)
+    }
   }
   const create = async () => {
     if (!topic.trim() || !reporter || !critic || !designer || new Set([reporter, critic, designer]).size < 3) {
@@ -55,7 +64,7 @@ export function MeetingPanel({ issueId }: { issueId: string }) {
       setTopic('')
       setNewMeeting(false)
       await run(() => bridge.meetings.start(meeting.id))
-    } catch (error) { toast.error(error instanceof Error ? error.message : '创建会议失败'); setBusy(false) }
+    } catch (error) { toast.error(error instanceof Error ? error.message : '创建会议失败') }
   }
   const selectedName = (id: string) => agents.find((agent) => agent.id === id)?.name ?? id
   const current = meetings.find((meeting) => meeting.status === 'active' || meeting.status === 'waiting_user')

@@ -85,6 +85,37 @@ const multi = buildTurns([
 ok(multi[0].items.filter((item) => item.type === 'text' || item.type === 'final').length === 2, 'last-message final keeps the earlier message bubble')
 ok(multi[0].items.filter((item) => item.type === 'final').length === 1 && multi[0].items[0].type === 'text', 'last open text is promoted to the final')
 
+// 流式回复被中途 status 工作项切碎（真实事故 YOU-85：子任务在领队流式中提前接单，
+// runner 发「⚡ 已接单」status 关闭了正在流式的气泡），终态只含最后一条消息全文：
+// 之前的碎片必须被终态吸收，否则同一回复显示两遍。注意回合里必须有更早的中间消息，
+// 否则整回合包含判断（fullFinal ⊇ fullStreamed）会先兜住、测不到该路径。
+const split = buildTurns([
+  event(1, 'user', '带队修 bug'),
+  event(2, 'text', '先看结构。'),
+  event(3, 'tool', 'Bash', { phase: 'started' }),
+  event(4, 'tool', 'Bash', { phase: 'result', ok: true }),
+  event(5, 'text', '根因定位完毕，现在派发修复：'),
+  event(6, 'text', '<delegate to="zcode">实现补丁</delegate>'),
+  event(7, 'status', '⚡ 已接单：ZCode ← 实现补丁'),
+  event(8, 'text', ' <round outcome="action"/>'),
+  event(9, 'final', '根因定位完毕，现在派发修复：<delegate to="zcode">实现补丁</delegate> <round outcome="action"/>')
+], 'x')
+ok(split[0].items.filter((item) => item.type === 'text' || item.type === 'final').length === 2, 'status-split fragments of the last message absorb into one final (no duplicate reply)')
+ok(split[0].items.some((item) => item.type === 'final' && item.text.startsWith('根因定位完毕')), 'surviving bubble is the single final')
+ok(split[0].items.some((item) => item.type === 'text' && item.text === '先看结构。'), 'earlier message bubble is preserved')
+ok(split[0].items.some((item) => item.type === 'work' && item.work.some((workEvent) => workEvent.kind === 'status')), 'mid-stream status note survives as a work block')
+
+// 终态不包含流式碎片（两段互不相干）：不得误吸收，宁可并存也不丢内容
+const unrelated = buildTurns([
+  event(1, 'user', '任务'),
+  event(2, 'text', '流式残片'),
+  event(3, 'status', '⚡ 已接单：X ← foo'),
+  event(4, 'text', '尾段'),
+  event(5, 'final', '终态是别的内容')
+], 'x')
+ok(unrelated[0].items.some((item) => item.type === 'text' && item.text === '流式残片'), 'fragments not contained in the final are kept')
+ok(unrelated[0].items.some((item) => item.type === 'final' && item.text === '终态是别的内容'), 'unrelated final still lands once')
+
 // 空 final（zcode 以 response || error || '' 兜底发出）：已流式的正文必须保留，只收口
 const blankFinal = buildTurns([
   event(1, 'user', '任务'),

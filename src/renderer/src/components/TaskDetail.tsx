@@ -104,9 +104,12 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   }
   const doAction = async (action: () => Promise<{ ok: boolean; error?: string }>) => {
     setBusy(true)
-    const result = await action()
-    if (!result.ok && result.error) toast.error(result.error)
-    setBusy(false)
+    try {
+      const result = await action()
+      if (!result.ok && result.error) toast.error(result.error)
+    } finally {
+      setBusy(false)
+    }
   }
   const doCancel = () => doAction(() => taskService.cancel(task.id))
   const doRetry = () => doAction(() => taskService.retry(task.id))
@@ -136,9 +139,13 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     if (!content || busy) return
     setBusy(true); setFollowUp('')
     if (followRef.current) followRef.current.style.height = 'auto'
-    const result = await taskService.followUp(task.id, content, opts)
-    if (!result.ok) toast.error(result.error ?? '续聊失败')
-    setBusy(false)
+    try {
+      // wait:false：IPC 在回合开跑即返回，busy 不锁整轮追问——否则「停止」会禁用到回合结束
+      const result = await taskService.followUp(task.id, content, { ...opts, wait: false })
+      if (!result.ok) toast.error(result.error ?? '续聊失败')
+    } finally {
+      setBusy(false)
+    }
   }
   const copyResult = async () => {
     const parts = [`# ${task.title}`, '', task.result ?? '']

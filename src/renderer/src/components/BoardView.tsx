@@ -60,9 +60,12 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
   /** parked 任务一键启动：tasks:start 已实现清 parked + 入队 */
   const startTask = async (taskId: string) => {
     setStarting(taskId)
-    const result = await taskService.start(taskId)
-    setStarting(null)
-    if (!result.ok) toast.error(result.error ?? '启动失败')
+    try {
+      const result = await taskService.start(taskId)
+      if (!result.ok) toast.error(result.error ?? '启动失败')
+    } finally {
+      setStarting(null)
+    }
   }
   return <div className="board issue-board">
     {COLUMNS.map((column) => {

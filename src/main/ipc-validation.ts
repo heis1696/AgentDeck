@@ -376,13 +376,14 @@ export function parsePresets(value: unknown): ApiPreset[] {
   })
 }
 
-export function parseFollowUpOptions(value: unknown): { relay?: boolean; collectFinal?: boolean } {
+export function parseFollowUpOptions(value: unknown): { relay?: boolean; collectFinal?: boolean; wait?: boolean } {
   if (value === undefined) return {}
   const input = record(value, '追问选项')
-  assertKeys(input, ['relay', 'collectFinal'], '追问选项')
+  assertKeys(input, ['relay', 'collectFinal', 'wait'], '追问选项')
   return {
     ...(input.relay === undefined ? {} : { relay: booleanValue(input.relay, 'relay') }),
-    ...(input.collectFinal === undefined ? {} : { collectFinal: booleanValue(input.collectFinal, 'collectFinal') })
+    ...(input.collectFinal === undefined ? {} : { collectFinal: booleanValue(input.collectFinal, 'collectFinal') }),
+    ...(input.wait === undefined ? {} : { wait: booleanValue(input.wait, 'wait') })
   }
 }
 

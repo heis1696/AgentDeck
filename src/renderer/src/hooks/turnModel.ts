@@ -24,6 +24,38 @@ const DELEGATE_BLOCK_RE = /<delegate\b(?=[^>]*\bto\s*=)([^>]*)>([\s\S]*?)<\/dele
 const DELEGATE_TO_ATTR_RE = /\bto\s*=\s*"([^"]*)"/
 
 /**
+ * 终态只含最后一条 assistant 消息的协议（zcode 语义）下，吸收流式阶段已展示的正文碎片。
+ * 流式中的文本气泡会被中途插入的非工具工作项（如派单接单的 ⚡ status note、错误）切开：
+ * 终态只转正末尾碎片时，之前的碎片残留为重复残影，同一回复就显示了两遍。
+ * 从队尾回溯收集文本碎片，可越过不含工具调用的工作项（与后端 lastSegment 只在工具
+ * 活动时重置的边界语义一致，含工具的工作项才是消息分界）；终态空白不敏感地包含碎片
+ * 拼接时，把它们整体替换为插在首碎片位置的单一终态气泡。返回是否发生了替换。
+ */
+function absorbFinalFragments(turn: Turn, finalText: string, compact: (value: string) => string): boolean {
+  const fullFinal = compact(finalText)
+  if (!fullFinal) return false
+  const texts: string[] = []
+  let first = -1
+  for (let i = turn.items.length - 1; i >= 0; i--) {
+    const item = turn.items[i]
+    if (item.type === 'text') {
+      texts.unshift(item.text)
+      first = i
+      continue
+    }
+    if (item.type === 'work' && !item.work.some((workEvent) => workEvent.kind === 'tool')) continue
+    break
+  }
+  if (first < 0) return false
+  const merged = compact(texts.join(''))
+  if (!merged || !fullFinal.includes(merged)) return false
+  const items = turn.items.filter((item, index) => !(index >= first && item.type === 'text'))
+  items.splice(first, 0, { type: 'final', text: finalText })
+  turn.items = items
+  return true
+}
+
+/**
  * 领队在回灌评估/总结回合里复述旧派单标记时（主进程按 to+指令 去重、只执行一次），
  * 展示层若把每次复述都卡片化，看起来就像派了多单。按同款 key 跨回合去重：
  * 首次出现保留卡片，之后重复的整段剥掉、只留周围正文，展示与执行语义对齐。
@@ -89,6 +121,8 @@ export function buildTurns(events: TaskEvent[], prompt = ''): Turn[] {
         const items: TurnItem[] = turn.items.filter((item) => item.type === 'work')
         items.splice(firstBubble >= 0 ? firstBubble : items.length, 0, { type: 'final', text: event.text ?? '' })
         turn.items = items
+      } else if (absorbFinalFragments(turn, event.text ?? '', compact)) {
+        // 终态已把流式碎片（含被 status 工作项切碎的多段）收敛为单一气泡
       } else if (last?.type === 'text' && !last.closed) {
         // 终态只含最后一条 assistant 消息（zcode 协议语义）：末尾开放气泡就地转正。
         // 空 final（zcode 以 response || error || '' 兜底发出）不能拿空终态抹掉
