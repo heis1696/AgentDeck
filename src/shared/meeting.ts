@@ -52,6 +52,13 @@ export interface MeetingTurn {
   endedAt?: number
 }
 
+export interface MeetingCurrentTurn {
+  agentId: string
+  role: MeetingRole
+  phase: MeetingTurnPhase
+  startedAt: number
+}
+
 export interface Meeting {
   id: string
   issueId: string
@@ -69,6 +76,8 @@ export interface Meeting {
   stopReason?: MeetingStopReason
   blockedReason?: string
   pendingChairNotes: string[]
+  /** 当前正在发言的与会者（每次发言开始即推送；一回合真实可达 5-15 分钟，不能等轮末才有反馈） */
+  currentTurn?: MeetingCurrentTurn
   createdAt: number
   updatedAt: number
   concludedAt?: number
@@ -86,7 +95,8 @@ export interface MeetingCreateInput {
 
 export const DEFAULT_MEETING_MAX_ROUNDS = 6
 export const DEFAULT_MEETING_MAX_INNER_TURNS = 3
-export const DEFAULT_MEETING_MAX_DURATION_MS = 30 * 60 * 1000
+/** 真实三队长会议单轮（模型思考 + 只读调查）可达 10-15 分钟，30 分钟一场就爆（iss_t_mu3uprnm 实测）。 */
+export const DEFAULT_MEETING_MAX_DURATION_MS = 60 * 60 * 1000
 export const DEFAULT_MEETING_NO_PROGRESS_CAP = 2
 
 const MEETING_TRANSITIONS: Record<MeetingActor, Record<MeetingStatus, readonly MeetingStatus[]>> = {

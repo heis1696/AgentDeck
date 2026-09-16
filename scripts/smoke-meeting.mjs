@@ -136,6 +136,9 @@ check(recovered.some((item) => item.id === meeting.id && item.status === 'waitin
 
 check(phaseCalls.some((call) => call.prompt.includes('汇报轮') && call.prompt.includes('<investigate')), 'report prompt teaches <investigate>')
 check(phaseCalls.some((call) => call.prompt.includes('质疑轮') && call.prompt.includes('<investigate')), 'challenge prompt teaches <investigate>')
+check(phaseCalls.some((call) => call.prompt.includes('质疑轮') && call.prompt.includes('<stance verdict=')), 'challenge prompt shows stance tag syntax')
+check(phaseCalls.some((call) => call.prompt.includes('答辩轮') && call.prompt.includes('"decisions"') && call.prompt.includes('"actionItems"')), 'defense prompt teaches envelope schema')
+check(phaseCalls.some((call) => call.prompt.includes('会议优先')), 'meeting prompts assert protocol precedence over delegation protocol')
 
 await fixture.runner.shutdown()
 if (process.exitCode) process.exit(1)
