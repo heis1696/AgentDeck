@@ -4,6 +4,25 @@
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-16
+
+### 团队会议模式（多队长结构化会议，设计见 docs/TEAM-MEETING-CONSTRUCTION.md）
+
+- **结构化回合制会议**：用户把 Issue 委派给队长，队长召集其他队长进会——汇报者（主张带引用收据）/ 质疑者（反对挂编号）/ 设计者（逐条答辩 + 纪要草案）三角色回合发言；**主持人是确定性代码**（`meeting-controller`），不是 LLM——发言顺序、表态收割、收敛裁决、纪要落盘全部由代码驱动，不做自由讨论与投票。
+- **主席是用户**：可插话（下一轮注入）、可喊停（级联取消）；会议挂在被讨论的真实 Issue 上，纪要（决策/反对及处置/行动项/开放问题）镜像进 Issue 评论时间线。
+- **行动项过人工闸门**：会议产出的行动项落 parked 任务挂到对应队长名下，经人工批准（plan gate）才进入实现——会议不直接驱动实现。
+- **队长办公室会话与咨询**（office sessions + `<consult>`）：跨队长通信收编为「咨询 / 会议」两个原语；`agent-sessions.ts` 管理队长级会话。
+- **只读调查**（`<investigate>`）：质疑者需要证据时派自己的队员调查，结果回灌会议会话后继续发言。
+- **安全闸门**：全局单活跃会议强制；会议生命周期流式更新（waiting_user/active/终态即时广播）；会议错误分类恢复。
+- 新增 `smoke:meeting-office` / `smoke:meeting-consult` / `smoke:meeting` / `smoke:meeting-investigate` 四组冒烟。
+
+### 异步回合交互修复
+
+- **续聊不再锁死整轮**（`followUp` 支持 `wait:false`）：UI 追问的 IPC 在回合开跑即返回，busy 不再锁到回合结束——「停止」随时可点；goal/meeting/sidecar 等自动化调用方默认仍等整轮拿 finalText。后台回合失败走 failTask→pushTask 广播显错，兜底防静默挂 running。
+- **会议转 active 即释放 busy**：start/resume 的 IPC 要等整场会议结束才返回，会议面板在收到 active 状态时即解锁——暂停/取消/插话不再禁用到散会。
+- **parked 一键启动兜异常**：看板/Issue 列表的启动按钮改 try/finally，失败也复位 starting 状态。
+- **终态碎片去重**（`absorbFinalFragments`）：zcode 语义下终态只含最后一条 assistant 消息，流式阶段已展示的正文碎片会残留为重复残影（同一回复显示两遍）；终态回灌时从队尾回溯吸收碎片，替换为单一终态气泡。
+
 ## [0.15.0] - 2026-09-15
 
 ### 硬切接力「卡队列」修复：parked 语义纠偏 + 全链路可见性（自主硬切后继滞留排查结论）
