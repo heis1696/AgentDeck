@@ -1251,8 +1251,9 @@ export class TaskRunner {
   }
 
   /** 续聊：在已完成任务的会话上追加消息，任务回到 running。
-   *  opts.relay 仅由「⇥ 接力下一阶段」按钮传入（显式人工入口）；自由追问不再按关键词猜测接力意图。 */
-  async followUp(taskId: string, content: string, opts?: { relay?: boolean; collectFinal?: boolean; consultDepth?: number }): Promise<{ ok: boolean; error?: string; finalText?: string }> {
+   *  opts.relay 仅由「⇥ 接力下一阶段」按钮传入（显式人工入口）；自由追问不再按关键词猜测接力意图。
+   *  opts.wait=false：校验通过后立即返回 ok，回合转后台执行（失败仍走 failTask/pushTask 广播显错）；默认等待回合结束并回传 finalText。 */
+  async followUp(taskId: string, content: string, opts?: { relay?: boolean; collectFinal?: boolean; consultDepth?: number; wait?: boolean }): Promise<{ ok: boolean; error?: string; finalText?: string }> {
     const task = this.store.get(taskId)
     if (!task) return { ok: false, error: '任务不存在' }
     const message = content.trim()
@@ -1290,93 +1291,105 @@ export class TaskRunner {
       this.pushTask(taskId)
     }
 
-    // 1) 内存会话健在：直接续聊
-    let liveSession = this.sessions.get(taskId)
-    if (liveSession) {
-      beginRun()
-      try {
-        const r = await this.sendTurn(taskId, liveSession, turnContent)
-        if (!r.ok) throw new Error(r.error || '续聊回合失败')
-        const finalText = await this.completeTurn(taskId, liveSession, r, opts?.consultDepth ?? 0)
-        if (this.opts().notify) this.notify(task, '完成', finalText)
-        return opts?.collectFinal ? { ok: true, finalText } : { ok: true }
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e)
-        if (!SESSION_DEAD_RE.test(msg)) {
-          // A failed follow-up turn invalidates the provider session as well;
-          // close it before dropping the session-wide delegate ledger.
+    const runTurn = async (): Promise<{ ok: boolean; error?: string; finalText?: string }> => {
+      // 1) 内存会话健在：直接续聊
+      let liveSession = this.sessions.get(taskId)
+      if (liveSession) {
+        beginRun()
+        try {
+          const r = await this.sendTurn(taskId, liveSession, turnContent)
+          if (!r.ok) throw new Error(r.error || '续聊回合失败')
+          const finalText = await this.completeTurn(taskId, liveSession, r, opts?.consultDepth ?? 0)
+          if (this.opts().notify) this.notify(task, '完成', finalText)
+          return opts?.collectFinal ? { ok: true, finalText } : { ok: true }
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e)
+          if (!SESSION_DEAD_RE.test(msg)) {
+            // A failed follow-up turn invalidates the provider session as well;
+            // close it before dropping the session-wide delegate ledger.
+            await this.closeSession(taskId)
+            this.failTask(taskId, msg)
+            this.pushTask(taskId)
+            return { ok: false, error: msg }
+          }
+          // 后端连接已死（进程退出/管道断开）：丢弃内存会话，走下面的 resume 重建——
+          // 以前这种情况只能重启应用，现在等价于把重启后的恢复路径内置
           await this.closeSession(taskId)
-          this.failTask(taskId, msg)
-          this.pushTask(taskId)
-          return { ok: false, error: msg }
+          liveSession = undefined
         }
-        // 后端连接已死（进程退出/管道断开）：丢弃内存会话，走下面的 resume 重建——
-        // 以前这种情况只能重启应用，现在等价于把重启后的恢复路径内置
-        await this.closeSession(taskId)
-        liveSession = undefined
+      }
+
+      // 2) resume 路径：内存会话丢失（应用重启/连接死亡）时按 sessionId 重建
+      if (!task.sessionId) {
+        const msg = '无会话可恢复'
+        this.failTask(taskId, msg)
+        this.pushTask(taskId)
+        return { ok: false, error: msg }
+      }
+      beginRun()
+      // 续聊沿用 agent 钉死的模型（zcode resume 每次重传 runtimeModel；CLI --model 与 --resume 正交）
+      let resumeSession: BackendSession
+      // 看门狗在 backend.start 之前武装：resume 重建阶段挂死同样按空转判败，
+      // 不永久卡住 running 状态（此前只能重启应用）
+      const sentinel = this.idleSentinel(taskId)
+      let unregisterResume: () => void = () => {}
+      try {
+        const gen = this.bumpTurnGen(taskId)
+        const eventContext: { generation: number; sessionOwner?: string } = { generation: gen }
+        const life = this.lifecycle(taskId)
+        const turn = new Promise<BackendTurnResult>((resolve) => {
+          const token = life.gate.token()
+          unregisterResume = life.registerResume(token, (v) => resolve(v as BackendTurnResult))
+        })
+        resumeSession = await this.executor.start(
+          () => backend.start({
+            prompt: turnContent,
+            workdir: task.workdir,
+            mode: this.opts().mode,
+            model: me?.model,
+            connection: this.resolveConnection(task.agentId),
+            resumeSessionId: task.sessionId,
+            events: this.makeEvents(taskId, undefined, eventContext)
+          }),
+          sentinel.timeout,
+          () => this.lifecycle(taskId).accepts({ generation: eventContext.generation, sessionOwner: eventContext.sessionOwner })
+        )
+        this.sessionEventContexts.set(resumeSession, eventContext)
+        eventContext.sessionOwner = resumeSession.sessionId
+        this.lifecycle(taskId).gate.setSessionOwner(resumeSession.sessionId)
+        void this.lifecycle(taskId).attachSession({ generation: gen, sessionOwner: resumeSession.sessionId }, resumeSession)
+        this.sessions.set(taskId, resumeSession)
+        this.store.update(taskId, { sessionId: resumeSession.sessionId })
+        this.pushTask(taskId)
+        try {
+          const r = await Promise.race([turn, sentinel.timeout])
+          if (!r?.ok) throw new Error(r?.error || '续聊回合失败')
+          const finalText = await this.completeTurn(taskId, resumeSession, r, opts?.consultDepth ?? 0)
+          if (this.opts().notify) this.notify(task, '完成', finalText)
+          return opts?.collectFinal ? { ok: true, finalText } : { ok: true }
+        } finally {
+          sentinel.cancel()
+          if (life.generation === gen) unregisterResume()
+        }
+      } catch (e) {
+        unregisterResume()
+        this.disarmWatchdog(taskId)
+        const msg = e instanceof Error ? e.message : String(e)
+        this.failTask(taskId, msg)
+        this.pushTask(taskId)
+        return { ok: false, error: msg }
       }
     }
 
-    // 2) resume 路径：内存会话丢失（应用重启/连接死亡）时按 sessionId 重建
-    if (!task.sessionId) {
-      const msg = '无会话可恢复'
-      this.failTask(taskId, msg)
-      this.pushTask(taskId)
-      return { ok: false, error: msg }
-    }
-    beginRun()
-    // 续聊沿用 agent 钉死的模型（zcode resume 每次重传 runtimeModel；CLI --model 与 --resume 正交）
-    let resumeSession: BackendSession
-    // 看门狗在 backend.start 之前武装：resume 重建阶段挂死同样按空转判败，
-    // 不永久卡住 running 状态（此前只能重启应用）
-    const sentinel = this.idleSentinel(taskId)
-    let unregisterResume: () => void = () => {}
-    try {
-      const gen = this.bumpTurnGen(taskId)
-      const eventContext: { generation: number; sessionOwner?: string } = { generation: gen }
-      const life = this.lifecycle(taskId)
-      const turn = new Promise<BackendTurnResult>((resolve) => {
-        const token = life.gate.token()
-        unregisterResume = life.registerResume(token, (v) => resolve(v as BackendTurnResult))
+    if (opts?.wait === false) {
+      void runTurn().catch((e) => {
+        const msg = e instanceof Error ? e.message : String(e)
+        this.failTask(taskId, msg)
+        this.pushTask(taskId)
       })
-      resumeSession = await this.executor.start(
-        () => backend.start({
-          prompt: turnContent,
-          workdir: task.workdir,
-          mode: this.opts().mode,
-          model: me?.model,
-          connection: this.resolveConnection(task.agentId),
-          resumeSessionId: task.sessionId,
-          events: this.makeEvents(taskId, undefined, eventContext)
-        }),
-        sentinel.timeout,
-        () => this.lifecycle(taskId).accepts({ generation: eventContext.generation, sessionOwner: eventContext.sessionOwner })
-      )
-      this.sessionEventContexts.set(resumeSession, eventContext)
-      eventContext.sessionOwner = resumeSession.sessionId
-      this.lifecycle(taskId).gate.setSessionOwner(resumeSession.sessionId)
-      void this.lifecycle(taskId).attachSession({ generation: gen, sessionOwner: resumeSession.sessionId }, resumeSession)
-      this.sessions.set(taskId, resumeSession)
-      this.store.update(taskId, { sessionId: resumeSession.sessionId })
-      this.pushTask(taskId)
-      try {
-        const r = await Promise.race([turn, sentinel.timeout])
-        if (!r?.ok) throw new Error(r?.error || '续聊回合失败')
-        const finalText = await this.completeTurn(taskId, resumeSession, r, opts?.consultDepth ?? 0)
-        if (this.opts().notify) this.notify(task, '完成', finalText)
-        return opts?.collectFinal ? { ok: true, finalText } : { ok: true }
-      } finally {
-        sentinel.cancel()
-        if (life.generation === gen) unregisterResume()
-      }
-    } catch (e) {
-      unregisterResume()
-      this.disarmWatchdog(taskId)
-      const msg = e instanceof Error ? e.message : String(e)
-      this.failTask(taskId, msg)
-      this.pushTask(taskId)
-      return { ok: false, error: msg }
+      return { ok: true }
     }
+    return runTurn()
   }
 
   async cancel(taskId: string): Promise<{ ok: boolean; error?: string }> {
