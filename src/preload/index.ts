@@ -1,6 +1,6 @@
 // preload：向渲染层暴露类型安全的 IPC 桥
 import { contextBridge, ipcRenderer } from 'electron'
-import type { Task, TaskEvent, AppSettings, Issue, Run, Comment, Notification, Automation, RuntimeSnapshot, AnalyticsSummary, IssuePriority, IssueStatus, RunTrigger } from '../shared/types'
+import type { Task, TaskEvent, AppSettings, Issue, Run, Comment, Automation, RuntimeSnapshot, AnalyticsSummary, IssuePriority, IssueStatus, RunTrigger } from '../shared/types'
 import type { SkillDetail, SkillMeta, SkillTarget, SyncState } from '../shared/skills'
 import type {
   CatalogEntry,
@@ -87,8 +87,6 @@ const api: AgentDeckApi = {
     comments: (id: string): Promise<Comment[]> => ipcRenderer.invoke('issues:comments', id),
     update: (id: string, patch: { priority?: IssuePriority; labels?: string[]; dueDate?: number; status?: IssueStatus }): Promise<Issue | null> => ipcRenderer.invoke('issues:update', id, patch),
     addComment: (id: string, content: string): Promise<Comment | null> => ipcRenderer.invoke('issues:add-comment', id, content),
-    notifications: (unreadOnly = false): Promise<Notification[]> => ipcRenderer.invoke('issues:notifications', unreadOnly),
-    markNotificationRead: (id: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('issues:notification-read', id),
     onUpdated: (cb: (payload: { taskId: string; issueId: string; issue: Issue | null; run: Run | null }) => void) => {
       const h = (_e: unknown, payload: { taskId: string; issueId: string; issue: Issue | null; run: Run | null }) => cb(payload)
       ipcRenderer.on('issues:updated', h)

@@ -43,13 +43,4 @@ export function registerIssueIpc(ctx: IpcContext) {
     if (issue && comment) sendUpdate(executionTask?.id ?? issue.taskId, issue.id, issue, executionTask ? ctx.issueStore.runForTask(executionTask.id) ?? null : ctx.issueStore.runForTask(issue.taskId) ?? null)
     return comment
   })
-  ipcMain.handle('issues:notifications', (_e, unreadOnly: unknown = false) => ctx.issueStore.notifications(unreadOnly === true))
-  ipcMain.handle('issues:notification-read', (_e, id: unknown) => {
-    const notificationId = parseId(id, 'notificationId')
-    const issueId = ctx.issueStore.notificationIssueId(notificationId)
-    const ok = ctx.issueStore.markNotificationRead(notificationId)
-    const issue = issueId ? ctx.issueStore.get(issueId) : undefined
-    if (ok && issue) sendUpdate(issue.taskId, issue.id, issue, ctx.issueStore.runForTask(issue.taskId) ?? null)
-    return { ok }
-  })
 }

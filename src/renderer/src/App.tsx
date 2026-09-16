@@ -10,18 +10,17 @@ import { TabBar } from './components/TabBar'
 import { BoardView } from './components/BoardView'
 import { AutomationView } from './components/AutomationView'
 import { ExtensionsView } from './components/ExtensionsView'
-import { InboxView } from './components/InboxView'
 import { IssuesView } from './components/IssuesView'
 import { AgentsView } from './components/AgentsView'
 import { MeetingsView, requestMeetingCreate } from './components/MeetingsView'
 import { GoalsView, requestGoalCreate } from './components/GoalsView'
-import { ListTodo, Kanban, Gauge, Settings, Search, Plus, Command, FolderOpen, ChevronDown, AlarmClock, Layers, Inbox, Users, MessagesSquare, Target } from 'lucide-react'
+import { ListTodo, Kanban, Gauge, Settings, Search, Plus, Command, FolderOpen, ChevronDown, AlarmClock, Layers, Users, MessagesSquare, Target } from 'lucide-react'
 import { ToastHost, toast } from './ui/Toasts'
 import { ConfirmHost } from './ui/Confirm'
 import { Palette, type PaletteCommand } from './ui/Palette'
-import type { Issue, Task } from '../../shared/types'
+import type { Task } from '../../shared/types'
 
-type View = 'issues' | 'create' | 'detail' | 'usage' | 'settings' | 'automation' | 'skills' | 'inbox' | 'board' | 'agents' | 'meetings' | 'goals'
+type View = 'issues' | 'create' | 'detail' | 'usage' | 'settings' | 'automation' | 'skills' | 'board' | 'agents' | 'meetings' | 'goals'
 const MAX_TABS = 8
 /** 最近工作区列表的上限（切换器下拉里展示） */
 const MAX_RECENT_WORKSPACES = 8
@@ -38,7 +37,6 @@ export function App() {
   const [settingsSection, setSettingsSection] = useState('general')
   const [tabs, setTabs] = useState<string[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
-  const [unreadCount, setUnreadCount] = useState(0)
   const selected = tasks.find((task) => task.id === activeId) ?? null
 
   useEffect(() => {
@@ -48,13 +46,6 @@ export function App() {
     apply()
     if (theme === 'system') { mq.addEventListener('change', apply); return () => mq.removeEventListener('change', apply) }
   }, [settings?.theme])
-  useEffect(() => {
-    let alive = true
-    const refresh = () => void bridge.issues.notifications(true).then((items) => { if (alive) setUnreadCount(items.length) })
-    refresh()
-    const off = bridge.issues.onUpdated(refresh)
-    return () => { alive = false; off() }
-  }, [])
 
   const openTask = (id: string) => { setTabs((current) => current.includes(id) ? current : [...current, id].slice(-MAX_TABS)); setActiveId(id); setView('detail') }
   const closeTab = (id: string) => { const next = tabs.filter((tab) => tab !== id); setTabs(next); if (activeId === id) setActiveId(next[next.length - 1] ?? null) }
@@ -107,7 +98,7 @@ export function App() {
   const openSettings = (section?: string) => { if (section) setSettingsSection(section); setView('settings') }
 
   const commands: PaletteCommand[] = useMemo(() => [
-    ...[['Issue', navIssues], ['看板', () => nav('board')], ['会议', () => nav('meetings')], ['目标', () => nav('goals')], ['Agent 管理', () => nav('agents')], ['收件箱', () => setView('inbox')], ['自动化', () => nav('automation')], ['扩展', () => nav('skills')], ['用量', () => nav('usage')], ['设置', () => openSettings('general')], ['设置 · 运行时', () => openSettings('runtime')]].map(([label, run]) => ({ id: String(label), group: '跳转', label: String(label), run: run as () => void })),
+    ...[['Issue', navIssues], ['看板', () => nav('board')], ['会议', () => nav('meetings')], ['目标', () => nav('goals')], ['Agent 管理', () => nav('agents')], ['自动化', () => nav('automation')], ['扩展', () => nav('skills')], ['用量', () => nav('usage')], ['设置', () => openSettings('general')], ['设置 · 运行时', () => openSettings('runtime')]].map(([label, run]) => ({ id: String(label), group: '跳转', label: String(label), run: run as () => void })),
     { id: 'new', group: '操作', label: '新建任务', hint: 'Ctrl+N', run: goWorkspace },
     { id: 'new-meeting', group: '操作', label: '发起会议', run: () => { nav('meetings'); requestMeetingCreate() } },
     { id: 'new-goal', group: '操作', label: '开启目标模式', run: () => { nav('goals'); requestGoalCreate() } },
@@ -130,7 +121,6 @@ export function App() {
     })
   ], [tasks, settings?.theme])
 
-  const openIssue = (issue: Issue) => { if (issue.taskId) openTask(issue.taskId) }
   return <div className="app">
     <ToastHost /><ConfirmHost /><Palette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={commands} />
     <aside className="sidebar">
@@ -143,7 +133,6 @@ export function App() {
         <button className={view === 'meetings' ? 'active' : ''} onClick={() => nav('meetings')}><MessagesSquare /><span className="nav-label">会议</span></button>
         <button className={view === 'goals' ? 'active' : ''} onClick={() => nav('goals')}><Target /><span className="nav-label">目标</span></button>
         <button className={view === 'agents' ? 'active' : ''} onClick={() => nav('agents')}><Users /><span className="nav-label">Agent</span></button>
-        <button className={view === 'inbox' ? 'active' : ''} onClick={() => nav('inbox')}><Inbox /><span className="nav-label">收件箱</span>{unreadCount > 0 && <span className="nav-count">{unreadCount > 99 ? '99+' : unreadCount}</span>}</button>
         <button className={view === 'automation' ? 'active' : ''} onClick={() => nav('automation')}><AlarmClock /><span className="nav-label">自动化</span></button>
         <button className={view === 'skills' ? 'active' : ''} onClick={() => nav('skills')}><Layers /><span className="nav-label">扩展</span></button>
         <button className={view === 'usage' ? 'active' : ''} onClick={() => nav('usage')}><Gauge /><span className="nav-label">用量</span></button>
@@ -152,7 +141,7 @@ export function App() {
       <div className="sidebar-footer"><span className="connection-dot" /> 本地引擎就绪</div>
     </aside>
     <main className="main">
-      {view === 'inbox' ? <InboxView onOpenIssue={openIssue} /> : view === 'agents' ? <AgentsView /> : view === 'automation' ? <AutomationView /> : view === 'skills' ? <ExtensionsView /> : view === 'settings' ? <SettingsView section={settingsSection} onSection={setSettingsSection} /> : view === 'usage' ? <UsageView /> : view === 'meetings' ? <MeetingsView onOpenIssue={(taskId) => openTask(taskId)} /> : view === 'goals' ? <GoalsView onOpenIssue={(taskId) => openTask(taskId)} /> : view === 'board' ? <Page title="看板" count={tasks.length}><BoardView tasks={tasks} onOpen={openTask} /></Page> : view === 'detail' && selected ? <div className="tasks-column detail-page"><Chrome title={selected.title} onBack={() => { setActiveId(null); setView('issues') }} />{tabs.length > 0 && <TabBar tabs={tabs} tasks={tasks} activeId={activeId} onSelect={openTask} onClose={closeTab} />}<TaskDetail task={selected} tasks={tasks} onSelect={openTask} /></div> : view === 'create' ? <Page title="新建 Issue" count={0}><WorkspaceView onCreated={(task) => openTask(task.id)} workspaceDir={workspaceDir} onPickWorkspace={pickWorkspace} /></Page> : <IssuesView tasks={tasks} onOpen={openTask} onCreate={goWorkspace} />}
+      {view === 'agents' ? <AgentsView /> : view === 'automation' ? <AutomationView /> : view === 'skills' ? <ExtensionsView /> : view === 'settings' ? <SettingsView section={settingsSection} onSection={setSettingsSection} /> : view === 'usage' ? <UsageView /> : view === 'meetings' ? <MeetingsView onOpenIssue={(taskId) => openTask(taskId)} /> : view === 'goals' ? <GoalsView onOpenIssue={(taskId) => openTask(taskId)} /> : view === 'board' ? <Page title="看板" count={tasks.length}><BoardView tasks={tasks} onOpen={openTask} /></Page> : view === 'detail' && selected ? <div className="tasks-column detail-page"><Chrome title={selected.title} onBack={() => { setActiveId(null); setView('issues') }} />{tabs.length > 0 && <TabBar tabs={tabs} tasks={tasks} activeId={activeId} onSelect={openTask} onClose={closeTab} />}<TaskDetail task={selected} tasks={tasks} onSelect={openTask} /></div> : view === 'create' ? <Page title="新建 Issue" count={0}><WorkspaceView onCreated={(task) => openTask(task.id)} workspaceDir={workspaceDir} onPickWorkspace={pickWorkspace} /></Page> : <IssuesView tasks={tasks} onOpen={openTask} onCreate={goWorkspace} />}
     </main>
   </div>
 }

@@ -6,7 +6,7 @@
 
 ## 1. 渲染层 IPC 桥（`window.agentdeck`）
 
-> 产品层以 Issue/Run 为中心；Task API 保留给本地执行器和旧数据兼容。一个 Issue 可以拥有多个 Run，Run 结束后会生成报告评论和收件箱通知。
+> 产品层以 Issue/Run 为中心；Task API 保留给本地执行器和旧数据兼容。一个 Issue 可以拥有多个 Run，Run 结束后会生成报告评论。
 
 preload 以 `contextBridge` 暴露，全部经 `ipcRenderer.invoke/on` 与主进程通信。TypeScript 契约：`src/shared/contracts.ts` 的 `AgentDeckApi` 接口；渲染层组件经 `src/renderer/src/task-service.ts`（任务操作单一入口）调用，不直接拼装 IPC payload。全部写入口在 main 侧接收 `unknown` 并经 `ipc-validation.ts` 校验。
 

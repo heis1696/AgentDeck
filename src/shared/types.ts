@@ -236,16 +236,6 @@ export interface Comment {
   createdAt: number
 }
 
-export interface Notification {
-  id: string
-  userId: string
-  issueId: string
-  kind: 'reported' | 'mentioned' | 'status' | 'assigned'
-  runId?: string
-  read: boolean
-  createdAt: number
-}
-
 export interface Automation {
   id: string
   name: string

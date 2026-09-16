@@ -104,7 +104,7 @@ try {
     const issueCount = issueStore.list().length
     const second = service.create({ title: 'replay', prompt: 'replay', workdir: '', issueId: goal.issueId, goalId: goal.id, phaseIndex: 2, dedupeKey: key })
     check(first.id === second.id && service.deduped(key)?.id === first.id, 'replayed dedupeKey returns the original Task')
-    check(issueStore.list().length === issueCount, 'dedupe replay adds no Issue or notification projection')
+    check(issueStore.list().length === issueCount, 'dedupe replay adds no Issue projection')
 
     // Public request/idempotency aliases map to one durable key. The second
     // request deliberately changes the payload to prove the first Task wins.

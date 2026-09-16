@@ -80,7 +80,6 @@ function durableState(userDataDir: string) {
   const issues = Array.isArray(issuesDocument.issues) ? issuesDocument.issues : []
   const runs = Array.isArray(issuesDocument.runs) ? issuesDocument.runs : []
   const comments = Array.isArray(issuesDocument.comments) ? issuesDocument.comments : []
-  const notifications = Array.isArray(issuesDocument.notifications) ? issuesDocument.notifications : []
   const goals = loadArray(path.join(userDataDir, 'goals', 'index.json'), 'goals')
   const goalDocument = (() => {
     try { return JSON.parse(fs.readFileSync(path.join(userDataDir, 'goals', 'index.json'), 'utf8')) as JsonRecord } catch { return {} }
@@ -91,7 +90,7 @@ function durableState(userDataDir: string) {
   const specApprovals = Array.isArray(goalDocument.specApprovals) ? goalDocument.specApprovals : []
   const goalEvents = new EventLog(path.join(userDataDir, 'goals', 'events.jsonl')).read()
   const orphanRuns = tasks.filter((task) => record(task).status === 'running')
-  return { tasks, issues, runs, comments, notifications, goals, checkpoints, specSnapshots, specDecisions, specApprovals, goalEvents, orphanRuns }
+  return { tasks, issues, runs, comments, goals, checkpoints, specSnapshots, specDecisions, specApprovals, goalEvents, orphanRuns }
 }
 
 function readEvents(userDataDir: string, taskId: string, afterSeq = 0) {

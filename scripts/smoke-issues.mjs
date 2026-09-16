@@ -14,14 +14,13 @@ const task = { id: 't_issue', title: 'Issue projection', prompt: 'ship it', work
 store.sync([task])
 const issue = store.list()[0]
 const run = store.runs(issue.id)[0]
-const notification = store.notifications()[0]
 const comment = store.comments(issue.id)[0]
 const ok = (condition, label) => { console.log(`  ${condition ? '✓' : '✗'} ${label}`); if (!condition) process.exitCode = 1 }
 ok(issue.identifier === 'YOU-1' && issue.status === 'in_review', 'task becomes an issue')
 ok(run?.status === 'completed' && run.transcriptEventCount === 4, 'completed run is projected')
-ok(comment?.content === 'Report is ready' && notification?.kind === 'reported', 'result creates report and inbox notification')
+ok(comment?.content === 'Report is ready', 'result creates a report comment')
 const added = store.addComment(issue.id, 'A human follow-up')
-ok(!!added && store.notifications().length === 2, 'comments create activity')
+ok(!!added && store.comments(issue.id).length === 2, 'comments create activity')
 await import('node:fs/promises').then(({ access }) => access(path.join(tmp, 'issues', 'index.json')))
 ok(true, 'projection is persisted')
 const retryTask = { ...task, id: 't_retry', title: 'Retry history', runId: 'run_retry_a', startedAt: 4, endedAt: 5, result: 'first' }

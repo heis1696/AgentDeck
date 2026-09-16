@@ -27,8 +27,8 @@
                │ preload（contextBridge → window.agentdeck）
 ┌──────────────┴─────────────────────────────────────────────────┐
 │ 渲染进程（React）                                                 │
-│  App → 侧栏导航：Issue（队列/详情）/ 看板 / Agent / 收件箱 /        │
-│         自动化 / 技能 / 用量 / 设置                                │
+│  App → 侧栏导航：Issue（队列/详情）/ 看板 / Agent / 会议 /        │
+│         目标 / 自动化 / 技能 / 用量 / 设置                         │
 │  TaskDetail（日志/结果/Git/子任务/权限/GoalPanel 侧栏）             │
 └────────────────────────────────────────────────────────────────┘
 ```
@@ -46,7 +46,7 @@ Issue（目标、状态、负责人、评论时间线）
             └─ Goal 阶段（goalId + phaseIndex 标记，可选）
 ```
 
-每个 Run 都保留独立的状态、触发来源、执行日志和用量。成功/失败结束后，IssueStore 将结果写成带 `runId` 的 Agent 报告评论，并创建收件箱通知；用户可以在同一 Issue 的评论中 `@agent`，触发新的 Run，而不会创建新的 Issue。Task 仍负责进程、事件流、会话恢复和 git 快照，作为本地执行层兼容契约。Goal 是叠加在 `Issue -> Run -> Task` 之上的持久化状态脊柱（§7.1），不替代该模型。
+每个 Run 都保留独立的状态、触发来源、执行日志和用量。成功/失败结束后，IssueStore 将结果写成带 `runId` 的 Agent 报告评论；用户可以在同一 Issue 的评论中 `@agent`，触发新的 Run，而不会创建新的 Issue。Task 仍负责进程、事件流、会话恢复和 git 快照，作为本地执行层兼容契约。Goal 是叠加在 `Issue -> Run -> Task` 之上的持久化状态脊柱（§7.1），不替代该模型。
 
 ---
 
@@ -170,7 +170,7 @@ src/
 │   ├── skills.ts             SkillMeta/SkillDetail/SkillTarget/SyncState
 │   └── extensions.ts         McpDef/HookDef/PluginInventoryItem/ExtSourceMeta/CatalogEntry/DiscoveredAsset
 └── renderer/src/             React UI
-    ├── App.tsx               视图路由 + 侧栏（Issue/看板/Agent/收件箱/自动化/技能/用量/设置）
+    ├── App.tsx               视图路由 + 侧栏（Issue/看板/Agent/会议/目标/自动化/技能/用量/设置）
     │                         + 命令面板 Ctrl+K + Toast/确认框/菜单
     ├── api.ts                bridge 类型 + hooks（useTasks/useSettings）
     ├── task-service.ts       任务操作 → Bridge command 单一入口
@@ -180,7 +180,7 @@ src/
         ├── IssuesView / BoardView（看板五列）/ WorkspaceView（新建）
         ├── TaskDetail + task/（TurnTimeline/PermissionPrompt/RunHistory/CommentPanel/GitSummary）
         ├── goal/GoalPanel    Issue 详情侧栏的目标模式面板（开启/状态/checkpoint/清除）
-        ├── AgentsView / SkillsView（编辑器+同步状态）/ AutomationView / InboxView
+        ├── AgentsView / SkillsView（编辑器+同步状态）/ AutomationView / MeetingsView / GoalsView
         ├── UsageView / RuntimeView（设置页内）/ SettingsView / DiffView / Markdown / TabBar
 ```
 
@@ -276,7 +276,7 @@ delegate 标记 → 目标解析（限 subordinates，名字/平台 id 忽略大
 - `renderer/src/hooks/useIssueDetails.ts` 负责 Issue、Run、Comment 查询与更新。
 - `renderer/src/components/task/` 提供 `TurnTimeline`、`PermissionPrompt`、`RunHistory`、`CommentPanel` 和 `GitSummary`。
 - `renderer/src/task-service.ts` 是任务操作到 Bridge command 的单一入口。
-- `App.tsx` 侧栏路由：Issue（默认）/ 看板 / Agent / 收件箱 / 自动化 / 技能 / 用量 / 设置；Ctrl+K 命令面板可搜索任务、跳页与切主题。
+- `App.tsx` 侧栏路由：Issue（默认）/ 看板 / 会议 / 目标 / Agent / 自动化 / 技能 / 用量 / 设置；Ctrl+K 命令面板可搜索任务、跳页与切主题。
 
 领域边界为 `Issue -> Run -> Task`：Issue 是用户工作单元，Run 是一次面向 Issue 的执行投影，Task 是本地 CLI 兼容记录；`ExecutionRecord` 由 `shared/taskflow.ts` 提供唯一映射。任务状态转换（含看板拖动的 `validateMove`）、Issue/Run 状态派生均集中在 `shared/taskflow.ts`。
 

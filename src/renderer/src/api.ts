@@ -1,7 +1,7 @@
 // 渲染层 API 封装：window.agentdeck 的类型 + 常用 hooks
 import { useEffect, useState, useCallback } from 'react'
 import type { AgentDeckApi, AgentInfo, AgentModelCatalog, PresetInfo, PermissionRequest, SidecarSnapshot } from '../../shared/contracts'
-import type { Task, TaskEvent, AppSettings, Issue, Run, Comment, Notification, Automation, RuntimeSnapshot, AnalyticsSummary, IssuePriority, IssueStatus, RunTrigger } from '../../shared/types'
+import type { Task, TaskEvent, AppSettings, Issue, Run, Comment, Automation, RuntimeSnapshot, AnalyticsSummary, IssuePriority, IssueStatus, RunTrigger } from '../../shared/types'
 
 /** 队员（agent 身份）——与主进程 agents.ts 的 Agent 对齐 */
 export type { AgentInfo, AgentModelCatalog }

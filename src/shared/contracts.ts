@@ -1,4 +1,4 @@
-import type { AcceptanceCriterion, Automation, AppSettings, AnalyticsSummary, Comment, Goal, GoalApprovalSnapshot, GoalCheckpoint, GoalEvolutionPatch, GoalSpecDecision, GoalSpecSnapshot, GoalRun, Issue, IssuePriority, IssueStatus, Notification, Run, RunTrigger, RuntimeSnapshot, Task, TaskEvent } from './types'
+import type { AcceptanceCriterion, Automation, AppSettings, AnalyticsSummary, Comment, Goal, GoalApprovalSnapshot, GoalCheckpoint, GoalEvolutionPatch, GoalSpecDecision, GoalSpecSnapshot, GoalRun, Issue, IssuePriority, IssueStatus, Run, RunTrigger, RuntimeSnapshot, Task, TaskEvent } from './types'
 import type { SkillDetail, SkillMeta, SkillTarget, SyncState } from './skills'
 import type { Meeting, MeetingCreateInput } from './meeting'
 export type { MeetingCreateInput } from './meeting'
@@ -193,8 +193,6 @@ export interface AgentDeckApi {
     comments: (id: string) => Promise<Comment[]>
     update: (id: string, patch: IssueUpdatePatch) => Promise<Issue | null>
     addComment: (id: string, content: string) => Promise<Comment | null>
-    notifications: (unreadOnly?: boolean) => Promise<Notification[]>
-    markNotificationRead: (id: string) => Promise<{ ok: boolean }>
     onUpdated: (cb: (payload: { taskId: string; issueId: string; issue: Issue | null; run: Run | null }) => void) => () => void
   }
   goals: {

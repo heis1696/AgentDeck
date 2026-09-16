@@ -1,14 +1,14 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import type { Comment, Issue, IssuePriority, IssueStatus, Notification, Run, Task } from '../shared/types'
+import type { Comment, Issue, IssuePriority, IssueStatus, Run, Task } from '../shared/types'
 import { executionRecordFromTask, taskStatusToIssueStatus } from '../shared/taskflow'
 
-type Persisted = { issues: Issue[]; runs: Run[]; comments: Comment[]; notifications: Notification[]; nextIdentifier: number }
+type Persisted = { issues: Issue[]; runs: Run[]; comments: Comment[]; nextIdentifier: number }
 
 /** Durable issue/run projection over the existing task execution store. */
 export class IssueStore {
   private readonly file: string
-  private data: Persisted = { issues: [], runs: [], comments: [], notifications: [], nextIdentifier: 1 }
+  private data: Persisted = { issues: [], runs: [], comments: [], nextIdentifier: 1 }
   private lastTaskFingerprint = ''
   private latestTasks = new Map<string, Task>()
 
@@ -22,7 +22,6 @@ export class IssueStore {
         issues: Array.isArray(parsed.issues) ? parsed.issues : [],
         runs: Array.isArray(parsed.runs) ? parsed.runs : [],
         comments: Array.isArray(parsed.comments) ? parsed.comments : [],
-        notifications: Array.isArray(parsed.notifications) ? parsed.notifications : [],
         nextIdentifier: typeof parsed.nextIdentifier === 'number' ? parsed.nextIdentifier : 1
       }
     } catch { /* first launch */ }
@@ -108,9 +107,6 @@ export class IssueStore {
         if (isLatest && existing.description !== task.prompt) patch.description = task.prompt
         if (isLatest && existing.status !== status) {
           patch.status = status
-          if (!existing.statusOverride && existing.updatedAt !== task.createdAt) {
-            this.data.notifications.push({ id: this.id('ntf'), userId: 'user', issueId: existing.id, kind: 'status', read: false, createdAt: Date.now() })
-          }
         }
         if (isLatest && task.agentId && existing.assignee?.id !== task.agentId) patch.assignee = { type: 'agent', id: task.agentId }
         // 旧数据回填：委派子任务的存量 Issue 补上来源标记
@@ -142,7 +138,6 @@ export class IssueStore {
       if ((task.status === 'done' || task.status === 'failed') && reportContent && !hasReport) {
         const comment: Comment = { id: this.id('com'), issueId: issue.id, author: { type: 'agent', id: task.agentId ?? task.backend }, content: reportContent, reactions: [], runId, createdAt: task.endedAt ?? Date.now() }
         this.data.comments.push(comment)
-        this.data.notifications.push({ id: this.id('ntf'), userId: 'user', issueId: issue.id, kind: 'reported', runId, read: false, createdAt: comment.createdAt })
         changed = true
       }
     }
@@ -198,27 +193,13 @@ export class IssueStore {
       .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0))[0]
   }
   comments(issueId: string) { return this.data.comments.filter((comment) => comment.issueId === issueId).sort((a, b) => a.createdAt - b.createdAt) }
-  notifications(unreadOnly = false) { return this.data.notifications.filter((item) => !unreadOnly || !item.read).sort((a, b) => b.createdAt - a.createdAt) }
 
   addComment(issueId: string, content: string, author: { type: 'agent' | 'user'; id: string } = { type: 'user', id: 'user' }): Comment | null {
     if (!this.get(issueId) || !content.trim()) return null
     const comment: Comment = { id: this.id('com'), issueId, author, content: content.trim(), reactions: [], createdAt: Date.now() }
     this.data.comments.push(comment)
-    this.data.notifications.push({ id: this.id('ntf'), userId: 'user', issueId, kind: author.type === 'agent' ? 'reported' : 'mentioned', read: false, createdAt: comment.createdAt })
     this.save()
     return comment
-  }
-
-  markNotificationRead(id: string) {
-    const notification = this.data.notifications.find((item) => item.id === id)
-    if (!notification) return false
-    notification.read = true
-    this.save()
-    return true
-  }
-
-  notificationIssueId(id: string) {
-    return this.data.notifications.find((item) => item.id === id)?.issueId
   }
 
   updateMetadata(id: string, patch: { priority?: IssuePriority; labels?: string[]; dueDate?: number }) {
