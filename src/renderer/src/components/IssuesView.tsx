@@ -1,6 +1,7 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { CheckCircle2, CircleAlert, CircleDot, Clock3, Eye, ListTodo, Plus, Search } from 'lucide-react'
-import type { Issue, IssueStatus, Task } from '../../../shared/types'
+import type { Goal, Issue, IssueStatus, Task } from '../../../shared/types'
+import type { Meeting } from '../../../shared/meeting'
 import { bridge, useIssues } from '../api'
 import { ISSUE_STATUS_LABELS, isParkedQueued, PARKED_QUEUED_LABEL } from '../labels'
 import { taskService } from '../task-service'
@@ -43,7 +44,21 @@ export function IssuesView({ tasks, onOpen, onCreate }: { tasks: Task[]; onOpen:
   const [query, setQuery] = useState('')
   const [status, setStatus] = useState<IssueStatus | 'all'>('all')
   const [starting, setStarting] = useState<string | null>(null)
+  const [goals, setGoals] = useState<Goal[]>([])
+  const [meetings, setMeetings] = useState<Meeting[]>([])
   const taskById = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks])
+  // 目标/会议角标数据：与 BoardView 同款订阅（非终态 goal、active/waiting_user meeting）
+  useEffect(() => {
+    const offGoals = bridge.goals.onUpdated((goal) => setGoals((cur) => (cur.some((g) => g.id === goal.id) ? cur.map((g) => (g.id === goal.id ? goal : g)) : [...cur, goal])))
+    const offGoalDeleted = bridge.goals.onDeleted((goalId) => setGoals((cur) => cur.filter((g) => g.id !== goalId)))
+    void bridge.goals.list().then(setGoals).catch(() => {})
+    const offMeetings = bridge.meetings.onUpdated((meeting) => setMeetings((cur) => (cur.some((m) => m.id === meeting.id) ? cur.map((m) => (m.id === meeting.id ? meeting : m)) : [...cur, meeting])))
+    const offMeetingDeleted = bridge.meetings.onDeleted((meetingId) => setMeetings((cur) => cur.filter((m) => m.id !== meetingId)))
+    void bridge.meetings.list().then(setMeetings).catch(() => {})
+    return () => { offGoals(); offGoalDeleted(); offMeetings(); offMeetingDeleted() }
+  }, [])
+  const goalIssues = useMemo(() => new Set(goals.filter((g) => !['completed', 'cancelled'].includes(g.status)).map((g) => g.issueId)), [goals])
+  const meetingIssues = useMemo(() => new Set(meetings.filter((m) => m.status === 'active' || m.status === 'waiting_user').map((m) => m.issueId)), [meetings])
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase()
     return issues.filter((issue) => {
@@ -91,20 +106,22 @@ export function IssuesView({ tasks, onOpen, onCreate }: { tasks: Task[]; onOpen:
         <div className="issue-list-view">{STATUS_ORDER.map(({ key, icon: Icon }) => {
           const items = visible.filter((issue) => issue.status === key)
           if (!items.length) return null
-          return <section className="issue-list-group" key={key}><div className="issue-list-group-head"><Icon size={14} /><strong>{ISSUE_STATUS_LABELS[key]}</strong><span>{items.length}</span></div>{items.map((issue) => <IssueRow key={issue.id} issue={issue} task={taskById.get(issue.taskId)!} onOpen={onOpen} onMove={move} onStart={start} starting={starting === issue.taskId} />)}</section>
+          return <section className="issue-list-group" key={key}><div className="issue-list-group-head"><Icon size={14} /><strong>{ISSUE_STATUS_LABELS[key]}</strong><span>{items.length}</span></div>{items.map((issue) => <IssueRow key={issue.id} issue={issue} task={taskById.get(issue.taskId)!} hasGoal={goalIssues.has(issue.id)} hasMeeting={meetingIssues.has(issue.id)} onOpen={onOpen} onMove={move} onStart={start} starting={starting === issue.taskId} />)}</section>
         })}</div>
       )}
     </div>
   )
 }
 
-function IssueRow({ issue, task, onOpen, onMove, onStart, starting }: { issue: Issue; task: Task; onOpen: (id: string) => void; onMove: (issue: Issue, status: IssueStatus) => void; onStart: (id: string) => void; starting: boolean }) {
+function IssueRow({ issue, task, hasGoal, hasMeeting, onOpen, onMove, onStart, starting }: { issue: Issue; task: Task; hasGoal: boolean; hasMeeting: boolean; onOpen: (id: string) => void; onMove: (issue: Issue, status: IssueStatus) => void; onStart: (id: string) => void; starting: boolean }) {
   // 行内已有状态分组头作语境，行内不再重复状态文字；搬运控件 hover 才浮现
   const parked = isParkedQueued(task)
   return <article className={`issue-home-row${parked ? ' is-parked' : ''}`} role="button" tabIndex={0} onClick={() => onOpen(task.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onOpen(task.id) } }}>
     <span className={`dot dot-${task.status}`} />
     <span className="issue-home-id"><span className="issue-identifier">{issue.identifier}</span><IssueIdChip id={issue.id} /></span>
     <strong className="issue-home-title">{issue.title}</strong>
+    {hasGoal && <span className="badge badge-goal" title="目标模式自动推进中">🎯</span>}
+    {hasMeeting && <span className="badge badge-meeting" title="团队会议进行中">💬</span>}
     {issue.createdBy === 'agent' && <span className="badge badge-delegate">⚡ 委派</span>}
     {task.trigger === 'handoff' && <span className="badge badge-handoff">⇥ 接力</span>}
     {parked && <span className="badge badge-parked" title="任务停放在队列外，等你手动启动">{PARKED_QUEUED_LABEL}</span>}

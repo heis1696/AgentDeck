@@ -19,7 +19,7 @@ export const GOAL_STATUS_LABELS: Record<GoalStatus, string> = {
   draft: '草稿', active: '进行中', waiting_user: '等待用户', completed: '已完成', blocked: '受阻', cancelled: '已取消', failed: '失败'
 }
 
-/** 目标状态配色（GoalPanel / GoalsView 共用）：进行中蓝、等待琥珀、完成绿、其余灰/红（与旧目标页一致） */
+/** 目标状态配色（GoalPanel 共用）：进行中蓝、等待琥珀、完成绿、其余灰/红 */
 export const GOAL_STATUS_COLORS: Record<GoalStatus, string> = {
   draft: '#8b95a5', active: '#4f8cff', waiting_user: '#e8a13c',
   completed: '#3cb96e', blocked: '#e8a13c', cancelled: '#8b95a5', failed: '#e05252'
