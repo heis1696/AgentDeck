@@ -71,7 +71,7 @@ const backend = {
     }
     return {
       sessionId,
-      async send(content) { if (content.includes('强制综合')) synthesisCalls++; await sleep(3); emit(content) },
+      async send(content) { if (content.includes('强制综合')) synthesisCalls++; phaseCalls.push({ agent, prompt: content }); await sleep(3); emit(content) },
       async stop() {},
       async close() {}
     }
@@ -133,6 +133,9 @@ const recoverController = new MeetingController({ store: recoverStore, offices: 
 recoverStore.update(meeting.id, { status: 'active' })
 const recovered = recoverController.recover()
 check(recovered.some((item) => item.id === meeting.id && item.status === 'waiting_user'), 'active meeting recovers to waiting_user')
+
+check(phaseCalls.some((call) => call.prompt.includes('汇报轮') && call.prompt.includes('<investigate')), 'report prompt teaches <investigate>')
+check(phaseCalls.some((call) => call.prompt.includes('质疑轮') && call.prompt.includes('<investigate')), 'challenge prompt teaches <investigate>')
 
 await fixture.runner.shutdown()
 if (process.exitCode) process.exit(1)

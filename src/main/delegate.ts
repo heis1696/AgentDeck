@@ -213,6 +213,21 @@ export function buildDelegationBlock(agent: AgentLike, team: AgentLike[]): strin
   const roster = subs
     .map((a) => `- ${a.name}（${a.backend}${a.role ? '，' + a.role : ''}${a.note ? '，' + a.note : '，专长未说明'}）`)
     .join('\n')
+  const peers = team.filter((a) => {
+    if (a.id === agent.id || a.backend.toLowerCase() === 'dsh') return false
+    return (!!a.role && /队长|领队|captain|leader/i.test(a.role)) || (a.subordinates?.length ?? 0) > 0
+  })
+  // 咨询/调查的解析与回灌管道只在模型输出标记后才生效，标记语法必须随 prompt 显式给出。
+  const consultBlock = peers.length ? `
+
+【队长间咨询】
+任务需要其他队长（非你的队员）的专业意见/复核时，输出：
+<consult to="队长名" reason="一句话为什么咨询它">问题（自包含：背景 + 你要它确认什么）</consult>
+可咨询的队长：
+${peers.map((a) => `- ${a.name}（${a.backend}${a.role ? '，' + a.role : ''}）`).join('\n')}
+系统会转交对方办公室会话，对方答复后自动回灌本会话，你继续推进。
+- 咨询只收集意见与复核，不能给对方派活；执行类工作一律 <delegate> 给自己的队员。
+- 对方意见仅供参考，决策与结果归属你；同一话题不要重复咨询。` : ''
   return `【你可驱使的队员】
 ${roster}
 
@@ -228,7 +243,7 @@ ${roster}
 系统会并行执行并把结果汇报给你，你继续推进；可多轮派发。
 判断原则：琐碎小事自己做（并行开销不值得）；队员无人能胜任时可亲自完成；需要并行或专长的工作一律派发。
 派发标记输出完即收尾本轮，不必解说等待。最终总结陈述结果而非过程，且不含任何标记。
-派发即时生效：标记闭合的瞬间系统就会建单并行执行，不需要确认，也不要因为"没看到动静"而重派同一工作或亲自重做——每轮结果会在本轮结束时自动回灌给你。已派过的工作不要输出第二次；对已派单的进展有疑问，在正文里说明即可，等待回灌。`
+派发即时生效：标记闭合的瞬间系统就会建单并行执行，不需要确认，也不要因为"没看到动静"而重派同一工作或亲自重做——每轮结果会在本轮结束时自动回灌给你。已派过的工作不要输出第二次；对已派单的进展有疑问，在正文里说明即可，等待回灌。${consultBlock}`
 }
 
 /** 把子任务指令里的主仓库绝对路径改写成相对路径（队员在隔离副本工作，绝对路径会改错地方） */

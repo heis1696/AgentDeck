@@ -31,6 +31,19 @@ check(delegate.parseConsults('<consult reason="why" to="Beta">question</consult>
 check(delegate.parseConsults('<consult>not a call</consult><consult to="Beta">real</consult>').length === 1, 'consult parser rejects phantom calls without to')
 check(delegate.stripConsults('before <consult to="Beta">question</consult> after') === 'before  after', 'consult markers are stripped from displayed text')
 
+const consultBlock = delegate.buildDelegationBlock(
+  { id: 'ag_alpha', name: 'Alpha', backend: 'zcode', role: '队长', subordinates: ['ag_member'] },
+  [
+    { id: 'ag_alpha', name: 'Alpha', backend: 'zcode', role: '队长', subordinates: ['ag_member'] },
+    { id: 'ag_beta', name: 'Beta', backend: 'claude', role: '队长', subordinates: ['ag_n'] },
+    { id: 'ag_dsh', name: 'DshCap', backend: 'dsh', role: '队长', subordinates: [] },
+    { id: 'ag_member', name: 'Member', backend: 'claude' }
+  ]
+)
+check(consultBlock.includes('<consult'), 'delegation block teaches <consult> usage')
+check(consultBlock.includes('可咨询的队长') && consultBlock.includes('Beta'), 'consult roster lists captain peers')
+check(!consultBlock.slice(consultBlock.indexOf('可咨询的队长')).includes('DshCap'), 'consult roster excludes dsh captains')
+
 const behavior = { starts: [], sends: [], active: 0, maxActive: 0 }
 const makeSession = (agent, events) => ({
   sessionId: `${agent}-session`,

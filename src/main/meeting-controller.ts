@@ -344,7 +344,7 @@ export class MeetingController {
     const turns: MeetingTurn[] = []
     const stances = new Map<string, Stance>()
     const reporter = meeting.participants.find((participant) => participant.role === 'reporter')!
-    const reportPrompt = `${this.chairNotes(meeting)}【系统·会议·第 ${meeting.round} 轮/汇报轮】议题：${meeting.topic}\n请汇报当前对议题的判断、证据与建议。回复最后一行必须是 <stance verdict="agree|disagree|abstain" grounds="一句话依据"/>。`
+    const reportPrompt = `${this.chairNotes(meeting)}【系统·会议·第 ${meeting.round} 轮/汇报轮】议题：${meeting.topic}\n请汇报当前对议题的判断、证据与建议。需要你名下队员补充事实时，可输出 <investigate to="你的队员名" reason="一句话">只读调查指令（查证/读码，不要修改代码）</investigate>，系统会派你的队员调查并自动回灌报告。回复最后一行必须是 <stance verdict="agree|disagree|abstain" grounds="一句话依据"/>。`
     const reportText = await this.speak(meeting, reporter, 'report', reportPrompt, turns)
     const reportStance = parseStance(reportText)
     if (reportStance) stances.set(reporter.agentId, reportStance)
@@ -354,7 +354,7 @@ export class MeetingController {
     const designer = meeting.participants.find((participant) => participant.role === 'designer')!
     for (let inner = 0; inner < Math.max(1, meeting.maxInnerTurns); inner++) {
       for (const critic of critics) {
-        const prompt = `${this.chairNotes(meeting)}【系统·会议·第 ${meeting.round} 轮/质疑轮】议题：${meeting.topic}\n${meetingData(stripMeetingTags(reportText))}\n请只针对汇报中的具体条目提出反对；每轮最多 3 条，并标记 1 条最高优先级。每条必须含具体 ref。可用 <objection ref="文件:行号" priority="high">缺陷与修正方向</objection>。回复最后一行必须是 stance。`
+        const prompt = `${this.chairNotes(meeting)}【系统·会议·第 ${meeting.round} 轮/质疑轮】议题：${meeting.topic}\n${meetingData(stripMeetingTags(reportText))}\n请只针对汇报中的具体条目提出反对；每轮最多 3 条，并标记 1 条最高优先级。每条必须含具体 ref。可用 <objection ref="文件:行号" priority="high">缺陷与修正方向</objection>。需要证据支撑时，可输出 <investigate to="你的队员名" reason="一句话">只读调查指令（不要修改代码）</investigate>，系统会派你的队员调查并自动回灌报告，你收到后继续。回复最后一行必须是 stance。`
         const text = await this.speak(meeting, critic, 'challenge', prompt, turns)
         const stance = parseStance(text)
         if (stance) stances.set(critic.agentId, stance)
