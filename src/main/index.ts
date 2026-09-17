@@ -1,5 +1,6 @@
 // AgentDeck 主进程入口
 import { app, BrowserWindow, Notification } from 'electron'
+import fs from 'node:fs'
 import path from 'node:path'
 import { TaskStore } from './store'
 import { TaskRunner } from './runner'
@@ -26,6 +27,9 @@ import { sweepWorktrees } from './git'
 import { registerIpcHandlers, type CreateTaskInput } from './ipc/register'
 import { SidecarManager } from './sidecar'
 import { verifyAcceptance } from './acceptance-verifier'
+import { resolveHotState } from './hot/resolve'
+import { clearPointer, readPointer } from './hot/pointer'
+import { HotUpdater } from './hot/updater'
 
 let mainWindow: BrowserWindow | null = null
 let settings: AppSettings
@@ -40,11 +44,45 @@ let agentSessions!: AgentSessionRegistry
 let meetingController!: MeetingController
 let sidecarManager: SidecarManager
 let automationTimer: NodeJS.Timeout | undefined
+let hotUpdater: HotUpdater
+/** 当前窗口加载的热更渲染层版本目录（null = 内置）；did-fail-load 溯源用（§4.3） */
+let hotRendererVersionDir: string | null = null
+let rendererGoneCount = 0
+let rendererGoneAt = 0
 let quitInProgress = false
 let quitReady = false
 let agents: Agent[]
 let presets: ApiPreset[]
 const backends = new Map<string, AgentBackend>()
+
+// —— 单实例锁（设计 §7.1）：声明先于 whenReady 注册；relaunch 的退出-取锁竞态由重试环吸收 ——
+const focusMainWindow = () => {
+  if (!mainWindow) return
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+}
+let hasInstanceLock = app.requestSingleInstanceLock()
+if (hasInstanceLock) {
+  app.on('second-instance', focusMainWindow)
+} else if (process.argv.includes('--agentdeck-relaunch-retry')) {
+  // 热更 relaunch 场景（§7.2 步 8）：旧进程未完全退出的竞态窗口，500ms × 10 次重试取锁
+  let lockAttempts = 0
+  const lockTimer = setInterval(() => {
+    hasInstanceLock = app.requestSingleInstanceLock()
+    if (hasInstanceLock) {
+      clearInterval(lockTimer)
+      app.on('second-instance', focusMainWindow)
+      // ready 已过（重试窗口内就绪）则直接初始化，whenReady 不会再触发
+      if (app.isReady()) void initMain()
+    } else if (++lockAttempts >= 10) {
+      clearInterval(lockTimer)
+      app.quit()
+    }
+  }, 500)
+} else {
+  app.quit()
+}
 
 /** Sync the durable projection and notify issue/run consumers for one task. */
 function publishIssueUpdate(task: Task | null) {
@@ -86,15 +124,64 @@ function createWindow() {
     }
   })
   mainWindow.on('closed', () => (mainWindow = null))
+  // 运行期自愈（§4.3）：热渲染层加载失败/渲染进程反复崩溃 → 隔离坏版本并回退内置
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, _errorDescription, validatedURL, isMainFrame) => {
+    if (!isMainFrame || errorCode === -3 /* ERR_ABORTED 中断类 */) return
+    const hotPrefix = hotRendererFilePrefix()
+    if (!hotPrefix || !validatedURL.startsWith(hotPrefix)) return
+    fallbackFromHotRenderer(`did-fail-load ${errorCode}`)
+  })
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    if (!hotRendererVersionDir) return
+    const now = Date.now()
+    if (now - rendererGoneAt > 5 * 60_000) rendererGoneCount = 0
+    rendererGoneAt = now
+    if (++rendererGoneCount >= 2) fallbackFromHotRenderer(`render-process-gone ×2 (${details.reason})`)
+  })
   // 开发环境由 electron-vite 注入 ELECTRON_RENDERER_URL
   if (process.env.ELECTRON_RENDERER_URL) {
     mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'))
+    // 生产态优先热更渲染层（§4.1 解析单源，bootstrap 与此处共用 resolveHotState）
+    const hot = app.isPackaged
+      ? resolveHotState(app.getPath('userData'), app.getVersion())
+      : resolveHotState(app.getPath('userData'), app.getVersion(), { skipPayload: true })
+    hotRendererVersionDir = hot.rendererIndexHtml ? path.dirname(path.dirname(hot.rendererIndexHtml)) : null
+    mainWindow.loadFile(hot.rendererIndexHtml ?? path.join(__dirname, '../renderer/index.html'))
   }
 }
 
-app.whenReady().then(async () => {
+/** file:// URL 前缀（含尾部分隔符）形式的当前热渲染层版本目录，供 did-fail-load 溯源比对 */
+function hotRendererFilePrefix(): string | null {
+  if (!hotRendererVersionDir) return null
+  try {
+    const url = new URL('file:///')
+    url.pathname = `${hotRendererVersionDir.replace(/\\/g, '/')}/`
+    return url.href
+  } catch {
+    return null
+  }
+}
+
+/** 热渲染层坏版本自愈：隔离版本目录 + 清指针 + 回退内置 + 推 updates:state（§4.3） */
+function fallbackFromHotRenderer(reason: string): void {
+  try {
+    const userData = app.getPath('userData')
+    const pointer = readPointer(userData, 'renderer')
+    if (pointer) {
+      const dir = path.join(userData, pointer.dir)
+      if (fs.existsSync(dir)) fs.renameSync(dir, `${dir}.quarantine-${Date.now()}`)
+      clearPointer(userData, 'renderer', 'fallback')
+    }
+  } catch { /* 处置失败不阻断回退 */ }
+  hotRendererVersionDir = null
+  rendererGoneCount = 0
+  mainWindow?.loadFile(path.join(__dirname, '../renderer/index.html'))
+  hotUpdater?.notifyRendererFallback(reason)
+}
+
+/** 主进程初始化（原 whenReady 体；单实例锁重试环拿锁晚于 ready 时可直接调用） */
+const initMain = async (): Promise<void> => {
   settings = loadSettings()
   // 共享目录解析集中在主进程：settings.sharedDir 非空用之，否则 home 默认；首次启动即初始化 README + skills/
   const resolveSharedDir = () => {
@@ -378,12 +465,31 @@ app.whenReady().then(async () => {
     runner.enqueue(store.get(task.id)!)
     return store.get(task.id) ?? null
   }
+  let automationBusy = false
   const automationTick = () => {
-    const now = Date.now()
-    for (const automation of automationStore.list()) if (automation.enabled && (automation.nextRunAt ?? now) <= now) runAutomation(automation.id)
+    automationBusy = true
+    try {
+      const now = Date.now()
+      for (const automation of automationStore.list()) if (automation.enabled && (automation.nextRunAt ?? now) <= now) runAutomation(automation.id)
+    } finally {
+      automationBusy = false
+    }
   }
   automationTimer = setInterval(automationTick, 15_000)
   automationTick()
+
+  // 热更状态机装配（§5.1 UpdaterDeps 注入；空闲门控 = runner.isIdle + automationTick 临界区重查）
+  hotUpdater = new HotUpdater({
+    getWindow: () => mainWindow,
+    isMainIdle: () => runner.isIdle() && !automationBusy,
+    relaunchForUpdate: (version) => {
+      app.relaunch({ args: [...process.argv.slice(1), '--agentdeck-hot-applied', version, '--agentdeck-relaunch-retry'] })
+      app.quit()
+    },
+    settings: () => settings,
+    getUserDataDir: () => app.getPath('userData'),
+    getShellVersion: () => app.getVersion()
+  })
 
   registerIpcHandlers({
     getWindow: () => mainWindow,
@@ -399,6 +505,7 @@ app.whenReady().then(async () => {
     backends,
     zcode,
     sidecar: sidecarManager,
+    updates: hotUpdater,
     get agents() { return agents },
     set agents(value) { agents = value },
     get presets() { return presets },
@@ -410,9 +517,20 @@ app.whenReady().then(async () => {
 
   createWindow()
 
+  // 热更：启动静默检查（延迟 10s）+ 6h 定时（§1.2）；relaunch 回带参数 → 推"已更新"状态（§7.2 步 11）
+  hotUpdater.startPeriodicCheck(10_000, 6 * 60 * 60 * 1000)
+  const appliedIndex = process.argv.indexOf('--agentdeck-hot-applied')
+  if (appliedIndex >= 0 && process.argv[appliedIndex + 1]) hotUpdater.notifyApplied(process.argv[appliedIndex + 1])
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
+}
+
+app.whenReady().then(() => {
+  // 未取得单实例锁的实例不初始化（§7.1；正常路径已 app.quit，此处是竞态兜底）
+  if (!hasInstanceLock) return
+  void initMain()
 })
 
 app.on('before-quit', (event) => {
@@ -421,7 +539,10 @@ app.on('before-quit', (event) => {
   if (quitInProgress) return
   quitInProgress = true
   if (automationTimer) clearInterval(automationTimer)
+  hotUpdater?.stop()
   void (async () => {
+    // 空闲门控挂起的载荷在退出时补应用（§5.1 autoInstallOnAppQuit 语义；翻转指针 + relaunch 已排程）
+    if (hotUpdater?.hasStagedPayload()) await hotUpdater.applyStagedOnQuit()
     await runner?.shutdown()
     await sidecarManager?.stop()
     store?.flush()

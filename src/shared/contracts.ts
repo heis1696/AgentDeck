@@ -332,4 +332,24 @@ export interface AgentDeckApi {
     listSkills: () => Promise<{ groups: SkillDiscoveryGroup[] }>
     importSkill: (id: string, relPath: string) => Promise<{ name: string }>
   }
+  updates: {
+    getState: () => Promise<UpdateStateSnapshot>
+    check: () => Promise<UpdateStateSnapshot>            // 手动检查（两通道，串行）
+    apply: (channel: UpdateChannel) => Promise<IpcResult>
+    rollback: (channel: UpdateChannel) => Promise<IpcResult>  // 指针回退上一保留版本
+    onState: (cb: (snapshot: UpdateStateSnapshot) => void) => () => void
+  }
+}
+
+export type UpdateChannel = 'renderer' | 'payload'
+export type UpdatePhase = 'idle' | 'checking' | 'downloading' | 'verifying' | 'staged' | 'applying' | 'failed'
+
+export interface UpdateStateSnapshot {
+  phase: UpdatePhase
+  channel: UpdateChannel | null
+  progress?: { receivedBytes: number; totalBytes: number }
+  currentVersion: string          // 生效版本（载荷优先，否则壳版本）
+  stagedVersion?: string          // 已就绪待应用（空闲门控挂起时）
+  activeRendererVersion?: string  // L2 指针生效中的版本（诊断用）
+  error?: string
 }

@@ -11,6 +11,7 @@ import type { CreateTaskInput } from '../task-service'
 import type { AgentBackend } from '../backends/types'
 import type { AppSettings, RunTrigger, Task } from '../../shared/types'
 import type { SidecarManager } from '../sidecar'
+import type { HotUpdater } from '../hot/updater'
 
 export type { CreateTaskInput } from '../task-service'
 
@@ -30,6 +31,8 @@ export interface IpcContext {
   readonly zcode: AgentBackend
   /** Optional business-brain sidecar. Legacy/test contexts may omit it. */
   readonly sidecar?: SidecarManager
+  /** 免安装热更（updates:* IPC 背后的状态机） */
+  readonly updates: HotUpdater
   get agents(): Agent[]
   set agents(value: Agent[])
   get presets(): ApiPreset[]

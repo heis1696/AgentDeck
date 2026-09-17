@@ -1449,6 +1449,11 @@ export class TaskRunner {
     return { ok: true }
   }
 
+  /** 空闲判定（热更 L1 apply 门控，设计 §7.4）：无在跑会话、无启动竞态句柄、store 无 running 任务。 */
+  isIdle(): boolean {
+    return this.sessions.size === 0 && this.launchHandles.size === 0 && this.store.list().every((task) => task.status !== 'running')
+  }
+
   async shutdown() {
     // First invalidate callbacks and stop owned sessions, then wait for any
     // Executor start races that resolve late and still need closing.

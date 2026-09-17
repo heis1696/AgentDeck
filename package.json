@@ -2,7 +2,7 @@
   "name": "agentdeck",
   "version": "0.18.2",
   "description": "本地任务看板 — 把任务派给本地 agent 执行",
-  "main": "./out/main/index.js",
+  "main": "./out/main/bootstrap.js",
   "author": "agentdeck",
   "license": "MIT",
   "scripts": {
@@ -67,7 +67,10 @@
     "smoke:meeting-office": "node scripts/smoke-meeting-office.mjs",
     "smoke:meeting-consult": "node scripts/smoke-meeting-consult.mjs",
     "smoke:meeting": "node scripts/smoke-meeting.mjs",
-    "smoke:meeting-investigate": "node scripts/smoke-meeting-investigate.mjs"
+    "smoke:meeting-investigate": "node scripts/smoke-meeting-investigate.mjs",
+    "smoke:hot-pointer": "node scripts/smoke-hot-pointer.mjs",
+    "smoke:hot-payload": "node scripts/smoke-hot-payload.mjs",
+    "release:hot": "node scripts/release-hot.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

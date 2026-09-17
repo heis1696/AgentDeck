@@ -6,6 +6,7 @@ directories:
 files:
   - out/**
   - package.json
+  - build/icon.png
 icon: build/icon.ico
 win:
   icon: build/icon.ico

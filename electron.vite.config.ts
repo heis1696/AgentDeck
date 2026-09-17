@@ -10,6 +10,7 @@ export default defineConfig({
       rollupOptions: {
         input: {
           index: resolve(__dirname, 'src/main/index.ts'),
+          bootstrap: resolve(__dirname, 'src/main/bootstrap.ts'),
           'sidecar-server': resolve(__dirname, 'src/main/sidecar-server.ts')
         }
       }

@@ -5,13 +5,14 @@ import { Settings } from 'lucide-react'
 import { Menu } from '../ui/Menu'
 import { EmptyState } from '../ui/EmptyState'
 import { RuntimeView } from './RuntimeView'
+import { UpdatePanel } from './UpdatePanel'
 import { toast } from '../ui/Toasts'
 
 /** 设置分区（侧栏导航用）；队伍已提级为顶级 Agent tab，运行时页并入设置 */
-type Section = 'general' | 'runtime' | 'advanced' | 'storage'
+type Section = 'general' | 'runtime' | 'advanced' | 'storage' | 'updates'
 
 const SECTIONS: Array<{ group: string; items: Array<{ id: Section; label: string; desc: string }> }> = [
-  { group: '基础', items: [{ id: 'general', label: '常规', desc: '外观、执行与通知' }] },
+  { group: '基础', items: [{ id: 'general', label: '常规', desc: '外观、执行与通知' }, { id: 'updates', label: '更新', desc: '热更通道与版本' }] },
   { group: '执行', items: [{ id: 'runtime', label: '运行时', desc: '后端路径与健康状态' }, { id: 'advanced', label: '调优', desc: '看门狗、重试、委派预算与护栏' }] },
   { group: '数据', items: [{ id: 'storage', label: '存储', desc: '数据落盘位置说明' }] }
 ]
@@ -45,6 +46,7 @@ export function SettingsView({ section, onSection }: { section: string; onSectio
           </div>
         </header>
         {active === 'general' && <GeneralSection />}
+        {active === 'updates' && <UpdatePanel />}
         {active === 'runtime' && <RuntimeSection />}
         {active === 'advanced' && <AdvancedSection />}
         {active === 'storage' && <StorageSection />}

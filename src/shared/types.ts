@@ -531,6 +531,7 @@ export interface AppSettings {
   delegateMaxDepth: number // 委派层级上限（领队→子领队→队员）
   doomLoopThreshold: number // 同名同参工具连续调用 N 次触发人工确认
   worktreeMaxAgeDays: number // 委派 worktree 回收年龄（天），手动清理时超过即回收
+  updateFeedUrl?: string // 热更 feed 基址；空 = 内置 DEFAULT_FEED_BASE
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {

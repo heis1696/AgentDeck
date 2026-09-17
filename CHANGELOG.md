@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **免安装热更（阶段 0-2，`docs/HOT-UPDATE-IMPL-DESIGN.md` 全量落地）**：三层热更先落 L1 载荷 + L2 渲染层两层。新增 `src/main/hot/` 模块族——`canonical` 规范化序列化（键序字节排序，发布端与验签端同一实现）、`verifier` Ed25519 manifest 验签 + 3 段 semver 通道门禁（minMainVersion/minShellVersion 应用/加载双处执行）、`trust` 信任锚（keyId→公钥 hex，支持轮换与 `AGENTDECK_HOT_TRUST_HEX` 测试注入）、`pointer` 指针原子写与规则 1-6 校验、`resolve` 解析单源（bootstrap 与主进程共用，载荷层优先/渲染层次之/内置兜底）、`zip` store-only 读写（零依赖，解压带 zip-slip 防护与 CRC 校验）、`feed` 拉取（超时+3 次退避）、`updater` 两通道状态机（staging→验签→原子指针，任一步失败删 staging 现网零触碰；串行互斥；版本目录 GC 保留 3 版）。`src/main/bootstrap.ts` 五步加载链：dev/逃生开关直通 → 载荷指针解析 → 载荷 require → 失败自愈 → 内置兜底；三类失败路径全演练通过——指针损坏改名留证、验签失败留证+版本目录隔离、载荷 require 抛错清指针+relaunch 干净重启（`--agentdeck-hot-fallback` 循环保险 + `--agentdeck-relaunch-retry` 取锁重试环 500ms×10）。主进程：单实例锁 + second-instance 聚焦；`loadFile` 接 `resolveHotState`（L2 免重启热载）+ `did-fail-load`/`render-process-gone`（5 分钟两次防抖）自动回退并隔离坏渲染层；`runner.isIdle()` 空闲门控 L1 apply（挂起为 staged，退出时 before-quit 链补应用后 relaunch）；IPC 新增 `updates` 命名空间四 handler + `updates:state` 事件（契约只增不改），preload 桥与设置页「更新」面板（当前版本/检查/进度/应用并重载/应用并重启/回退 + `updateFeedUrl` feed 基址覆盖）。发布脚本 `scripts/release-hot.mjs`（npm build→§6.1 组装→store zip→签名→verifier 回读自检→`dist/feed/{stable,versions}` 树，版本历史不可变；私钥经 `HOT_SIGNING_KEY`/`HOT_SIGNING_KEY_PATH`，绝不进仓库）；验收 smoke：`smoke:hot-pointer`（打包态四态：正常/损坏/验签失败/require 抛错全绿）、`smoke:hot-payload`（载荷启动、sidecar 自载荷目录拉起、second boot 对账、指针移除回退全绿）。测试隔离通道 `AGENTDECK_USER_DATA_DIR`（Windows 上 Electron 经系统 API 解析 appData，env APPDATA 重定向无效）。开发签名密钥 keyId `ad-2026-09` 公钥内置 `trust.ts`，私钥在仓库外 `~/.agentdeck/hot-keys/`。
 ## [0.18.2] - 2026-09-16
 
 ### 修复

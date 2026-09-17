@@ -23,7 +23,7 @@ import type {
   SkillsFromUrlResult,
   SkillsShEntry
 } from '../shared/extensions'
-import type { AgentDeckApi, AgentInfo, AgentModelCatalog, GoalCheckpointInput, GoalCreateInput, MeetingCreateInput, PermissionRequest, PresetInfo, SidecarSnapshot, TaskCreateInput } from '../shared/contracts'
+import type { AgentDeckApi, AgentInfo, AgentModelCatalog, GoalCheckpointInput, GoalCreateInput, MeetingCreateInput, PermissionRequest, PresetInfo, SidecarSnapshot, TaskCreateInput, UpdateChannel, UpdateStateSnapshot } from '../shared/contracts'
 
 const api: AgentDeckApi = {
   worktrees: {
@@ -193,6 +193,17 @@ const api: AgentDeckApi = {
       const h = (_e: unknown, snapshot: SidecarSnapshot) => cb(snapshot)
       ipcRenderer.on('sidecar:status', h)
       return () => ipcRenderer.removeListener('sidecar:status', h)
+    }
+  },
+  updates: {
+    getState: (): Promise<UpdateStateSnapshot> => ipcRenderer.invoke('updates:get-state'),
+    check: (): Promise<UpdateStateSnapshot> => ipcRenderer.invoke('updates:check'),
+    apply: (channel: UpdateChannel): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('updates:apply', channel),
+    rollback: (channel: UpdateChannel): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('updates:rollback', channel),
+    onState: (cb: (snapshot: UpdateStateSnapshot) => void) => {
+      const h = (_e: unknown, snapshot: UpdateStateSnapshot) => cb(snapshot)
+      ipcRenderer.on('updates:state', h)
+      return () => ipcRenderer.removeListener('updates:state', h)
     }
   },
   skills: {
