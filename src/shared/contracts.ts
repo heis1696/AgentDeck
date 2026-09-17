@@ -352,7 +352,7 @@ export interface AgentDeckApi {
   }
 }
 
-export type UpdateChannel = 'renderer' | 'payload'
+export type UpdateChannel = 'renderer' | 'payload' | 'shell'
 export type UpdatePhase = 'idle' | 'checking' | 'downloading' | 'verifying' | 'staged' | 'applying' | 'failed'
 
 export interface UpdateStateSnapshot {

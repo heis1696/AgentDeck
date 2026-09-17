@@ -77,8 +77,8 @@ function parseArgs(argv) {
     else if (a === '--skip-build') args.skipBuild = true
     else fail(`未知参数: ${a}（--help 查看用法）`)
   }
-  if (!['renderer', 'payload', 'both'].includes(args.channel)) {
-    fail(`--channel 只能是 renderer|payload|both，收到: ${args.channel}`)
+  if (!['renderer', 'payload', 'shell', 'both'].includes(args.channel)) {
+    fail(`--channel 只能是 renderer|payload|shell|both，收到: ${args.channel}`)
   }
   const seq = Number(args.seq)
   if (!Number.isInteger(seq) || seq < 1) fail(`--seq 必须是 ≥1 的整数，收到: ${args.seq}`)
@@ -183,6 +183,22 @@ function walkFiles(dir) {
   return out
 }
 
+/** 壳通道打包：electron-builder --dir 到 dist/.shell-pack（旁路输出，避免占用 release/win-unpacked） */
+function packShellDir() {
+  const packRoot = path.join(root, 'dist', '.shell-pack')
+  const packDir = path.join(packRoot, 'win-unpacked')
+  if (process.env.RELEASE_HOT_SKIP_PACK === '1' && fs.existsSync(path.join(packDir, 'AgentDeck.exe'))) {
+    console.log(`[step] shell: RELEASE_HOT_SKIP_PACK=1 且 ${path.relative(root, packDir)} 存在，跳过打包`)
+    return packDir
+  }
+  console.log('[step] shell: electron-builder --dir（产出 dist/.shell-pack/win-unpacked）…')
+  const r = spawnSync('npx', ['electron-builder', '--dir', `--config.directories.output=${path.join('dist', '.shell-pack')}`], { cwd: root, stdio: 'inherit', shell: true })
+  if (r.status !== 0 || !fs.existsSync(path.join(packDir, 'AgentDeck.exe'))) {
+    fail('electron-builder --dir 失败或产物缺失（dist/.shell-pack/win-unpacked/AgentDeck.exe）— 见上方输出')
+  }
+  return packDir
+}
+
 /** 载荷 zip 文件集合 ≡ electron-builder 打进 asar 的文件集合（§6.1 对齐规则） */
 function collectChannelFiles(channel) {
   const files = [] // { src, zipPath }
@@ -206,6 +222,13 @@ function collectChannelFiles(channel) {
     if (!files.some((f) => f.zipPath === 'out/main/bootstrap.js')) {
       console.warn('[warn] out/main/bootstrap.js 缺失 — bootstrap 入口（阶段 0.4/0.5）尚未落地；载荷 zip 将不含它（与当前 asar 内容一致），热更引导不随载荷分发')
     }
+  } else if (channel === 'shell') {
+    // 壳 zip = 便携分发物：解压即应用目录（exe 在 zip 根），与 staging rename dance 布局一致（§5）
+    const packDir = packShellDir()
+    for (const p of walkFiles(packDir)) {
+      files.push({ src: p, zipPath: path.relative(packDir, p).split(path.sep).join('/') })
+    }
+    if (!files.some((f) => f.zipPath === 'AgentDeck.exe')) fail('壳打包产物缺 AgentDeck.exe — zip 布局要求 exe 在根')
   } else {
     // renderer 通道只取 out/renderer/**（§6.1：zip 内同样带 out/ 前缀，版本目录路径与载荷布局同构）
     addDir('renderer', 'out/renderer/')
@@ -433,9 +456,16 @@ async function main() {
     canonical: canonicalMod,
     verifier: verifierMod
   }
-  const channels = args.channel === 'both' ? ['renderer', 'payload'] : [args.channel]
+  const channels = args.channel === 'both' ? ['renderer', 'payload', 'shell'] : [args.channel]
   const results = []
   for (const ch of channels) results.push(await buildChannel(ch, ctx))
+  // 壳 zip 同时是免安装分发渠道产物（§9.2 zip 渠道）：复制一份独立命名到 dist/ 根
+  const shellResult = results.find((r) => r.channel === 'shell')
+  if (shellResult) {
+    const portable = path.join(root, 'dist', 'agentdeck-' + ctx.pkg.version.replace(/^v/, '') + '-portable-win-x64.zip')
+    fs.copyFileSync(path.join(FEED_ROOT, 'stable', 'shell', shellResult.artifact.name), portable)
+    console.log(`[ok] 便携分发包: ${path.relative(root, portable)}（zip 渠道 GA 产物，解压即用）`)
+  }
 
   // shell 占位空目录（§6.2 / §9.3：L0 阶段 4 前产物为空）
   fs.mkdirSync(path.join(FEED_ROOT, 'stable', 'shell'), { recursive: true })

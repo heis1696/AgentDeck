@@ -30,6 +30,7 @@ import { verifyAcceptance } from './acceptance-verifier'
 import { resolveHotState } from './hot/resolve'
 import { clearPointer, readPointer } from './hot/pointer'
 import { HotUpdater } from './hot/updater'
+import { sweepOldShellDirs } from './hot/shell'
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
@@ -573,7 +574,12 @@ const initMain = async (): Promise<void> => {
     },
     settings: () => settings,
     getUserDataDir: () => app.getPath('userData'),
-    getShellVersion: () => app.getVersion()
+    getShellVersion: () => app.getVersion(),
+    getAppDir: () => (app.isPackaged ? path.dirname(process.execPath) : null),
+    quitForShellUpdate: () => {
+      quitting = true
+      app.quit()
+    }
   })
 
   registerIpcHandlers({
@@ -607,6 +613,15 @@ const initMain = async (): Promise<void> => {
   hotUpdater.startPeriodicCheck(10_000, 6 * 60 * 60 * 1000)
   const appliedIndex = process.argv.indexOf('--agentdeck-hot-applied')
   if (appliedIndex >= 0 && process.argv[appliedIndex + 1]) hotUpdater.notifyApplied(process.argv[appliedIndex + 1])
+  // 壳替换残留清扫（§5.4）：后台延迟执行，被占用的 .old-<ts> 留待下次启动
+  if (app.isPackaged) {
+    const appDir = path.dirname(process.execPath)
+    setTimeout(() => {
+      try {
+        sweepOldShellDirs(appDir)
+      } catch { /* 清扫失败无碍，下次再试 */ }
+    }, 5_000)
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

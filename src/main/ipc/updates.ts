@@ -4,8 +4,8 @@ import type { UpdateChannel } from '../../shared/contracts'
 import type { IpcContext } from './context'
 
 function parseChannel(value: unknown): UpdateChannel {
-  if (value === 'renderer' || value === 'payload') return value
-  throw new Error(`updates: 未知通道 ${JSON.stringify(value)}（合法值 renderer|payload）`)
+  if (value === 'renderer' || value === 'payload' || value === 'shell') return value
+  throw new Error(`updates: 未知通道 ${JSON.stringify(value)}（合法值 renderer|payload|shell）`)
 }
 
 export function registerUpdatesIpc(ctx: IpcContext) {

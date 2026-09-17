@@ -5,9 +5,9 @@ export const TRUST_KEYS: Record<string, string> = {
   'ad-2026-09': '7c5d7bf8b60bb01d656dc2a079405d87c5c8fa1bc3872cf8f7077bee9b165937'
 }
 
-// feed 基址占位（§5.1/§9.1）：自有域名未定，阶段 1 接 feed.ts 前由领队替换；
-// 运行期可被 AppSettings.updateFeedUrl 覆盖。
-export const DEFAULT_FEED_BASE = 'https://feed.agentdeck.invalid/'
+// feed 基址：用户阿里云公网 IP 先行（域名审核中；Ed25519 验签兜底内容真实性，§9.1）；
+// 域名到位后换 https 域名并随壳版本重发。运行期可被 AppSettings.updateFeedUrl 覆盖。
+export const DEFAULT_FEED_BASE = 'http://118.31.43.156'
 
 const RAW_KEY_HEX = /^[0-9a-fA-F]{64}$/
 

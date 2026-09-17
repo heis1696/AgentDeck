@@ -7,11 +7,12 @@ import type { BrowserWindow } from 'electron'
 import type { UpdateChannel, UpdateStateSnapshot } from '../../shared/contracts'
 import type { AppSettings } from '../../shared/types'
 import { DEFAULT_FEED_BASE } from './trust'
-import { channelRoot, clearPointer, pointerFilePath, readPointer, writePointerAtomic } from './pointer'
+import { channelRoot, clearPointer, pointerFilePath, readPointer, writePointerAtomic, type HotChannel } from './pointer'
 import { sha256File, verifyManifest, type HotManifestPayload } from './verifier'
 import { resolveHotState } from './resolve'
 import { downloadArtifact, fetchManifest } from './feed'
 import { extractZipStore } from './zip'
+import { placeUnlockedFiles, rollbackShell, spawnSwapHelper, stageShellZip } from './shell'
 
 export interface UpdaterDeps {
   getWindow: () => BrowserWindow | null
@@ -23,6 +24,13 @@ export interface UpdaterDeps {
   getUserDataDir: () => string
   /** 壳版本（app.getVersion()；bootstrap 所在 asar 的元数据） */
   getShellVersion: () => string
+  /** 应用目录（exe 所在）；null = 不适用壳通道（dev / 非目录式分发） */
+  getAppDir: () => string | null
+  /**
+   * 壳通道专用退出（默认走 relaunchForUpdate 之外的纯 quit）：swap helper 在主进程退出后
+   * 完成文件腾挪并负责拉起新壳，主进程此处不得再 relaunch（否则与 helper 双启动竞态）。
+   */
+  quitForShellUpdate?: () => void
 }
 
 const GC_KEEP_VERSIONS = 3
@@ -37,6 +45,8 @@ export class HotUpdater {
   private busy = false
   /** 已下载就绪、因空闲门控挂起的载荷（§5.1 staged 语义；指针尚未翻转） */
   private staged: { version: string } | null = null
+  /** 壳通道已 staging 就绪、等待用户确认的二段式状态（§9.3 半自动） */
+  private stagedShell: { version: string; stagedDir: string } | null = null
   private checkTimer: NodeJS.Timeout | undefined
 
   constructor(private deps: UpdaterDeps) {}
@@ -69,24 +79,31 @@ export class HotUpdater {
     this.busy = true
     try {
       this.emit({ phase: 'checking', channel: null, error: undefined })
-      // 两通道串行各拉一次定点 manifest（验签失败按该通道无更新处理，不置 failed）
-      for (const channel of ['payload', 'renderer'] as const) {
+      // 三通道串行各拉一次定点 manifest（验签失败按该通道无更新处理，不置 failed）
+      for (const channel of ['payload', 'renderer', 'shell'] as const) {
         try {
           await this.verifyFeedManifest(channel)
         } catch {
           /* 静默：check 失败不打扰（§1.2 启动静默检查语义） */
         }
       }
-      return this.emit({ phase: 'idle', channel: null, error: undefined })
     } finally {
+      // 先释放互斥锁再自动应用，否则 apply 会被 check 自己持有的 busy 门挡回（自锁）
       this.busy = false
     }
+    // 测试通道：smoke 用（§6.2 壳演练）；风险面仅限"已验签的 staging 内容被自动应用"
+    if (process.env.AGENTDECK_HOT_AUTO_APPLY_SHELL === '1') {
+      await this.apply('shell').catch(() => {})
+      await this.apply('shell').catch(() => {})
+    }
+    return this.emit({ phase: 'idle', channel: null, error: undefined })
   }
 
   async apply(channel: UpdateChannel): Promise<{ ok: boolean; error?: string }> {
     if (this.busy) return { ok: false, error: '更新操作进行中，请稍候' }
     this.busy = true
     try {
+      if (channel === 'shell') return await this.applyShell()
       await this.stageAndFlip(channel)
       return { ok: true }
     } catch (error) {
@@ -100,6 +117,17 @@ export class HotUpdater {
     if (this.busy) return { ok: false, error: '更新操作进行中，请稍候' }
     this.busy = true
     try {
+      if (channel === 'shell') {
+        const appDir = this.deps.getAppDir()
+        if (!appDir) return { ok: false, error: '当前运行模式不支持壳回滚（dev / 非目录式分发）' }
+        const userData = this.deps.getUserDataDir()
+        rollbackShell(appDir, () => {
+          clearPointer(userData, 'payload', 'superseded')
+          clearPointer(userData, 'renderer', 'superseded')
+        })
+        this.deps.relaunchForUpdate('rollback-shell')
+        return { ok: true }
+      }
       const userData = this.deps.getUserDataDir()
       const root = channelRoot(userData, channel)
       const current = (() => {
@@ -178,7 +206,8 @@ export class HotUpdater {
 
   private async verifyFeedManifest(channel: UpdateChannel): Promise<HotManifestPayload> {
     const { manifestBytes, payload } = await fetchManifest(this.feedBase(), channel)
-    const tmp = path.join(channelRoot(this.deps.getUserDataDir(), channel), `.latest-${channel}.json`)
+    const tmpDir = channel === 'shell' ? path.join(this.deps.getUserDataDir(), 'hot-shell') : channelRoot(this.deps.getUserDataDir(), channel)
+    const tmp = path.join(tmpDir, `.latest-${channel}.json`)
     fs.mkdirSync(path.dirname(tmp), { recursive: true })
     fs.writeFileSync(tmp, manifestBytes)
     try {
@@ -193,7 +222,7 @@ export class HotUpdater {
   }
 
   /** staging 全流程 + 指针翻转（§5.1；下载中断/校验失败/目标已存在各分支均现网零触碰） */
-  private async stageAndFlip(channel: UpdateChannel): Promise<void> {
+  private async stageAndFlip(channel: HotChannel): Promise<void> {
     const userData = this.deps.getUserDataDir()
     this.emit({ phase: 'downloading', channel, error: undefined })
     const { manifestBytes, payload } = await fetchManifest(this.feedBase(), channel)
@@ -247,8 +276,75 @@ export class HotUpdater {
     }
   }
 
+  /**
+   * 壳通道两段式（§9.3 半自动）：首次调用 = 下载+验签+staging（不动现网，state 置 staged）；
+   * 再次调用 = 用户确认 → 空闲校验 → rename dance（§5.3）→ relaunch。确认动作本身即 §9.3 的
+   * 一键确认门，不做退出时自动应用（区别于载荷通道的空闲挂起语义）。
+   */
+  private async applyShell(): Promise<{ ok: boolean; error?: string }> {
+    const appDir = this.deps.getAppDir()
+    if (!appDir) return { ok: false, error: '当前运行模式不支持壳更新（dev / 非目录式分发）' }
+    if (this.stagedShell) {
+      const { version, stagedDir } = this.stagedShell
+      if (!this.deps.isMainIdle()) return { ok: false, error: '有任务在执行，请在空闲后再确认壳更新' }
+      this.emit({ phase: 'applying', channel: 'shell', error: undefined })
+      const userData = this.deps.getUserDataDir()
+      // §5.3 两阶段：存活期先放无锁文件；swap helper（分离进程）等本进程退出后完成
+      // 剩余腾挪（.old-<ts> 让位）并拉起新壳——主进程不再 relaunch，避免双启动竞态
+      placeUnlockedFiles(appDir, stagedDir)
+      spawnSwapHelper(appDir, stagedDir, process.pid, version, userData)
+      // §6 协同规则：壳自带最新载荷 → 清两层指针（全量 > 增量）；helper 失败的最坏结果 =
+      // 混排目录 + 无指针 → bootstrap 回内置，仍可启动
+      clearPointer(userData, 'payload', 'superseded')
+      clearPointer(userData, 'renderer', 'superseded')
+      this.stagedShell = null
+      if (this.deps.quitForShellUpdate) {
+        this.deps.quitForShellUpdate()
+      } else {
+        this.deps.relaunchForUpdate(version)
+      }
+      return { ok: true }
+    }
+    const payload = await this.verifyFeedManifest('shell')
+    if (!payload.artifact?.name) throw new Error('feed manifest 缺 artifact（壳 zip 清单）')
+    if (payload.version === this.deps.getShellVersion()) return { ok: true } // 已是最新
+    this.emit({ phase: 'downloading', channel: 'shell', error: undefined })
+    const downloadDir = path.join(this.deps.getUserDataDir(), 'hot-shell')
+    fs.mkdirSync(downloadDir, { recursive: true })
+    const zipPath = path.join(downloadDir, `.download-${Date.now()}.zip`)
+    let staged: string | null = null
+    try {
+      await downloadArtifact(this.feedBase(), 'shell', payload.artifact.name, zipPath, (progress) => {
+        this.emit({ phase: 'downloading', channel: 'shell', progress })
+      })
+      this.emit({ phase: 'verifying', channel: 'shell', progress: undefined })
+      if (sha256File(zipPath) !== payload.artifact.sha256) throw new Error('壳下载产物 sha256 与 manifest 不符')
+      staged = stageShellZip(zipPath, appDir)
+      for (const file of payload.files ?? []) {
+        // Electron 的 fs-asar 拦截层会把 .asar 后缀路径当归档打开（readFileSync 抛 Invalid package），
+        // 无法按字节读回；该条目的完整性已由 zip 整体 sha256 + 解压逐条 CRC 双重覆盖，磁盘级 sha 只对普通文件执行
+        if (/\.asar$/i.test(file.path)) continue
+        const target = path.join(staged, ...file.path.split('/'))
+        if (!fs.existsSync(target) || fs.statSync(target).size !== file.size || sha256File(target) !== file.sha256) {
+          throw new Error(`壳文件校验失败：${file.path}`)
+        }
+      }
+      this.stagedShell = { version: payload.version, stagedDir: staged }
+      this.emit({ phase: 'staged', channel: 'shell', stagedVersion: payload.version })
+      return { ok: true }
+    } catch (error) {
+      if (staged) {
+        try { fs.rmSync(staged, { recursive: true, force: true }) } catch { /* 清理失败不放大 */ }
+      }
+      this.emit({ phase: 'failed', channel: 'shell', error: error instanceof Error ? error.message : String(error) })
+      throw error
+    } finally {
+      try { fs.unlinkSync(zipPath) } catch { /* 临时 zip 清理失败无碍 */ }
+    }
+  }
+
   /** 指针翻转 + 通道专属后动作（renderer=loadFile 新路径； payload=清 L2 指针+relaunch，P6） */
-  private flipPointer(channel: UpdateChannel, version: string, manifest: HotManifestPayload): void {
+  private flipPointer(channel: HotChannel, version: string, manifest: HotManifestPayload): void {
     const userData = this.deps.getUserDataDir()
     this.emit({ phase: 'applying', channel, stagedVersion: undefined })
     writePointerAtomic(pointerFilePath(userData, channel), {
@@ -274,7 +370,7 @@ export class HotUpdater {
   }
 
   /** 版本目录 GC：保留最近 3 版（当前指向版永不回收） */
-  private gc(channel: UpdateChannel, keepVersion: string): void {
+  private gc(channel: HotChannel, keepVersion: string): void {
     try {
       const root = channelRoot(this.deps.getUserDataDir(), channel)
       if (!fs.existsSync(root)) return
@@ -311,6 +407,13 @@ export class HotUpdater {
   private emit(patch: Partial<UpdateStateSnapshot>): UpdateStateSnapshot {
     this.snapshot = { ...this.snapshot, ...patch }
     const next = this.computeSnapshot()
+    // 观测通道：env 指定日志文件时逐行追加状态流（smoke/现场排障用；默认零开销）
+    const debugLog = process.env.AGENTDECK_HOT_DEBUG_LOG
+    if (debugLog) {
+      try {
+        fs.appendFileSync(debugLog, `${new Date().toISOString()} ${next.phase}${next.channel ? ':' + next.channel : ''}${next.error ? ' !' + next.error : ''}\n`)
+      } catch { /* 日志失败不影响主流程 */ }
+    }
     for (const listener of this.listeners) listener(next)
     this.deps.getWindow()?.webContents.send('updates:state', next)
     return next

@@ -71,7 +71,9 @@
     "smoke:meeting-investigate": "node scripts/smoke-meeting-investigate.mjs",
     "smoke:hot-pointer": "node scripts/smoke-hot-pointer.mjs",
     "smoke:hot-payload": "node scripts/smoke-hot-payload.mjs",
-    "release:hot": "node scripts/release-hot.mjs"
+    "release:hot": "node scripts/release-hot.mjs",
+    "smoke:hot-shell": "node scripts/smoke-hot-shell.mjs",
+    "deploy:hot": "node scripts/deploy-feed.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

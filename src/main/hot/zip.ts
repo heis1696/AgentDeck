@@ -1,7 +1,19 @@
 // store-only zip 读写（设计 §5.1 零新 npm 依赖约束）：发布脚本（写）与 updater（解）共用同一实现。
 // 只支持 method 0（不压缩）+ UTF-8 文件名；解压侧带 zip-slip 防护与 CRC 校验。
-import fs from 'node:fs'
+import nodeFs from 'node:fs'
 import path from 'node:path'
+import { createRequire } from 'node:module'
+
+// Electron 主进程的 fs 带 asar 拦截：任何 .asar 后缀路径段（含壳包内的 resources/app.asar）
+// 的读写会被当"归档操作"（writeFileSync/readFileSync 抛 Invalid package）。解壳包必须按原始
+// 字节访问 → 用 Electron 的 original-fs（未打补丁）；纯 node 环境（发布脚本/smoke）无此模块，回落 node:fs。
+const rawFs: typeof nodeFs = (() => {
+  try {
+    return createRequire(__filename)('original-fs') as typeof nodeFs
+  } catch {
+    return nodeFs
+  }
+})()
 
 const CRC_TABLE = (() => {
   const table = new Uint32Array(256)
@@ -93,7 +105,7 @@ export interface ExtractedEntry {
  * 返回解出的条目清单（相对路径），调用方再做 manifest 的逐文件 sha256/size 核对（§5.1 staging 流程）。
  */
 export function extractZipStore(zipPath: string, destDir: string): ExtractedEntry[] {
-  const zip = fs.readFileSync(zipPath)
+  const zip = rawFs.readFileSync(zipPath)
   // 从尾部找 EOCD（22 字节固定长，无 comment）
   if (zip.length < 22) throw new Error('zip: too short')
   const eocdPos = zip.length - 22
@@ -124,8 +136,8 @@ export function extractZipStore(zipPath: string, destDir: string): ExtractedEntr
     const data = zip.subarray(dataStart, dataStart + size)
     if (data.length !== size || crc32(data) !== crc) throw new Error(`zip: crc mismatch for ${name}`)
     const target = path.join(destDir, ...name.split('/'))
-    fs.mkdirSync(path.dirname(target), { recursive: true })
-    fs.writeFileSync(target, data)
+    rawFs.mkdirSync(path.dirname(target), { recursive: true })
+    rawFs.writeFileSync(target, data)
     extracted.push({ path: name, size })
     ptr += 46 + nameLen + extraLen + commentLen
   }
