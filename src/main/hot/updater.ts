@@ -8,7 +8,7 @@ import type { UpdateChannel, UpdateStateSnapshot } from '../../shared/contracts'
 import type { AppSettings } from '../../shared/types'
 import { DEFAULT_FEED_BASE } from './trust'
 import { channelRoot, clearPointer, pointerFilePath, readPointer, writePointerAtomic, type HotChannel } from './pointer'
-import { sha256File, verifyManifest, type HotManifestPayload } from './verifier'
+import { compareSemver, sha256File, verifyManifest, type HotManifestPayload } from './verifier'
 import { resolveHotState } from './resolve'
 import { downloadArtifact, fetchManifest } from './feed'
 import { extractZipStore } from './zip'
@@ -128,13 +128,29 @@ export class HotUpdater {
     if (this.busy) return { ok: false, error: '更新操作进行中，请稍候' }
     this.busy = true
     try {
-      for (const channel of ['renderer', 'payload'] as const) {
-        if (this.availableFor(channel)) await this.stageAndFlip(channel)
+      let applied = 0
+      let firstError: string | null = null
+      // 载荷优先：P6 全量自带渲染层，且先把新版比较器/下载逻辑落地（旧版客户端的渲染层门禁
+      // 误判只有靠载荷更新解开）；单通道失败不阻断其余通道
+      for (const channel of ['payload', 'renderer'] as const) {
+        if (!this.availableFor(channel)) continue
+        try {
+          await this.stageAndFlip(channel)
+          applied++
+        } catch (error) {
+          firstError ??= error instanceof Error ? error.message : String(error)
+        }
       }
-      if (this.availableFor('shell') && !this.stagedShell) await this.applyShell()
+      if (this.availableFor('shell') && !this.stagedShell) {
+        try {
+          await this.applyShell()
+          applied++
+        } catch (error) {
+          firstError ??= error instanceof Error ? error.message : String(error)
+        }
+      }
+      if (firstError && applied === 0) return { ok: false, error: firstError }
       return { ok: true }
-    } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : String(error) }
     } finally {
       this.busy = false
     }
@@ -144,9 +160,11 @@ export class HotUpdater {
   private availableFor(channel: UpdateChannel): string | undefined {
     const feed = this.feedVersions[channel]
     if (!feed) return undefined
-    if (channel === 'shell') return feed !== this.deps.getShellVersion() ? feed : undefined
-    const active = this.activeVersionFor(channel)
-    return feed !== active ? feed : undefined
+    const active = channel === 'shell' ? this.deps.getShellVersion() : this.activeVersionFor(channel)
+    if (feed === active) return undefined
+    // 只把「严格高于当前」当可更新：壳通道版本串与基座不同但内容相同时不诱导 314MB 空下载；
+    // 服务端 manifest 被回滚（降级）也不当更新报
+    return compareSemver(feed, active) === 1 ? feed : undefined
   }
 
   private activeVersionFor(channel: 'renderer' | 'payload'): string {

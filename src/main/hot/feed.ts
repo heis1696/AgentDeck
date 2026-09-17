@@ -60,7 +60,9 @@ export async function fetchManifest(baseUrl: string, channel: string): Promise<F
   return { manifestBytes, payload }
 }
 
-/** 下载 `<base>/<channel>/<artifact.name>` 到 dest（整体 sha256 由调用方核对）。 */
+/** 下载 artifact 到 dest（整体 sha256 由调用方核对）。超时语义：停滞 30s 才中止（按块重置），
+ *  总时长上限 30 分钟——不能用固定总超时：慢带宽下 314MB 壳包会被"20 秒到点"腰斩
+ *  （实测 4Mbps 带宽 20s ≈ 8.6MB，每次都死在同一位置）。失败自动清 .part 并重试 3 次。 */
 export async function downloadArtifact(
   baseUrl: string,
   channel: string,
@@ -69,30 +71,56 @@ export async function downloadArtifact(
   onProgress?: (progress: DownloadProgress) => void
 ): Promise<void> {
   const url = `${trimBase(baseUrl)}/${channel}/${encodeURIComponent(artifactName)}`
-  const response = await fetchWithRetry(url)
-  const totalBytes = Number(response.headers.get('content-length')) || 0
   fs.mkdirSync(path.dirname(dest), { recursive: true })
   const tmp = `${dest}.part`
-  if (response.body) {
+  let lastError: unknown = null
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await downloadOnce(url, tmp, onProgress)
+      fs.renameSync(tmp, dest)
+      return
+    } catch (error) {
+      lastError = error
+      try { fs.unlinkSync(tmp) } catch { /* 无残留 */ }
+    }
+    if (attempt < 2) await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt] ?? 4_000))
+  }
+  throw lastError instanceof Error ? lastError : new FeedError(`download failed: ${url}`)
+}
+
+const DOWNLOAD_IDLE_TIMEOUT_MS = 30_000
+const DOWNLOAD_TOTAL_CAP_MS = 30 * 60_000
+
+async function downloadOnce(url: string, tmp: string, onProgress?: (progress: DownloadProgress) => void): Promise<void> {
+  const controller = new AbortController()
+  const armIdle = () => setTimeout(() => controller.abort(new FeedError('下载停滞超时（30 秒无数据）')), DOWNLOAD_IDLE_TIMEOUT_MS)
+  let idle = armIdle()
+  const cap = setTimeout(() => controller.abort(new FeedError('下载总时长超限（30 分钟）')), DOWNLOAD_TOTAL_CAP_MS)
+  try {
+    const response = await fetch(url, { signal: controller.signal, redirect: 'follow' })
+    if (!response.ok) throw new FeedError(`HTTP ${response.status} for ${url}`)
+    const totalBytes = Number(response.headers.get('content-length')) || 0
+    if (!response.body) {
+      const buf = Buffer.from(await response.arrayBuffer())
+      fs.writeFileSync(tmp, buf)
+      onProgress?.({ receivedBytes: buf.length, totalBytes: totalBytes || buf.length })
+      return
+    }
     const file = fs.createWriteStream(tmp)
     let received = 0
     const reader = response.body.getReader()
-    try {
-      for (;;) {
-        const { done, value } = await reader.read()
-        if (done) break
-        received += value.byteLength
-        file.write(value)
-        onProgress?.({ receivedBytes: received, totalBytes })
-      }
-      await new Promise<void>((resolve, reject) => file.end((error?: Error | null) => (error ? reject(error) : resolve())))
-    } finally {
-      await reader.cancel().catch(() => {})
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      clearTimeout(idle)
+      idle = armIdle()
+      received += value.byteLength
+      file.write(value)
+      onProgress?.({ receivedBytes: received, totalBytes })
     }
-  } else {
-    const buf = Buffer.from(await response.arrayBuffer())
-    fs.writeFileSync(tmp, buf)
-    onProgress?.({ receivedBytes: buf.length, totalBytes: totalBytes || buf.length })
+    await new Promise<void>((resolve, reject) => file.end((error?: Error | null) => (error ? reject(error) : resolve())))
+  } finally {
+    clearTimeout(idle)
+    clearTimeout(cap)
   }
-  fs.renameSync(tmp, dest)
 }

@@ -269,7 +269,9 @@ function verifyStoreZip(buf, files) {
 // ---------- 单通道流水线 ----------
 async function buildChannel(channel, ctx) {
   const { pkg, keyId, privKey, pubHex, seq } = ctx
-  const version = `${pkg.version}-hot.${seq}`
+  // 壳通道版本 = 基座版本（不带 -hot 后缀）：壳更新就是新基座；带 -hot 会造成「内容相同但
+  // 版本串不同」的假更新（客户端与 feed 各执一词，反复诱导 314MB 空下载）。发壳前必须 bump package.json。
+  const version = channel === 'shell' ? pkg.version : `${pkg.version}-hot.${seq}`
   const files = collectChannelFiles(channel)
   console.log(`[step] ${channel}: 组装 ${files.length} 个文件（§6.1 清单）`)
   const entries = files.map((f) => ({ path: f.zipPath, data: fs.readFileSync(f.src) }))
