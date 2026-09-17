@@ -83,12 +83,14 @@ export function buildModelSelectionFromCliConfig(
     const requested = slash > 0 && slash < ref.length - 1 ? ref.slice(slash + 1) : ref
     const catalog = readV2ModelCatalog()
     const entry = catalog?.models.find((m) => m.modelId === requested) ?? catalog?.models.find((m) => m.modelId.toLowerCase() === requested.toLowerCase())
-    // 注册与引用必须同 id：优先目录归一后的（与推理元数据一致），目录外按原引用
+    // 注册与引用必须同 id：优先目录归一后的，目录外按原引用
     const modelId = entry?.modelId ?? requested
     if (!upsertPresetProvider(connection, modelId)) {
       throw new Error(`预设连接「${connection.name}」注册失败：无法写入 ~/.zcode/v2/provider_config.json（ZCode 桌面端可能正占用该文件，稍后重试）`)
     }
-    return entry ? withReasoning(presetProviderId(connection), entry) : { providerId: presetProviderId(connection), modelId }
+    // 注册表里该模型的 optionSpecs 由本函数显式声明（reasoningLevel values=['high']），
+    // 引用必须带同款 level，否则选择校验报 "Reasoning level is required"
+    return { providerId: presetProviderId(connection), modelId, options: { reasoningLevel: 'high' } }
   }
   const catalog = readV2ModelCatalog()
   if (!catalog) return null
@@ -123,9 +125,11 @@ function presetProviderId(connection: { baseURL: string }): string {
 
 /**
  * 把预设连接 upsert 成 v2 注册表的个人 provider：providerRule 声明凭据/端点/模型目录
- * （group 必填 standard-personal，缺了整条规则被静默过滤），providerModelRule 登记
- * 模型（enabled 即可，属性由内置通用规则按 modelId 正则补全）。只动自己 id 的条目，
- * 桌面端自己的规则不受影响。
+ * （group 必填 standard-personal，缺了整条规则被静默过滤），providerModelRule 用
+ * 完整模型定义（注册表完整性校验必查 properties/optionSpecs；只写 enabled 会被内置
+ * 通用规则补成"reasoning 必选"，外部模型没法定义 level 就卡死）。optionSpecs 显式
+ * 声明 reasoningLevel values=['high']、map '{}'（不发 thinking 参数），引用端始终带
+ * options.reasoningLevel='high' 同款。只动自己 id 的条目，桌面端规则不受影响。
  */
 function upsertPresetProvider(connection: { name: string; baseURL: string; apiKey: string }, modelId: string): boolean {
   const id = presetProviderId(connection)
@@ -155,7 +159,27 @@ function upsertPresetProvider(connection: { name: string; baseURL: string; apiKe
     providerRules.providerRules = rules
     const modelRules = config.modelConfigRules
     const list = Array.isArray(modelRules.providerModelRules) ? modelRules.providerModelRules.filter((rule) => !(isJsonObject(rule) && rule.providerId === id && rule.modelId === modelId)) : []
-    list.push({ providerId: id, modelId, config: { enabled: true } })
+    list.push({
+      providerId: id,
+      modelId,
+      config: {
+        enabled: true,
+        properties: {
+          requiresMfjsToolSchema: false,
+          contextWindow: 200000,
+          inputFormat: { supportsText: true, supportsImage: false, supportsVideo: false, supportsAudio: false, supportsPdf: false },
+          outputFormat: { supportsText: true },
+          supportsToolCall: true,
+          supportsJsonSchemaOutput: false,
+          supportsNativeWebSearch: false,
+          supportsMidConversationSystem: false
+        },
+        optionSpecs: {
+          reasoningLevel: { values: ['high'], map: '{}' },
+          maxOutputTokens: { max: 32000, map: "{'max_tokens': maxOutputTokens}" }
+        }
+      }
+    })
     modelRules.providerModelRules = list
     fs.mkdirSync(path.dirname(configPath), { recursive: true })
     fs.writeFileSync(configPath, JSON.stringify(root, null, 2))

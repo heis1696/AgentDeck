@@ -10,6 +10,8 @@
 
 ### 修复
 
+- **预设 provider 注册改完整模型定义（修复外部中转模型选不上）**：providerModelRule 只写 `enabled` 会被内置通用规则按 modelId 正则补全成"reasoning 必选"——外部模型没法定义 level，选择校验直接卡死。现在注册时带完整定义（properties 上下文窗/输入输出格式/工具调用 + optionSpecs 显式声明 `reasoningLevel values=['high']`、map '{}' 不发 thinking 参数），引用端始终带同款 `options.reasoningLevel='high'`；目录外模型同样注册完整定义。
+
 - **旧协议会话 resume 后回合必败（"Select a model before continuing"）**：内联注册表时代建立的老会话，其历史模型（如 `zai/*`）在新版 v2 注册表里不可解析——resume 后会话无可用模型，回合在 model_creation 阶段报 CONFIGURATION_ERROR。现在 resume 后无条件 `session/setModel`（agent 钉死模型，缺省取目录默认），等价于旧 runtimeModel 每次重传；create 不带模型时服务端自选默认（实测可用），仅钉选时设置。
 - **回合失败原因透出（新 CLI 错误只在 telemetry 通道）**：不少失败（CONFIGURATION_ERROR 等）的 errorMessage 只在 `telemetry/turn.terminal` 下发、不带在 `session/event` 终态里，此前只能报出干巴巴的 "turn ended: failed"。备用终态路径现在透出 telemetry 的 errorMessage/errorCode；`payload.error` 单独下发的回合级错误也记最近一条（lastTurnError），终态缺 errorMessage 时兜底还原真实原因，并以 ⚠ status 事件实时提示；每回合开始重置。
 
