@@ -28,30 +28,31 @@ if (!fs.existsSync(path.join(FEED_DIR, 'stable'))) {
 
 const sh = (cmd) => spawnSync(cmd, { stdio: ['ignore', 'pipe', 'pipe'], shell: true, encoding: 'utf8' })
 
-// 本地清单
+// 本地清单（md5 内容哈希：纯尺寸比对会被结构同长的版本迭代骗过——hot.2 与 hot.3 的 manifest 字节数恰好相同）
+import crypto from 'node:crypto'
 const local = []
 const walk = (dir) => {
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
     const p = path.join(dir, e.name)
     if (e.isDirectory()) walk(p)
-    else if (e.isFile()) local.push({ rel: path.relative(FEED_DIR, p).split(path.sep).join('/'), size: fs.statSync(p).size })
+    else if (e.isFile()) local.push({ rel: path.relative(FEED_DIR, p).split(path.sep).join('/'), md5: crypto.createHash('md5').update(fs.readFileSync(p)).digest('hex') })
   }
 }
 walk(FEED_DIR)
 
 // 远端清单（目录不存在则空）
-const remoteRaw = sh(`ssh ${USER}@${HOST} "cd ${REMOTE} 2>/dev/null && find . -type f -printf '%p %s\\n' || true"`)
+const remoteRaw = sh(`ssh ${USER}@${HOST} "cd ${REMOTE} 2>/dev/null && find . -type f -exec md5sum {} + || true"`)
 if (remoteRaw.status !== 0) {
   console.error(`[FAIL] ssh 取远端清单失败（退出码 ${remoteRaw.status}）— 检查免密登录`)
   process.exit(1)
 }
 const remote = new Map()
 for (const line of remoteRaw.stdout.split('\n')) {
-  const m = /^\.\/(\S+) (\d+)$/.exec(line.trim())
-  if (m) remote.set(m[1], Number(m[2]))
+  const m = /^(\w+)  \.[\/](\S+)$/.exec(line.trim())
+  if (m) remote.set(m[2], m[1])
 }
 
-const changed = FORCE ? local : local.filter((f) => remote.get(f.rel) !== f.size)
+const changed = FORCE ? local : local.filter((f) => remote.get(f.rel) !== f.md5)
 const skipped = local.length - changed.length
 console.log(`[plan] 本地 ${local.length} 个文件：上传 ${changed.length}，跳过未变化 ${skipped}`)
 
