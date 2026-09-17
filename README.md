@@ -92,6 +92,8 @@ src/
 - [架构文档](docs/ARCHITECTURE.md) — 总览、模块地图、关键数据流、可靠性设计、测试基线、已知限制
 - [API 文档](docs/API.md) — IPC 桥全接口、数据模型、后端适配器接口、委派协议、ZCode 协议要点
 - [共享目录与技能库](docs/SKILLS-SHARED-DIR.md) · [目标模式设计](docs/GOAL-AUTOPILOT-REDESIGN.md) · [Loop Engineering](docs/LOOP-ENGINEERING.md)
+- [设计系统 V2](docs/DESIGN-SYSTEM-V2.md)（现行视觉规范） · [Sidecar 架构](docs/SIDECAR.md)（进程模型与契约）
+- 历史报告（竞品拆解 / 架构评审 / hotfix 复盘）见 `docs/reports/`，外部项目拆解见 `docs/teardown/`
 
 ## 打包
 

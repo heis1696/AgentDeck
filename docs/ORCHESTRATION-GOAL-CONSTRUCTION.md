@@ -125,7 +125,7 @@ git diff --check
 - `docs/LOOP-ENGINEERING.md`：四层模型、agentdeck 映射、行动清单和拆解计划。
 - `docs/teardown/`：六份源码精读报告。
 - 本文：不变量、风险台账、阶段顺序和验收协议。
-- `docs/ARCHITECTURE-REVIEW.md`：现状风险登记册。
+- `docs/reports/ARCHITECTURE-REVIEW.md`：现状风险登记册。
 
 **出站验收**：七份核心文档存在且为有效 UTF-8；第三方 clone 位于被忽略的 `teardown/repos/`；`typecheck`、`smoke:all`、`build` 通过。状态：已完成。
 

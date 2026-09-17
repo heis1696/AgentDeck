@@ -118,7 +118,7 @@ agentdeck 已实现的模块恰好覆盖了 Loop Engineering 图谱的大半，�
 
 ## 5. 拆解执行结果（2026-09-09 完成）
 
-六个项目浅克隆至 `teardown/repos/`（已 gitignore，不入库），6 个子代理并行拆解，各产出一份报告（沿用 `MULTICA-TEARDOWN.md` 规格：一句话定位 / 总体架构 / 核心链路 / 关键实现细节 / **与 agentdeck 的对照与可借鉴点**；子代理各精读 20–46 个核心源码文件）。
+六个项目浅克隆至 `teardown/repos/`（已 gitignore，不入库），6 个子代理并行拆解，各产出一份报告（沿用 `docs/reports/MULTICA-TEARDOWN.md` 规格：一句话定位 / 总体架构 / 核心链路 / 关键实现细节 / **与 agentdeck 的对照与可借鉴点**；子代理各精读 20–46 个核心源码文件）。
 
 | 报告 | 对象（星数） | 一句话结论 |
 |---|---|---|

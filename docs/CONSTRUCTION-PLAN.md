@@ -252,7 +252,7 @@ draft → active → waiting_user → completed
 4. ZCode 拆出 JSON-RPC transport、protocol helpers 和配置/model catalog；一次性 CLI adapter 使用 per-session 进程句柄与 JSON guards。
 5. 新增串行 `smoke:all` 与执行服务 smoke，防止多个测试并发覆盖 `out` 临时 bundle。
 
-**验收**：`npm run typecheck`、`npm run smoke:all`、真实 `smoke:clis`、真实 `smoke:zcode` 和 `npm run dist` 通过；并发取消、启动期取消、429 resume/取消退避、显式 relay、流式提前委派和 Goal 重启恢复均有回归。真实 provider 的 429 与延迟观察写入 `docs/CONCURRENCY-HOTFIX-REPORT.md` 和 `docs/VALIDATION.md`。
+**验收**：`npm run typecheck`、`npm run smoke:all`、真实 `smoke:clis`、真实 `smoke:zcode` 和 `npm run dist` 通过；并发取消、启动期取消、429 resume/取消退避、显式 relay、流式提前委派和 Goal 重启恢复均有回归。真实 provider 的 429 与延迟观察写入 `docs/reports/CONCURRENCY-HOTFIX-REPORT.md` 和 `docs/VALIDATION.md`。
 
 ---
 

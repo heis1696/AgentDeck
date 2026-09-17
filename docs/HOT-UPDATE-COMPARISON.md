@@ -25,7 +25,7 @@
 | F8 | 启动对账：重启后把中断任务补记为失败 / 恢复排队 | `src/main/index.ts:224-249` | 中断有兜底，但仍是"中断"，体验与产出损失真实存在 |
 | F9 | preload 为 `contextBridge` 类型安全桥（`nodeIntegration: false`、`contextIsolation: true`） | `src/preload/index.ts:1-2`、`src/main/index.ts:81-86` | 渲染层无权写文件；下载 / 校验 / 落盘只能由主进程经 IPC 完成（对路线 ② 反而是安全边界） |
 | F10 | 当前无任何更新代码、无 `electron-updater` 依赖 | `package.json`（dependencies） | 三条路线都从零开始 |
-| F11 | Multica 参照：自动更新用 electron-updater、按 OS+CPU 架构分 feed；CLI 引导下载用 GitHub Releases + sha256 校验 | `docs/MULTICA-TEARDOWN.md:237`、`:236` | 路线 ① 的直接先例；sha256 校验是该团队的既有实践 |
+| F11 | Multica 参照：自动更新用 electron-updater、按 OS+CPU 架构分 feed；CLI 引导下载用 GitHub Releases + sha256 校验 | `docs/reports/MULTICA-TEARDOWN.md:237`、`:236` | 路线 ① 的直接先例；sha256 校验是该团队的既有实践 |
 
 ---
 
@@ -46,7 +46,7 @@
 
 ### 3.1 原理
 
-1. 在 `electron-builder.yml` 增加 `publish: { provider: generic, url: <https 静态托管> }`，构建时产出 `latest.yml`（含 `version`、`files[].url/size`、`sha512`、`path`、`releaseDate`）与 blockmap（差分更新用），与 NSIS 安装包一并上传到静态托管（Multica 做法：按 OS+CPU 架构分 feed，`docs/MULTICA-TEARDOWN.md:237`；AgentDeck 只需一个 `win-x64` feed）。
+1. 在 `electron-builder.yml` 增加 `publish: { provider: generic, url: <https 静态托管> }`，构建时产出 `latest.yml`（含 `version`、`files[].url/size`、`sha512`、`path`、`releaseDate`）与 blockmap（差分更新用），与 NSIS 安装包一并上传到静态托管（Multica 做法：按 OS+CPU 架构分 feed，`docs/reports/MULTICA-TEARDOWN.md:237`；AgentDeck 只需一个 `win-x64` feed）。
 2. 主进程引入 `electron-updater`，启动 / 定时调用 `checkForUpdates`；检测到新版后下载安装包 → 校验 `latest.yml` 中的 sha512 → 静默执行 NSIS 安装器（`/S`）→ 以 `--updated` 参数拉起新版本。
 3. 安装布局上，electron-builder NSIS 产物采用版本化目录（安装目录下 `app-<version>/resources/app.asar` + 根目录加载器指针），升级 = 写入新版本目录后切换指针，旧版本目录保留。
 4. 下载与安装由主进程完成（同 F9：渲染层只通过 IPC 拿到"可更新 / 下载进度 / 已完成"状态并展示）。
@@ -55,7 +55,7 @@
 
 - **覆盖面完整**：主进程、preload、渲染层、Electron 版本、依赖树一次到位 —— 是唯一能修复主进程 bug / 升级 Electron 的通道。
 - **生态成熟**：electron-updater 是行业标准件，下载重试、差分（blockmap）、进度事件、退出时安装（`autoInstallOnAppQuit`）等都有现成实现，自研代码量最小。
-- **有既有先例**：Multica 同构做法已验证（`docs/MULTICA-TEARDOWN.md:237`），团队有可抄的作业。
+- **有既有先例**：Multica 同构做法已验证（`docs/reports/MULTICA-TEARDOWN.md:237`），团队有可抄的作业。
 
 ### 3.3 风险与对策
 
@@ -191,4 +191,4 @@
 - `src/preload/index.ts:1-2` —— contextBridge 类型安全桥
 - `src/shared/contracts.ts` —— 渲染层 ↔ 主进程契约面（`AgentDeckApi`）
 - `electron.vite.config.ts:27-36` —— 渲染层构建输出
-- `docs/MULTICA-TEARDOWN.md:237` / `:236` —— Multica 的 electron-updater 分 feed 与 sha256 校验实践
+- `docs/reports/MULTICA-TEARDOWN.md:237` / `:236` —— Multica 的 electron-updater 分 feed 与 sha256 校验实践
