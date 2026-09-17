@@ -12,5 +12,6 @@ export function registerUpdatesIpc(ctx: IpcContext) {
   ipcMain.handle('updates:get-state', () => ctx.updates.getState())
   ipcMain.handle('updates:check', () => ctx.updates.check())
   ipcMain.handle('updates:apply', (_e, channel: unknown) => ctx.updates.apply(parseChannel(channel)))
+  ipcMain.handle('updates:apply-all', () => ctx.updates.applyAll())
   ipcMain.handle('updates:rollback', (_e, channel: unknown) => ctx.updates.rollback(parseChannel(channel)))
 }

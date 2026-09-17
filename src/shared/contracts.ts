@@ -347,6 +347,8 @@ export interface AgentDeckApi {
     getState: () => Promise<UpdateStateSnapshot>
     check: () => Promise<UpdateStateSnapshot>            // 手动检查（两通道，串行）
     apply: (channel: UpdateChannel) => Promise<IpcResult>
+    /** 一键更新：按 renderer→payload→shell 顺序编排（壳只 staging，确认仍走 apply('shell')） */
+    applyAll: () => Promise<IpcResult>
     rollback: (channel: UpdateChannel) => Promise<IpcResult>  // 指针回退上一保留版本
     onState: (cb: (snapshot: UpdateStateSnapshot) => void) => () => void
   }
@@ -362,5 +364,7 @@ export interface UpdateStateSnapshot {
   currentVersion: string          // 生效版本（载荷优先，否则壳版本）
   stagedVersion?: string          // 已就绪待应用（空闲门控挂起时）
   activeRendererVersion?: string  // L2 指针生效中的版本（诊断用）
+  /** 各通道可更新到的 feed 版本（check 后填充；无则不出现）*/
+  available?: { renderer?: string; payload?: string; shell?: string }
   error?: string
 }

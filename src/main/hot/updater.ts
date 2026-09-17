@@ -47,6 +47,8 @@ export class HotUpdater {
   private staged: { version: string } | null = null
   /** 壳通道已 staging 就绪、等待用户确认的二段式状态（§9.3 半自动） */
   private stagedShell: { version: string; stagedDir: string } | null = null
+  /** 最近一次 check 拿到的各通道 feed 版本（驱动 available 快照与 applyAll 编排） */
+  private feedVersions: Partial<Record<UpdateChannel, string>> = {}
   private checkTimer: NodeJS.Timeout | undefined
 
   constructor(private deps: UpdaterDeps) {}
@@ -82,7 +84,7 @@ export class HotUpdater {
       // 三通道串行各拉一次定点 manifest（验签失败按该通道无更新处理，不置 failed）
       for (const channel of ['payload', 'renderer', 'shell'] as const) {
         try {
-          await this.verifyFeedManifest(channel)
+          this.feedVersions[channel] = (await this.verifyFeedManifest(channel)).version
         } catch {
           /* 静默：check 失败不打扰（§1.2 启动静默检查语义） */
         }
@@ -103,13 +105,60 @@ export class HotUpdater {
     if (this.busy) return { ok: false, error: '更新操作进行中，请稍候' }
     this.busy = true
     try {
-      if (channel === 'shell') return await this.applyShell()
-      await this.stageAndFlip(channel)
+      return await this.applyChannel(channel)
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    } finally {
+      this.busy = false
+    }
+  }
+
+  private async applyChannel(channel: UpdateChannel): Promise<{ ok: boolean; error?: string }> {
+    if (channel === 'shell') return await this.applyShell()
+    await this.stageAndFlip(channel)
+    return { ok: true }
+  }
+
+  /**
+   * 一键更新（UI「开始更新」）：renderer→payload 顺序应用（payload 有空闲门控，
+   * 非空闲挂起为 staged 由退出时补应用），shell 只做 staging——确认动作（§9.3 半自动）
+   * 仍由用户显式 apply('shell') 触发。单次持锁串行，与手动 apply 互斥。
+   */
+  async applyAll(): Promise<{ ok: boolean; error?: string }> {
+    if (this.busy) return { ok: false, error: '更新操作进行中，请稍候' }
+    this.busy = true
+    try {
+      for (const channel of ['renderer', 'payload'] as const) {
+        if (this.availableFor(channel)) await this.stageAndFlip(channel)
+      }
+      if (this.availableFor('shell') && !this.stagedShell) await this.applyShell()
       return { ok: true }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     } finally {
       this.busy = false
+    }
+  }
+
+  /** feed 上有比本地当前更新的版本则返回该版本号（available 快照与 applyAll 编排共用） */
+  private availableFor(channel: UpdateChannel): string | undefined {
+    const feed = this.feedVersions[channel]
+    if (!feed) return undefined
+    if (channel === 'shell') return feed !== this.deps.getShellVersion() ? feed : undefined
+    const active = this.activeVersionFor(channel)
+    return feed !== active ? feed : undefined
+  }
+
+  private activeVersionFor(channel: 'renderer' | 'payload'): string {
+    const shellVersion = this.shellVersion()
+    const hot = resolveHotState(this.deps.getUserDataDir(), shellVersion)
+    if (channel === 'payload') return hot.payload?.version ?? shellVersion
+    // P6：载荷生效时其自带渲染层即当前渲染层（L2 指针已被清，feed 渲染层只与载荷版本比）
+    if (hot.payload) return hot.payload.version
+    try {
+      return readPointer(this.deps.getUserDataDir(), 'renderer')?.version ?? shellVersion
+    } catch {
+      return shellVersion
     }
   }
 
@@ -397,10 +446,16 @@ export class HotUpdater {
         if (pointer) activeRendererVersion = pointer.version
       } catch { /* 诊断字段，失败即缺省 */ }
     }
+    const available: { renderer?: string; payload?: string; shell?: string } = {}
+    for (const channel of ['renderer', 'payload', 'shell'] as const) {
+      const v = this.availableFor(channel)
+      if (v) available[channel] = v
+    }
     return {
       ...this.snapshot,
       currentVersion: hot.payload?.version ?? shellVersion,
-      activeRendererVersion
+      activeRendererVersion,
+      available
     }
   }
 

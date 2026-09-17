@@ -116,31 +116,38 @@ export function UpdatePanel() {
           </div>
         )}
         {state?.error && <p className="hint probe-fail">{state.error}</p>}
+        {state?.available && Object.keys(state.available).length > 0 && (
+          <div className="field">
+            <span>可更新</span>
+            <span className="mono">
+              {(['renderer', 'payload', 'shell'] as const)
+                .filter((ch) => state.available?.[ch])
+                .map((ch) => `${CHANNEL_LABEL[ch]} v${state.available?.[ch]}`)
+                .join(' · ')}
+            </span>
+          </div>
+        )}
         {state?.channel === 'shell' && state?.phase === 'staged' && state.stagedVersion && (
-          <p className="hint">壳更新 v{state.stagedVersion} 已下载并校验就绪。确认后将替换应用本体并重启（低频更新，任务运行中不可执行）。</p>
+          <p className="hint">壳更新 v{state.stagedVersion} 已下载并校验就绪。点击下方按钮确认替换应用本体并重启（任务运行中不可执行）。</p>
         )}
         <div className="row">
           <button className="btn" disabled={disableOps} onClick={() => void run(() => bridge.updates.check())}>
             <RefreshCw size={14} className={pending && state?.phase === 'checking' ? 'spin' : ''} /> 检查更新
           </button>
-          <button className="btn" disabled={disableOps} onClick={() => void run(() => bridge.updates.apply('renderer'), '已应用，正在重载')}>
-            <Download size={14} /> 应用并重载（L2）
-          </button>
-          <button className="btn" disabled={disableOps} onClick={() => void run(() => bridge.updates.apply('payload'), '已应用，即将重启')}>
-            <Rocket size={14} /> 应用并重启（L1）
-          </button>
-          <button className="btn" disabled={disableOps} onClick={() => void run(() => bridge.updates.apply('shell'), '壳更新已就绪，请再点一次确认执行')}>
-            <Rocket size={14} /> 下载/准备壳更新（L0）
-          </button>
-          {state?.channel === 'shell' && state?.phase === 'staged' && (
+          {state?.channel === 'shell' && state?.phase === 'staged' ? (
             <button className="btn danger" disabled={disableOps} onClick={() => void run(() => bridge.updates.apply('shell'), '已确认，正在替换壳并重启')}>
-              <RotateCcw size={14} /> 确认并重启更新壳（v{state.stagedVersion}）
+              <Rocket size={14} /> 确认并重启完成壳更新（v{state.stagedVersion}）
+            </button>
+          ) : (
+            <button className="btn" disabled={disableOps} onClick={() => void run(() => bridge.updates.applyAll(), '已开始更新')}>
+              <Download size={14} /> 开始更新
             </button>
           )}
           <button className="btn" disabled={disableOps} onClick={() => void run(() => bridge.updates.rollback('renderer'), '已回退上一版')}>
             <RotateCcw size={14} /> 回退上一版
           </button>
         </div>
+        <p className="hint">「开始更新」自动编排：界面改动即时生效；功能逻辑应用后按空闲自动重启（有任务在跑则退出时应用）；应用本体更新需再点一次确认。</p>
       </section>
 
       <section className="settings-card">

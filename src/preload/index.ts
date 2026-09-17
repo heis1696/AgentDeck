@@ -205,6 +205,7 @@ const api: AgentDeckApi = {
     getState: (): Promise<UpdateStateSnapshot> => ipcRenderer.invoke('updates:get-state'),
     check: (): Promise<UpdateStateSnapshot> => ipcRenderer.invoke('updates:check'),
     apply: (channel: UpdateChannel): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('updates:apply', channel),
+    applyAll: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('updates:apply-all'),
     rollback: (channel: UpdateChannel): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('updates:rollback', channel),
     onState: (cb: (snapshot: UpdateStateSnapshot) => void) => {
       const h = (_e: unknown, snapshot: UpdateStateSnapshot) => cb(snapshot)
