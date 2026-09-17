@@ -33,3 +33,6 @@ agentdeck-task-branches-backup.bundle
 agentdeck-worktree-backups/
 gui-test-screenshots/
 .smoke-hot-shell-*/
+
+# Detached agent worktree scratch space (worktrees are registered per-machine)
+.agentdeck-worktrees/
