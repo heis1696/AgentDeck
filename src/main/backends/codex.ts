@@ -4,8 +4,9 @@
 // 续聊：codex exec resume <id> --json ...
 // 注意：Windows 下 workspace-write 沙箱会废掉命令执行，必须 bypass（实测 exit -1）
 import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnResult } from './types'
-import type { TaskEvent } from '../../shared/types'
+import type { TaskEvent, ToolEditMeta } from '../../shared/types'
 import { isJsonObject, jsonObject, jsonString, runCliJsonl, toolEvent } from './cli-common'
+import { parseEditMeta } from './edit-meta'
 import { resolveCli, probeCli } from './cli-locator'
 
 export function createCodexBackend(): AgentBackend {
@@ -45,6 +46,8 @@ export function createCodexBackend(): AgentBackend {
       settle({ sessionId, response, ok, error, delegationText })
     }
     const itemNames = new Map<string, string>()
+    /** item.completed 不带入参：started 时按 item id 存好编辑元数据，result 时补挂上 */
+    const itemEdits = new Map<string, ToolEditMeta>()
 
     const runner = runCliJsonl({
       command: resolved.command,
@@ -65,8 +68,12 @@ export function createCodexBackend(): AgentBackend {
           if (name) {
             const itemId = jsonString(it.id)
             if (itemId) itemNames.set(itemId, name)
-            const args = jsonString(it.type === 'command_execution' ? it.command : it.arguments).slice(0, 200)
-            emit(toolEvent('started', name, { args }))
+            // 原始入参（command_execution 是整条命令文本，apply_patch 走 heredoc）算编辑元数据
+            const rawArgs = jsonString(it.type === 'command_execution' ? it.command : it.arguments)
+            const edit = parseEditMeta(name, rawArgs)
+            if (edit && itemId) itemEdits.set(itemId, edit)
+            const args = rawArgs.slice(0, 200)
+            emit(toolEvent('started', name, { args }, edit))
           }
         } else if (j.type === 'item.completed') {
           const it = jsonObject(j.item)
@@ -76,11 +83,14 @@ export function createCodexBackend(): AgentBackend {
             emit({ kind: 'text', text: finalText })
           } else if (it.type === 'command_execution' || it.type === 'mcp_tool_call') {
             const name = itemNames.get(jsonString(it.id)) ?? (it.type === 'command_execution' ? 'Bash' : 'mcp')
+            const itemId = jsonString(it.id)
+            const edit = itemId ? itemEdits.get(itemId) ?? null : null
+            if (itemId) itemEdits.delete(itemId)
             emit(
               toolEvent('result', name, {
                 ok: it.status !== 'failed' && it.exit_code !== -1,
                 preview: jsonString(it.aggregated_output, jsonString(it.output)).slice(0, 300)
-              })
+              }, edit)
             )
           }
         } else if (j.type === 'turn.completed') {

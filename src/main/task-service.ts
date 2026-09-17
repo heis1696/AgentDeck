@@ -103,6 +103,35 @@ export class TaskService {
     this.defaultBackend = options.defaultBackend ?? 'zcode'
   }
 
+  taskCascade(taskIds: string[]): Task[] {
+    const ids = new Set(taskIds)
+    const tasks = this.store.list()
+    let changed = true
+    while (changed) {
+      changed = false
+      for (const task of tasks) {
+        if (task.parentTaskId && ids.has(task.parentTaskId) && !ids.has(task.id)) {
+          ids.add(task.id)
+          changed = true
+        }
+      }
+    }
+    return tasks.filter((task) => ids.has(task.id))
+  }
+
+  /** Retention deletes data only: never remove a branch or worktree. */
+  async deleteTerminalCascade(taskIds: string[], forget: (id: string) => unknown, validate: (tasks: Task[]) => boolean): Promise<string[] | null> {
+    const tasks = this.taskCascade(taskIds)
+    const terminal = (items: Task[]) => items.every((task) => ['done', 'failed', 'cancelled'].includes(task.status))
+    if (!terminal(tasks) || !validate(tasks)) return null
+    for (const task of tasks) await forget(task.id)
+    const current = this.taskCascade(taskIds)
+    if (current.length !== tasks.length || !current.every((task) => tasks.some((item) => item.id === task.id)) || !terminal(current) || !validate(current)) return null
+    for (const task of current) this.store.delete(task.id)
+    this.store.flush()
+    return current.map((task) => task.id)
+  }
+
   /** Return the task registered for a durable idempotency key. */
   deduped(key: string): Task | null {
     key = key.trim()

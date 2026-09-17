@@ -48,6 +48,8 @@
     "smoke:taskflow": "node scripts/smoke-taskflow.mjs",
     "smoke:model": "node scripts/smoke-model.mjs",
     "smoke:continue": "node scripts/smoke-continue.mjs",
+    "smoke:board-retention": "node scripts/smoke-board-retention.mjs",
+    "smoke:edit-meta": "node scripts/smoke-edit-meta.mjs",
     "smoke:orchestration-matrix": "node scripts/smoke-orchestration-matrix.mjs",
     "smoke:round": "node scripts/smoke-round.mjs",
     "smoke:turn-lifecycle": "node scripts/smoke-turn-lifecycle.mjs",
@@ -62,7 +64,7 @@
     "smoke:extensions": "node scripts/smoke-extensions.mjs",
     "smoke:stage7": "npm run typecheck && npm run smoke:stage6 && npm run smoke:opencode-server && npm run smoke && npm run smoke:goal",
     "smoke:stage8": "npm run typecheck && npm run smoke:sidecar && npm run build && git diff --check",
-    "smoke:all": "npm run smoke && npm run smoke:event-log && npm run smoke:permission && npm run smoke:execution-services && npm run smoke:ipc-validation && npm run smoke:final-dedup && npm run smoke:cli-errors && npm run smoke:dsh-budget && npm run smoke:dsh-acp && npm run smoke:git-errors && npm run smoke:delegate && npm run smoke:delegate-reject && npm run smoke:migration && npm run smoke:failure && npm run smoke:diff && npm run smoke:retry && npm run smoke:flow && npm run smoke:resume && npm run smoke:issues && npm run smoke:automation && npm run smoke:runtime-analytics && npm run smoke:taskflow && npm run smoke:model && npm run smoke:continue && npm run smoke:orchestration-matrix && npm run smoke:round && npm run smoke:turn-model && npm run smoke:turn-lifecycle && npm run smoke:lifecycle && npm run smoke:worktrees && npm run smoke:opencode-server && npm run smoke:goal && npm run smoke:goal-guards && npm run smoke:goal-spec && npm run smoke:skills && npm run smoke:task-service && npm run smoke:sidecar && npm run smoke:zcode-protocol && npm run smoke:retitle-cap && npm run smoke:extensions && npm run smoke:meeting-office && npm run smoke:meeting-consult && npm run smoke:meeting && npm run smoke:meeting-investigate",
+    "smoke:all": "npm run smoke && npm run smoke:event-log && npm run smoke:permission && npm run smoke:execution-services && npm run smoke:ipc-validation && npm run smoke:final-dedup && npm run smoke:cli-errors && npm run smoke:dsh-budget && npm run smoke:dsh-acp && npm run smoke:git-errors && npm run smoke:delegate && npm run smoke:delegate-reject && npm run smoke:migration && npm run smoke:failure && npm run smoke:diff && npm run smoke:retry && npm run smoke:flow && npm run smoke:resume && npm run smoke:issues && npm run smoke:automation && npm run smoke:runtime-analytics && npm run smoke:taskflow && npm run smoke:model && npm run smoke:continue && npm run smoke:board-retention && npm run smoke:edit-meta && npm run smoke:orchestration-matrix && npm run smoke:round && npm run smoke:turn-model && npm run smoke:turn-lifecycle && npm run smoke:lifecycle && npm run smoke:worktrees && npm run smoke:opencode-server && npm run smoke:goal && npm run smoke:goal-guards && npm run smoke:goal-spec && npm run smoke:skills && npm run smoke:task-service && npm run smoke:sidecar && npm run smoke:zcode-protocol && npm run smoke:retitle-cap && npm run smoke:extensions && npm run smoke:meeting-office && npm run smoke:meeting-consult && npm run smoke:meeting && npm run smoke:meeting-investigate",
     "smoke:task-service": "node scripts/smoke-task-service.mjs",
     "smoke:sidecar": "node scripts/smoke-sidecar.mjs",
     "smoke:meeting-office": "node scripts/smoke-meeting-office.mjs",
@@ -92,6 +94,7 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1"
+    "remark-gfm": "^4.0.1",
+    "shiki": "^4.4.3"
   }
 }

@@ -28,15 +28,15 @@ export type InvestigateHandler = (input: { sourceTaskId: string; call: Investiga
 export const MAX_CONSULT_ROUNDS = 2
 
 /** 阶段接力协议：多阶段任务在阶段边界输出 <continue>，系统在同一 Issue 上硬切新会话 */
-const CONTINUE_BLOCK = `【阶段接力（仅多阶段任务使用）】
+const CONTINUE_BLOCK = `【阶段接力（分阶段任务使用）】
 若本任务是分阶段施工的其中一阶段、且下一阶段的目标已明确，在回复的最后一行输出：
 <continue start="auto">下一阶段简报</continue>
-- 标记必须是整个回复的结尾（其后最多跟空白）——系统只识别位于末尾的标记；正文、示例或讨论里出现标记字样不会触发接力。
+- 标记必须是整个回复的结尾（其后最多跟空白）——末尾锚定是主通道；不在末尾的标记只有显式写 start="auto" 才会被兜底识别。正文、示例或讨论里出现标记字样不会触发接力。
 - 简报必须自包含：阶段目标、方案文档路径、上阶段成果（commit/关键文件:行号）、约束与验收。接手的会话看不到本会话上下文，一切靠简报。
-- 自主硬切默认 auto：下一阶段目标已明确就照常 auto（缺省/写错也按 auto 处理），系统立即在同一 Issue 上以新会话开始执行。
-- start="parked" 仅限你明确需要用户做某件事才能继续（如：等你确认方案、等你提供凭据），并且必须在正文里写明"我停在阶段 N，等你 <X>"；只有显式写 parked 才会停放。
+- 想让系统立即续跑下一阶段就必须显式写 start="auto"：缺省或写错一律按 start="parked" 停放，等你手动点「▶ 启动」。
+- start="parked" 用于你明确需要用户做某件事才能继续（如：等你确认方案、等你提供凭据），并且必须在正文里写明"我停在阶段 N，等你 <X>"。
 - 环境受限（无头跑不了 GUI、缺权限、缺依赖）不算等用户的理由——照常 auto，把风险与规避办法写进简报，让下一阶段自行绕开。
-- 没有明确的下一阶段就不要输出该标记；输出了就不再写"后续可以…"之类的口头交接。
+- 拿不准要不要切会话时：只要还存在明确值得做的下一阶段，就输出 start="parked" 的标记备好待启——**不要**改用"后续可以…"之类的口头交接段落；没有下一阶段才什么都不输出。
 - 示例：<continue start="auto">阶段2：按 docs/plan.md §3 实现模型选择 UI；阶段1 已完成数据管道（commit 09a47a4，src/main/presets.ts）；验收：两个不同模型的 agent 并发执行成功</continue>`
 
 /** 同一 Issue 上 <continue> 自继链上限（防无限自我接力） */
@@ -966,13 +966,23 @@ export class TaskRunner {
     const issueId = task.issueId
     if (task.parentTaskId || !issueId) return finalText
     const cont = parseContinueMerged(...scanTexts)
-    if (!cont) return finalText
+    if (!cont) {
+      // 可观测性：回复里出现过标记字样却没解析成功（未闭合/围栏内/示例复述），留痕说明为何没接力——
+      // 否则用户只看到"硬切从没触发过"，无从分辨是 agent 没输出还是解析拒收
+      if (scanTexts.some((text) => text.includes('<continue'))) {
+        const e = { ts: Date.now(), kind: 'status' as const, text: '⚠ 检测到 <continue> 字样但未构成有效接力（需完整闭合且位于回复末尾；不在末尾的标记必须显式 start="auto" 才走兜底），未触发' }
+        const full = this.store.appendEvent(taskId, e)
+        if (full) this.pushEvent(taskId, full)
+      }
+      return finalText
+    }
     const stripped = stripContinue(finalText)
     const note = (text: string) => {
       const e = { ts: Date.now(), kind: 'status' as const, text }
       const full = this.store.appendEvent(taskId, e)
       if (full) this.pushEvent(taskId, full)
     }
+    if (cont.loose) note('阶段接力标记不在回复末尾（其后仍有内容），已按显式 start="auto" 兜底解析')
     // Cancelled handoffs are abandoned attempts and must not consume the
     // finite relay chain budget. Failed, queued, running and completed
     // handoffs remain durable chain members for audit and loop prevention.

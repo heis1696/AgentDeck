@@ -1,0 +1,120 @@
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { build } from 'esbuild'
+
+const root = path.resolve(import.meta.dirname, '..')
+const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-board-retention-'))
+const now = Date.now()
+const DAY = 86_400_000
+let store
+try {
+  for (const [source, name] of [['src/main/store.ts', 'store'], ['src/main/issue-store.ts', 'issues'], ['src/main/task-service.ts', 'service'], ['src/main/retention.ts', 'retention'], ['src/main/event-log.ts', 'log'], ['src/renderer/src/components/BoardView.tsx', 'board']]) {
+    await build({ entryPoints: [path.join(root, source)], outfile: path.join(temp, `${name}.cjs`), bundle: true, platform: 'node', format: 'cjs', external: ['electron'], logLevel: 'silent' })
+  }
+  globalThis.window = { agentdeck: {} }
+  const load = (name) => import(pathToFileURL(path.join(temp, `${name}.cjs`)).href)
+  const [{ TaskStore }, { IssueStore }, { TaskService }, { sweepExpiredIssues }, { EventLog }, board] = await Promise.all(['store', 'issues', 'service', 'retention', 'log', 'board'].map(load))
+  const data = path.join(temp, 'data')
+  store = new TaskStore(data)
+  const fixtureIssues = new IssueStore(data)
+  const fresh = new Set()
+  const make = (title, status = 'done', options = {}) => {
+    const { age = 40, ...fields } = options
+    const task = store.create({ title, prompt: title, backend: 'fake', workdir: '', ...fields })
+    store.update(task.id, { status, createdAt: now - age * DAY, startedAt: now - age * DAY, endedAt: status === 'done' || status === 'failed' || status === 'cancelled' ? now - age * DAY + 1000 : undefined })
+    if (age < 30) fresh.add(fields.issueId ?? `iss_${task.id}`)
+    store.appendEvent(task.id, { ts: now - age * DAY, kind: 'status', text: title })
+    return store.get(task.id)
+  }
+  const expired = make('expired done')
+  const failed = make('expired failed', 'failed')
+  const cancelled = make('expired cancelled', 'cancelled')
+  const running = make('old running', 'running')
+  const parked = make('old parked', 'queued', { parked: true })
+  const queued = make('old queued', 'queued')
+  const recent = make('recent done', 'done', { age: 2 })
+  const orphan = make('run-only orphan', 'done', { suppressIssue: true, parentTaskId: 'missing-parent' })
+  const freshOrphan = make('fresh orphan worker', 'done', { age: 1, parentTaskId: 'missing-parent' })
+  const activeGoal = make('protected goal')
+  const activeMeeting = make('protected meeting')
+  const leader = make('expired leader')
+  const child = make('expired child', 'done', { parentTaskId: leader.id })
+  const grandchild = make('expired grandchild', 'failed', { parentTaskId: child.id })
+  const blockedLeader = make('leader with running child')
+  const busyChild = make('running child', 'running', { parentTaskId: blockedLeader.id })
+  const freshLeader = make('leader with fresh child')
+  const freshChild = make('fresh child', 'done', { parentTaskId: freshLeader.id, age: 2 })
+  const protectedLeader = make('leader with protected child')
+  const protectedChild = make('goal child', 'done', { parentTaskId: protectedLeader.id })
+  const sharedDone = make('shared old done', 'done', { issueId: 'iss_shared' })
+  const sharedParked = make('shared parked', 'queued', { issueId: 'iss_shared', parked: true })
+  const race = make('changes during forget')
+  fixtureIssues.sync(store.list())
+  fixtureIssues.addComment(`iss_${expired.id}`, 'old comment')
+  store.flush()
+  const issueFile = path.join(data, 'issues', 'index.json')
+  const persisted = JSON.parse(fs.readFileSync(issueFile, 'utf8'))
+  for (const issue of persisted.issues) issue.updatedAt = now - (fresh.has(issue.id) ? 2 : 40) * DAY
+  fs.writeFileSync(issueFile, JSON.stringify(persisted))
+  const issues = new IssueStore(data)
+  const service = new TaskService({ store, issueStore: issues })
+  const forgotten = []
+  const published = []
+  const logFile = path.join(data, 'issues', 'retention.jsonl')
+  const deps = {
+    store, issueStore: issues, taskService: service, now: () => now,
+    activeGoalIssueIds: () => new Set([`iss_${activeGoal.id}`, `iss_${protectedChild.id}`]),
+    activeMeetingIssueIds: () => new Set([`iss_${activeMeeting.id}`]),
+    forget: async (id) => { forgotten.push(id); if (id === race.id) store.update(id, { status: 'running' }) },
+    onTaskDeleted: (id) => published.push(id), eventLog: new EventLog(logFile)
+  }
+  const report = await sweepExpiredIssues(deps)
+  for (const task of [expired, failed, cancelled, leader, child, grandchild]) {
+    assert.equal(store.get(task.id), undefined, `${task.title} deleted`)
+    assert.equal(issues.get(`iss_${task.id}`), undefined, 'projection removed')
+    assert.equal(fs.existsSync(path.join(data, 'tasks', task.id)), false, 'task directory and events removed')
+    assert.ok(forgotten.includes(task.id) && published.includes(task.id), 'runner cleanup and deletion notification')
+  }
+  for (const task of [running, parked, queued, recent, orphan, freshOrphan, activeGoal, activeMeeting, blockedLeader, busyChild, freshLeader, freshChild, protectedLeader, protectedChild, sharedDone, sharedParked, race]) assert.ok(store.get(task.id), `${task.title} preserved`)
+  assert.equal(report.deletedTasks, 6)
+  assert.equal(report.deletedIssues, 6)
+  assert.ok(report.deletedComments > 0 && report.deletedRuns > 0)
+  assert.deepEqual(issues.comments(`iss_${expired.id}`), [])
+  assert.deepEqual(issues.runs(`iss_${expired.id}`), [])
+  issues.sync(store.list())
+  assert.equal(issues.get(`iss_${expired.id}`), undefined, 'sync does not resurrect Issue')
+  assert.equal(new IssueStore(data).get(`iss_${expired.id}`), undefined, 'deletion is durable')
+  assert.equal(JSON.parse(fs.readFileSync(logFile, 'utf8').trim()).data.deletedTasks, 6, 'event-log audit')
+  assert.equal((await sweepExpiredIssues(deps)).deletedTasks, 0, 'second sweep idempotent')
+  await assert.rejects(() => sweepExpiredIssues(deps, 0), /positive/)
+  console.log('PASS retention: terminal/age/cascade/logs/protection/orphans/race/restart/idempotence')
+
+  const task = (id, extra = {}) => ({ id, title: id, prompt: id, backend: 'fake', status: 'done', createdAt: now, eventCount: 0, workdir: '', ...extra })
+  const issue = (id, taskId) => ({ id, taskId, identifier: id, status: 'done', updatedAt: now, createdBy: 'user' })
+  const tree = board.buildBoardTree([task('old', { issueId: 'iss_leader' }), task('latest', { issueId: 'iss_leader', trigger: 'handoff' }), task('worker', { parentTaskId: 'old' }), task('orphan', { parentTaskId: 'deleted' })], [issue('iss_leader', 'latest'), issue('iss_worker', 'worker'), issue('iss_orphan', 'orphan')])
+  assert.equal(tree.roots.length, 1)
+  assert.equal(tree.roots[0].task.id, 'latest')
+  assert.equal(tree.roots[0].children[0].task.id, 'worker', 'historical leader aliases latest Issue card')
+  assert.equal(tree.orphans[0].task.id, 'orphan')
+  const cycle = board.buildBoardTree([task('a', { parentTaskId: 'b' }), task('b', { parentTaskId: 'a' })], [])
+  assert.equal(cycle.orphans.length, 2, 'cycles cannot recurse')
+  const empty = new Set()
+  assert.equal(board.boardCardKind(task('n'), undefined, empty, empty), 'normal')
+  assert.equal(board.boardCardKind(task('d', { parentTaskId: 'p' }), undefined, empty, empty), 'delegate')
+  assert.equal(board.boardCardKind(task('h', { trigger: 'handoff' }), undefined, empty, empty), 'handoff')
+  assert.equal(board.boardCardKind(task('g', { goalId: 'g' }), undefined, empty, empty), 'goal')
+  assert.equal(board.boardCardKind(task('m'), issue('m', 'm'), empty, new Set(['m'])), 'meeting')
+  assert.equal(board.boardDateGroup(now, now), '今天')
+  assert.equal(board.boardDateGroup(new Date(now).setDate(new Date(now).getDate() - 1), now), '昨天')
+  assert.equal(board.boardDateGroup(now - 3 * DAY, now), '近7天')
+  assert.equal(board.boardDateGroup(now - 30 * DAY, now), '更早（≤30天）')
+  assert.equal(board.boardDateGroup(now - 31 * DAY, now), '超30天 · 保留')
+  console.log('PASS board: five type classes, date buckets, child folding, historical leader alias, orphan/cycle grouping')
+} finally {
+  store?.flush()
+  delete globalThis.window
+  fs.rmSync(temp, { recursive: true, force: true })
+}

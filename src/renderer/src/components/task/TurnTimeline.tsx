@@ -1,11 +1,21 @@
 import { Undo2 } from 'lucide-react'
-import { useEffect, useRef, useState, type CSSProperties, type RefObject } from 'react'
+import { createContext, useContext, useEffect, useRef, useState, type CSSProperties, type RefObject } from 'react'
 import { Markdown, renderStreamingMarkers } from '../Markdown'
 import { fmtDuration } from '../../api'
 import { PARKED_QUEUED_LABEL } from '../../labels'
 import type { Task, TaskEvent } from '../../../../shared/types'
 import type { Turn } from '../../hooks/turnModel'
 import { classifyTool, navSummary } from '../../hooks/turnModel'
+import { openDockItem, type DockEditMetadata } from '../../ui/SideDock'
+
+const TimelineTaskId = createContext('')
+
+function EditBadge({ edit, seq }: { edit: DockEditMetadata; seq: number }) {
+  const taskId = useContext(TimelineTaskId)
+  if (!edit || typeof edit.file !== 'string' || !edit.file) return null
+  const name = edit.file.split(/[\\/]/).pop() || edit.file
+  return <button type="button" className="timeline-edit-badge" title={edit.file} aria-label={`查看 ${edit.file}，新增 ${edit.additions} 行，删除 ${edit.deletions} 行`} onClick={() => openDockItem({ id: `file:${taskId}:${seq}:${edit.file}`, kind: 'file', title: name, payload: { ...edit, taskId } })}><span className="timeline-edit-name">{name}</span><span className="edit-added">+{edit.additions}</span><span className="edit-deleted">-{edit.deletions}</span></button>
+}
 
 function ToolChips({ work }: { work: TaskEvent[] }) {
   const counts = { reads: 0, commands: 0, edits: 0, other: 0 }
@@ -129,9 +139,9 @@ function LogLine({ event }: { event: TaskEvent }) {
   const time = new Date(event.ts).toISOString().slice(11, 19)
   if (event.kind === 'status') return <div className="log-line status"><span className="ts">{time}</span> {event.text}</div>
   if (event.kind === 'tool') {
-    const data = (event.data ?? {}) as { phase?: string; args?: string; ok?: boolean; durationMs?: number; preview?: string }
+    const data = (event.data ?? {}) as { phase?: string; args?: string; ok?: boolean; durationMs?: number; preview?: string; edit?: DockEditMetadata }
     if (data.phase === 'started') return <div className="log-line tool" title={data.args}><span className="ts">{time}</span> 🛠 <b>{event.text}</b> <span className="mono dim">{data.args}</span></div>
-    if (data.phase === 'result') return <div className="log-line tool-result" title={data.preview}><span className="ts">{time}</span> {data.ok === false ? '✗' : '✓'} <b>{event.text}</b><span className="dim">{data.durationMs != null ? ` (${Math.round(data.durationMs)}ms)` : ''}</span>{data.preview ? <span className="mono dim preview"> {firstLine(data.preview)}</span> : null}</div>
+    if (data.phase === 'result') return <div className="log-line tool-result" title={data.preview}><span className="ts">{time}</span> {data.ok === false ? '✗' : '✓'} <b>{event.text}</b><span className="dim">{data.durationMs != null ? ` (${Math.round(data.durationMs)}ms)` : ''}</span>{data.preview ? <span className="mono dim preview"> {firstLine(data.preview)}</span> : null}{data.edit && <EditBadge edit={data.edit} seq={event.seq} />}</div>
     return <div className="log-line tool"><span className="ts">{time}</span> 🛠 <b>{event.text}</b></div>
   }
   if (event.kind === 'error') return <div className="log-line error"><span className="ts">{time}</span> ✗ {event.text}</div>
@@ -142,7 +152,7 @@ function LogLine({ event }: { event: TaskEvent }) {
 export function TurnTimeline({ task, turns, activeNav, onNavigate, onRewind, logRef, onScroll }: { task: Task; turns: Turn[]; activeNav: number; onNavigate: (index: number) => void; onRewind: (index: number) => void; logRef: RefObject<HTMLDivElement>; onScroll: () => void }) {
   const active = task.status === 'running'
   return (
-    <div className="chat-wrap">
+    <TimelineTaskId.Provider value={task.id}><div className="chat-wrap">
       <TurnMinimap turns={turns} activeNav={activeNav} onNavigate={onNavigate} />
       <div className="log chat" ref={logRef} onScroll={onScroll}>
         {turns.map((turn, index) => {
@@ -168,6 +178,6 @@ export function TurnTimeline({ task, turns, activeNav, onNavigate, onRewind, log
         })}
         {turns.length === 0 && <div className="list-empty">（无对话内容）</div>}
       </div>
-    </div>
+    </div></TimelineTaskId.Provider>
   )
 }

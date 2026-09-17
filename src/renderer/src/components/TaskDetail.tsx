@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { FolderOpen, Pencil, Waypoints } from 'lucide-react'
 import { bridge, fmtDuration, fmtTokens } from '../api'
 import { taskService } from '../task-service'
@@ -12,11 +12,15 @@ import { useTurnModel } from '../hooks/turnModel'
 import { useIssueDetails } from '../hooks/useIssueDetails'
 import { PermissionPrompt } from './task/PermissionPrompt'
 import { TurnTimeline } from './task/TurnTimeline'
+import { SkillMenu, parseSkillDirective, wrapSkillDirective } from './task/SkillMenu'
+import { usePromptHistory } from '../hooks/usePromptHistory'
+import { SideDock, openDockItem } from '../ui/SideDock'
 import { ActivityTimeline, CommentPanel } from './task/CommentPanel'
 import { RunHistory } from './task/RunHistory'
 import { GitSummary } from './task/GitSummary'
 import { GoalPanel } from './goal/GoalPanel'
 import type { IssuePriority, IssueStatus, Task } from '../../../shared/types'
+import type { SkillMeta } from '../../../shared/skills'
 
 type Tab = 'activity' | 'log' | 'result' | 'git'
 const STATUS_META: Record<Task['status'], string> = { queued: '排队中', running: '执行中', done: '完成', failed: '失败', cancelled: '已取消' }
@@ -36,6 +40,25 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   const navFrameRef = useRef(0)
   const { events, permission, refreshEvents, answerPermission } = useTaskEvents(task.id)
   const turns = useTurnModel(events, task.prompt)
+  // 追问框：↑↓ 历史重写 + / 技能命令菜单（技能列表首按 / 时懒加载一次）
+  const history = usePromptHistory(task.id)
+  const [skills, setSkills] = useState<SkillMeta[]>([])
+  const skillsLoadedRef = useRef(false)
+  const [skillMenuOpen, setSkillMenuOpen] = useState(false)
+  const [skillIndex, setSkillIndex] = useState(0)
+  const skillQuery = followUp.startsWith('/') ? followUp.slice(1).split(/\s/)[0] ?? '' : ''
+  const filteredSkills = useMemo(() => {
+    if (!skillQuery) return skills
+    const q = skillQuery.toLowerCase()
+    return skills.filter((skill) => skill.name.toLowerCase().includes(q) || skill.description.toLowerCase().includes(q))
+  }, [skills, skillQuery])
+  useEffect(() => { setSkillIndex(0) }, [skillQuery])
+  // 首次打开菜单才拉技能清单；此后复用（安装/卸载技能后重开 Issue 即刷新）
+  useEffect(() => {
+    if (!skillMenuOpen || skillsLoadedRef.current) return
+    skillsLoadedRef.current = true
+    void bridge.skills.list().then((result) => setSkills(result.skills)).catch(() => { skillsLoadedRef.current = false })
+  }, [skillMenuOpen])
   const issueId = task.issueId ?? `iss_${task.id}`
   const { issue, comments, runs, labelsDraft, setLabelsDraft, addComment, updateIssue, updateWorkflow } = useIssueDetails(issueId, `${task.status}:${task.result ?? ''}:${task.eventCount}`)
   const workers = tasks.filter((item) => item.parentTaskId === task.id).sort((a, b) => (a.workerIndex ?? 0) - (b.workerIndex ?? 0))
@@ -135,9 +158,13 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     if (next) toast.success('标题已更新')
   }
   const sendFollowUp = async (preset?: string, opts?: { relay?: boolean }) => {
-    const content = (preset ?? followUp).trim()
-    if (!content || busy) return
+    const raw = (preset ?? followUp).trim()
+    if (!raw || busy) return
+    // zcode 会话支持 Skill 工具：/技能名 开头的输入包装成显式技能指令再下发
+    const directive = task.backend === 'zcode' ? parseSkillDirective(raw, skills) : null
+    const content = directive ? wrapSkillDirective(directive.skill, directive.rest) : raw
     setBusy(true); setFollowUp('')
+    history.push(raw)
     if (followRef.current) followRef.current.style.height = 'auto'
     try {
       // wait:false：IPC 在回合开跑即返回，busy 不锁整轮追问——否则「停止」会禁用到回合结束
@@ -165,7 +192,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     <header className="detail-header page-header-bar"><div className="detail-title-wrap">
       {editingTitle ? <input className="title-edit-input" value={titleDraft} autoFocus onChange={(event) => setTitleDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void saveTitle() } else if (event.key === 'Escape') cancelTitleEdit() }} onBlur={() => void saveTitle()} /> : <h1 className="detail-title">{task.title}<button className="title-edit" type="button" title="重命名" onClick={beginTitleEdit}><Pencil size={13} aria-hidden="true" /></button></h1>}
       <div className="detail-meta">
-        <span className="meta-group meta-identity"><span className="detail-eyebrow">{parent ? '队员任务' : '工作任务'}</span>{parent && <a className="mini link" role="button" tabIndex={0} onClick={() => onSelect(parent.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(parent.id) } }}>↩ 领队任务: {parent.title}</a>}{workers.length > 0 && <span className="badge badge-squad">⚡ 子任务 {workers.filter((worker) => worker.status === 'done').length}/{workers.length}</span>}</span>
+        <span className="meta-group meta-identity"><span className="detail-eyebrow">{parent ? '队员任务' : '工作任务'}</span>{parent && <a className="mini link" role="button" tabIndex={0} onClick={() => onSelect(parent.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(parent.id) } }}>↩ 领队任务: {parent.title}</a>}{workers.length > 0 && <button type="button" className="badge badge-squad link-badge" title="在右侧分页打开子任务" onClick={() => { const target = workers.find((item) => item.status === 'running') ?? workers[0]; if (target) openDockItem({ id: `task:${target.id}`, kind: 'task', title: target.title, payload: { taskId: target.id } }) }}>⚡ 子任务 {workers.filter((worker) => worker.status === 'done').length}/{workers.length}</button>}</span>
         <span className="meta-divider" aria-hidden="true" />
         <span className="meta-group meta-status"><span className={`status-chip status-${task.status}`}>{isParkedQueued(task) ? PARKED_QUEUED_LABEL : STATUS_META[task.status]}</span>{turnActive && <span className="active-duration" aria-live="polite">工作中 · {fmtDuration(Date.now() - (task.startedAt ?? Date.now()))}</span>}{!!task.attempt && <span className="retry-chip" title={`自动重试 ${task.attempt}/2`}>⟳ 重试 {task.attempt}/2</span>}</span>
         <span className="meta-divider" aria-hidden="true" />
@@ -177,12 +204,50 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     <div className="detail-columns"><div className="detail-main" onScroll={onLogScroll}>
       {task.status === 'failed' && task.error && <div className="error-banner"><div className="error-head"><span className="error-icon" aria-hidden="true">⚠</span><span className="error-title">{task.failure?.title ?? '执行失败'}</span>{task.failure?.code && <span className="failure-code">{task.failure.code}</span>}{task.failure?.retryable && <span className="failure-retryable">可重试</span>}</div>{task.failure?.hint && <div className="error-hint">{task.failure.hint}</div>}<details className="failure-raw"><summary>错误原文</summary><pre>{task.error}</pre></details></div>}
       {task.integration?.note && <div className={`integration-banner ${task.integration.note.includes('未完成') ? 'warn' : ''}`}>🔀 {task.integration.note}{task.integration.branch && task.workdir && <a className="mini link" role="button" tabIndex={0} onClick={() => void bridge.openPath(task.workdir)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void bridge.openPath(task.workdir) } }}>打开仓库</a>}</div>}
-      {activeWorkers.length > 0 && <div className="workers-pane"><div className="list-group-label">运行中的队员（{activeWorkers.length}）</div>{activeWorkers.map((worker) => <div key={worker.id} className={`worker-card ${worker.status === 'cancelled' ? 'is-cancelled' : ''}`} role="button" tabIndex={0} onClick={() => onSelect(worker.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(worker.id) } }}><span className={`dot dot-${worker.status}`} /><span className="worker-title">{worker.title}</span><span className="mini">{worker.status === 'running' ? '执行中…' : worker.status === 'queued' ? (worker.parked ? PARKED_QUEUED_LABEL : '排队') : worker.status === 'cancelled' ? '已取消' : worker.status === 'failed' ? '✗ 失败' : worker.startedAt && worker.endedAt ? `✓ ${fmtDuration(worker.endedAt - worker.startedAt)}` : '✓'}</span>{worker.gitStat ? <span className="mini dim">· 有改动</span> : null}</div>)}</div>}
+      {activeWorkers.length > 0 && <div className="workers-pane"><div className="list-group-label">运行中的队员（{activeWorkers.length}）</div>{activeWorkers.map((worker) => <div key={worker.id} className={`worker-card ${worker.status === 'cancelled' ? 'is-cancelled' : ''}`} role="button" tabIndex={0} onClick={() => openDockItem({ id: `task:${worker.id}`, kind: 'task', title: worker.title, payload: { taskId: worker.id } })} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openDockItem({ id: `task:${worker.id}`, kind: 'task', title: worker.title, payload: { taskId: worker.id } }) } }}><span className={`dot dot-${worker.status}`} /><span className="worker-title">{worker.title}</span><span className="mini">{worker.status === 'running' ? '执行中…' : worker.status === 'queued' ? (worker.parked ? PARKED_QUEUED_LABEL : '排队') : worker.status === 'cancelled' ? '已取消' : worker.status === 'failed' ? '✗ 失败' : worker.startedAt && worker.endedAt ? `✓ ${fmtDuration(worker.endedAt - worker.startedAt)}` : '✓'}</span>{worker.gitStat ? <span className="mini dim">· 有改动</span> : null}</div>)}</div>}
       {permission && <PermissionPrompt permission={permission} onAnswer={(decision) => void answerPermission(decision)} />}
       <div className="tabs"><button className={tab === 'activity' ? 'active' : ''} onClick={() => setTab('activity')}>动态</button><button className={tab === 'log' ? 'active' : ''} onClick={() => setTab('log')}>执行记录</button><button className={tab === 'result' ? 'active' : ''} onClick={() => setTab('result')}>结果</button><button className={tab === 'git' ? 'active' : ''} onClick={() => setTab('git')} disabled={!task.gitDiff && !task.gitStat}>Git 改动</button></div>
       <div className="detail-body">{tab === 'activity' && <ActivityTimeline task={task} issueIdentifier={issue?.identifier} runs={runs} comments={comments} onShowLog={() => setTab('log')} />}{tab === 'log' && <TurnTimeline task={task} turns={turns} activeNav={activeNav} onNavigate={scrollToTurn} onRewind={(index) => void doRewind(index)} logRef={logRef} onScroll={onLogScroll} />}{tab === 'result' && <div className="result">{task.result ? <Markdown text={task.result} /> : turnActive ? <div className="list-empty">执行中，暂无最终结果</div> : <div className="list-empty">（无结果）</div>}</div>}{tab === 'git' && <GitSummary task={task} />}</div>
-      {task.sessionId && task.status !== 'queued' && <footer className="followup"><textarea ref={followRef} value={followUp} placeholder="追问 / 继续这个会话…（Enter 发送，Shift+Enter 换行）" rows={1} onChange={(event) => { setFollowUp(event.target.value); autoGrow(event.target) }} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void sendFollowUp() } }} /><button className="btn" disabled={busy || !!task.parentTaskId || (task.status !== 'done' && task.status !== 'failed')} title={task.parentTaskId ? '委派子任务不参与阶段接力' : '让本执行交出下一阶段简报，并在同一 Issue 上硬切新会话'} onClick={() => void sendFollowUp('执行下一阶段', { relay: true })}>⇥ 接力下一阶段</button><button className="btn primary" disabled={busy || !followUp.trim()} onClick={() => void sendFollowUp()}>发送</button></footer>}
+      {task.sessionId && task.status !== 'queued' && <footer className="followup">
+        {skillMenuOpen && task.backend === 'zcode' && <SkillMenu skills={filteredSkills} query={skillQuery} activeIndex={skillIndex} onHover={setSkillIndex} onPick={(skill) => { setFollowUp(`/${skill.name} `); setSkillMenuOpen(false); followRef.current?.focus() }} />}
+        <textarea ref={followRef} value={followUp} placeholder="追问 / 继续这个会话…（Enter 发送，Shift+Enter 换行，↑↓ 翻历史，/ 技能命令）" rows={1}
+          onChange={(event) => {
+            setFollowUp(event.target.value); autoGrow(event.target)
+            const startsSlash = event.target.value.startsWith('/')
+            setSkillMenuOpen(startsSlash)
+            if (!startsSlash) history.exitBrowse()
+          }}
+          onKeyDown={(event) => {
+            // 技能菜单开着时先服务菜单导航
+            if (skillMenuOpen && filteredSkills.length > 0) {
+              if (event.key === 'ArrowDown') { event.preventDefault(); setSkillIndex((i) => Math.min(filteredSkills.length - 1, i + 1)); return }
+              if (event.key === 'ArrowUp') { event.preventDefault(); setSkillIndex((i) => Math.max(0, i - 1)); return }
+              if (event.key === 'Tab' || (event.key === 'Enter' && !event.shiftKey)) { event.preventDefault(); const skill = filteredSkills[skillIndex]; if (skill) { setFollowUp(`/${skill.name} `); setSkillMenuOpen(false) } return }
+              if (event.key === 'Escape') { event.preventDefault(); setSkillMenuOpen(false); return }
+            }
+            if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+              // readline 式历史：菜单关闭时 ↑↓ 只在首行/末行（或正在浏览）时翻历史，不劫持多行编辑
+              const element = event.currentTarget
+              const atFirstLine = element.selectionStart === 0 || !followUp.slice(0, element.selectionStart).includes('\n')
+              const atLastLine = element.selectionEnd >= followUp.length || !followUp.slice(element.selectionEnd).includes('\n')
+              if (event.key === 'ArrowUp' && (history.index >= 0 || atFirstLine || !followUp)) {
+                event.preventDefault()
+                const text = history.navigate(-1)
+                if (text != null) { setFollowUp(text); requestAnimationFrame(() => { element.selectionStart = element.selectionEnd = text.length; autoGrow(element) }) }
+              } else if (event.key === 'ArrowDown' && history.index >= 0 && atLastLine) {
+                event.preventDefault()
+                const text = history.navigate(1)
+                if (text != null) { setFollowUp(text); requestAnimationFrame(() => { element.selectionStart = element.selectionEnd = text.length; autoGrow(element) }) }
+              }
+              return
+            }
+            if (event.key === 'Escape' && history.index >= 0) { event.preventDefault(); setFollowUp(history.navigate(1) ?? ''); return }
+            if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void sendFollowUp(); setSkillMenuOpen(false) }
+          }} />
+        <button className="btn" disabled={busy || !!task.parentTaskId || (task.status !== 'done' && task.status !== 'failed')} title={task.parentTaskId ? '委派子任务不参与阶段接力' : '让本执行交出下一阶段简报，并在同一 Issue 上硬切新会话'} onClick={() => void sendFollowUp('执行下一阶段', { relay: true })}>⇥ 接力下一阶段</button><button className="btn primary" disabled={busy || !followUp.trim()} onClick={() => { void sendFollowUp(); setSkillMenuOpen(false) }}>发送</button>
+      </footer>}
     </div>
+    <SideDock key={task.id} tasks={tasks} onOpen={onSelect} />
     <aside className="detail-panel"><div className="prop-row"><span className="prop-label">Issue ID</span><IssueIdChip id={issueId} /></div>{!task.parentTaskId && <><GoalPanel task={task} issueId={issueId} /><hr className="prop-sep" /></>}<div className="issue-meta-edit"><span className="prop-label">工作流</span><select value={issue?.status ?? 'todo'} onChange={(event) => void updateWorkflow(event.target.value as IssueStatus)}><option value="backlog">待梳理</option><option value="todo">待办</option><option value="in_progress">进行中</option><option value="in_review">审查中</option><option value="done">已完成</option><option value="blocked">受阻</option><option value="cancelled">已取消</option></select></div><div className="issue-meta-edit"><span className="prop-label">优先级</span><select value={issue?.priority ?? 'none'} onChange={(event) => void updateIssue({ priority: event.target.value as IssuePriority })}><option value="urgent">紧急</option><option value="high">高</option><option value="medium">中</option><option value="low">低</option><option value="none">无</option></select></div><div className="issue-meta-edit"><span className="prop-label">标签</span><input value={labelsDraft} placeholder="design, review" onChange={(event) => setLabelsDraft(event.target.value)} onBlur={() => void updateIssue({ labels: labelsDraft.split(',') })} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void updateIssue({ labels: labelsDraft.split(',') }) } }} /></div>{issue?.labels.length ? <div className="issue-labels">{issue.labels.map((label) => <span className="badge" key={label}>{label}</span>)}</div> : null}<div className="prop-row"><span className="prop-label">状态</span><span className={`status-chip status-${task.status}`}>{isParkedQueued(task) ? PARKED_QUEUED_LABEL : STATUS_META[task.status]}</span></div><div className="prop-row"><span className="prop-label">平台</span><span className="badge">{task.backend}</span>{task.sessionId && <span className="mini mono" title={task.sessionId}>{task.sessionId.slice(0, 12)}…</span>}</div>{task.handoff && <div className="prop-row" title={task.handoff}><span className="prop-label">交接备注</span><span className="prop-value" style={{ whiteSpace: 'normal' }}>{task.handoff}</span></div>}<div className="prop-row"><span className="prop-label">工作目录</span>{task.workdir ? <a className="prop-value link" role="button" tabIndex={0} title={task.workdir} onClick={() => void bridge.openPath(task.workdir)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void bridge.openPath(task.workdir) } }}>{task.workdir.split(/[\\/]/).pop()}</a> : <span className="prop-value dim">未绑定</span>}</div><div className="prop-row"><span className="prop-label">用时</span><span className="prop-value">{duration > 0 ? fmtDuration(duration) : '—'}</span></div><hr className="prop-sep" /><div className="prop-group-label">用量</div>{task.usage ? <><div className="prop-row"><span className="prop-label">Tokens</span><span className="prop-value" title={`输入 ${task.usage.inputTokens.toLocaleString()} / 输出 ${task.usage.outputTokens.toLocaleString()}`}>{fmtTokens(task.usage.inputTokens)} / {fmtTokens(task.usage.outputTokens)}</span></div><div className="prop-row"><span className="prop-label">回合</span><span className="prop-value">{task.usage.turns}</span></div><div className="prop-row"><span className="prop-label">成本</span><span className="prop-value">{task.usage.costUsd > 0 ? `$${task.usage.costUsd.toFixed(4)}` : '—'}</span></div></> : <div className="prop-row"><span className="prop-value dim">完成后统计</span></div>}{(task.integration?.branch || task.attempt) && <hr className="prop-sep" />}{task.integration?.branch && <><div className="prop-group-label">集成</div><div className="prop-row"><span className="prop-label">分支</span><span className="prop-value mono" title={task.integration.branch}>{task.integration.branch.replace('agentdeck/task-', '#')}</span></div></>}{!!task.attempt && <div className="prop-row"><span className="prop-label">重试</span><span className="prop-value retry-chip">⟳ {task.attempt}/2</span></div>}<hr className="prop-sep" />{isRelay && <><div className="prop-group-label"><Waypoints size={13} /> 阶段接力<span className="mini dim">阶段 {relayStage}</span></div>{relayPred && <div className="prop-row"><span className="prop-label">接力自</span><span className="prop-value"><a className="mini link" role="button" tabIndex={0} title={relayPred.title} onClick={() => onSelect(relayPred.id)}>▶ {relayPred.title.slice(0, 26)}{relayPred.title.length > 26 ? '…' : ''}</a></span></div>}{relaySucc && <div className="prop-row"><span className="prop-label">已接力 →</span><span className="prop-value"><a className="mini link" role="button" tabIndex={0} title={relaySucc.title} onClick={() => onSelect(relaySucc.id)}>{relaySucc.status === 'queued' && relaySucc.parked ? '⏸ ' : '▶ '}{relaySucc.title.replace(/^▶ /, '').slice(0, 24)}{relaySucc.title.length > 24 ? '…' : ''}</a></span></div>}{!relayPred && <div className="prop-row"><span className="prop-label">触发</span><span className="prop-value">上一阶段接力（同 Issue 新会话）</span></div>}</>}<RunHistory runs={runs} /><CommentPanel comments={comments} draft={commentDraft} onDraftChange={setCommentDraft} onSubmit={() => { void addComment(commentDraft).then(() => setCommentDraft('')) }} /></aside>
     </div>
   </div>

@@ -19,6 +19,7 @@ import type { AgentBackend, BackendSession, BackendSessionEvents } from './types
 import { isJsonObject, type JsonObject } from './cli-common'
 import { ZcodeConnection } from './zcode-transport'
 import { compactToolArgs, mergeTurnTexts as mergeTexts, runtimePreferences, sessionEvent, zcodeRecord, zcodeString } from './zcode-protocol'
+import { parseEditMeta } from './edit-meta'
 import {
   buildModelSelectionFromCliConfig as buildModelSelection,
   ensureZcodeCliConfig as ensureCliConfig,
@@ -262,16 +263,23 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
             // tool_input_end / 其余 streaming 子类静默
           } else if (type === 'tool.updated') {
             const k = asString(payload.kind)
+            const toolCallId = asString(payload.toolCallId)
+            const ti = toolInputs.get(toolCallId)
+            const toolName = asString(payload.toolName, ti?.name ?? '')
+            // 编辑元数据必须从 tool_input_delta 累积的**原始未截断**入参算（args 字段给的是
+            // compactToolArgs 压过的预览，content/old/new 早就被切掉，渲染层没法查看全文）；
+            // 原始串解析失败（增量还没收全/坏 JSON）时为 null，不影响事件本身
+            const edit = k === 'started' || k === 'result' ? parseEditMeta(toolName, ti?.args) : null
             if (k === 'started') {
               lastSegment = ''
-              const ti = toolInputs.get(asString(payload.toolCallId))
               emit({
                 kind: 'tool',
-                text: asString(payload.toolName, ti?.name ?? ''),
+                text: toolName,
                 data: {
                   phase: 'started',
-                  toolCallId: asString(payload.toolCallId),
-                  args: compactArgs(ti?.args)
+                  toolCallId,
+                  args: compactArgs(ti?.args),
+                  ...(edit ? { edit } : {})
                 }
               })
             } else if (k === 'result') {
@@ -285,13 +293,14 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
                     : ''
               emit({
                 kind: 'tool',
-                text: asString(payload.toolName, toolInputs.get(asString(payload.toolCallId))?.name ?? ''),
+                text: toolName,
                 data: {
                   phase: 'result',
-                  toolCallId: asString(payload.toolCallId),
+                  toolCallId,
                   ok: res.success !== false,
                   durationMs: payload.duration ?? asRecord(res.perf).totalMs,
-                  preview
+                  preview,
+                  ...(edit ? { edit } : {})
                 }
               })
             }

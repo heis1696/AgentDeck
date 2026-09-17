@@ -3,8 +3,9 @@
 // 事件：system/init(session_id) → assistant(text|tool_use) → user(tool_result) → result(终态+费用)
 // 续聊：--resume <sessionId>
 import type { AgentBackend, BackendSession, BackendSessionEvents } from './types'
-import type { TaskEvent } from '../../shared/types'
+import type { TaskEvent, ToolEditMeta } from '../../shared/types'
 import { isJsonObject, jsonNumber, jsonObject, jsonString, runCliJsonl, toolEvent } from './cli-common'
+import { parseEditMeta, stringifyToolArgs } from './edit-meta'
 import { resolveCli, probeCli } from './cli-locator'
 
 export function createClaudeBackend(): AgentBackend {
@@ -20,6 +21,8 @@ export function createClaudeBackend(): AgentBackend {
     onSpawn?: (runner: { kill: () => void | Promise<unknown> }) => void
   ): Promise<{ sessionId: string; response: string; ok: boolean; error?: string }> => {
     const emit = (e: Omit<TaskEvent, 'seq' | 'ts'>) => events.onEvent({ ...e, ts: Date.now() })
+    /** tool_result 里没有入参：started 时按 tool_use id 存好编辑元数据，result 时补挂上 */
+    const pendingEdits = new Map<string, ToolEditMeta>()
     const resolved = resolveCli('claude')
     if (!resolved) return Promise.reject(new Error('PATH 上找不到 claude'))
     const args = [
@@ -66,11 +69,17 @@ export function createClaudeBackend(): AgentBackend {
             if (part.type === 'text' && part.text) {
               emit({ kind: 'text', text: jsonString(part.text) })
             } else if (part.type === 'tool_use') {
+              const name = jsonString(part.name)
+              // 编辑元数据用**未截断**的原始入参算；args 字段仍只给 200 字预览
+              const rawArgs = stringifyToolArgs(part.input)
+              const edit = parseEditMeta(name, rawArgs)
+              const toolUseId = jsonString(part.id)
+              if (edit && toolUseId) pendingEdits.set(toolUseId, edit)
               let toolArgs = ''
               try {
                 toolArgs = JSON.stringify(part.input).slice(0, 200)
               } catch {}
-              emit(toolEvent('started', jsonString(part.name), { args: toolArgs }))
+              emit(toolEvent('started', name, { args: toolArgs }, edit))
             }
           }
         } else if (j.type === 'user' && Array.isArray(jsonObject(j.message).content)) {
@@ -82,7 +91,10 @@ export function createClaudeBackend(): AgentBackend {
                 : Array.isArray(part.content)
                   ? part.content.map(jsonObject).filter((content) => content.type === 'text').map((content) => jsonString(content.text)).join('\n').slice(0, 300)
                   : ''
-              emit(toolEvent('result', '', { ok: !part.is_error, preview }))
+              const toolUseId = jsonString(part.tool_use_id)
+              const edit = toolUseId ? pendingEdits.get(toolUseId) ?? null : null
+              if (toolUseId) pendingEdits.delete(toolUseId)
+              emit(toolEvent('result', '', { ok: !part.is_error, preview }, edit))
             }
           }
         } else if (j.type === 'result') {

@@ -27,13 +27,29 @@ const c1 = parseContinue('<continue start="parked">Phase 2 简报</continue>')[0
 assert(c1?.start === 'parked' && c1.brief === 'Phase 2 简报', 'parseContinue：parked + 简报')
 assert(parseContinue('<continue>缺省 start</continue>')[0]?.start === 'parked', 'parseContinue：start 缺省 → parked（防误切）')
 assert(parseContinue('<continue start="parked">简报</continue>')[0]?.start === 'parked', 'parseContinue：显式 parked')
-assert(parseContinue('讨论正文提到 <continue start="auto">示例</continue> 后面还有内容。').length === 0, 'parseContinue：非末尾标记不构成接力意图')
+assert(parseContinue('讨论正文提到 <continue start="auto">示例</continue> 后面还有内容。').length === 0, 'parseContinue：非末尾 + 简报分量不足（讨论复述）不构成接力意图')
 assert(parseContinue('结尾标记 <continue start=auto>简报</continue>')[0]?.start === 'parked', 'parseContinue：无引号写法 fail-safe 按 parked')
 assert(parseContinue('<continue></continue>').length === 0, 'parseContinue：空简报拒绝')
 const markStream = '收尾。<continue start="auto">下一阶段：UI 施工</continue>'
 const markFull = '收尾。（思考内容，不含标记）'
 assert(parseContinue(markFull).length === 0 && parseContinueMerged(markFull, markStream)?.brief.includes('UI 施工'), '多源解析：标记只在流式来源也能找回（Phase 0 教训）')
 assert(!stripContinue('完成。<continue start="auto">X</continue>').includes('<continue'), 'stripContinue 剥标记')
+// ---- 0.21.1 硬切复活矩阵：兜底通道 + 防复述 + 缺省语义对齐 ----
+// 兜底：标记后跟客套收尾（末尾锚定失守的实测形态），显式 auto → 救回
+const loose = parseContinue('成果汇报…<continue start="auto">阶段2：按 docs/CONSTRUCTION-PLAN.md §5 施工后端适配与 Git 错误模型</continue>\n\n以上，若有问题随时找我。')[0]
+assert(loose?.start === 'auto' && loose?.loose === true && loose.brief.includes('后端适配'), '兜底：标记后跟收尾语，显式 auto 仍触发（loose 留痕）')
+// 兜底：同形态但缺省 start → 不触发（兜底通道只认显式 auto，防复述误触）
+assert(parseContinue('成果…<continue>阶段2：继续</continue>\n\n以上。').length === 0, '兜底：非末尾 + 缺省 start 不触发')
+// 兜底：非末尾 + 显式 parked → 不触发（parked 没有兜底资格，必须末尾锚定）
+assert(parseContinue('成果…<continue start="parked">阶段2：继续</continue>\n\n以上。').length === 0, '兜底：非末尾 parked 不触发')
+// 防复述：逐字引用协议示例（带显式 auto）→ 拒绝
+assert(parseContinue('协议示例：<continue start="auto">阶段2：按 docs/plan.md §3 实现模型选择 UI；阶段1 已完成数据管道（commit 09a47a4，src/main/presets.ts）；验收：两个不同模型的 agent 并发执行成功</continue>').length === 0, '防复述：协议示例同文简报拒绝（非末尾）')
+assert(parseContinue('示例收尾：<continue start="auto">阶段2：按 docs/plan.md §3 实现模型选择 UI；阶段1 已完成数据管道（commit 09a47a4，src/main/presets.ts）；验收：两个不同模型的 agent 并发执行成功</continue>').length === 0, '防复述：示例同文简报拒绝（即便在末尾）')
+// 围栏包裹：显式 auto 的完整标记在代码块里且块是全文结尾 → 末尾锚定被 ``` 挡住，兜底救回
+const fenced = parseContinue('结果：\n```\n<continue start="auto">阶段2：按 docs/plan.md §3 完成模型选择 UI 与数据管道施工</continue>\n```')[0]
+assert(fenced?.start === 'auto' && fenced?.loose === true, '兜底：围栏包裹的显式 auto 标记救回')
+// 未闭合：只有起始标记 → 不触发（配合 runner 的可观测留痕）
+assert(parseContinue('我打算输出 <continue start="auto">简报但忘了闭合').length === 0, '未闭合标记不触发')
 
 // ---- e2e 场景 A：领队带 subordinates，最终回合在委派循环后输出 continue（parked） ----
 const tmpStore = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-store-'))
@@ -188,5 +204,35 @@ assert(store.get(d3.id)?.status === 'running', '场景 D3：IPC 返回时任务�
 const t7 = Date.now()
 while (Date.now() - t7 < 15000 && store.get(d3.id)?.status !== 'done') await new Promise((r) => setTimeout(r, 100))
 assert(store.get(d3.id)?.status === 'done' && store.get(d3.id).result.includes('追问回答完成'), '场景 D3：后台回合照常完成')
+// ---- 场景 E：硬切复活——非末尾标记兜底 + 未闭合标记可观测留痕 ----
+// E1：agent 在标记后补了客套收尾（实测高频形态）→ 兜底通道建单，事件留痕 loose 提示
+let eSucc = null
+const runnerE = new TaskRunner(store, new Map([['lead', continueBackend('lead', '阶段1 完成。<continue start="auto">阶段2：按 docs/CONSTRUCTION-PLAN.md §5 施工后端适配；阶段1 已完成 shared 契约（src/shared/contracts.ts）；验收：typecheck 绿</continue>\n\n以上是本阶段汇报，有问题随时找我。', '')]]), () => ({ concurrency: 1, mode: 'yolo', notify: false, workerConcurrency: 2 }), () => {})
+runnerE.attachTeam(() => team)
+runnerE.attachContinue(({ sourceTaskId, issueId, brief }) => {
+  eSucc = store.create({ title: '▶ ' + brief.slice(0, 20), prompt: brief, workdir: '', backend: 'lead', agentId: 'L', issueId, trigger: 'handoff', continuesFrom: sourceTaskId })
+  return store.get(eSucc.id)
+})
+const e1 = store.create({ title: '阶段一 E1', prompt: '干活', workdir: '', backend: 'lead', agentId: 'L', issueId: 'iss_E1' })
+runnerE.enqueue(e1)
+const t8 = Date.now()
+while (Date.now() - t8 < 15000 && store.get(e1.id)?.status !== 'done') await new Promise((r) => setTimeout(r, 100))
+assert(store.get(e1.id)?.status === 'done', '场景 E1：任务 done')
+assert(!!eSucc && eSucc.trigger === 'handoff', '场景 E1：非末尾标记（显式 auto）兜底建单成功')
+const e1Events = store.readEvents(e1.id).map((ev) => ev.text ?? '').join('\n')
+assert(e1Events.includes('不在回复末尾') && e1Events.includes('兜底解析'), '场景 E1：兜底触发有事件留痕')
+assert(!store.get(e1.id).result.includes('<continue'), '场景 E1：标记不外漏')
+// E2：只出现未闭合的标记字样 → 不建单，但留"检测到但未触发"的观测痕迹
+let e2Created = false
+const runnerE2 = new TaskRunner(store, new Map([['lead', continueBackend('lead', '完成。下一阶段我建议 <continue start="auto">先做管道，但本回合先不切会话', '')]]), () => ({ concurrency: 1, mode: 'yolo', notify: false, workerConcurrency: 2 }), () => {})
+runnerE2.attachTeam(() => team)
+runnerE2.attachContinue(() => { e2Created = true; return {} })
+const e2 = store.create({ title: '阶段一 E2', prompt: '干活', workdir: '', backend: 'lead', agentId: 'L', issueId: 'iss_E2' })
+runnerE2.enqueue(e2)
+const t9 = Date.now()
+while (Date.now() - t9 < 15000 && store.get(e2.id)?.status !== 'done') await new Promise((r) => setTimeout(r, 100))
+assert(!e2Created, '场景 E2：未闭合标记不建单')
+const e2Events = store.readEvents(e2.id).map((ev) => ev.text ?? '').join('\n')
+assert(e2Events.includes('未构成有效接力'), '场景 E2：拒收留痕可观测（不再无声失败）')
 console.log('')
 process.exit(0)

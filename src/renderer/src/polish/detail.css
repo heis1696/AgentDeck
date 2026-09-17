@@ -473,3 +473,15 @@ html.light .tab.active {
 .meeting-action-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; padding: 6px 7px; border-top: 1px solid var(--border); color: var(--ink-dim); font-size: var(--text-caption); }
 .meeting-approval { display: inline-flex; gap: 3px; }
 @media (max-width: 600px) { .meeting-selects { grid-template-columns: 1fr; } }
+
+/* ---- 追问框技能命令菜单（F4）：textarea 上方浮层，样式对齐 Palette ---- */
+.detail-page .detail-main > .followup { position: relative; }
+.skill-menu { position: absolute; left: 12px; right: 12px; bottom: calc(100% + 6px); z-index: 30; background: var(--bg-raised, var(--bg)); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 12px 32px rgb(0 0 0 / 0.28); overflow: hidden; }
+.skill-menu-head { padding: 6px 12px; font-size: var(--text-micro); color: var(--text-dim); border-bottom: 1px solid var(--border); }
+.skill-menu-foot { padding: 5px 12px; font-size: var(--text-micro); color: var(--text-faint); border-top: 1px solid var(--border); }
+.skill-menu-list { max-height: 260px; overflow-y: auto; padding: 4px; }
+.skill-menu-item { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; border: 0; border-radius: 7px; background: transparent; color: var(--text); cursor: pointer; text-align: left; }
+.skill-menu-item.active { background: var(--bg-hover, var(--bg-inset)); }
+.skill-menu-item.active .skill-menu-name { color: var(--accent, var(--text)); }
+.skill-menu-name { font-family: var(--mono); font-size: 12px; flex-shrink: 0; }
+.skill-menu-desc { font-size: var(--text-micro); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

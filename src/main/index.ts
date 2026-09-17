@@ -11,6 +11,8 @@ import { AgentSessionRegistry } from './agent-sessions'
 import { MeetingController } from './meeting-controller'
 import { MeetingStore } from './meeting-store'
 import { TaskService } from './task-service'
+import { EventLog } from './event-log'
+import { startIssueRetention } from './retention'
 import { AutomationStore } from './automation-store'
 import { loadSettings, saveSettings } from './settings'
 import { loadAgents, type Agent } from './agents'
@@ -625,6 +627,16 @@ const initMain = async (): Promise<void> => {
 
   createWindow()
   createTray()
+
+  const stopRetention = startIssueRetention({
+    store, issueStore, taskService,
+    activeGoalIssueIds: () => new Set(goalStore.list().filter((goal) => !['completed', 'cancelled'].includes(goal.status)).map((goal) => goal.issueId)),
+    activeMeetingIssueIds: () => new Set(meetingController.list().filter((meeting) => meeting.status === 'active' || meeting.status === 'waiting_user').map((meeting) => meeting.issueId)),
+    forget: (id) => runner.forget(id),
+    eventLog: new EventLog(path.join(app.getPath('userData'), 'issues', 'retention.jsonl')),
+    onTaskDeleted: (id) => mainWindow?.webContents.send('task:deleted', id)
+  })
+  app.once('before-quit', stopRetention)
 
   // 热更：启动静默检查（延迟 10s）+ 6h 定时（§1.2）；relaunch 回带参数 → 推"已更新"状态（§7.2 步 11）
   hotUpdater.startPeriodicCheck(10_000, 6 * 60 * 60 * 1000)

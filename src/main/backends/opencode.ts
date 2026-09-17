@@ -3,8 +3,9 @@
 // 事件：step_start/tool_use/step_finish/text（sessionID 全程携带）；回合结束 = 进程退出
 // 续聊：-s <sessionId>
 import type { AgentBackend, BackendSession, BackendSessionEvents } from './types'
-import type { TaskEvent } from '../../shared/types'
+import type { TaskEvent, ToolEditMeta } from '../../shared/types'
 import { isJsonObject, jsonObject, jsonString, runCliJsonl, toolEvent, killProcessTree } from './cli-common'
+import { parseEditMeta, stringifyToolArgs } from './edit-meta'
 import { resolveCli, probeCli, type ResolvedCli } from './cli-locator'
 import { createOpencodeServerBackend, OpencodeServerClient, OpencodeServerVersionError, OpencodeServerUnavailableError, type FetchLike } from './opencode-server'
 import { spawn, type ChildProcess } from 'node:child_process'
@@ -62,6 +63,8 @@ export function createOpencodeBackend(config: OpencodeBackendOptions = {}): Agen
     /** text part 快照去重：同一 part 的更新只补发增长增量，跨 part 全量发 */
     let textPartId = ''
     let textShown = ''
+    /** 工具 start→result 之间的编辑元数据（完成态可能不再带回参） */
+    const editByCall = new Map<string, ToolEditMeta>()
     let settled = false
     let settle!: (v: { sessionId: string; response: string; ok: boolean; error?: string }) => void
     const done = new Promise<{ sessionId: string; response: string; ok: boolean; error?: string }>((r) => (settle = r))
@@ -93,10 +96,17 @@ export function createOpencodeBackend(config: OpencodeBackendOptions = {}): Agen
           const stateObject = jsonObject(part.state)
           const state = jsonString(stateObject.status)
           const name = jsonString(part.tool)
+          const callId = jsonString(part.callID)
+          // 编辑元数据用**未截断**的原始入参（state.input）算；args/preview 仍是压缩预览。
+          // 完成态若不再带入参，用 started 时存下的同一 callID 元数据
+          const edit = parseEditMeta(name, stringifyToolArgs(stateObject.input ?? part.input))
+            ?? (callId ? editByCall.get(callId) ?? null : null)
           if (state === 'running' || state === 'pending') {
-            emit(toolEvent('started', name, { args: jsonString(part.title).slice(0, 200) }))
+            if (edit && callId) editByCall.set(callId, edit)
+            emit(toolEvent('started', name, { args: jsonString(part.title).slice(0, 200) }, edit))
           } else {
-            emit(toolEvent('result', name, { ok: state !== 'error', preview: jsonString(stateObject.output, jsonString(part.title)).slice(0, 300) }))
+            if (callId) editByCall.delete(callId)
+            emit(toolEvent('result', name, { ok: state !== 'error', preview: jsonString(stateObject.output, jsonString(part.title)).slice(0, 300) }, edit))
           }
         } else if (j.type === 'text' && part.text) {
           // 最后一条 text 即最终回复；中间 text 走 text 事件流式展示

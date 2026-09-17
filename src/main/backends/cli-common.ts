@@ -2,7 +2,7 @@
 // 适用于 claude / codex / opencode（zcode 是常驻服务，单独实现）
 import { spawn, type ChildProcess } from 'node:child_process'
 import path from 'node:path'
-import type { TaskEvent } from '../../shared/types'
+import type { TaskEvent, ToolEditMeta } from '../../shared/types'
 
 export type JsonPrimitive = string | number | boolean | null
 /** Parsed JSON is intentionally unknown at the transport boundary; adapters validate fields. */
@@ -182,6 +182,12 @@ export function runCliJsonl(opts: {
 }
 
 /** 工具调用事件构造助手 */
-export function toolEvent(phase: 'started' | 'result', name: string, data: Record<string, unknown>): Omit<TaskEvent, 'seq' | 'ts'> {
-  return { kind: 'tool', text: name, data: { phase, ...data } }
+export function toolEvent(
+  phase: 'started' | 'result',
+  name: string,
+  data: Record<string, unknown>,
+  /** 可选编辑元数据（edit-meta.ts 的 parseEditMeta 产出）：附到 data.edit 供渲染层做 file +N -M 角标 */
+  edit?: ToolEditMeta | null
+): Omit<TaskEvent, 'seq' | 'ts'> {
+  return { kind: 'tool', text: name, data: { phase, ...data, ...(edit ? { edit } : {}) } }
 }

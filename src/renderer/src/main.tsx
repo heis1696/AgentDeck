@@ -10,6 +10,7 @@ import './polish/board.css'
 import './polish/detail.css'
 import './polish/usage.css'
 import './polish/team.css'
+import './polish/dock.css'
 
 createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

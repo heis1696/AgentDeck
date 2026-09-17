@@ -7,6 +7,7 @@ import { SettingsView } from './components/SettingsView'
 import { UsageView } from './components/UsageView'
 import { WorkspaceView, FOCUS_WORKSPACE } from './components/WorkspaceView'
 import { TabBar } from './components/TabBar'
+import { openDockItem } from './ui/SideDock'
 import { BoardView } from './components/BoardView'
 import { AutomationView } from './components/AutomationView'
 import { ExtensionsView } from './components/ExtensionsView'
@@ -26,7 +27,7 @@ const MAX_RECENT_WORKSPACES = 8
 export function App() {
   const { tasks } = useTasks()
   const { settings, update } = useSettings()
-  const [view, setView] = useState<View>('issues')
+  const [view, setView] = useState<View>('board')
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [workspaceDir, setWorkspaceDir] = useState(() => localStorage.getItem('agentdeck:workspace-dir') ?? '')
   const [recentWorkspaces, setRecentWorkspaces] = useState<string[]>(() => {
@@ -45,7 +46,28 @@ export function App() {
     if (theme === 'system') { mq.addEventListener('change', apply); return () => mq.removeEventListener('change', apply) }
   }, [settings?.theme])
 
-  const openTask = (id: string) => { setTabs((current) => current.includes(id) ? current : [...current, id].slice(-MAX_TABS)); setActiveId(id); setView('detail') }
+  /** 子派单不开顶部 Tab：路由到其领队（根祖先）详情页，并在右侧分页（SideDock）里打开 */
+  const openWorkerInDock = (id: string, title: string) => {
+    let root = tasks.find((item) => item.id === id)
+    const seen = new Set([id])
+    while (root?.parentTaskId && !seen.has(root.parentTaskId)) {
+      seen.add(root.id)
+      const parent = tasks.find((item) => item.id === root!.parentTaskId)
+      if (!parent) break
+      root = parent
+    }
+    if (!root || root.parentTaskId) return false // 祖先链断裂：退回普通 Tab 打开
+    setTabs((current) => current.includes(root!.id) ? current : [...current, root!.id].slice(-MAX_TABS))
+    setActiveId(root.id); setView('detail')
+    // 等 TaskDetail 挂载出 SideDock 后再派发 dock 事件（容器不存在时事件会丢）
+    window.setTimeout(() => openDockItem({ id: `task:${id}`, kind: 'task', title, payload: { taskId: id } }), 60)
+    return true
+  }
+  const openTask = (id: string) => {
+    const target = tasks.find((task) => task.id === id)
+    if (target?.parentTaskId && openWorkerInDock(id, target.title)) return
+    setTabs((current) => current.includes(id) ? current : [...current, id].slice(-MAX_TABS)); setActiveId(id); setView('detail')
+  }
   const closeTab = (id: string) => { const next = tabs.filter((tab) => tab !== id); setTabs(next); if (activeId === id) setActiveId(next[next.length - 1] ?? null) }
   const goWorkspace = () => { setView('create'); window.dispatchEvent(new Event(FOCUS_WORKSPACE)) }
   /** 切到某个最近用过的工作区：新任务默认目录随之变化 */
@@ -89,10 +111,8 @@ export function App() {
     return () => window.removeEventListener('keydown', handler)
   }, [activeId, tabs])
 
-  // 视图切换不再清空当前 issue：Issue 主导航可回到最后浏览的详情（Chrome 返回按钮才显式退出）
   const nav = (next: View) => { setView(next) }
-  /** Issue 导航：有正在浏览的 issue 就回到它的详情，否则进总览 */
-  const navIssues = () => { if (activeId && tasks.some((t) => t.id === activeId)) setView('detail'); else setView('issues') }
+  const navIssues = () => setView('issues')
   const openSettings = (section?: string) => { if (section) setSettingsSection(section); setView('settings') }
 
   const commands: PaletteCommand[] = useMemo(() => [
@@ -124,7 +144,7 @@ export function App() {
       <WorkspaceSwitcher dir={workspaceDir} recent={recentWorkspaces} onChoose={chooseWorkspace} onPick={pickWorkspace} />
       <button className="new-task-btn" onClick={goWorkspace}><Plus size={15} /> 新建任务 <kbd>Ctrl+N</kbd></button>
       <nav className="nav" aria-label="主导航">
-        <button className={view === 'issues' || view === 'detail' ? 'active' : ''} onClick={navIssues} title={activeId ? '回到当前 Issue（再点总览请用面包屑返回）' : undefined}><ListTodo /><span className="nav-label">Issue</span></button>
+        <button className={view === 'issues' || view === 'detail' ? 'active' : ''} onClick={navIssues} title="新建及已打开的 Issue"><ListTodo /><span className="nav-label">Issue</span></button>
         <button className={view === 'board' ? 'active' : ''} onClick={() => nav('board')}><Kanban /><span className="nav-label">看板</span></button>
         <button className={view === 'agents' ? 'active' : ''} onClick={() => nav('agents')}><Users /><span className="nav-label">Agent</span></button>
         <button className={view === 'automation' ? 'active' : ''} onClick={() => nav('automation')}><AlarmClock /><span className="nav-label">自动化</span></button>
@@ -135,7 +155,7 @@ export function App() {
       <div className="sidebar-footer"><span className="connection-dot" /> 本地引擎就绪</div>
     </aside>
     <main className="main">
-      {view === 'agents' ? <AgentsView /> : view === 'automation' ? <AutomationView /> : view === 'skills' ? <ExtensionsView /> : view === 'settings' ? <SettingsView section={settingsSection} onSection={setSettingsSection} /> : view === 'usage' ? <UsageView /> : view === 'board' ? <Page title="看板" count={tasks.length}><BoardView tasks={tasks} onOpen={openTask} /></Page> : view === 'detail' && selected ? <div className="tasks-column detail-page"><Chrome title={selected.title} onBack={() => { setActiveId(null); setView('issues') }} />{tabs.length > 0 && <TabBar tabs={tabs} tasks={tasks} activeId={activeId} onSelect={openTask} onClose={closeTab} />}<TaskDetail task={selected} tasks={tasks} onSelect={openTask} /></div> : view === 'create' ? <Page title="新建 Issue" count={0}><WorkspaceView onCreated={(task) => openTask(task.id)} workspaceDir={workspaceDir} onPickWorkspace={pickWorkspace} /></Page> : <IssuesView tasks={tasks} onOpen={openTask} onCreate={goWorkspace} />}
+      {view === 'agents' ? <AgentsView /> : view === 'automation' ? <AutomationView /> : view === 'skills' ? <ExtensionsView /> : view === 'settings' ? <SettingsView section={settingsSection} onSection={setSettingsSection} /> : view === 'usage' ? <UsageView /> : view === 'board' ? <Page title="看板" count={tasks.length}><BoardView tasks={tasks} onOpen={openTask} /></Page> : view === 'detail' && selected ? <div className="tasks-column detail-page"><Chrome title={selected.title} onBack={() => { setActiveId(null); setView('issues') }} />{tabs.length > 0 && <TabBar tabs={tabs.filter((id) => !tasks.find((task) => task.id === id)?.parentTaskId)} tasks={tasks} activeId={activeId} onSelect={openTask} onClose={closeTab} />}<TaskDetail task={selected} tasks={tasks} onSelect={openTask} /></div> : view === 'create' ? <Page title="新建 Issue" count={0}><WorkspaceView onCreated={(task) => openTask(task.id)} workspaceDir={workspaceDir} onPickWorkspace={pickWorkspace} /></Page> : <IssuesView tasks={tasks} tabs={tabs} onOpen={openTask} onCreate={goWorkspace} />}
     </main>
   </div>
 }

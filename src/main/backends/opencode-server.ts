@@ -1,6 +1,7 @@
 import type { PermissionRequest } from '../../shared/contracts'
 import type { TaskEvent } from '../../shared/types'
 import type { AgentBackend, BackendSession, BackendSessionEvents } from './types'
+import { parseEditMeta, stringifyToolArgs } from './edit-meta'
 
 type RecordValue = Record<string, unknown>
 export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
@@ -308,8 +309,10 @@ export function createOpencodeServerBackend(options: OpencodeServerBackendOption
           }
           else if (partType === 'tool') {
             const state = record(part.state); const status = stringValue(state.status ?? part.status); const name = stringValue(part.tool ?? part.name, 'tool')
-            if (status === 'pending' || status === 'running') emit({ kind: 'tool', type: 'tool.started', text: name, data: { phase: 'started', args: state.input ?? part.input } })
-            else if (status === 'completed' || status === 'error') emit({ kind: 'tool', type: status === 'error' ? 'tool.error' : 'tool.result', durability: 'durable', durable: true, text: name, data: { phase: 'result', ok: status !== 'error', output: state.output ?? state.error } })
+            // 编辑元数据用**未截断**的原始入参算（完成态的 state 通常仍带 input）
+            const edit = parseEditMeta(name, stringifyToolArgs(state.input ?? part.input))
+            if (status === 'pending' || status === 'running') emit({ kind: 'tool', type: 'tool.started', text: name, data: { phase: 'started', args: state.input ?? part.input, ...(edit ? { edit } : {}) } })
+            else if (status === 'completed' || status === 'error') emit({ kind: 'tool', type: status === 'error' ? 'tool.error' : 'tool.result', durability: 'durable', durable: true, text: name, data: { phase: 'result', ok: status !== 'error', output: state.output ?? state.error, ...(edit ? { edit } : {}) } })
           } else if (partType === 'step-finish' || partType === 'step_finish') {
             const usage = usageData(part); if (usage.total !== undefined && active) active.tokens = usage.total; emit({ kind: 'usage', type: 'step-finish', durability: 'durable', durable: true, data: usage.data })
           } else if (partType === 'subtask' || partType === 'agent') emit({ kind: 'status', type: 'agent.fork', durability: 'durable', durable: true, text: stringValue(part.agent ?? part.name), data: part })

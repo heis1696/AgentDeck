@@ -183,6 +183,17 @@ export class IssueStore {
     this.lastTaskFingerprint = ''
   }
 
+  deleteIssue(id: string): boolean {
+    if (!this.data.issues.some((issue) => issue.id === id)) return false
+    this.data.issues = this.data.issues.filter((issue) => issue.id !== id)
+    this.data.runs = this.data.runs.filter((run) => run.issueId !== id)
+    this.data.comments = this.data.comments.filter((comment) => comment.issueId !== id)
+    this.latestTasks.delete(id)
+    this.lastTaskFingerprint = ''
+    this.save()
+    return true
+  }
+
   list() { return [...this.data.issues].sort((a, b) => b.updatedAt - a.updatedAt) }
   get(id: string) { return this.data.issues.find((issue) => issue.id === id || issue.identifier === id) }
   runs(issueId: string) { return this.data.runs.filter((run) => run.issueId === issueId).sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0)) }
@@ -198,6 +209,7 @@ export class IssueStore {
     if (!this.get(issueId) || !content.trim()) return null
     const comment: Comment = { id: this.id('com'), issueId, author, content: content.trim(), reactions: [], createdAt: Date.now() }
     this.data.comments.push(comment)
+    this.get(issueId)!.updatedAt = comment.createdAt
     this.save()
     return comment
   }

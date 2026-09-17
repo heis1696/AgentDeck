@@ -123,24 +123,56 @@ export interface ContinueCall {
   brief: string
   /** auto = 用户已明确要求继续，立即执行；parked = agent 备好等用户启动 */
   start: 'auto' | 'parked'
+  /**
+   * 兜底通道命中：标记不在回复末尾（其后仍有正文/围栏），但显式写了 start="auto"。
+   * 调用方据此在时间线留痕，让"为什么没走末尾锚定"可观测。
+   */
+  loose?: boolean
+}
+
+/** 末尾锚定主通道：标记后只允许空白 */
+const CONTINUE_TAIL_RE = /<continue\b([^>]*)>([\s\S]*?)<\/continue>\s*$/
+/** 兜底扫描：全文任意位置的完整闭合标记（取最后一个） */
+const CONTINUE_ANY_RE = /<continue\b([^>]*)>([\s\S]*?)<\/continue>/g
+
+/** 协议示例简报的指纹前缀（含专属 commit 号）：与它同源的简报视为复述而非真实接力意图 */
+const CONTINUE_EXAMPLE_FINGERPRINT = '阶段2：按 docs/plan.md §3 实现模型选择 UI；阶段1 已完成数据管道（commit 09a47a4'
+
+function continueStart(attrs: string): { start: 'auto' | 'parked'; explicitAuto: boolean } {
+  const attr = attrs.match(/\bstart\s*=\s*(["'])(auto|parked)\1/i)
+  return { start: attr && attr[2].toLowerCase() === 'auto' ? 'auto' : 'parked', explicitAuto: !!attr && attr[2].toLowerCase() === 'auto' }
 }
 
 /**
- * 解析位于回复末尾的 <continue start="auto|parked">简报</continue>。
- * 末尾锚定：标记后只允许空白——协议即"在回复最后一行输出"，正文/示例/复述文档里
- * 出现标记字样不构成接力意图（防止讨论方案或引用本文档时被误切会话）。
+ * 解析 <continue start="auto|parked">简报</continue>。
+ * 主通道末尾锚定：标记后只允许空白——协议即"在回复最后一行输出"，正文/示例/复述
+ * 文档里出现标记字样不构成接力意图（防止讨论方案或引用本文档时被误切会话）。
  * start 属性解析容忍多属性/大小写；只有显式 "auto" 才立即执行，
  * 缺省/非法/无引号一律按 parked 备好待人工启动，防止复述协议时误切会话。
+ * 兜底通道：主通道未命中时取全文最后一个完整闭合标记，仅当**显式** start="auto"
+ * 才采纳（显式意图优先于位置规范；复述协议示例不会带真实简报文本）。实测模型常在
+ * 标记后补一句客套收尾或整体包进代码围栏，末尾锚定全灭——这正是硬切"看起来失效"
+ * 的主要形态，兜底把这些显式意图救回来。
  */
 export function parseContinue(text: string): ContinueCall[] {
   const out: ContinueCall[] = []
-  const m = text.match(/<continue\b([^>]*)>([\s\S]*?)<\/continue>\s*$/)
-  if (!m) return out
-  const brief = m[2].trim()
+  const tail = text.match(CONTINUE_TAIL_RE)
+  if (tail) {
+    const brief = tail[2].trim()
+    // 防复述：与协议示例同指纹的简报不构成接力意图（agent 逐字引用协议块收尾时）
+    if (brief && !brief.startsWith(CONTINUE_EXAMPLE_FINGERPRINT)) out.push({ brief, start: continueStart(tail[1]).start })
+    return out
+  }
+  let last: RegExpMatchArray | null = null
+  for (const m of text.matchAll(CONTINUE_ANY_RE)) last = m
+  if (!last) return out
+  const brief = last[2].trim()
   if (!brief) return out
-  const attr = m[1].match(/\bstart\s*=\s*(["'])(auto|parked)\1/i)
-  const start = attr && attr[2].toLowerCase() === 'auto' ? 'auto' : 'parked'
-  out.push({ brief, start })
+  // 防复述：兜底通道不接受与协议示例同指纹的简报（agent 引用协议全文时示例标记带显式 auto），
+  // 也不接受分量不足的简报——真简报按协议必须自包含（目标/成果/约束），讨论里的演示标记通常只有片语
+  if (brief.startsWith(CONTINUE_EXAMPLE_FINGERPRINT) || brief.length < 20) return out
+  const { start, explicitAuto } = continueStart(last[1])
+  if (explicitAuto) out.push({ brief, start: 'auto', loose: true })
   return out
 }
 

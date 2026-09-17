@@ -453,6 +453,28 @@ export function isTaskEventKind(value: unknown): value is TaskEventKind {
 /** Event schema version written by the local EventLog. */
 export const TASK_EVENT_SCHEMA_VERSION = 1 as const
 
+/**
+ * 工具调用的编辑元数据，挂在 `kind: 'tool'` 事件的 `data.edit` 上（可选）。
+ *
+ * 契约（解析端 src/main/backends/edit-meta.ts 的 parseEditMeta，字段名/含义两边一致）：
+ * - `file`     被改动的文件路径（patch 取 patch 头，写/编辑类取 file_path/path）
+ * - `additions` 新增行数，`deletions` 删除行数（均 >= 0，按全文统计，不受截断影响）
+ * - `content`  Write/NotebookEdit 类写入后的内容；`oldString`/`newString` Edit 类替换前后文本
+ *   （MultiEdit 的 newString 为多段拼接）；三者各 64KB 上限
+ * - `truncated` 任一字符串字段被截断时为 true，渲染层据此提示"内容不完整"
+ *
+ * 只有编辑类工具才有该字段；`TaskEvent.data` 是宽松类型，读取方需自行判形。
+ */
+export interface ToolEditMeta {
+  file: string
+  additions: number
+  deletions: number
+  content?: string
+  oldString?: string
+  newString?: string
+  truncated?: boolean
+}
+
 export type TaskEventDurability = 'durable' | 'live'
 
 /** Durable metadata follows the OpenCode event contract while remaining optional. */
