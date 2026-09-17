@@ -1,6 +1,10 @@
 // ZCode 后端适配器：spawn `zcode app-server --stdio`，讲 "ZCode Protocol"。
-// 协议要点（逆向自 zcode.cjs 0.16.3，2026-08 实测）：
+// 协议要点（逆向自 zcode.cjs 0.16.3，2026-08 实测；3.12.3 复核，2026-09）：
 //   - 换行分隔 JSON。请求 {id,method,params}，响应 {id,result|error}，通知 {method,params}
+//   - 模型不随 create/resume 传（strict schema，create 带了执行期也带不住 options）：
+//     统一在会话建立后走 session/setModel {sessionId, model:{providerId, modelId,
+//     options?:{reasoningLevel}}}，reasoning 模型必须带 level（报 "Reasoning level is
+//     required"）；旧 runtimeModel 内联块已整体移除，传了报 Unrecognized key
 //   - session/create 会先收到服务端请求 session/requestRuntimePreferences（必须应答扁平对象）
 //   - session/subscribe {sessionId, deliveryKind:"desktop-continuous"} 开启事件推送
 //   - session/send {sessionId, content} 派发提示词
@@ -14,7 +18,7 @@ import { isJsonObject, type JsonObject } from './cli-common'
 import { ZcodeConnection } from './zcode-transport'
 import { compactToolArgs, mergeTurnTexts as mergeTexts, runtimePreferences, sessionEvent, zcodeRecord, zcodeString } from './zcode-protocol'
 import {
-  buildRuntimeModelFromCliConfig as buildRuntimeModel,
+  buildModelSelectionFromCliConfig as buildModelSelection,
   ensureZcodeCliConfig as ensureCliConfig,
   ensureZcodeCliProviderConfig as ensureProviderConfig,
   findZcodeBundle as findBundle,
@@ -67,19 +71,17 @@ function compactArgs(args?: string): string {
 }
 
 /**
- * 从 cli config 构造 runtimeModel（provider registry 快照）。
- * resume 旧会话必须带：服务端用它重新解析会话的历史模型，否则 send 会报
- * ZCODE_RUNTIME_MODEL_UNAVAILABLE（"历史任务使用的模型已不可用"）。
- * modelRef 为 agent 钉死的模型覆盖：'providerId/modelId' 拆两者，裸 modelId 沿用
- * config 默认 provider；目录缺该模型时补录（服务端按目录校验）。
- * connection（API 预设）与模型同时提供时，provider 整体改由预设构造（baseURL/apiKey
- * 内存注入，完全不读 config）；connection 无模型时忽略连接（平台默认路径）。
+ * 解析模型引用（{providerId, modelId, options?}，注册表引用）。
+ * providerId 取自 v2 provider_config.json 的 providerRules；模型 id 按桌面端目录
+ * 归一大小写；reasoning 模型自动带 defaultVariant 的 reasoningLevel。
+ * 连接（API 预设）替代旧 runtimeModel 内联凭据：upsert 成 v2 注册表的个人
+ * provider 规则后按派生 id 引用（写入发生在 app-server 拉起前，回合内即生效）。
  */
-export function buildRuntimeModelFromCliConfig(
+export function buildModelSelectionFromCliConfig(
   modelRef?: string,
   connection?: { name: string; baseURL: string; apiKey: string }
-): Record<string, unknown> | null {
-  return buildRuntimeModel(modelRef, connection)
+): { providerId: string; modelId: string; options?: { reasoningLevel: string } } | null {
+  return buildModelSelection(modelRef, connection)
 }
 
 /**
@@ -128,6 +130,9 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
 
       const cwd = workdir && fs.existsSync(workdir) ? workdir : os.tmpdir()
       const node = resolveNode(nodePath || undefined)
+      // 模型解析（预设连接此时 upsert 进 v2 注册表）必须先于 spawn：app-server 启动时
+      // 加载注册表快照，拉起后再写文件它看不到（setModel 报 provider-not-found）
+      const modelSelection = model?.trim() ? buildModelSelection(model, connection) : null
       const conn = new ZcodeConnection(node.path, bundle, cwd)
       // 启动即注册硬停句柄：session/create 等握手请求挂死时（进程半死/连接无响应），
       // 调用方在 start 返回前也有手段杀掉进程，不会永久占住任务与并发槽
@@ -395,23 +400,24 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
       emit({ kind: 'status', text: 'starting app-server' })
       let sessionId: string
       if (resumeSessionId) {
-        const runtimeModel = buildRuntimeModel(model, connection)
         const resumed = await conn.request<JsonObject>('session/resume', {
           sessionId: resumeSessionId,
-          workspace: { workspaceKey: cwd, workspacePath: cwd },
-          ...(runtimeModel ? { runtimeModel } : {})
+          workspace: { workspaceKey: cwd, workspacePath: cwd }
         })
         sessionId = String(asRecord(resumed.session).sessionId ?? resumeSessionId)
-        emit({ kind: 'status', text: runtimeModel ? '会话已恢复' : '会话已恢复（未带模型注册表）' })
       } else {
-        // agent 指定模型（或预设+模型）时 create 也带 runtimeModel；默认路径不带，保持历史行为
-        const runtimeModel = model?.trim() ? buildRuntimeModel(model, connection) : null
         const created = await conn.request<JsonObject>('session/create', {
           workspace: { workspaceKey: cwd, workspacePath: cwd },
-          mode: mode || 'yolo',
-          ...(runtimeModel ? { runtimeModel } : {})
+          mode: mode || 'yolo'
         })
         sessionId = String(asRecord(created.session).sessionId ?? '')
+      }
+      // 新协议：模型一律经 session/setModel 设置（create 的 model 参数执行期带不住
+      // options，reasoning 模型会报 "Reasoning level is required"；setModel 是
+      // 官方 schema 里唯一带 options 的入口），resume/create 两路在此汇合
+      if (modelSelection) {
+        await conn.request('session/setModel', { sessionId, model: modelSelection })
+        emit({ kind: 'status', text: `模型已设置: ${modelSelection.providerId}/${modelSelection.modelId}` })
       }
       if (!sessionId) throw new Error('会话创建/resume 未返回 sessionId')
       sessionIdHolder.value = sessionId

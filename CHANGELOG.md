@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### 变更
+
+- **zcode 模型接线迁移 CLI 3.12.3 新协议（注册表引用 + session/setModel）**：新协议 create/resume 的 strict schema 不再收模型字段（传了报 Unrecognized key，执行期也带不住 options）——统一改为会话建立后 `session/setModel {providerId, modelId, options?}` 补设；reasoning 模型必须带 `options.reasoningLevel`（取桌面端目录 defaultVariant，报 "Reasoning level is required" 的坑）。**API 预设（连接）替代旧 runtimeModel 内联凭据**：预设 upsert 成 `~/.zcode/v2/provider_config.json` 的个人 provider 规则（id 由 baseURL fnv1a 派生，`agentdeck-xxxxxxxx`，同预设幂等、异预设不冲突；group 必填 standard-personal 否则整条被静默过滤），模型解析为注册表引用（providerId 必须在 providerRules 内，模型 id 大小写按目录归一）；**解析/upsert 必须先于 spawn**——app-server 启动加载注册表快照，拉起后再写它看不到。resume 后同样 setModel 补设（沿用 agent 钉死模型），修复「历史任务使用的模型已不可用」类失效。`smoke:model` 重写为新协议（引用解析/预设 upsert/目录归一/显式前缀四组场景）。
+
 ### 修复
 
 - **zcode 后端拉起即退（新版桌面端 provider 配置迁移）**：app-server 以文件入口运行时只在 `<bundle>/provider/` 及其上溯 5 级 `config/provider/` 找 `zcode-builtin.json`；新版 ZCode 桌面端把它挪到 `resources/config/provider/`（旧位置随更新被清），导致拉起即退出（code 1「无法定位 CLI ZCode Built-in Provider Config」）。现在 probe/start 前检测补齐：两处都不在时从新版桌面端布局或 `~/.zcode/v2/runtime/provider/` 运行时缓存（取最新 mtime）复制；仍失败时报错提示重启 agentdeck 再试。`scripts/fixtures/provider/` 附样本配置。

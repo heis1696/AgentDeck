@@ -3,7 +3,7 @@
 //   未流式思考内容）比流式累计更长却不含中间消息里的 <delegate> 标记，旧逻辑按
 //   "长度取长"二选一丢弃含标记来源 → 委派静默失效。修复 = mergeTurnTexts 两源
 //   并集 + parseDelegatesMerged 多源去重。
-// - Phase 1：buildRuntimeModelFromCliConfig(modelRef) 解析覆盖（隔离 HOME，不碰真实
+// - Phase 1：buildModelSelectionFromCliConfig(modelRef) 解析覆盖（隔离 HOME，不碰真实
 //   zcode 配置）；claude --model 实测（探测不到则跳过）。
 import { build } from 'esbuild'
 import { pathToFileURL } from 'node:url'
@@ -20,7 +20,7 @@ for (const [src, out] of [
   await build({ entryPoints: [path.join(root, src)], outfile: path.join(root, out), bundle: true, platform: 'node', format: 'cjs', target: 'node18' })
 }
 const { parseDelegates, parseDelegatesMerged } = await import(pathToFileURL(path.join(root, 'out/sm-delegate.cjs')).href)
-const { mergeTurnTexts, buildRuntimeModelFromCliConfig, listZcodeModels } = await import(pathToFileURL(path.join(root, 'out/sm-zcode.cjs')).href)
+const { mergeTurnTexts, buildModelSelectionFromCliConfig, listZcodeModels } = await import(pathToFileURL(path.join(root, 'out/sm-zcode.cjs')).href)
 
 const assert = (cond, msg) => { if (!cond) { console.error('❌', msg); process.exit(1) } console.log('  ✓', msg) }
 
@@ -51,43 +51,69 @@ assert(mergeTurnTexts(normal, normal) === normal, '两源相同直接返回，�
 assert(mergeTurnTexts('甲。\n\n乙。', '甲。乙。') === '甲。\n\n乙。', '互含（空白不敏感）取终态全文——保真消息分隔（final-dedup 契约）')
 assert(mergeTurnTexts('', streamed) === streamed, '终态为空守卫：返回流式累计')
 
-// ============ Phase 1：zcode runtimeModel 覆盖（隔离 HOME） ============
+// ============ Phase 1：zcode model 覆盖（隔离 HOME，读 v2 注册表） ============
 const ORIG_HOME = process.env.USERPROFILE
 const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sm-model-home-'))
-fs.mkdirSync(path.join(fakeHome, '.zcode', 'cli'), { recursive: true })
-fs.writeFileSync(path.join(fakeHome, '.zcode', 'cli', 'config.json'), JSON.stringify({
+fs.mkdirSync(path.join(fakeHome, '.zcode', 'v2'), { recursive: true })
+// 桌面端目录：v2/config.json 的 provider models（大小写敏感、带 reasoning 元数据）
+fs.writeFileSync(path.join(fakeHome, '.zcode', 'v2', 'config.json'), JSON.stringify({
   provider: {
-    zai: { kind: 'anthropic', name: 'Z.ai', options: { baseURL: 'https://fake.z.ai', apiKey: 'sk-fake' }, models: { 'glm-5.3': { name: 'GLM-5.3' }, 'glm-5.2': {}, 'glm-5-turbo': {} } },
-    beta: { kind: 'anthropic', name: 'Beta', options: { baseURL: 'https://fake.beta', apiKey: 'sk-fake2' }, models: { 'glm-x': {} } }
-  },
-  model: { main: 'zai/glm-5.3', lite: 'zai/glm-4.7' }
+    'builtin:bigmodel': {
+      name: 'Bigmodel',
+      models: {
+        'GLM-5.3': { reasoning: { enabled: true, variants: ['low', 'max', 'high'], defaultVariant: 'max' }, limit: { context: 200000, output: 32000 } },
+        'GLM-5.3-Flash': {}
+      }
+    }
+  }
+}))
+// 注册表：v2/provider_config.json 的 providerRules（引用用的 providerId 来源）
+fs.writeFileSync(path.join(fakeHome, '.zcode', 'v2', 'provider_config.json'), JSON.stringify({
+  schemaVersion: 1,
+  config: {
+    providerConfigRules: { providerRules: [{ providerId: 'bigmodel-api', templateId: 'bigmodel-api', config: { group: 'standard-personal', access: { type: 'api-key', apiKey: 'sk-fake' } } }] },
+    modelConfigRules: { providerModelRules: [], manualProviderModelRules: [] }
+  }
 }))
 process.env.USERPROFILE = fakeHome // os.homedir() 在 Windows 优先读 USERPROFILE
 
-const rmDefault = buildRuntimeModelFromCliConfig()
-assert(rmDefault?.model?.providerId === 'zai' && rmDefault.model.modelId === 'glm-5.3', '无覆盖：沿用 config 默认 zai/glm-5.3')
-const rmBare = buildRuntimeModelFromCliConfig('glm-5.2')
-assert(rmBare?.model?.providerId === 'zai' && rmBare.model.modelId === 'glm-5.2', '裸 modelId：provider 沿用默认，模型覆盖为 glm-5.2')
-assert(rmBare?.provider?.baseURL === 'https://fake.z.ai' && Array.isArray(rmBare.provider?.models), 'provider 注册表快照完整（baseURL/models）')
-const rmSlash = buildRuntimeModelFromCliConfig('beta/glm-x')
-assert(rmSlash?.model?.providerId === 'beta' && rmSlash.model.modelId === 'glm-x' && rmSlash.provider?.providerId === 'beta', 'prov/model 形式：双路由到 beta/glm-x')
-const rmCustom = buildRuntimeModelFromCliConfig('glm-9.9')
-assert(rmCustom?.model?.modelId === 'glm-9.9' && rmCustom.provider?.models?.some((m) => m.modelId === 'glm-9.9'), '目录缺项时补录模型')
-assert(buildRuntimeModelFromCliConfig('nope/m1') === null, 'provider 不存在返回 null')
+const rmDefault = buildModelSelectionFromCliConfig()
+assert(rmDefault?.providerId === 'bigmodel-api' && rmDefault.modelId === 'GLM-5.3', '无覆盖：provider 取注册表首项，模型取目录首项')
+assert(rmDefault?.options?.reasoningLevel === 'max', 'reasoning 模型自动带 defaultVariant 的 reasoningLevel')
+const rmBare = buildModelSelectionFromCliConfig('glm-5.3')
+assert(rmBare?.providerId === 'bigmodel-api' && rmBare.modelId === 'GLM-5.3' && rmBare.options?.reasoningLevel === 'max', '裸 modelId：大小写归一到目录 id，provider 取注册表首项')
+const rmFlash = buildModelSelectionFromCliConfig('GLM-5.3-Flash')
+assert(rmFlash?.modelId === 'GLM-5.3-Flash' && rmFlash.options === undefined, '非 reasoning 模型不带 options')
+const rmSlash = buildModelSelectionFromCliConfig('bigmodel-api/GLM-5.3')
+assert(rmSlash?.providerId === 'bigmodel-api' && rmSlash.modelId === 'GLM-5.3', 'prov/model 形式：路由到注册表 provider')
+const rmCustom = buildModelSelectionFromCliConfig('glm-9.9')
+assert(rmCustom?.modelId === 'glm-9.9' && rmCustom.providerId === 'bigmodel-api' && rmCustom.options === undefined, '目录外模型按原引用透传（服务端给出明确 ModelNotFound）')
+assert(buildModelSelectionFromCliConfig('nope/m1') === null, 'provider 不在注册表返回 null')
 
-// API 预设连接覆盖：provider 整体来自预设（不读 config），模型取 ref 尾段
+// API 预设连接：upsert 进 v2 注册表（个人 provider 规则）后按派生 id 引用
 const conn = { name: '某中转站', baseURL: 'https://relay.example/v1', apiKey: 'sk-relay' }
-const rmPreset = buildRuntimeModelFromCliConfig('glm-5.2', conn)
-assert(rmPreset?.model?.providerId === 'preset' && rmPreset.model.modelId === 'glm-5.2', '预设+模型：providerId=preset，模型取 ref')
-assert(rmPreset?.provider?.baseURL === 'https://relay.example/v1' && rmPreset.provider?.apiKey?.value === 'sk-relay' && rmPreset.provider?.label === '某中转站', '预设 provider 携带预设连接（baseURL/apiKey/label）')
-assert(rmPreset.provider?.models?.some((m) => m.modelId === 'glm-5.2'), '预设模型目录含钉选模型')
-const rmPresetSlash = buildRuntimeModelFromCliConfig('prov/glm-x', conn)
-assert(rmPresetSlash?.model?.modelId === 'glm-x', '预设+prov/model 形式：取尾段 modelId')
-const rmConnNoModel = buildRuntimeModelFromCliConfig(undefined, conn)
-assert(rmConnNoModel?.model?.providerId === 'zai' && rmConnNoModel.model.modelId === 'glm-5.3', '预设无模型：忽略连接，走平台默认（zai/glm-5.3）')
+const readPresetConfig = () => JSON.parse(fs.readFileSync(path.join(fakeHome, '.zcode', 'v2', 'provider_config.json'), 'utf8'))
+const rmPreset = buildModelSelectionFromCliConfig('glm-5.3', conn)
+assert(/^agentdeck-[0-9a-f]{8}$/.test(rmPreset?.providerId ?? '') && rmPreset?.modelId === 'GLM-5.3', `预设+模型：id 由 baseURL 派生（${rmPreset?.providerId}），模型归一到目录 id`)
+assert(rmPreset?.options?.reasoningLevel === 'max', '预设 reasoning 模型同样带 defaultVariant')
+const presetRule = readPresetConfig().config.providerConfigRules.providerRules.find((r) => r.providerId === rmPreset.providerId)
+assert(presetRule?.providerName === '某中转站' && presetRule?.config?.group === 'standard-personal' && presetRule?.config?.access?.apiKey === 'sk-relay' && presetRule?.config?.api?.baseUrl === 'https://relay.example/v1', 'providerRule 写入（group/access/api 齐全）')
+assert(presetRule?.config?.personalModelIds?.[0] === 'GLM-5.3', 'personalModelIds 用归一 id')
+const presetModelRule = readPresetConfig().config.modelConfigRules.providerModelRules.find((r) => r.providerId === rmPreset.providerId)
+assert(presetModelRule?.modelId === 'GLM-5.3' && presetModelRule?.config?.enabled === true, 'providerModelRule 登记（enabled）')
+buildModelSelectionFromCliConfig('glm-5.3', conn)
+const rulesAfter = readPresetConfig().config.providerConfigRules.providerRules.filter((r) => r.providerId === rmPreset.providerId)
+assert(rulesAfter.length === 1, '重复 upsert 幂等（不翻倍）')
+assert(readPresetConfig().config.providerConfigRules.providerRules.some((r) => r.providerId === 'bigmodel-api'), '桌面端已有规则不受影响')
+const rmPresetUnknown = buildModelSelectionFromCliConfig('gpt-x', conn)
+assert(rmPresetUnknown?.modelId === 'gpt-x' && rmPresetUnknown?.options === undefined, '目录外模型按原引用注册（无 reasoning options）')
+const rmPresetSlash = buildModelSelectionFromCliConfig('relay/glm-x9', conn)
+assert(rmPresetSlash?.modelId === 'glm-x9', '预设+prov/model 形式：取尾段 modelId')
+const rmConnNoModel = buildModelSelectionFromCliConfig(undefined, conn)
+assert(rmConnNoModel?.providerId === 'bigmodel-api' && rmConnNoModel.modelId === 'GLM-5.3', '预设无模型：忽略连接，走平台默认')
 
 const catalog = listZcodeModels()
-assert(catalog.models.length === 4 && catalog.models.includes('glm-x') && catalog.defaultModel === 'glm-5.3', `模型目录并集 + 默认（${catalog.models.join(',')}）`)
+assert(catalog.models.length === 2 && catalog.models.includes('GLM-5.3') && catalog.defaultModel === undefined, `模型目录来自 v2 桌面端目录（${catalog.models.join(',')}）`)
 
 process.env.USERPROFILE = ORIG_HOME // 还原，避免影响后续 claude 实测读真实配置
 
@@ -114,9 +140,9 @@ if (!claudeProbe.ok) {
     (session) => ({ session }),
     (e) => ({ error: String(e?.message ?? e) })
   )
-  // 网关/供应商侧临时故障（5xx、限流、账户池耗尽）不代表接线问题：CLI 已接受
+  // 网关/供应商侧故障（5xx、限流、账户池耗尽、模型无权限/不存在）不代表接线问题：CLI 已接受
   // --model 并发起请求。跳过而非失败，其余错误照常判败。
-  if (outcome.error && /5\d\d|server-side|no available accounts|rate.?limit|overloaded/i.test(outcome.error)) {
+  if (outcome.error && /5\d\d|server-side|no available accounts|rate.?limit|overloaded|may not exist|not have access/i.test(outcome.error)) {
     console.log(`  - claude 网关临时故障，跳过 --model 实测（${outcome.error.slice(0, 110)}）`)
   } else {
     assert(!outcome.error, `claude 带 --model sonnet 完成一回合（${outcome.error ?? outcome.session.sessionId.slice(0, 10) + '…'}）`)

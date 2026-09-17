@@ -64,34 +64,158 @@ export function ensureZcodeCliConfig(): { ok: boolean; detail: string } {
   }
 }
 
-export function buildRuntimeModelFromCliConfig(modelRef?: string, connection?: { name: string; baseURL: string; apiKey: string }): Record<string, unknown> | null {
+/**
+ * 解析模型引用为协议 model 字段（{providerId, modelId, options?} 引用）。
+ * 新协议（CLI 3.12.3+）只收注册表引用：providerId 必须是 ~/.zcode/v2/provider_config.json
+ * providerRules 里的 id（如 bigmodel-api），模型 id 大小写敏感（目录里是 GLM-5.3），
+ * reasoning 模型必须带 options.reasoningLevel（取桌面端目录里的 defaultVariant）。
+ * 连接（API 预设）替代旧 runtimeModel 内联凭据：作为个人 provider 规则 upsert 进
+ * v2 provider_config.json（id 由 baseURL 派生，不同预设互不冲突），app-server 由
+ * agentdeck 每回合重新拉起、启动前写入即生效。
+ */
+export function buildModelSelectionFromCliConfig(
+  modelRef?: string,
+  connection?: { name: string; baseURL: string; apiKey: string }
+): { providerId: string; modelId: string; options?: { reasoningLevel: string } } | null {
+  const ref = modelRef?.trim()
+  if (connection && ref) {
+    const slash = ref.indexOf('/')
+    const requested = slash > 0 && slash < ref.length - 1 ? ref.slice(slash + 1) : ref
+    const catalog = readV2ModelCatalog()
+    const entry = catalog?.models.find((m) => m.modelId === requested) ?? catalog?.models.find((m) => m.modelId.toLowerCase() === requested.toLowerCase())
+    // 注册与引用必须同 id：优先目录归一后的（与推理元数据一致），目录外按原引用
+    const modelId = entry?.modelId ?? requested
+    if (!upsertPresetProvider(connection, modelId)) {
+      throw new Error(`预设连接「${connection.name}」注册失败：无法写入 ~/.zcode/v2/provider_config.json（ZCode 桌面端可能正占用该文件，稍后重试）`)
+    }
+    return entry ? withReasoning(presetProviderId(connection), entry) : { providerId: presetProviderId(connection), modelId }
+  }
+  const catalog = readV2ModelCatalog()
+  if (!catalog) return null
+  const slash = ref ? ref.indexOf('/') : -1
+  if (slash > 0 && ref) {
+    // 显式 provider 前缀：必须在注册表里（不在则 null，保持"provider 不存在"语义）
+    const prefix = ref.slice(0, slash)
+    if (!catalog.providerIds.includes(prefix)) return null
+    const bare = ref.slice(slash + 1)
+    const entry = bare ? (catalog.models.find((m) => m.modelId === bare) ?? catalog.models.find((m) => m.modelId.toLowerCase() === bare.toLowerCase())) : undefined
+    return entry ? withReasoning(prefix, entry) : { providerId: prefix, modelId: bare }
+  }
+  const providerId = catalog.providerIds[0]
+  if (!providerId) return null
+  if (ref) {
+    const entry = catalog.models.find((m) => m.modelId === ref) ?? catalog.models.find((m) => m.modelId.toLowerCase() === ref.toLowerCase())
+    return entry ? withReasoning(providerId, entry) : { providerId, modelId: ref }
+  }
+  const first = catalog.models[0]
+  return first ? withReasoning(providerId, first) : null
+}
+
+/** 预设注册到 v2 注册表的 providerId：baseURL 派生（fnv1a-32），同预设幂等、异预设不冲突 */
+function presetProviderId(connection: { baseURL: string }): string {
+  let hash = 0x811c9dc5
+  for (let i = 0; i < connection.baseURL.length; i++) {
+    hash ^= connection.baseURL.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return `agentdeck-${hash.toString(16).padStart(8, '0')}`
+}
+
+/**
+ * 把预设连接 upsert 成 v2 注册表的个人 provider：providerRule 声明凭据/端点/模型目录
+ * （group 必填 standard-personal，缺了整条规则被静默过滤），providerModelRule 登记
+ * 模型（enabled 即可，属性由内置通用规则按 modelId 正则补全）。只动自己 id 的条目，
+ * 桌面端自己的规则不受影响。
+ */
+function upsertPresetProvider(connection: { name: string; baseURL: string; apiKey: string }, modelId: string): boolean {
+  const id = presetProviderId(connection)
   try {
-    const ref = modelRef?.trim()
-    if (connection && ref) {
-      const slash = ref.indexOf('/')
-      const modelId = slash > 0 && slash < ref.length - 1 ? ref.slice(slash + 1) : ref
-      return { revision: '0', generatedAt: Date.now(), model: { providerId: 'preset', modelId }, provider: { providerId: 'preset', kind: 'anthropic', label: connection.name, baseURL: connection.baseURL, apiKey: { source: 'inline', value: connection.apiKey }, apiKeyRequired: true, models: [{ modelId }] } }
+    const configPath = path.join(os.homedir(), '.zcode', 'v2', 'provider_config.json')
+    let root: unknown
+    try { root = JSON.parse(fs.readFileSync(configPath, 'utf8')) as unknown } catch {
+      root = { schemaVersion: 1, config: { providerConfigRules: { providerRules: [] }, modelConfigRules: { providerModelRules: [], manualProviderModelRules: [] } } }
     }
-    const root = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.zcode', 'cli', 'config.json'), 'utf8')) as unknown
-    if (!isJsonObject(root) || !isJsonObject(root.model) || !isJsonObject(root.provider)) return null
-    const [defaultProvider, defaultModel] = String(root.model.main ?? '').split('/')
-    const slash = ref?.indexOf('/') ?? -1
-    const providerId = slash > 0 && ref ? ref.slice(0, slash) : defaultProvider
-    const modelId = slash > 0 && ref ? ref.slice(slash + 1) : ref || defaultModel
-    const providerConfig = root.provider[providerId]
-    if (!modelId || !isJsonObject(providerConfig)) return null
-    const providerModels = isJsonObject(providerConfig.models) ? providerConfig.models : {}
-    const models = Object.entries(providerModels).map(([id, value]) => ({ modelId: id, ...(isJsonObject(value) && typeof value.name === 'string' ? { label: value.name } : {}) }))
-    if (!models.some((model) => model.modelId === modelId)) models.push({ modelId })
-    const options = isJsonObject(providerConfig.options) ? providerConfig.options : {}
-    return {
-      revision: '0', generatedAt: Date.now(), model: { providerId, modelId },
-      provider: { providerId, kind: providerConfig.kind ?? 'anthropic', ...(providerConfig.name ? { label: providerConfig.name } : {}), ...(options.baseURL ? { baseURL: options.baseURL } : {}), apiKey: { source: 'inline', value: options.apiKey }, apiKeyRequired: true, models }
+    if (!isJsonObject(root)) return false
+    const config = isJsonObject(root.config) ? root.config : (root.config = {})
+    if (!isJsonObject(config.providerConfigRules)) config.providerConfigRules = { providerRules: [] }
+    if (!isJsonObject(config.modelConfigRules)) config.modelConfigRules = { providerModelRules: [], manualProviderModelRules: [] }
+    const providerRules = config.providerConfigRules
+    const rules = Array.isArray(providerRules.providerRules) ? providerRules.providerRules.filter((rule) => !(isJsonObject(rule) && rule.providerId === id)) : []
+    rules.push({
+      providerId: id,
+      providerName: connection.name,
+      enabled: true,
+      config: {
+        group: 'standard-personal',
+        access: { type: 'api-key', apiKey: connection.apiKey },
+        api: { type: 'anthropic-messages', baseUrl: connection.baseURL },
+        personalModelIds: [modelId]
+      }
+    })
+    providerRules.providerRules = rules
+    const modelRules = config.modelConfigRules
+    const list = Array.isArray(modelRules.providerModelRules) ? modelRules.providerModelRules.filter((rule) => !(isJsonObject(rule) && rule.providerId === id && rule.modelId === modelId)) : []
+    list.push({ providerId: id, modelId, config: { enabled: true } })
+    modelRules.providerModelRules = list
+    fs.mkdirSync(path.dirname(configPath), { recursive: true })
+    fs.writeFileSync(configPath, JSON.stringify(root, null, 2))
+    return true
+  } catch { return false }
+}
+
+function withReasoning(providerId: string, entry: { modelId: string; reasoning?: { enabled?: boolean; defaultVariant?: string; variants?: string[] } }): { providerId: string; modelId: string; options?: { reasoningLevel: string } } {
+  const reasoning = entry.reasoning
+  const options = reasoning?.enabled
+    ? { reasoningLevel: reasoning.defaultVariant ?? reasoning.variants?.[0] ?? 'high' }
+    : undefined
+  return { providerId, modelId: entry.modelId, ...(options ? { options } : {}) }
+}
+
+/** 桌面端 v2 目录：provider id 来自 provider_config.json 的 providerRules，模型表来自 v2/config.json 各 provider 的 models */
+function readV2ModelCatalog(): { providerIds: string[]; models: { modelId: string; reasoning?: { enabled?: boolean; defaultVariant?: string; variants?: string[] } }[] } | null {
+  const v2Dir = path.join(os.homedir(), '.zcode', 'v2')
+  try {
+    const providerIds: string[] = []
+    try {
+      const rules = JSON.parse(fs.readFileSync(path.join(v2Dir, 'provider_config.json'), 'utf8')) as unknown
+      if (isJsonObject(rules) && isJsonObject(rules.config) && isJsonObject(rules.config.providerConfigRules) && Array.isArray(rules.config.providerConfigRules.providerRules)) {
+        for (const rule of rules.config.providerConfigRules.providerRules) {
+          if (isJsonObject(rule) && typeof rule.providerId === 'string') providerIds.push(rule.providerId)
+        }
+      }
+    } catch {}
+    const models: { modelId: string; reasoning?: { enabled?: boolean; defaultVariant?: string; variants?: string[] } }[] = []
+    const seen = new Set<string>()
+    const v2Config = JSON.parse(fs.readFileSync(path.join(v2Dir, 'config.json'), 'utf8')) as unknown
+    if (isJsonObject(v2Config) && isJsonObject(v2Config.provider)) {
+      for (const provider of Object.values(v2Config.provider)) {
+        if (!isJsonObject(provider) || !isJsonObject(provider.models)) continue
+        for (const [modelId, meta] of Object.entries(provider.models)) {
+          if (seen.has(modelId)) continue
+          seen.add(modelId)
+          const reasoning = isJsonObject(meta) && isJsonObject(meta.reasoning) ? meta.reasoning : undefined
+          models.push({
+            modelId,
+            ...(reasoning ? { reasoning: { enabled: reasoning.enabled === true, ...(typeof reasoning.defaultVariant === 'string' ? { defaultVariant: reasoning.defaultVariant } : {}), ...(Array.isArray(reasoning.variants) ? { variants: reasoning.variants.filter((v): v is string => typeof v === 'string') } : {}) } } : {})
+          })
+        }
+      }
     }
+    if (!providerIds.length && !models.length) return null
+    return { providerIds, models }
   } catch { return null }
 }
 
 export function listZcodeModels(): { models: string[]; defaultModel?: string } {
+  // 优先桌面端 v2 目录（注册表真实可用的模型 id，大小写如 GLM-5.3）；
+  // 读不到时退回旧 cli config（历史行为）
+  try {
+    const v2Config = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.zcode', 'v2', 'config.json'), 'utf8')) as unknown
+    if (isJsonObject(v2Config) && isJsonObject(v2Config.provider)) {
+      const models = [...new Set(Object.values(v2Config.provider).flatMap((provider) => isJsonObject(provider) && isJsonObject(provider.models) ? Object.keys(provider.models) : []))]
+      if (models.length) return { models }
+    }
+  } catch {}
   try {
     const root = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.zcode', 'cli', 'config.json'), 'utf8')) as unknown
     if (!isJsonObject(root)) return { models: [] }

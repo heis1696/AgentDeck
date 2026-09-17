@@ -1,5 +1,5 @@
 // API 预设（连接档案）：cc-switch 式"按平台多套 provider 配置"，但零全局切换——
-// 预设只在 agent 引用它的会话里内存注入（zcode 走 runtimeModel，claude 走 spawn env）。
+// 预设只在 agent 引用它的会话里注入（zcode upsert 进 v2 注册表按 id 引用，claude 走 spawn env）。
 // 预设只存连接（baseURL/apiKey），模型在 agent 表单里从预设在线拉取后单独钉选。
 import fs from 'node:fs'
 import path from 'node:path'
