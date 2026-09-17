@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **系统托盘 + 关闭语义分级（「关闭后重启没反应」根治）**：普通点 X 关闭 = 隐藏到托盘继续运行（首次收起弹一次气泡说明，任务照跑、完成照通知），托盘菜单「显示主窗口 / 退出（结束后台任务）」，单击托盘图标即唤回窗口；「退出」与热更 relaunch 置 quitting 后走既有 before-quit 链（runner.shutdown 杀会话进程树 → sidecar.stop → store flush）。配套修复 second-instance 只聚焦不重建：`mainWindow` 已销毁时 `focusMainWindow` 改为重建窗口——此前残留主进程持有单实例锁、二次启动只把 second-instance 发给一个没有窗口的僵尸进程，用户看到的就是「点了没反应」，只能任务管理器杀进程。另补 `app.setAppUserModelId('ai.agentdeck.desktop')`（与 appId 一致）——不设置时打包版 Windows toast 通知静默失效，这就是「后台任务完成了却没通知」的原因。
+- **锻造师三期：触发评测 + subagent Markdown 导入导出**。草稿确认页新增「评测路由」：锻造师构造 3 条应接 + 2 条不应接的典型任务并逐条判定归属（SkillForge 式 should/should-not 实测，优先于自评），`passRate` 由应用侧按 verdicts 复算不信任模型自报，低命中时给出一句话修改建议（指出定义过宽/过窄/歧义处）。新增 `agents:import-md` / `agents:export-md`：与 Claude Code subagent 生态互通（`.claude/agents/*.md` 格式，frontmatter name/description[/model] + 正文即 system prompt，可接 wshobson/agents 等 200+ 社区素材）——页头「导入 .md」解析后直接走既有草稿确认视图（backend/预设/可驱使仍人工配置，导入正文同样剥派发标记），队员卡片 Download 按钮一键导出（另存对话框，description 由 role/note 拼合）。`agent-crafter` 技能升级 v3（生成/改进/评测三模式），升级比对扩为历代内置正文清单——正文与任何一代内置都不同即视为用户编辑过，不覆盖。
+
+### 修复
+
+- **委派被拒的反馈闭环（「回复里有两个单、等半天不出现」）**：领队输出 `<delegate to="claude">` 这类名单外目标时，护栏拒单只留痕不回灌——领队不知道单被拒，在「等队员回灌」的幻觉里收尾，任务看起来正常完成实则什么都没派出去（实战：队长把可咨询的队长 claude/codex 当成可派单队员）。现在「目标解析失败」类拒单原因（含队长提示「只能 consult 咨询不能派活」与有效队员名单）会记录并在委派循环里回灌给领队，让它当场改派名单内队员或自己完成；回灌有界（连续 2 轮后终止），重复同一被拒目标凭 seenKeys 静默去重不再回灌，防环/层级/预算等政策性硬闸拒绝维持只留痕不回灌（避免诱导再烧一轮）。拒单时间线文案同步回填有效名单。新增 `scripts/smoke-delegate-reject.mjs`（流式被拒改派成功 / 回合末被拒自行收尾 / 顽固重派有界终止三场景，`npm run smoke:delegate-reject`，已入 smoke:all 链）。
+
 ## [0.19.0] - 2026-09-17
 
 ### 新增
@@ -14,6 +23,7 @@
 
 ### 变更
 
+- **页面壳统一（用量页 / Agent 页共用 page-shell）**：两页的页头、滚动内容区、极光氛围层抽成共享 `polish/page-shell.css`（psh- 前缀：`.psh-page/.psh-header/.psh-body/.psh-aurora/.psh-actions`），页头高度/半透明底/标题与按钮的 flex 分配、氛围层参数、内容边距节奏完全同源，消除两页布局差异；容器查询宿主（`container: page`）落在 `.psh-body` 上，两页断点统一为 `@container page`。**两个伴生 bug 修复**：① 用量页趋势图连线在窗口拉伸后碎成虚点——旧实现用 `pathLength=1 + dasharray` 描边动画，`non-scaling-stroke` 下 dash 会被 Chromium 拉到屏幕空间解释，resize 后 dash 全乱；改为 clip-path 从左向右整体揭示（线+面积+网格一起展开，与 resize 无关）。② Agent 页「新建 Agent」弹窗跑到页面下方黑块——`container` 属性自带 layout containment，会把 fixed 后代的包含块从视口改成容器，弹窗被钉进滚动区裁掉；弹窗移出滚动区（挂 `.psh-page` 直下，该层无容器），实测 dialog fixed 居中于视口。另加窄视口页头两行化（≤900px 标题行+操作行，防操作按钮挤压标题）。
 - **Agent（队员）页界面重制**：修复列表卡片布局破版（卡片内文字挤成窄列竖排、名字被拆行、头像与文本错位——旧 `.agent-card` flex 结构在徽章与长描述下失衡）。卡片重构为三段结构：头像+名字+定位 → 徽章行（平台 / 模型等宽字体 / ✦锻造师紫徽 / ⚡领队·可驱使数 accent 徽 / 引用预设）→ 两行截断描述；操作按钮（✦ 锻造师改进 / ✕ 删除）悬停显现，删除态红色。页头与列表区改为常驻页头 + 独立滚动区 + 顶部极光氛围层（与用量页同族驾驶舱语言，tm- 命名空间迁移至 `polish/team.css`，auto-fill 网格 + 容器查询响应式）；预设区空态从一行小字升级为虚线空态框。styles.css 中被替代的 `.agent-card/.agent-grid/.agent-info/.agent-name` 三代际规则清理（弹窗仍在用的 `.agent-avatar/.agent-picker` 等保留）。foundation.css 的亮色桥接从墨色三变量扩为整套旧代际重映射（补 `--surface-0/1/2/3`、`--line-soft/strong`——此前亮色下用到的页面画布仍是黑底）。
 - **用量页界面与美术重制（"深夜驾驶舱"仪表盘 v2）**：整页重做——布局从 1060px 居中窄列改为**全宽自适应**（跟随窗口流动）；内容区顶部新增青色**极光氛围层**（双 radial 光晕 + 微点阵，向下渐隐，亮色自动减淡），Hero 四格大数字（Tokens 总消耗渐变字 / 预估成本含 $/1M tok 单价 / 运行次数含均次用时 / 失败率 SVG 环形仪表，零失败翠绿满环、有失败红弧+辉光）直接浮在氛围上；趋势图升级为 **SVG 平滑面积图**（Catmull-Rom 曲线 + 渐变填充 + 描边生长动画 + 峰值光钉 + 失败日红刻 + hover 列高亮，「全部」跨度 >60 天自动并月桶）；失败构成（名次徽标+红→琥珀渐变条+可重试芯片）、按运行时（七色色板方点+单色渐变轨道）、队员明细（等宽数字+失败红芯片+token 占比微条）保持卡片化并统一 hover 细节。**响应式改用容器查询**（`container: usage`）——内容区宽度扣除侧栏后才是真实可用宽度，视口断点在带侧栏的布局里必然错位（实测 760px 视口下四格挤压文字溢出）；1150/860/560px 三档容器断点：4 格→2×2→单列、双栏→单栏，数字字号用 `cqw` 随容器流动。数据层 `AnalyticsSummary` 新增 `byDay` 每日聚合序列（本地时区分桶，升序）。样式迁移至 `polish/usage.css`（us- 命名空间，全令牌驱动，暗/亮双主题，reduced-motion 降级），styles.css 三代际旧 usage/error-mix 规则清理；修复 `.usage-page` 缺 `flex:1` 导致内容不足一屏时页底露出异色背景。顺带修复亮色主题全站页头标题白字白底（`--ink-strong` 等 0.12 代际墨色变量在 `html.light` 从未重映射，foundation.css 统一桥接到字色令牌）。
 

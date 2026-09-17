@@ -140,6 +140,8 @@ export class TaskRunner {
   /** 流式派单嗅探：领队会话期间逐条 text 事件累计扫描，闭合一个 <delegate> 即提前建单入队。
    *  回灌仍只在回合末（委派循环）发生，不会打断领队正在进行的主运行。 */
   private earlySpawns = new Map<string, { buffer: string; scanOffset: number; closeScanOffset: number; spawned: Map<string, { call: DelegateCall; childId: string }>; seenKeys: Set<string>; pending: Promise<unknown>[] }>()
+  /** 被拒派单的原因（按任务累积）：委派循环每轮取走并回灌给领队，让它当场改派而不是干等不存在的回灌 */
+  private delegateRejections = new Map<string, string[]>()
   /** Consecutive tool-call signatures used by the doom-loop approval guard. */
   private toolWindows = new Map<string, { key: string; count: number; requested: boolean }>()
   private doomRequestSeq = 0
@@ -441,6 +443,7 @@ export class TaskRunner {
     this.clearRetry(taskId)
     this.bumpTurnGen(taskId)
     this.earlySpawns.delete(taskId)
+    this.delegateRejections.delete(taskId)
     this.lastTerminalResponses.delete(taskId)
     const s = this.sessions.get(taskId)
     if (!s) return
@@ -463,6 +466,7 @@ export class TaskRunner {
     this.permissionBroker.cancelTask(taskId)
     this.toolWindows.delete(taskId)
     this.earlySpawns.delete(taskId)
+    this.delegateRejections.delete(taskId)
     this.lastTerminalResponses.delete(taskId)
     this.turnLifecycles.get(taskId)?.dispose()
     this.turnLifecycles.delete(taskId)
@@ -581,6 +585,7 @@ export class TaskRunner {
     const state = this.earlySpawns.get(taskId)
     if (!state) return
     this.earlySpawns.delete(taskId)
+    this.delegateRejections.delete(taskId)
     if (!state.pending.length && ![...state.spawned.values()].some((e) => e.childId)) return
     const cancelSpawned = () => {
       for (const { childId } of state.spawned.values()) {
@@ -613,6 +618,19 @@ export class TaskRunner {
       if (entry.childId) entries.push(entry)
     }
     return { entries, seenKeys: new Set(state.seenKeys) }
+  }
+  /** 记录一条被拒派单的原因。只收「目标解析失败」（名单外/不存在）——这类改派有用；
+   *  护栏拒单（防环/层级/预算）是政策性拒绝，回灌只会诱导模型再烧一轮，只留痕不回灌 */
+  private recordDelegateRejection(taskId: string, reason: string) {
+    const list = this.delegateRejections.get(taskId) ?? []
+    list.push(reason)
+    this.delegateRejections.set(taskId, list)
+  }
+  /** 取走并清空本任务被拒派单的原因（委派循环每轮回灌用；不残留到后续轮） */
+  takeDelegateRejections(taskId: string): string[] {
+    const list = this.delegateRejections.get(taskId) ?? []
+    this.delegateRejections.delete(taskId)
+    return list
   }
   /** 逐条 text 事件增量扫描：闭合一个 <delegate to="...">...</delegate> 即提前建单 */
   private sniffDelegates(taskId: string, delta?: string) {
@@ -679,7 +697,14 @@ export class TaskRunner {
       subs.find((a) => a.name.toLowerCase() === call.to.toLowerCase()) ??
       subs.find((a) => a.backend.toLowerCase() === call.to.toLowerCase())
     if (!target) {
-      this.note(taskId, `⚠ 未找到可驱使的队员 "${call.to}"（不在你的队员名单里），跳过`)
+      // 名单回填 + 队长提示：模型常把「可咨询的队长」当成可派单对象，说清有效名单它才改派得动
+      const rosterText = subs.map((a) => `${a.name}（${a.backend}）`).join('、') || '当前为空'
+      const elsewhere = team.find((a) => a.id !== me?.id && (a.name.toLowerCase() === call.to.toLowerCase() || a.backend.toLowerCase() === call.to.toLowerCase()))
+      const why = elsewhere
+        ? `在团队里但不是你的队员（${(elsewhere.subordinates?.length ?? 0) > 0 ? '它是队长' : '它不归你管'}；只能 <consult> 咨询，不能被派活）`
+        : '不在你的队员名单里'
+      this.note(taskId, `⚠ 未找到可驱使的队员 "${call.to}"（${why}；你的队员：${rosterText}），跳过`)
+      this.recordDelegateRejection(taskId, `to="${call.to}"：${why}`)
       return null
     }
     // 防环：目标已在祖先链上（或就是自己）→ 拒绝派发；顺带执行层级闸与全链轮数预算闸
@@ -1443,6 +1468,7 @@ export class TaskRunner {
     this.toolWindows.delete(taskId)
     this.disarmWatchdog(taskId)
     this.earlySpawns.delete(taskId)
+    this.delegateRejections.delete(taskId)
     this.lifecycle(taskId).dispose()
     this.lastTerminalResponses.delete(taskId)
     this.store.flushEvents(taskId)
@@ -1480,6 +1506,7 @@ export class TaskRunner {
     }
     this.sessions.clear()
     this.earlySpawns.clear()
+    this.delegateRejections.clear()
     this.lastTerminalResponses.clear()
     for (const lifecycle of this.turnLifecycles.values()) lifecycle.dispose()
     this.turnLifecycles.clear()

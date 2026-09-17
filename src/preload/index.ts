@@ -2,7 +2,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { Task, TaskEvent, AppSettings, Issue, Run, Comment, Automation, RuntimeSnapshot, AnalyticsSummary, IssuePriority, IssueStatus, RunTrigger } from '../shared/types'
 import type { SkillDetail, SkillMeta, SkillTarget, SyncState } from '../shared/skills'
-import type { DraftResult, ImproveResult } from '../shared/forge'
+import type { AgentDraft, DraftResult, ExportResult, ImproveResult, ImportResult, EvaluateResult } from '../shared/forge'
 import type {
   CatalogEntry,
   DiscoveredAsset,
@@ -174,7 +174,10 @@ const api: AgentDeckApi = {
     models: (backend: string): Promise<AgentModelCatalog> =>
       ipcRenderer.invoke('agents:models', backend),
     draft: (description: string, answers?: string[]): Promise<DraftResult> => ipcRenderer.invoke('agents:draft', description, answers ?? null),
-    improve: (agentId: string, feedback: string): Promise<ImproveResult> => ipcRenderer.invoke('agents:improve', agentId, feedback)
+    improve: (agentId: string, feedback: string): Promise<ImproveResult> => ipcRenderer.invoke('agents:improve', agentId, feedback),
+    evaluate: (draft: AgentDraft): Promise<EvaluateResult> => ipcRenderer.invoke('agents:evaluate', draft),
+    importMd: (): Promise<ImportResult> => ipcRenderer.invoke('agents:import-md'),
+    exportMd: (agentId: string): Promise<ExportResult> => ipcRenderer.invoke('agents:export-md', agentId)
   },
   presets: {
     list: (): Promise<Array<PresetInfo>> => ipcRenderer.invoke('presets:list'),

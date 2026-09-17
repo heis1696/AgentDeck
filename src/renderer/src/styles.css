@@ -681,7 +681,7 @@ body {
 ::-webkit-scrollbar-track { background: transparent; }
 
 /* ---- 用量页（P2） ---- */
-.usage-page { padding: 20px 24px; overflow-y: auto; }
+
 .page-head h2 { margin: 0 0 2px; font-size: 18px; }
 .page-head .hint { margin: 0 0 16px; }
 .agent-avatar.xs {
@@ -1705,7 +1705,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .page-title { color: var(--ink-strong); }
 .page-desc { color: var(--ink-muted); }
 .page-icon { color: var(--signal); }
-.settings, .usage-page { background: var(--surface-0); }
+.settings { background: var(--surface-0); }
 .settings-card { border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface-1); box-shadow: 0 12px 30px rgba(0,0,0,.12); }
 .settings-card { padding: 20px; }
 .settings-card h3 { color: var(--ink-strong); font-size: 14px; }
@@ -1718,7 +1718,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 
 html.light body { background: #f3f7f7; }
 html.light .sidebar, html.light .workspace-topbar, html.light .detail-panel, html.light .settings-card { background: #ffffff; }
-html.light .main, html.light .workspace, html.light .board, html.light .settings, html.light .usage-page, html.light .detail-main { background: #f3f7f7; }
+html.light .main, html.light .workspace, html.light .board, html.light .settings, html.light .detail-main { background: #f3f7f7; }
 html.light .workspace-prompt, html.light .field input, html.light .field textarea, html.light .workspace-row input { background: #ffffff; }
 
 @media (max-width: 760px) {

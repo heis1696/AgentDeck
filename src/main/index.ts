@@ -1,5 +1,5 @@
 // AgentDeck 主进程入口
-import { app, BrowserWindow, Notification } from 'electron'
+import { app, BrowserWindow, Menu, Notification, Tray } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
 import { TaskStore } from './store'
@@ -32,6 +32,10 @@ import { clearPointer, readPointer } from './hot/pointer'
 import { HotUpdater } from './hot/updater'
 
 let mainWindow: BrowserWindow | null = null
+let tray: Tray | null = null
+/** 真正退出进行中（托盘退出/热更 relaunch/app.quit 收尾）：close 不再拦截为隐藏到托盘 */
+let quitting = false
+let trayHintShown = false
 let settings: AppSettings
 let store: TaskStore
 let runner: TaskRunner
@@ -84,7 +88,12 @@ function seedDevDataSnapshot(): void {
 
 // —— 单实例锁（设计 §7.1）：声明先于 whenReady 注册；relaunch 的退出-取锁竞态由重试环吸收 ——
 const focusMainWindow = () => {
-  if (!mainWindow) return
+  // 窗口曾被销毁（而非隐藏）时重建：否则二次启动只发 second-instance 给无窗的残留
+  // 主进程，用户看到的就是「点了没反应」
+  if (!mainWindow) {
+    createWindow()
+    return
+  }
   if (mainWindow.isMinimized()) mainWindow.restore()
   mainWindow.show()
   mainWindow.focus()
@@ -151,6 +160,21 @@ function createWindow() {
     }
   })
   mainWindow.on('closed', () => (mainWindow = null))
+  // 普通关闭 = 收进托盘继续跑（回灌/通知不中断）；真正退出走托盘菜单或 app.quit()
+  //（quitting 已置位，不再拦截），退出时的任务终止与进程清理归 before-quit 统一处理
+  mainWindow.on('close', (event) => {
+    if (quitting) return
+    event.preventDefault()
+    mainWindow?.hide()
+    if (tray && !trayHintShown) {
+      trayHintShown = true
+      try {
+        if (process.platform === 'win32') {
+          tray.displayBalloon({ iconType: 'info', title: 'AgentDeck 仍在后台运行', content: '任务会继续执行并在完成时通知；右键托盘图标可打开窗口或退出。' })
+        }
+      } catch { /* 提示失败不影响隐藏 */ }
+    }
+  })
   // 运行期自愈（§4.3）：热渲染层加载失败/渲染进程反复崩溃 → 隔离坏版本并回退内置
   mainWindow.webContents.on('did-fail-load', (_event, errorCode, _errorDescription, validatedURL, isMainFrame) => {
     if (!isMainFrame || errorCode === -3 /* ERR_ABORTED 中断类 */) return
@@ -207,8 +231,41 @@ function fallbackFromHotRenderer(reason: string): void {
   hotUpdater?.notifyRendererFallback(reason)
 }
 
+/** 托盘：普通关闭后应用的唯一可见入口；「退出」是唯一真正结束进程的用户路径 */
+function createTray() {
+  try {
+    tray = new Tray(path.join(__dirname, '../../build/icon.png'))
+    tray.setToolTip('AgentDeck')
+    const show = () => {
+      if (!mainWindow) {
+        createWindow()
+        return
+      }
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.show()
+      mainWindow.focus()
+    }
+    tray.setContextMenu(Menu.buildFromTemplate([
+      { label: '显示主窗口', click: show },
+      { type: 'separator' },
+      {
+        label: '退出（结束后台任务）',
+        click: () => {
+          quitting = true
+          app.quit()
+        }
+      }
+    ]))
+    tray.on('click', show)
+  } catch {
+    tray = null
+  }
+}
+
 /** 主进程初始化（原 whenReady 体；单实例锁重试环拿锁晚于 ready 时可直接调用） */
 const initMain = async (): Promise<void> => {
+  // Windows 通知身份：不设置时打包版 Notification 静默失效（后台任务完成不弹 toast）
+  app.setAppUserModelId('ai.agentdeck.desktop')
   settings = loadSettings()
   // 共享目录解析集中在主进程：settings.sharedDir 非空用之，否则 home 默认；首次启动即初始化 README + skills/
   const resolveSharedDir = () => {
@@ -510,6 +567,7 @@ const initMain = async (): Promise<void> => {
     getWindow: () => mainWindow,
     isMainIdle: () => runner.isIdle() && !automationBusy,
     relaunchForUpdate: (version) => {
+      quitting = true
       app.relaunch({ args: [...process.argv.slice(1), '--agentdeck-hot-applied', version, '--agentdeck-relaunch-retry'] })
       app.quit()
     },
@@ -543,6 +601,7 @@ const initMain = async (): Promise<void> => {
   })
 
   createWindow()
+  createTray()
 
   // 热更：启动静默检查（延迟 10s）+ 6h 定时（§1.2）；relaunch 回带参数 → 推"已更新"状态（§7.2 步 11）
   hotUpdater.startPeriodicCheck(10_000, 6 * 60 * 60 * 1000)
@@ -561,6 +620,7 @@ app.whenReady().then(() => {
 })
 
 app.on('before-quit', (event) => {
+  quitting = true
   if (quitReady) return
   event.preventDefault()
   if (quitInProgress) return
@@ -583,4 +643,10 @@ app.on('window-all-closed', () => {
   // Keep the main process (and its runner) alive when the renderer window is
   // closed. A later window can reconnect to the same in-process state; only an
   // explicit application quit should tear down execution.
+})
+
+app.on('will-quit', () => {
+  // 托盘图标随进程销毁，否则 Windows 上会残留幽灵图标直到鼠标划过
+  try { tray?.destroy() } catch {}
+  tray = null
 })

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
-import { bridge, type AgentInfo as Agent, type AgentModelCatalog, type ApiPresetInfo as Preset, type AgentDraft, type ImproveOutcome } from '../api'
-import { Users, KeyRound, Sparkles, X, RefreshCw, Network } from 'lucide-react'
+import { bridge, type AgentInfo as Agent, type AgentModelCatalog, type ApiPresetInfo as Preset, type AgentDraft, type ImproveOutcome, type EvaluateOutcome } from '../api'
+import { Users, KeyRound, Sparkles, X, RefreshCw, Network, Download, Upload } from 'lucide-react'
 import { toast } from '../ui/Toasts'
 import { Menu } from '../ui/Menu'
 import { BACKEND_IDS } from '../../../shared/types'
@@ -29,6 +29,10 @@ export function AgentsView() {
   const [draftResult, setDraftResult] = useState<AgentDraft | null>(null)
   const [draftPicked, setDraftPicked] = useState<Record<string, boolean>>({})
   const [drafting, setDrafting] = useState(false)
+  /** 草稿来源：import 时不显示"重新生成"（没有描述可回退）；评测结果挂在确认页 */
+  const [draftFromImport, setDraftFromImport] = useState(false)
+  const [evaluating, setEvaluating] = useState(false)
+  const [evaluation, setEvaluation] = useState<EvaluateOutcome | null>(null)
   // —— 锻造师·改进既有 agent：反馈 → 字段级 old→new diff → 勾选应用并保存 ——
   const [improveOpen, setImproveOpen] = useState(false)
   const [improveTarget, setImproveTarget] = useState<Agent | null>(null)
@@ -84,6 +88,8 @@ export function AgentsView() {
     setDraftQuestions([])
     setDraftAnswers([])
     setDraftResult(null)
+    setDraftFromImport(false)
+    setEvaluation(null)
     setDraftStage('input')
     setDraftOpen(true)
   }
@@ -105,6 +111,8 @@ export function AgentsView() {
       }
       setDraftResult(result.draft)
       setDraftPicked({ name: true, role: true, systemPrompt: true, note: true, color: true, model: true })
+      setDraftFromImport(false)
+      setEvaluation(null)
       setDraftStage('confirm')
     } catch (err) {
       toast.error('生成失败：' + (err instanceof Error ? err.message : String(err)))
@@ -178,6 +186,46 @@ export function AgentsView() {
     setImproveOpen(false)
     toast.success(`已改进「${improveTarget.name}」并保存`)
   }
+  /** 导入 subagent .md：解析为草稿后走既有确认视图（backend 等仍人工配置） */
+  const importMd = async () => {
+    const result = await bridge.agents.importMd()
+    if (!result.ok) {
+      if (result.error !== '已取消导入') toast.error('导入失败：' + result.error)
+      return
+    }
+    setDraftResult(result.draft)
+    setDraftPicked({ name: true, role: true, systemPrompt: true, note: true, color: true, model: true })
+    setDraftFromImport(true)
+    setEvaluation(null)
+    setDraftStage('confirm')
+    setDraftOpen(true)
+  }
+  /** 导出为 Claude subagent 格式 .md（另存对话框在主进程；用户取消静默） */
+  const exportMd = async (a: Agent) => {
+    const result = await bridge.agents.exportMd(a.id)
+    if (!result.ok) {
+      if (result.error !== '已取消导出') toast.error('导出失败：' + result.error)
+      return
+    }
+    toast.success(`已导出：${result.path}`)
+  }
+  /** 触发评测：锻造师构造 should/should-not 输入并判定归属，低命中时给修改建议 */
+  const runEvaluate = async () => {
+    if (!draftResult || evaluating) return
+    setEvaluating(true)
+    try {
+      const result = await bridge.agents.evaluate(draftResult)
+      if (!result.ok) {
+        toast.error('评测失败：' + result.error)
+        return
+      }
+      setEvaluation(result.outcome)
+    } catch (err) {
+      toast.error('评测失败：' + (err instanceof Error ? err.message : String(err)))
+    } finally {
+      setEvaluating(false)
+    }
+  }
   const addPreset = async () => {
     const id = await bridge.presets.newId()
     setEditingPreset({ id, name: '', backend: 'zcode', baseURL: '', apiKey: '', note: '', createdAt: Date.now() })
@@ -214,8 +262,9 @@ export function AgentsView() {
   const backendPresets = presets.filter((p) => p.backend === editing?.backend)
 
   const actions = (
-    <div className="team-actions">
+    <div className="psh-actions">
       <button className="btn" onClick={addPreset}><KeyRound size={14} /> 新建 API 预设</button>
+      <button className="btn" onClick={() => void importMd()}><Upload size={14} /> 导入 .md</button>
       <button className="btn" onClick={openDraft}>✦ 从描述生成</button>
       <button className="btn primary" onClick={add}>＋ 新建 Agent</button>
     </div>
@@ -257,7 +306,7 @@ export function AgentsView() {
     </section>
   )
 
-  const grid = (
+  const sections = (
     <>
       <section className="tm-section">
         <div className="tm-section-head">
@@ -276,6 +325,7 @@ export function AgentsView() {
                     <span className="tm-role">{a.role || (isForgeAgent(a) ? '锻造师' : '') || '\u00A0'}</span>
                   </div>
                   <div className="tm-acts">
+                    {!isForgeAgent(a) && <button className="tm-act" title="导出为 .md（Claude subagent 格式）" onClick={(e) => { e.stopPropagation(); void exportMd(a) }}><Download size={13} /></button>}
                     {!isForgeAgent(a) && <button className="tm-act" title="用锻造师改进提示词" onClick={(e) => { e.stopPropagation(); openImprove(a) }}><Sparkles size={13} /></button>}
                     <button className="tm-act tm-act-danger" title="删除" onClick={(e) => { e.stopPropagation(); remove(a.id) }}><X size={13} /></button>
                   </div>
@@ -304,7 +354,12 @@ export function AgentsView() {
         </div>
       </section>
       {presetSection}
+    </>
+  )
 
+  /** 弹窗层：position:fixed 的包含块必须是视口——不能挂在容器查询的 .psh-body（layout containment）里，否则弹窗被钉进滚动区裁掉 */
+  const dialogs = (
+    <>
       {editingPreset && (
         <div className="overlay" onClick={(e) => e.target === e.currentTarget && setEditingPreset(null)}>
           <div className="dialog">
@@ -405,9 +460,21 @@ export function AgentsView() {
                     </div>
                   </div>
                 ))}
+                {evaluation && (
+                  <div className="field">
+                    <span>触发评测 · 命中 {Math.round(evaluation.passRate * 100)}%（{evaluation.verdicts.filter((v) => v.matched === v.shouldMatch).length}/{evaluation.verdicts.length}）</span>
+                    <div style={{ display: 'grid', gap: 4 }}>
+                      {evaluation.verdicts.map((v, i) => (
+                        <span key={i} className="hint">{v.matched === v.shouldMatch ? '✓' : '✗'} {v.input}（应{v.shouldMatch ? '接' : '不接'} · 判{v.matched ? '接' : '不接'}）</span>
+                      ))}
+                      {evaluation.suggestion && <span className="hint">建议：{evaluation.suggestion}</span>}
+                    </div>
+                  </div>
+                )}
                 <div className="dialog-footer">
                   <span className="hint">未勾选的字段留空，进表单后仍可手改</span>
-                  <button className="btn" onClick={() => setDraftStage('input')}>重新生成</button>
+                  <button className="btn" onClick={() => void runEvaluate()} disabled={evaluating}>{evaluating ? '评测中…' : '评测路由'}</button>
+                  {!draftFromImport && <button className="btn" onClick={() => setDraftStage('input')}>重新生成</button>}
                   <button className="btn primary" onClick={applyDraft}>填入表单</button>
                 </div>
               </>
@@ -599,8 +666,8 @@ export function AgentsView() {
   )
 
   return (
-    <div className="team-page">
-      <header className="page-header-bar team-header">
+    <div className="psh-page">
+      <header className="page-header-bar psh-header">
         <div className="page-title-row">
           <Users size={16} className="page-icon" />
           <h2 className="page-title">Agent</h2>
@@ -609,10 +676,11 @@ export function AgentsView() {
         </div>
         {actions}
       </header>
-      <div className="team-body">
-        <div className="team-aurora" aria-hidden />
-        {grid}
+      <div className="psh-body">
+        <div className="psh-aurora" aria-hidden />
+        {sections}
       </div>
+      {dialogs}
     </div>
   )
 }

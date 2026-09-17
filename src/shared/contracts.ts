@@ -1,6 +1,6 @@
 import type { AcceptanceCriterion, Automation, AppSettings, AnalyticsSummary, Comment, Goal, GoalApprovalSnapshot, GoalCheckpoint, GoalEvolutionPatch, GoalSpecDecision, GoalSpecSnapshot, GoalRun, Issue, IssuePriority, IssueStatus, Run, RunTrigger, RuntimeSnapshot, Task, TaskEvent } from './types'
 import type { SkillDetail, SkillMeta, SkillTarget, SyncState } from './skills'
-import type { DraftResult, ImproveResult } from './forge'
+import type { AgentDraft, DraftResult, ExportResult, ImproveResult, ImportResult, EvaluateResult } from './forge'
 import type { Meeting, MeetingCreateInput } from './meeting'
 export type { MeetingCreateInput } from './meeting'
 import type {
@@ -256,6 +256,12 @@ export interface AgentDeckApi {
     draft: (description: string, answers?: string[]) => Promise<DraftResult>
     /** 锻造师：按反馈改进既有 agent 的定义（backend/预设/可驱使不在改进范围） */
     improve: (agentId: string, feedback: string) => Promise<ImproveResult>
+    /** 锻造师：对草稿做触发评测（should/should-not 实测路由，passRate 应用侧复算） */
+    evaluate: (draft: AgentDraft) => Promise<EvaluateResult>
+    /** 导入 .md（Claude subagent 格式）→ 草稿（系统对话框选文件） */
+    importMd: () => Promise<ImportResult>
+    /** 导出 agent 为 .md（Claude subagent 格式，另存对话框） */
+    exportMd: (agentId: string) => Promise<ExportResult>
   }
   presets: {
     list: () => Promise<PresetInfo[]>

@@ -162,8 +162,8 @@ export function UsageView() {
   const backendTotal = Math.max(1, (summary?.byBackend ?? []).reduce((sum, row) => sum + row.inputTokens + row.outputTokens, 0))
   const agentTokenMax = Math.max(1, ...(summary?.byAgent ?? []).map((row) => row.inputTokens + row.outputTokens))
 
-  return <div className="usage-page">
-    <header className="page-header-bar us-header">
+  return <div className="psh-page">
+    <header className="page-header-bar psh-header">
       <div className="page-title-row"><Gauge size={16} className="page-icon" /><h2 className="page-title">用量与错误</h2><span className="page-desc">token、成本、运行时长与失败情况的聚合统计。</span></div>
       <div className="us-controls">
         <div className="us-seg" role="tablist">
@@ -173,8 +173,8 @@ export function UsageView() {
         <button className="btn" onClick={() => void refresh()} disabled={loading}><RefreshCw size={14} className={loading ? 'spin' : ''} /> 刷新</button>
       </div>
     </header>
-    <div className="us-body">
-      <div className="us-aurora" aria-hidden />
+    <div className="psh-body">
+      <div className="psh-aurora" aria-hidden />
       {loading && !summary ? <div className="empty"><Gauge size={32} /><span>统计加载中…</span></div> : <>
         <section className="us-hero">
           <div className="us-stats">

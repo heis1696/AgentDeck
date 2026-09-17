@@ -162,7 +162,7 @@ AgentsView「从描述生成」入口（用户输入一句描述 + 生成引擎�
 
 ### 5.6 分阶段落地建议
 
-> 状态：**一期、二期均已于 2026-09-17 落地**（typecheck 全绿，未提交）。一期：`src/shared/forge.ts` 契约、`src/main/agent-forge.ts`（技能+单回合调用+解析）、`agents.ts` 种子+按 id 复活、`ipc/catalog.ts` `agents:draft`、`preload`/`contracts` 桥接、§5.7 全部 UI（生成入口/锻造徽标/编辑适配/四处过滤）。二期：澄清追问（`DraftResult` 三形态 + answers 强制出稿）、草稿确认视图（逐字段勾选填入）、`agents:improve` 改进回路（卡片 ✦ 入口 → 最小改动重写 → 字段级 old→new diff 勾选应用并保存）、技能 v2 双模式与"尊重用户编辑"的版本升级规则（仅未经编辑的旧版自动升级）。三期未动。
+> 状态：**一、二、三期全部于 2026-09-17 落地**（一二期已随 v0.19.0 发布，三期 typecheck 全绿待发布）。一期：`src/shared/forge.ts` 契约、`src/main/agent-forge.ts`（技能+单回合调用+解析）、`agents.ts` 种子+按 id 复活、`ipc/catalog.ts` `agents:draft`、`preload`/`contracts` 桥接、§5.7 全部 UI。二期：澄清追问（`DraftResult` 三形态 + answers 强制出稿）、草稿确认视图（逐字段勾选填入）、`agents:improve` 改进回路（字段级 old→new diff 勾选应用并保存）、技能 v2 双模式与"尊重用户编辑"的升级规则。三期：`agents:evaluate` 触发评测（should/should-not 实测，passRate 应用侧复算 + 修改建议，挂在草稿确认页）、`agents:import-md`/`agents:export-md` subagent 互通（`src/main/agent-exchange.ts` 纯函数序列化/解析，导入走既有确认视图）、技能 v3 三模式（升级比对扩为历代内置正文清单）。
 
 | 阶段 | 内容 | 规模 |
 |---|---|---|

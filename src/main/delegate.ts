@@ -430,13 +430,44 @@ export async function runDelegationLoop(
     note(`领队评估：${n.outcome}${n.reason ? ' — ' + n.reason : ''}`)
   }
 
+  // 被拒派单的回灌（有界防循环）：目标护栏拒单时领队并不知道，若不回灌它会在
+  // 「等回灌」的幻觉里干等（实际事故：派给队长 claude/codex 被跳过，单子永远不出现）。
+  let rejectedFeedbacks = 0
+  const rosterText = subs.map((a) => `${a.name}（${a.backend}）`).join('、')
+  const feedbackRejections = async (): Promise<boolean> => {
+    const rejects = runner.takeDelegateRejections(taskId)
+    if (!rejects.length || rejectedFeedbacks >= 2) return false
+    rejectedFeedbacks++
+    note(`⚠ ${rejects.length} 条派单被拒（未建单），原因回灌给领队改派`)
+    try {
+      const turn = await runner.sendTurn(taskId, session,
+        `【系统】以下派单没有被执行，队员没有收到任何指令：\n${rejects.map((r) => `- ${r}`).join('\n')}\n\n` +
+        `你的队员名单：${rosterText || '（空，无人可派）'}。请先输出一行评估标记（<round outcome="..." reason="..."/>），` +
+        `然后改派给名单内的队员或自己完成；被拒的目标不要再次派发。`)
+      if (!turn.ok) throw new Error(turn.error || '回灌回合失败')
+      for (const n of parseRoundNotes(turn.response)) {
+        note(`领队评估：${n.outcome}${n.reason ? ' — ' + n.reason : ''}`)
+      }
+      scanTexts = [turn.delegationText ?? '', turn.response]
+      finalResponse = turn.response
+      return true
+    } catch (e) {
+      note(`⚠ 拒单回灌失败: ${e instanceof Error ? e.message : String(e)}`)
+      return false
+    }
+  }
+
   while (round < budget) {
     const calls = parseDelegatesMerged(...scanTexts)
     // 收编流式期间提前建的单（等待未决建单完成）。seenKeys 是本会话出现过的全部派单
     // key（含已交付的）：领队在回灌/评估回合里复述旧派单标记时，绝不能当成新派单再建。
     const early = await runner.takeEarlySpawns(taskId)
     const fresh = calls.filter((c) => !early.seenKeys.has(`${c.to}\n${c.prompt}`))
-    if (!fresh.length && !early.entries.length) break
+    if (!fresh.length && !early.entries.length) {
+      // 全部派单已在流式阶段处理且无一建单：把拒单原因回灌，让领队当场改派
+      if (await feedbackRejections()) continue
+      break
+    }
     round++
     const roundChildren = new Map<string, DelegateCall>()
     for (const entry of early.entries) {
@@ -451,7 +482,11 @@ export async function runDelegationLoop(
     } else {
       note(`第 ${round} 轮：${early.entries.length} 个子任务已在流式中提前接单`)
     }
-    if (!roundChildren.size) break
+    if (!roundChildren.size) {
+      // 本轮新建的派单全部被护栏拒绝：回灌原因让领队改派，而不是静默结束这轮
+      if (await feedbackRejections()) continue
+      break
+    }
     const childIds = [...roundChildren.keys()]
     allChildren.push(...childIds)
     pushTask(taskId)
