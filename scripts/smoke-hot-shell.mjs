@@ -61,7 +61,15 @@ await build({ entryPoints: [path.join(root, 'src/main/hot/zip.ts')], outfile: zi
 const { createZipStore } = await import(pathToFileURL(zipOut).href)
 
 // —— 复制应用目录到临时区（同卷：临时区也在 D 盘时 rename 才原子；直接放 repo 同盘） ——
+// 启动清扫：失败现场只保留 1 天供排障，更早的残留工作区在此清除，避免根部无限堆积
+for (const d of fs.readdirSync(root)) {
+  if (!d.startsWith('.smoke-hot-shell-')) continue
+  try { if (Date.now() - fs.statSync(path.join(root, d)).mtimeMs > 86_400_000) fs.rmSync(path.join(root, d), { recursive: true, force: true }) } catch { /* 被占用：留给下次清扫 */ }
+}
 const tmpBase = fs.mkdtempSync(path.join(root, '.smoke-hot-shell-'))
+let keepScene = false // 断言失败时短暂保留现场（见尾部失败分支），其余退出路径一律清理
+process.on('exit', () => { if (!keepScene) { try { fs.rmSync(tmpBase, { recursive: true, force: true }) } catch { /* 被占用：留给启动清扫 */ } } })
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => process.exit(sig === 'SIGINT' ? 130 : 143))
 const appDir = path.join(tmpBase, 'app')
 console.log(`[step] 复制打包产物 → ${appDir}（较大，稍候）`)
 fs.cpSync(path.dirname(srcExe), appDir, { recursive: true })
@@ -202,6 +210,7 @@ spawnSync('powershell', ['-NoProfile', '-Command', `Get-CimInstance Win32_Proces
 feeder.kill()
 await sleep(1000)
 if (failed > 0) {
+  keepScene = true
   console.error(`\n[FAIL] SMOKE HOT SHELL FAILED（${failed} 项）。现场保留: ${tmpBase}`)
   try {
     console.error('  hot-debug.log 尾部:', fs.readFileSync(path.join(tmpBase, 'hot-debug.log'), 'utf8').split(/\r?\n/).slice(-10).join('\n'))
@@ -210,7 +219,6 @@ if (failed > 0) {
   console.error('  stderr 尾部:', fs.readFileSync(path.join(tmpBase, 'app-stderr.log'), 'utf8').split(/\r?\n/).slice(-8).join('\n'))
   process.exit(1)
 }
-fs.rmSync(tmpBase, { recursive: true, force: true })
 console.log('\n[ok] SMOKE HOT SHELL: 全绿（staging→dance→relaunch→新壳就位→指针重置→残留清扫）')
 
 function appBaseEscape() {
