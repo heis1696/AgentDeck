@@ -264,7 +264,12 @@ function createTray() {
 }
 
 /** 主进程初始化（原 whenReady 体；单实例锁重试环拿锁晚于 ready 时可直接调用） */
+let initStarted = false
 const initMain = async (): Promise<void> => {
+  // 幂等闸：单实例锁重试环（拿锁晚于 ready 时直接调用）与 whenReady 回调可能先后触发，
+  // 双初始化会双建窗口/双注册 IPC（handler 二次注册即抛）——实测表现为"白+深两个主题窗口"
+  if (initStarted) return
+  initStarted = true
   // Windows 通知身份：不设置时打包版 Notification 静默失效（后台任务完成不弹 toast）
   app.setAppUserModelId('ai.agentdeck.desktop')
   settings = loadSettings()
@@ -569,7 +574,19 @@ const initMain = async (): Promise<void> => {
     isMainIdle: () => runner.isIdle() && !automationBusy,
     relaunchForUpdate: (version) => {
       quitting = true
-      app.relaunch({ args: [...process.argv.slice(1), '--agentdeck-hot-applied', version, '--agentdeck-relaunch-retry'] })
+      // 剥离上一轮热更参数再补新值：逐轮累积会让后续实例带着一堆陈旧的
+      // --agentdeck-hot-applied/--relaunch-retry 启动，干扰取锁重试环与状态上报
+      const stale = new Set(['--agentdeck-hot-applied', '--agentdeck-relaunch-retry', '--agentdeck-hot-fallback'])
+      const cleanArgs: string[] = []
+      const rest = process.argv.slice(1)
+      for (let i = 0; i < rest.length; i++) {
+        if (stale.has(rest[i])) {
+          if (rest[i] === '--agentdeck-hot-applied') i++ // 跳过其版本值参数
+          continue
+        }
+        cleanArgs.push(rest[i])
+      }
+      app.relaunch({ args: [...cleanArgs, '--agentdeck-hot-applied', version, '--agentdeck-relaunch-retry'] })
       app.quit()
     },
     settings: () => settings,

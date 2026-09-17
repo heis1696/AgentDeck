@@ -243,6 +243,13 @@ export class HotUpdater {
   /** 退出时补应用（§5.1 autoInstallOnAppQuit 语义；调用方挂在 before-quit 链） */
   async applyStagedOnQuit(): Promise<void> {
     if (!this.staged) return
+    // 仅空闲时补应用：有任务在跑时退出本来就要停机会话（zcode 侧会看到"已停止"），
+    // 再叠一次版本翻转+重启会让中断与换版互相纠缠（实测：重启闪断、双窗口）——
+    // 宁可放弃本次挂起，留待下次空闲时用户再点一次「开始更新」
+    if (!this.deps.isMainIdle()) {
+      this.staged = null
+      return
+    }
     const version = this.staged.version
     this.staged = null
     const userData = this.deps.getUserDataDir()
