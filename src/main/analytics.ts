@@ -20,6 +20,14 @@ function add(target: UsageAggregate, task: Task) {
   }
 }
 
+/** 本地时区 YYYY-MM-DD，用作每日分桶键 */
+function dayKey(timestamp: number): string {
+  const d = new Date(timestamp)
+  const month = `${d.getMonth() + 1}`.padStart(2, '0')
+  const day = `${d.getDate()}`.padStart(2, '0')
+  return `${d.getFullYear()}-${month}-${day}`
+}
+
 /** Build a stable usage/error report from durable task snapshots. */
 export function buildAnalytics(tasks: Task[], agents: Agent[] = [], since?: number, until = Date.now()): AnalyticsSummary {
   const selected = tasks.filter((task) => {
@@ -29,10 +37,15 @@ export function buildAnalytics(tasks: Task[], agents: Agent[] = [], since?: numb
   const totals = empty()
   const backend = new Map<string, UsageAggregate>()
   const agent = new Map<string, UsageAggregate>()
+  const days = new Map<string, UsageAggregate>()
   const agentNames = new Map(agents.map((item) => [item.id, item.name]))
   const errors = new Map<string, ErrorAggregate>()
   for (const task of selected) {
     add(totals, task)
+    const timestamp = task.endedAt ?? task.startedAt ?? task.createdAt
+    const day = dayKey(timestamp)
+    if (!days.has(day)) days.set(day, empty())
+    add(days.get(day)!, task)
     if (!backend.has(task.backend)) backend.set(task.backend, empty())
     add(backend.get(task.backend)!, task)
     const agentKey = task.agentId ?? '__unassigned'
@@ -61,6 +74,7 @@ export function buildAnalytics(tasks: Task[], agents: Agent[] = [], since?: numb
     totals,
     byBackend: toRows(backend, new Map([...backend.keys()].map((key) => [key, key]))),
     byAgent: toRows(agent, agentNames),
+    byDay: [...days.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([date, value]) => ({ date, ...value })),
     errors: [...errors.values()].sort((a, b) => b.count - a.count || (b.lastSeenAt ?? 0) - (a.lastSeenAt ?? 0))
   }
 }

@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { app } from 'electron'
 import { BACKEND_IDS, type BackendId } from '../shared/types'
+import { FORGE_AGENT_ID, isForgeAgent } from '../shared/forge'
 
 export interface Agent {
   id: string
@@ -80,7 +81,9 @@ export function defaultAgents(): Agent[] {
     { id: 'ag_claude', name: 'Claude', backend: 'claude', color: '#d97757', role: '工程师', systemPrompt: '你是资深全栈工程师，专注高质量代码实现。' },
     { id: 'ag_codex', name: 'Codex', backend: 'codex', color: '#8b95a5', role: '工程师', systemPrompt: '你是务实的工程师，擅长按指令完成编码与文档任务。' },
     { id: 'ag_opencode', name: 'OpenCode', backend: 'opencode', color: '#c084fc', role: '工程师', systemPrompt: '你是通用工程师。' },
-    { id: 'ag_dsh', name: 'DeepSeek', backend: 'dsh', color: '#4d6bfe', role: '分析员', systemPrompt: '你是分析员，擅长调研、分析与方案对比。' }
+    { id: 'ag_dsh', name: 'DeepSeek', backend: 'dsh', color: '#4d6bfe', role: '分析员', systemPrompt: '你是分析员，擅长调研、分析与方案对比。' },
+    // 锻造师：agents:draft 的生成引擎；系统提示词由 agent-crafter 技能提供（agent-forge.ts），故不设 systemPrompt
+    { id: FORGE_AGENT_ID, name: '锻造师', backend: 'zcode', color: '#f59e0b', role: '锻造', note: '专职生成其它 Agent——改我的平台/模型即换生成引擎；无需系统提示词（由 agent-crafter 技能提供）' }
   ]
 }
 
@@ -94,7 +97,11 @@ export function loadAgents(): Agent[] {
   if (!saved) return defaultAgents()
   // 迁移：补上保存文件里缺失的平台预置队员（如新增的 dsh）
   const have = new Set(saved.map((a) => a.backend))
-  const missing = defaultAgents().filter((d) => !have.has(d.backend))
+  // 锻造师按 id 补缺：平台与领队同为 zcode，按 backend 补缺盖不住它
+  const missing = defaultAgents().filter((d) => !have.has(d.backend) && !isForgeAgent(d))
+  const haveIds = new Set(saved.map((a) => a.id))
+  const forge = defaultAgents().find(isForgeAgent)
+  if (forge && !haveIds.has(forge.id)) missing.push(forge)
   const merged = missing.length ? dedupeAgentNames([...saved, ...missing]) : dedupeAgentNames(saved)
   return merged
 }

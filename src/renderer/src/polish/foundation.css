@@ -35,6 +35,13 @@ html.light {
   --teal-soft: var(--accent-soft);
   --teal-line: color-mix(in srgb, var(--accent) 36%, transparent);
 }
+/* 0.12 代际的墨色家族：styles.css 只给了暗色值且 light 块从未重映射，
+   亮色下 .page-title 等 white-on-white；这里统一桥接到字色令牌 */
+html.light {
+  --ink-strong: var(--text);
+  --ink: var(--text);
+  --ink-muted: var(--text-dim);
+}
 
 /* ---- 主 CTA（新建任务）：唯一的 accent 电弧光 ---- */
 .new-task-btn,

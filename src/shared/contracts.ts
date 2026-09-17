@@ -1,5 +1,6 @@
 import type { AcceptanceCriterion, Automation, AppSettings, AnalyticsSummary, Comment, Goal, GoalApprovalSnapshot, GoalCheckpoint, GoalEvolutionPatch, GoalSpecDecision, GoalSpecSnapshot, GoalRun, Issue, IssuePriority, IssueStatus, Run, RunTrigger, RuntimeSnapshot, Task, TaskEvent } from './types'
 import type { SkillDetail, SkillMeta, SkillTarget, SyncState } from './skills'
+import type { DraftResult, ImproveResult } from './forge'
 import type { Meeting, MeetingCreateInput } from './meeting'
 export type { MeetingCreateInput } from './meeting'
 import type {
@@ -251,6 +252,10 @@ export interface AgentDeckApi {
     list: () => Promise<AgentInfo[]>
     save: (list: AgentInfo[]) => Promise<AgentInfo[]>
     models: (backend: string) => Promise<AgentModelCatalog>
+    /** 锻造师：一句描述 → 草稿；描述含糊时先返回澄清问题（提供 answers 即强制出稿） */
+    draft: (description: string, answers?: string[]) => Promise<DraftResult>
+    /** 锻造师：按反馈改进既有 agent 的定义（backend/预设/可驱使不在改进范围） */
+    improve: (agentId: string, feedback: string) => Promise<ImproveResult>
   }
   presets: {
     list: () => Promise<PresetInfo[]>

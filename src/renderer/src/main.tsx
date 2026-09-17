@@ -7,6 +7,8 @@ import './polish/foundation.css'
 import './polish/issue-home.css'
 import './polish/board.css'
 import './polish/detail.css'
+import './polish/usage.css'
+import './polish/team.css'
 
 createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

@@ -295,6 +295,8 @@ export interface AnalyticsSummary {
   byBackend: Array<UsageAggregate & { key: string; label: string }>
   byAgent: Array<UsageAggregate & { key: string; label: string }>
   errors: ErrorAggregate[]
+  /** 每日聚合（本地时区按天分桶，升序；零消耗日不产出） */
+  byDay: Array<UsageAggregate & { date: string }>
 }
 
 /** 失败分类（main/failure.ts 产出；code 稳定，文案可变） */

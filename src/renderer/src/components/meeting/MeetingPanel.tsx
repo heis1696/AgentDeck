@@ -3,6 +3,7 @@ import { MessageSquare, Plus, Users } from 'lucide-react'
 import { bridge, type AgentInfo } from '../../api'
 import { toast } from '../../ui/Toasts'
 import { captains } from './captains'
+import { isForgeAgent } from '../../../../shared/forge'
 import { MeetingCard, MEETING_STATUS_LABEL } from './MeetingCard'
 import type { Meeting } from '../../../../shared/meeting'
 
@@ -35,7 +36,7 @@ export function MeetingPanel({ issueId }: { issueId: string }) {
     })
   }, [issueId])
 
-  const eligible = useMemo(() => agents.filter((agent) => agent.backend !== 'dsh'), [agents])
+  const eligible = useMemo(() => agents.filter((agent) => agent.backend !== 'dsh' && !isForgeAgent(agent)), [agents])
   const run = async (action: () => Promise<{ ok: boolean; error?: string }>) => {
     setBusy(true)
     try {

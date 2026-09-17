@@ -55,6 +55,33 @@ let agents: Agent[]
 let presets: ApiPreset[]
 const backends = new Map<string, AgentBackend>()
 
+// —— dev 数据目录隔离：dev 与打包版共用 userData 会互踩同一份数据（任一侧启动恢复都把对方
+// running 的任务标记中断并反复补写同文评论，issues/index.json 双向覆盖打穿 runId 去重），
+// dev 固定落到独立的 agentdeck-dev。必须先于单实例锁声明：锁以 userData 为键，dev 只与 dev 互斥。
+// bootstrap 里显式指定的 AGENTDECK_USER_DATA_DIR 优先（测试隔离通道不被隐式重定向劫持） ——
+if (!app.isPackaged && !process.env.AGENTDECK_USER_DATA_DIR) {
+  app.setPath('userData', path.join(app.getPath('appData'), 'agentdeck-dev'))
+  seedDevDataSnapshot()
+}
+
+/** dev 数据快照：首启把生产目录的应用数据（配置 + 各 store）拷入 agentdeck-dev，之后 dev 独立
+ *  读写、永不回写生产。只拷数据文件——Chromium 缓存与 sidecar-*.json（活动进程状态）不拷；
+ *  AGENTDECK_DEV_SEED=1 可强制用生产快照覆盖刷新（同名文件被替换，dev 独有数据保留）。 */
+function seedDevDataSnapshot(): void {
+  const dev = app.getPath('userData')
+  const prod = path.join(app.getPath('appData'), 'agentdeck')
+  if (!fs.existsSync(prod)) return
+  const seeded = fs.existsSync(path.join(dev, 'settings.json')) || fs.existsSync(path.join(dev, 'tasks'))
+  if (seeded && process.env.AGENTDECK_DEV_SEED !== '1') return
+  const cp = (name: string, recursive: boolean) => {
+    try {
+      fs.cpSync(path.join(prod, name), path.join(dev, name), recursive ? { recursive: true } : {})
+    } catch { /* 单项失败跳过，不阻断启动 */ }
+  }
+  for (const name of ['settings.json', 'agents.json', 'api-presets.json']) if (fs.existsSync(path.join(prod, name))) cp(name, false)
+  for (const name of ['tasks', 'issues', 'goals', 'meetings', 'automations']) if (fs.existsSync(path.join(prod, name))) cp(name, true)
+}
+
 // —— 单实例锁（设计 §7.1）：声明先于 whenReady 注册；relaunch 的退出-取锁竞态由重试环吸收 ——
 const focusMainWindow = () => {
   if (!mainWindow) return

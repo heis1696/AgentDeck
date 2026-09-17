@@ -4,6 +4,7 @@ import { bridge, type AgentInfo } from '../api'
 import { toast } from '../ui/Toasts'
 import { captains } from './meeting/captains'
 import type { Task } from '../../../shared/types'
+import { isForgeAgent } from '../../../shared/forge'
 
 /** 新建 Issue 的三种类型：普通任务 / 目标模式（自动推进）/ 团队会议（三队长研讨） */
 type IssueKind = 'task' | 'goal' | 'meeting'
@@ -86,8 +87,10 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
     bridge.agents.list().then((list) => {
       setAgents(list)
       if (list.length && !draft.agentId) {
-        draft.agentId = list[0].id
-        setAgentId(list[0].id)
+        // 默认执行者跳过锻造师（专职生成 Agent，不接任务）
+        const first = list.find((a) => !isForgeAgent(a)) ?? list[0]
+        draft.agentId = first.id
+        setAgentId(first.id)
       }
     })
   }, [])
@@ -260,7 +263,7 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
           <div className="field">
             <span>执行 Agent{isLeader ? '（领队可按需拆分任务）' : ''}</span>
             <div className="agent-picker">
-              {agents.map((a) => (
+              {agents.filter((a) => !isForgeAgent(a)).map((a) => (
                 <button
                   key={a.id}
                   className={`agent-pick ${a.id === agentId ? 'active' : ''}`}

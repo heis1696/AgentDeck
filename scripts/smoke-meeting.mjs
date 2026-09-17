@@ -56,10 +56,22 @@ const backend = {
     }, 5)
     const emit = (content) => {
       const responseFor = (value) => {
-        if (agent === 'alpha') return '<stance verdict="agree" grounds="report ready"/>'
-        if (agent === 'beta') return mode === 'hard-error' ? null : mode === 'budget'
-          ? '<objection ref="src/a.ts:4" priority="high">needs proof</objection>\n<stance verdict="disagree" grounds="not enough"/>'
-          : '<stance verdict="agree" grounds="looks good"/>'
+        if (agent === 'alpha') {
+          if (value.includes('答辩轮')) {
+            return mode === 'budget'
+              ? '{"decisions":[],"objections":[{"text":"needs proof","ref":"src/a.ts:4","resolved":false}],"actionItems":[],"openQuestions":["evidence pending"]}\n<stance verdict="disagree" grounds="cannot verify"/>'
+              : '{"decisions":["adjust"],"objections":[{"text":"needs proof","ref":"src/a.ts:4","resolved":true,"resolution":"verified"}],"actionItems":[],"openQuestions":[]}\n<stance verdict="agree" grounds="addressed"/>'
+          }
+          return '<stance verdict="agree" grounds="report ready"/>'
+        }
+        if (agent === 'beta') {
+          return mode === 'hard-error' ? null : mode === 'budget'
+            ? '<objection ref="src/a.ts:4" priority="high">needs proof</objection>\n<stance verdict="disagree" grounds="not enough"/>'
+            : '<stance verdict="agree" grounds="looks good"/>'
+        }
+        if (value.includes('综合轮')) {
+          return '{"decisions":["ship"],"objections":[],"actionItems":[{"title":"run release checks","owner":"Alpha","acceptance":["checks pass"]}],"openQuestions":[]}\n<stance verdict="agree" grounds="accepted"/>'
+        }
         return mode === 'budget'
           ? '{"decisions":["hold"],"objections":[{"text":"needs proof","ref":"src/a.ts:4","resolved":false}],"actionItems":[],"openQuestions":["prove it"]}\n<stance verdict="agree" grounds="partial"/>'
           : '{"decisions":["ship"],"objections":[],"actionItems":[{"title":"run release checks","owner":"Alpha","acceptance":["checks pass"]}],"openQuestions":[]}\n<stance verdict="agree" grounds="accepted"/>'
@@ -91,8 +103,9 @@ async function makeFixture() {
   runner.attachTeam(() => agents)
   const offices = new AgentSessionRegistry({ store: taskStore, taskService, runner, getAgents: () => agents, waitPollMs: 5, waitTimeoutMs: 2_000 })
   const meetingStore = new MeetingStore(data)
-  const controller = new MeetingController({ store: meetingStore, offices, getAgents: () => agents, taskService, startTask: (taskId) => { const task = taskStore.get(taskId); if (task?.status === 'queued') taskStore.update(taskId, { parked: undefined }) }, issueExists: () => true, now: Date.now })
-  return { data, taskStore, taskService, runner, offices, controller, meetingStore, agents }
+  const mirrored = []
+  const controller = new MeetingController({ store: meetingStore, offices, getAgents: () => agents, taskService, startTask: (taskId) => { const task = taskStore.get(taskId); if (task?.status === 'queued') taskStore.update(taskId, { parked: undefined }) }, issueExists: () => true, addIssueComment: (issueId, content, authorId) => { mirrored.push({ issueId, content, authorId }) }, now: Date.now })
+  return { data, taskStore, taskService, runner, offices, controller, meetingStore, agents, mirrored }
 }
 
 const fixture = await makeFixture()
@@ -110,6 +123,11 @@ check(actionTask?.parked === true && actionTask.status === 'queued', 'conclusion
 const approved = fixture.controller.approveAction(meeting.id, 0, 'approved')
 const approvedTask = action?.taskId ? fixture.taskStore.get(action.taskId) : undefined
 check(approved.ok && approvedTask?.parked !== true, 'approval releases action task from parked gate')
+const meetingComments = fixture.mirrored.filter((row) => row.issueId === 'iss_1')
+check(meetingComments.length >= 3, 'every speech mirrors to the issue timeline')
+check(['alpha', 'beta', 'gamma'].every((id) => meetingComments.some((row) => row.authorId === id)), 'mirrored comments carry speaker author ids')
+check(meetingComments.some((row) => row.content.includes('轮/汇报')) && meetingComments.some((row) => row.content.includes('轮/质疑')) && meetingComments.some((row) => row.content.includes('轮/综合')), 'mirrored comments label meeting, round and phase')
+check(phaseCalls.some((call) => call.agent === 'gamma' && call.prompt.includes('综合轮')), 'designer synthesis turn finalizes minutes')
 
 mode = 'budget'
 const budgetMeeting = fixture.controller.create({ issueId: 'iss_2', topic: 'blocked decision', participants: [
@@ -120,6 +138,9 @@ check(budgetResult.ok && budgetResult.meeting?.status === 'waiting_user', 'budge
 check(budgetResult.meeting?.stopReason === 'budget', 'budget stopReason is distinct from converged')
 check(budgetResult.meeting?.minutes.at(-1)?.objections.some((objection) => !objection.resolved), 'forced synthesis keeps unresolved objections explicit')
 check(synthesisCalls >= 1, 'budget path runs a real synthesis turn before waiting')
+
+check(fixture.mirrored.filter((row) => row.issueId === 'iss_2').some((row) => row.content.includes('轮/答辩')), 'defense speeches mirror with phase label')
+check(phaseCalls.some((call) => call.agent === 'alpha' && call.prompt.includes('答辩轮')), 'defense turn is answered by the challenged reporter, not the designer')
 
 mode = 'hard-error'
 const failedMeeting = fixture.controller.create({ issueId: 'iss_3', topic: 'provider failure', participants: [

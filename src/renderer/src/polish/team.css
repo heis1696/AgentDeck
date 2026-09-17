@@ -1,0 +1,149 @@
+/* ============================================================
+   Agent（队员）页重制
+   设计主张：与用量页同族的"驾驶舱"语言 —— 全宽自适应、顶部
+   极光氛围层、卡片浮于氛围之上；徽章系统承载平台/模型/预设/
+   领队身份。tm- 前缀为本页专属命名空间，全部颜色取自 tokens。
+   响应式：容器查询（内容区宽 = 视口 - 侧栏）。
+   ============================================================ */
+
+/* ---- 页骨架：页头常驻，内容区独立滚动 ---- */
+.team-page {
+  flex: 1; min-height: 0;
+  display: flex; flex-direction: column;
+  padding: 0; overflow: hidden;
+  background: var(--surface-0);
+  container: team / inline-size;
+}
+.team-header {
+  flex-shrink: 0; z-index: 2;
+  padding: 0 clamp(18px, 2.4vw, 34px);
+  min-height: 58px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-raised) 72%, transparent);
+}
+.team-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+
+/* ---- 内容区 ---- */
+.team-body {
+  position: relative; flex: 1; min-height: 0;
+  overflow-y: auto;
+  padding: 0 clamp(18px, 2.4vw, 34px) 20px;
+}
+.team-body > * { position: relative; z-index: 1; }
+
+/* ---- 氛围层：单侧主光 + 微点阵，较用量页更收敛 ---- */
+.team-aurora {
+  position: absolute; z-index: 0; inset: 0 0 auto; height: 340px;
+  pointer-events: none;
+  background:
+    radial-gradient(720px 280px at 12% -12%, var(--accent-glow), transparent 62%),
+    radial-gradient(color-mix(in srgb, var(--accent) 26%, transparent) 1px, transparent 1.4px);
+  background-size: auto, 26px 26px;
+  opacity: 0.85;
+  -webkit-mask-image: linear-gradient(180deg, #000 40%, transparent);
+  mask-image: linear-gradient(180deg, #000 40%, transparent);
+}
+html.light .team-aurora { opacity: 0.4; }
+
+/* ---- 分区标题 ---- */
+.tm-section { margin: 0 0 26px; }
+.tm-section:first-of-type { padding-top: clamp(18px, 2.2vw, 28px); }
+.tm-section-head {
+  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  margin: 0 0 14px;
+}
+.tm-section-head h3 {
+  display: inline-flex; align-items: center; gap: 7px; margin: 0;
+  font-size: var(--text-title-sm); font-weight: 650;
+}
+.tm-hicon { color: var(--text-faint); }
+.tm-hicon-accent { color: var(--accent); }
+.tm-section-desc { color: var(--text-faint); font-size: var(--text-caption); min-width: 0; }
+
+/* ---- 卡片网格：auto-fill 随容器流动 ---- */
+.tm-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(272px, 1fr)); gap: 12px; }
+
+/* ---- 卡片：头像+身份行 / 徽章行 / 描述行 ---- */
+.tm-card {
+  display: flex; flex-direction: column; min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--border); border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--bg-raised) 92%, transparent);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.1);
+  cursor: pointer;
+  transition: border-color var(--duration-base) var(--ease-in-out), transform var(--duration-base) var(--ease-in-out), box-shadow var(--duration-base) var(--ease-in-out);
+  animation: tm-fade-up 0.35s var(--ease-out) both;
+}
+.tm-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+  transform: translateY(-1px);
+  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.14);
+}
+.tm-card-top { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.tm-card .agent-avatar {
+  width: 40px; height: 40px; border-radius: 11px; font-size: 15px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14), 0 3px 10px rgba(0, 0, 0, 0.22);
+}
+.tm-avatar-preset { background: var(--bg-hover); color: var(--text-dim); box-shadow: inset 0 0 0 1px var(--border); }
+.tm-id { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.tm-name {
+  font-size: var(--text-body); font-weight: 650; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tm-role { font-size: var(--text-micro); color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tm-acts { display: flex; gap: 2px; margin-left: auto; flex: none; opacity: 0; transition: opacity var(--duration-quick) var(--ease-in-out); }
+.tm-card:hover .tm-acts, .tm-card:focus-visible .tm-acts { opacity: 1; }
+.tm-act {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; border: 0; border-radius: var(--radius-sm);
+  background: transparent; color: var(--text-faint); cursor: pointer;
+  transition: background var(--duration-quick) var(--ease-in-out), color var(--duration-quick) var(--ease-in-out);
+}
+.tm-act:hover { background: var(--bg-hover); color: var(--accent); }
+.tm-act-danger:hover { background: var(--status-failed-bg); color: var(--status-failed); }
+
+/* 徽章行：平台 / 模型 / 锻造师 / 领队 / 预设 */
+.tm-badges { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; min-width: 0; }
+.tm-badge {
+  display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
+  padding: 2px 8px; border-radius: var(--radius-pill);
+  background: var(--bg-hover); color: var(--text-dim);
+  font-size: 10.5px; font-weight: 550;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tm-badge-mono { font-family: var(--font-mono); color: var(--text-faint); }
+.tm-badge-forge { background: color-mix(in srgb, #8f7ff0 16%, transparent); color: #a99cf4; }
+html.light .tm-badge-forge { background: color-mix(in srgb, #8f7ff0 14%, transparent); color: #6a58c8; }
+.tm-badge-lead { background: var(--accent-soft); color: var(--accent); }
+.tm-badge-preset { color: var(--text-faint); }
+
+/* 描述行：最多两行截断 */
+.tm-note {
+  margin: 10px 0 0; color: var(--text-dim); font-size: var(--text-caption); line-height: 1.5;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.tm-note-mono { font-family: var(--font-mono); font-size: 11px; color: var(--text-faint); }
+
+/* ---- 空态 ---- */
+.tm-empty {
+  grid-column: 1 / -1;
+  display: flex; align-items: center; gap: 10px;
+  padding: 22px 18px;
+  border: 1px dashed var(--border); border-radius: var(--radius-lg);
+  color: var(--text-faint); font-size: var(--text-caption);
+}
+.tm-empty svg { flex: none; }
+
+/* ---- 动效 ---- */
+@keyframes tm-fade-up { from { opacity: 0; transform: translateY(6px); } }
+
+/* ---- 响应式（容器查询） ---- */
+@container team (max-width: 720px) {
+  .tm-grid { grid-template-columns: 1fr; }
+  .tm-section-desc { display: none; }
+}
+
+/* ---- 降低动画强度 ---- */
+@media (prefers-reduced-motion: reduce) {
+  .tm-card { animation: none; }
+}

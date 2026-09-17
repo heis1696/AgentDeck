@@ -2,6 +2,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { Task, TaskEvent, AppSettings, Issue, Run, Comment, Automation, RuntimeSnapshot, AnalyticsSummary, IssuePriority, IssueStatus, RunTrigger } from '../shared/types'
 import type { SkillDetail, SkillMeta, SkillTarget, SyncState } from '../shared/skills'
+import type { DraftResult, ImproveResult } from '../shared/forge'
 import type {
   CatalogEntry,
   DiscoveredAsset,
@@ -171,7 +172,9 @@ const api: AgentDeckApi = {
     save: (list: Array<AgentInfo>) =>
       ipcRenderer.invoke('agents:save', list) as Promise<Array<AgentInfo>>,
     models: (backend: string): Promise<AgentModelCatalog> =>
-      ipcRenderer.invoke('agents:models', backend)
+      ipcRenderer.invoke('agents:models', backend),
+    draft: (description: string, answers?: string[]): Promise<DraftResult> => ipcRenderer.invoke('agents:draft', description, answers ?? null),
+    improve: (agentId: string, feedback: string): Promise<ImproveResult> => ipcRenderer.invoke('agents:improve', agentId, feedback)
   },
   presets: {
     list: (): Promise<Array<PresetInfo>> => ipcRenderer.invoke('presets:list'),
