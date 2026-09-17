@@ -72,8 +72,11 @@ export function compareSemver(a: string, b: string): number | null {
     if (left.core[i] !== right.core[i]) return left.core[i] < right.core[i] ? -1 : 1
   }
   if (!left.pre && !right.pre) return 0
-  if (!left.pre) return 1
-  if (!right.pre) return -1
+  // 本产品版本语义（§6.3）：<基座>-hot.<n> 是"基座之上叠加的热更版"，高于无后缀基座
+  // （与标准 semver 的 prerelease 排序相反）：否则载荷 0.21.0-hot.4 生效后，渲染层
+  // manifest 的 minMainVersion=0.21.0 会被误判为"高于当前主进程"而遭门禁拒绝。
+  if (!left.pre) return -1
+  if (!right.pre) return 1
   for (let i = 0; i < Math.max(left.pre.length, right.pre.length); i++) {
     const x = left.pre[i]
     const y = right.pre[i]
