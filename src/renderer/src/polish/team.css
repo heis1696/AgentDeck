@@ -21,6 +21,10 @@
   border-bottom: 1px solid var(--border);
   background: color-mix(in srgb, var(--bg-raised) 72%, transparent);
 }
+.team-header .page-title-row { flex: 1 1 0; min-width: 0; }
+.team-header .page-title { flex: none; }
+.team-header .page-count { flex: none; }
+.team-header .page-desc { flex: 1 1 0; min-width: 20px; }
 .team-actions { display: flex; align-items: center; gap: 8px; flex: none; }
 
 /* ---- 内容区 ---- */

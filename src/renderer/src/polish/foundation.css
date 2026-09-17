@@ -35,12 +35,19 @@ html.light {
   --teal-soft: var(--accent-soft);
   --teal-line: color-mix(in srgb, var(--accent) 36%, transparent);
 }
-/* 0.12 代际的墨色家族：styles.css 只给了暗色值且 light 块从未重映射，
-   亮色下 .page-title 等 white-on-white；这里统一桥接到字色令牌 */
+/* 0.12 代际的墨色家族与表面四层：styles.css 只给了暗色值且 light 块
+   从未重映射（亮色下 .page-title 白字白底、.team-page 画布黑底割裂），
+   这里统一桥接到主题令牌 */
 html.light {
   --ink-strong: var(--text);
   --ink: var(--text);
   --ink-muted: var(--text-dim);
+  --surface-0: #f3f7f7;
+  --surface-1: #ffffff;
+  --surface-2: #ffffff;
+  --surface-3: #ffffff;
+  --line-soft: rgba(23, 35, 42, 0.1);
+  --line-strong: rgba(23, 35, 42, 0.18);
 }
 
 /* ---- 主 CTA（新建任务）：唯一的 accent 电弧光 ---- */
