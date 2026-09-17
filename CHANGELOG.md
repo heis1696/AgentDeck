@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-09-17
+
 ### 新增
 
 - **免安装热更阶段3-4：feed 上线 + L0 壳自替换**（docs/HOT-UPDATE-IMPL-DESIGN.md §9 / docs/INSTALLER-FREE-HOT-UPDATE.md §5）：`DEFAULT_FEED_BASE` 指向用户阿里云 IP（域名审核后换 HTTPS 重发壳）；`release:hot` 增 shell 通道（electron-builder --dir 旁路打包 → store-only zip，exe 在根，72 文件自检 → 签名进 stable/shell + versions/shell，并产出免安装分发物 dist/agentdeck-版本-portable-win-x64.zip，§9.2 zip 渠道 GA）；部署一键化 `deploy:hot`（scp + nginx reload，env 覆盖 FEED_HOST/USER/DIR）与 docs/HOT-FEED-DEPLOY.md（nginx 配置/安全组/备案换端口提示/服务端回滚/域名迁移/NSIS 并行期）；L0 壳自替换三棒机制——存活期放无锁文件 → swap helper（本 exe RUN_AS_NODE、detached 逃逸 Chromium Job 的 KILL_ON_JOB_CLOSE）等主进程退出后文件级腾挪（被占用目标改名 .old-让位，E3）→ finisher-bin 私用副本 exe 收尾 icudtl/v8 快照自举死角 → 拉起新壳；§6 协同换壳清 L1+L2 指针，启动时 sweepOldShellDirs 清扫让位残留（保留最新一批作回滚源）；updater 两段式 shell apply（staging→用户确认执行，§9.3 半自动）+ rollback('shell') 反向腾挪 + UpdatePanel 壳通道确认按钮；zip.ts 改 original-fs 绕 Electron 对 .asar 路径的读写劫持；AGENTDECK_HOT_DEBUG_LOG 状态流观测通道。smoke:hot-shell 真机演练全绿（复制打包产物→本地 feed→自动两段 apply→断言进程重启/新壳就位/指针重置/让位留证/staging 收尾；受限环境对 2 个被占用数据文件容忍文档化降级），指针四态与载荷端到端回归全绿。
