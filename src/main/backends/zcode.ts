@@ -4,7 +4,9 @@
 //   - 模型不随 create/resume 传（strict schema，create 带了执行期也带不住 options）：
 //     统一在会话建立后走 session/setModel {sessionId, model:{providerId, modelId,
 //     options?:{reasoningLevel}}}，reasoning 模型必须带 level（报 "Reasoning level is
-//     required"）；旧 runtimeModel 内联块已整体移除，传了报 Unrecognized key
+//     required"）；旧 runtimeModel 内联块已整体移除，传了报 Unrecognized key。
+//     resume 后无条件 setModel（钉选或目录默认）——旧协议会话的历史模型在新注册表
+//     里不可解析，缺了这步回合报 "Select a model before continuing"
 //   - session/create 会先收到服务端请求 session/requestRuntimePreferences（必须应答扁平对象）
 //   - session/subscribe {sessionId, deliveryKind:"desktop-continuous"} 开启事件推送
 //   - session/send {sessionId, content} 派发提示词
@@ -144,6 +146,8 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
       /** 最后一条 assistant 消息：自上一次工具活动以来累计的文本增量 */
       let lastSegment = ''
       let lastTurnEnd: { response: string; ok: boolean; error?: string } | null = null
+      /** 回合内最近一条错误事件（payload.error），终态缺 errorMessage 时兜底 */
+      let lastTurnError = ''
       /** 本回合是否仍在进行（send 串行化判断用） */
       let turnActive = false
       /**
@@ -222,6 +226,13 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
         const event = sessionEvent(m)
         if (event) {
           const { type, payload } = event
+          // 回合级错误（invalid_model_request 等）以 payload.error 单独下发、不带在终态里，
+          // 先记住最近一条，终态无 errorMessage 时用它还原真实原因
+          const turnError = asRecord(payload.error)
+          if (turnError.message || turnError.code) {
+            lastTurnError = asString(turnError.message) || asString(turnError.code)
+            emit({ kind: 'status', text: `⚠ ${lastTurnError}` })
+          }
           if (type === 'model.streaming') {
             const k = asString(payload.kind)
             if (k === 'text_delta') {
@@ -309,7 +320,7 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
               response: currentText,
               ok: !failed && !interrupted,
               error: failed
-                ? (asString(payload.errorMessage) || asString(payload.errorCode) || `turn ended: ${type}`)
+                ? (asString(payload.errorMessage) || asString(payload.errorCode) || lastTurnError || `turn ended: ${type}`)
                 : interrupted
                   ? `turn interrupted: ${asString(payload.resultType) || 'user stopped'}`
                   : undefined
@@ -334,12 +345,14 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
           const telemetry = asRecord(m.params)
           const kind: string = String(telemetry.kind ?? '')
           if (kind === 'turn.terminal') {
-            // 备用终态信号：若尚未触发 handleTurnEnd
+            // 备用终态信号：若尚未触发 handleTurnEnd。新版 CLI 不少失败（如
+            // CONFIGURATION_ERROR "Select a model before continuing"）只走 telemetry
+            // 且 errorMessage 只在这里——必须透出，否则只剩 "turn ended: failed"
             if (!lastTurnEnd) {
               handleTurnEnd({
                 response: currentText,
                 ok: telemetry.status === 'success',
-                error: telemetry.status === 'success' ? undefined : `turn ended: ${telemetry.status}`
+                error: telemetry.status === 'success' ? undefined : (asString(telemetry.errorMessage) || asString(telemetry.errorCode) || lastTurnError || `turn ended: ${telemetry.status}`)
               })
               // 只有在走备用路径时才补 usage（正常路径已由 session/event 发过）
               const u = telemetry
@@ -414,10 +427,15 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
       }
       // 新协议：模型一律经 session/setModel 设置（create 的 model 参数执行期带不住
       // options，reasoning 模型会报 "Reasoning level is required"；setModel 是
-      // 官方 schema 里唯一带 options 的入口），resume/create 两路在此汇合
-      if (modelSelection) {
-        await conn.request('session/setModel', { sessionId, model: modelSelection })
-        emit({ kind: 'status', text: `模型已设置: ${modelSelection.providerId}/${modelSelection.modelId}` })
+      // 官方 schema 里唯一带 options 的入口）。resume 无条件设置（钉选或目录默认）：
+      // 旧协议会话的历史模型（内联注册表时代的 zai/*）在新注册表里不可解析，resume
+      // 后会话无可用模型，回合在 model_creation 阶段报 CONFIGURATION_ERROR
+      // "Select a model before continuing"——等价于旧 runtimeModel 每次 resume 重传。
+      // create 不带模型时服务端自选默认（实测可用），仅钉选时设置
+      const selection = resumeSessionId ? (modelSelection ?? buildModelSelection()) : modelSelection
+      if (selection) {
+        await conn.request('session/setModel', { sessionId, model: selection })
+        emit({ kind: 'status', text: `模型已设置: ${selection.providerId}/${selection.modelId}` })
       }
       if (!sessionId) throw new Error('会话创建/resume 未返回 sessionId')
       sessionIdHolder.value = sessionId
@@ -426,6 +444,7 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
       currentText = ''
       lastSegment = ''
       lastTurnEnd = null
+      lastTurnError = ''
       textOverflowed = false
       turnActive = true
       await conn.request('session/send', { sessionId, content: prompt })
@@ -457,6 +476,7 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
           currentText = ''
           lastSegment = ''
           lastTurnEnd = null
+          lastTurnError = ''
           textOverflowed = false
           turnActive = true
           let timer: NodeJS.Timeout | undefined

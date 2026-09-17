@@ -10,6 +10,9 @@
 
 ### 修复
 
+- **旧协议会话 resume 后回合必败（"Select a model before continuing"）**：内联注册表时代建立的老会话，其历史模型（如 `zai/*`）在新版 v2 注册表里不可解析——resume 后会话无可用模型，回合在 model_creation 阶段报 CONFIGURATION_ERROR。现在 resume 后无条件 `session/setModel`（agent 钉死模型，缺省取目录默认），等价于旧 runtimeModel 每次重传；create 不带模型时服务端自选默认（实测可用），仅钉选时设置。
+- **回合失败原因透出（新 CLI 错误只在 telemetry 通道）**：不少失败（CONFIGURATION_ERROR 等）的 errorMessage 只在 `telemetry/turn.terminal` 下发、不带在 `session/event` 终态里，此前只能报出干巴巴的 "turn ended: failed"。备用终态路径现在透出 telemetry 的 errorMessage/errorCode；`payload.error` 单独下发的回合级错误也记最近一条（lastTurnError），终态缺 errorMessage 时兜底还原真实原因，并以 ⚠ status 事件实时提示；每回合开始重置。
+
 - **zcode 后端拉起即退（新版桌面端 provider 配置迁移）**：app-server 以文件入口运行时只在 `<bundle>/provider/` 及其上溯 5 级 `config/provider/` 找 `zcode-builtin.json`；新版 ZCode 桌面端把它挪到 `resources/config/provider/`（旧位置随更新被清），导致拉起即退出（code 1「无法定位 CLI ZCode Built-in Provider Config」）。现在 probe/start 前检测补齐：两处都不在时从新版桌面端布局或 `~/.zcode/v2/runtime/provider/` 运行时缓存（取最新 mtime）复制；仍失败时报错提示重启 agentdeck 再试。`scripts/fixtures/provider/` 附样本配置。
 
 ## [0.21.0] - 2026-09-17
