@@ -2,7 +2,7 @@
 // 私钥只在 CI secret / 离线，绝不进仓库（§9.5）。
 
 export const TRUST_KEYS: Record<string, string> = {
-  'ad-2026-09': '7c5d7bf8b60bb01d656dc2a079405d87c5c8fa1bc3872cf8f7077bee9b165937'
+  'ad-2026-09-r2': '4eb1c26ada2804b52f61935a5228c304e0f003c24498132b2494521cc9047248'
 }
 
 // feed 基址：用户阿里云公网 IP 先行（域名审核中；Ed25519 验签兜底内容真实性，§9.1）；
