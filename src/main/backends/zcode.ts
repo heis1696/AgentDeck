@@ -16,6 +16,7 @@ import { compactToolArgs, mergeTurnTexts as mergeTexts, runtimePreferences, sess
 import {
   buildRuntimeModelFromCliConfig as buildRuntimeModel,
   ensureZcodeCliConfig as ensureCliConfig,
+  ensureZcodeCliProviderConfig as ensureProviderConfig,
   findZcodeBundle as findBundle,
   listZcodeModels as listModels,
   resolveNodeRuntime as resolveNode,
@@ -105,6 +106,8 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
       const { zcodePath, nodePath } = getPaths()
       const bundle = findBundle(zcodePath || undefined)
       if (!bundle) return { ok: false, detail: '找不到 zcode.cjs（可在设置里手动指定路径）' }
+      const provider = ensureProviderConfig(bundle)
+      if (!provider.ok) return { ok: false, detail: `${provider.detail}（ZCode 桌面端刚更新过的话重启一次 agentdeck 再试）` }
       const node = resolveNode(nodePath || undefined)
       const nodeNote =
         node.source === 'fallback-electron'
@@ -112,12 +115,14 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
           : `node: ${node.path}`
       const cfg = ensureCliConfig()
       if (!cfg.ok) return { ok: false, detail: `${cfg.detail} · ${nodeNote}` }
-      return { ok: node.source !== 'fallback-electron', detail: `${bundle} · ${cfg.detail} · ${nodeNote}` }
+      return { ok: node.source !== 'fallback-electron', detail: `${bundle} · ${provider.detail} · ${cfg.detail} · ${nodeNote}` }
     },
     async start({ prompt, workdir, mode, model, connection, events, resumeSessionId }) {
       const { nodePath, zcodePath } = getPaths()
       const bundle = findBundle(zcodePath || undefined)
       if (!bundle) throw new Error('找不到 zcode.cjs')
+      const provider = ensureProviderConfig(bundle)
+      if (!provider.ok) throw new Error(provider.detail)
       const cfgCheck = ensureCliConfig()
       if (!cfgCheck.ok) throw new Error(cfgCheck.detail)
 

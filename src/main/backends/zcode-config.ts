@@ -101,3 +101,48 @@ export function listZcodeModels(): { models: string[]; defaultModel?: string } {
     return { models, ...(defaultModel ? { defaultModel } : {}) }
   } catch { return { models: [] } }
 }
+
+/**
+ * 补齐 CLI 内置 Provider 配置（zcode-builtin.json）。
+ * app-server 以文件入口运行时只在 <bundle 目录>/provider/ 与其上溯 5 级的
+ * config/provider/ 两处找该文件；新版 ZCode 桌面端把它挪到了 resources/config/provider/
+ * （resources/glm/ 里的旧位置随更新被清掉），导致 app-server 拉起即退出
+ * （code 1，"无法定位 CLI ZCode Built-in Provider Config"）。
+ * 启动前检测：两处都不在时，从桌面端新版布局或 v2 运行时缓存复制补齐。
+ */
+export function ensureZcodeCliProviderConfig(bundle: string): { ok: boolean; detail: string } {
+  const bundleDir = path.dirname(path.resolve(bundle))
+  const target = path.join(bundleDir, 'provider', 'zcode-builtin.json')
+  const driveRootFallback = path.resolve(bundleDir, '..', '..', '..', '..', '..', 'config', 'provider', 'zcode-builtin.json')
+  try {
+    if (fs.existsSync(target) || fs.existsSync(driveRootFallback)) return { ok: true, detail: 'provider config 就绪' }
+  } catch {}
+  const sources = [path.join(bundleDir, '..', 'config', 'provider', 'zcode-builtin.json'), ...runtimeProviderConfigSources()]
+  for (const source of sources) {
+    try {
+      if (!fs.existsSync(source)) continue
+      fs.mkdirSync(path.dirname(target), { recursive: true })
+      fs.copyFileSync(source, target)
+      return { ok: true, detail: `已补齐 provider config（复制自 ${source}）` }
+    } catch {}
+  }
+  return { ok: false, detail: '无法定位 zcode-builtin.json，请检查 ZCode 桌面端是否完整安装' }
+}
+
+/** 新版桌面端为 CLI 下载的 provider 运行时缓存：~/.zcode/v2/runtime/provider/<平台>/<版本>/endpoint 目录下的 zcode-builtin.json，取最新 */
+function runtimeProviderConfigSources(): string[] {
+  const runtimeRoot = path.join(os.homedir(), '.zcode', 'v2', 'runtime', 'provider')
+  try {
+    const found: { file: string; mtime: number }[] = []
+    for (const platform of fs.readdirSync(runtimeRoot)) {
+      const platformDir = path.join(runtimeRoot, platform)
+      for (const version of fs.readdirSync(platformDir)) {
+        for (const endpoint of fs.readdirSync(path.join(platformDir, version))) {
+          const file = path.join(platformDir, version, endpoint, 'zcode-builtin.json')
+          try { found.push({ file, mtime: fs.statSync(file).mtimeMs }) } catch {}
+        }
+      }
+    }
+    return found.sort((a, b) => b.mtime - a.mtime).map((entry) => entry.file)
+  } catch { return [] }
+}

@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### 修复
+
+- **zcode 后端拉起即退（新版桌面端 provider 配置迁移）**：app-server 以文件入口运行时只在 `<bundle>/provider/` 及其上溯 5 级 `config/provider/` 找 `zcode-builtin.json`；新版 ZCode 桌面端把它挪到 `resources/config/provider/`（旧位置随更新被清），导致拉起即退出（code 1「无法定位 CLI ZCode Built-in Provider Config」）。现在 probe/start 前检测补齐：两处都不在时从新版桌面端布局或 `~/.zcode/v2/runtime/provider/` 运行时缓存（取最新 mtime）复制；仍失败时报错提示重启 agentdeck 再试。`scripts/fixtures/provider/` 附样本配置。
+
 ## [0.21.0] - 2026-09-17
 
 ### 新增
