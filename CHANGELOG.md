@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-09-17
+
 ### 新增
 
 - **系统托盘 + 关闭语义分级（「关闭后重启没反应」根治）**：普通点 X 关闭 = 隐藏到托盘继续运行（首次收起弹一次气泡说明，任务照跑、完成照通知），托盘菜单「显示主窗口 / 退出（结束后台任务）」，单击托盘图标即唤回窗口；「退出」与热更 relaunch 置 quitting 后走既有 before-quit 链（runner.shutdown 杀会话进程树 → sidecar.stop → store flush）。配套修复 second-instance 只聚焦不重建：`mainWindow` 已销毁时 `focusMainWindow` 改为重建窗口——此前残留主进程持有单实例锁、二次启动只把 second-instance 发给一个没有窗口的僵尸进程，用户看到的就是「点了没反应」，只能任务管理器杀进程。另补 `app.setAppUserModelId('ai.agentdeck.desktop')`（与 appId 一致）——不设置时打包版 Windows toast 通知静默失效，这就是「后台任务完成了却没通知」的原因。
