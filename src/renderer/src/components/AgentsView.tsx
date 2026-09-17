@@ -246,6 +246,8 @@ export function AgentsView() {
     bridge.presets.models(p.id).then((c) => toast.success(`${p.name}：${c.models.length} 个模型（${c.models.slice(0, 3).join('、')}${c.models.length > 3 ? '…' : ''}）`)).catch((e) => toast.error('拉取失败: ' + (e instanceof Error ? e.message : String(e))))
   }
 
+  /** 确认页将填入的字段数（名字恒填入）：用于页脚计数与"只填入名字"按钮文案，防误取消全部字段 */
+  const draftPickCount = 1 + (['role', 'systemPrompt', 'note', 'model', 'color'] as const).filter((k) => draftPicked[k]).length
   /** 改进 diff 行：只列发生变化的字段 [key, label, old, new]；长文本在展示层截断 */
   const brief = (s: string) => (s.length > 160 ? s.slice(0, 160) + '…' : s)
   const improveDiff = improveOutcome && improveTarget
@@ -453,9 +455,9 @@ export function AgentsView() {
                   <div className="field" key={key}>
                     <span>{label}{draftPicked[key] ? '' : '（不填入）'}</span>
                     <div className="row" style={{ gap: 8, alignItems: 'flex-start' }}>
-                      <span className="hint" style={{ flex: 1, whiteSpace: 'pre-wrap' }}>{brief(value) || '—'}</span>
+                      <span className="hint" style={draftPicked[key] ? { flex: 1, whiteSpace: 'pre-wrap' } : { flex: 1, whiteSpace: 'pre-wrap', textDecoration: 'line-through', opacity: 0.45 }}>{brief(value) || '—'}</span>
                       <button className="btn" onClick={() => setDraftPicked({ ...draftPicked, [key]: !draftPicked[key] })}>
-                        {draftPicked[key] ? '✓ 填入' : '跳过'}
+                        {draftPicked[key] ? '✓ 填入' : '已跳过'}
                       </button>
                     </div>
                   </div>
@@ -472,10 +474,10 @@ export function AgentsView() {
                   </div>
                 )}
                 <div className="dialog-footer">
-                  <span className="hint">未勾选的字段留空，进表单后仍可手改</span>
+                  <span className="hint">将填入 {draftPickCount}/6 个字段——按钮单击即取消/恢复，取消的字段进表单后留空可手改</span>
                   <button className="btn" onClick={() => void runEvaluate()} disabled={evaluating}>{evaluating ? '评测中…' : '评测路由'}</button>
                   {!draftFromImport && <button className="btn" onClick={() => setDraftStage('input')}>重新生成</button>}
-                  <button className="btn primary" onClick={applyDraft}>填入表单</button>
+                  <button className="btn primary" onClick={applyDraft}>{draftPickCount === 1 ? '只填入名字' : '填入表单'}</button>
                 </div>
               </>
             )}
