@@ -1,6 +1,7 @@
 /* ============================================================
    0.15.0 UI Polish Wave · board（看板视图专属文件）
-   职责：看板列与卡片、空列状态、卡片信息分层。
+   职责：单日视图（顶栏日期导航 + 日节头）、看板列与卡片、
+         子单有界容器与两行迷你卡。
    约定：只覆盖看板类名；颜色一律引用令牌变量；
    按钮全局体系归 foundation.css 管。
    ============================================================ */
@@ -143,14 +144,31 @@
 .board-page { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
 .board-page .board { flex: 1; min-height: 0; }
 .board-toolbar { flex-shrink: 0; flex-wrap: wrap; }
-.board-retention-note { margin-left: auto; font-size: var(--text-micro); color: var(--text-dim); }
-.board-date-section, .board-orphans { display: flex; flex-direction: column; gap: 8px; }
-.board-section-head { display: flex; align-items: center; gap: 8px; margin: 5px 2px 1px; font-size: var(--text-micro); font-weight: 500; color: var(--text-dim); }
-.board-section-head span { margin-left: auto; font-family: var(--mono); }
-.board-section-head .board-expiring-badge { margin-left: 0; padding: 0 5px; border-radius: 999px; border: 1px solid var(--border); color: var(--warn); cursor: help; }
-.board-orphans { margin-top: auto; padding-top: 14px; border-top: 1px dashed var(--border); }
+.board-retention-note { font-size: var(--text-micro); color: var(--text-dim); }
+.board-orphans { display: flex; flex-direction: column; gap: 8px; margin-top: auto; padding-top: 14px; border-top: 1px dashed var(--border); }
 .board-orphans .board-card { background: var(--bg-inset); }
 .board-orphans .board-card-title { color: var(--text-dim); }
+.board-orphans-head { display: flex; align-items: center; gap: 8px; margin: 0 2px 1px; font-size: var(--text-micro); font-weight: 500; color: var(--text-dim); }
+.board-orphans-head span { margin-left: auto; font-family: var(--mono); }
+
+/* ---------- 单日视图：顶栏日期导航（‹ / 日期 / › / 今天 / 日期下拉） ---------- */
+.board-day-nav { display: inline-flex; align-items: center; gap: 2px; margin-left: auto; height: 30px; padding: 0 3px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-inset); }
+.board-day-nav-btn { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-dim); cursor: pointer; }
+.board-day-nav-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
+.board-day-nav-btn:disabled { opacity: 0.4; cursor: default; }
+.board-day-nav-label { min-width: 92px; color: var(--text); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; text-align: center; white-space: nowrap; }
+.board-day-nav-today { min-height: 22px; padding: 0 8px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: transparent; color: var(--text-dim); font-size: 10px; font-weight: 600; cursor: pointer; }
+.board-day-nav-today:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.board-day-nav-today:disabled { opacity: 0.4; cursor: default; }
+.board-day-nav-select { max-width: 112px; height: 24px; padding: 0 2px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-dim); font-size: 11px; cursor: pointer; }
+.board-day-nav-select:hover { background: var(--bg-hover); }
+.board-day-nav-btn:focus-visible, .board-day-nav-today:focus-visible, .board-day-nav-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* ---------- 日节头：全局唯一选中日的节头；超龄保留日的「将自动清理」角标只出现这一处 ---------- */
+.board-day-head { display: flex; flex-shrink: 0; align-items: center; gap: 8px; padding: 8px 14px 0; }
+.board-day-head-date { color: var(--text); font-size: 13px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.board-day-head-count { color: var(--text-faint); font-size: var(--text-micro); }
+.board-day-head .board-expiring-badge { padding: 1px 7px; border: 1px solid var(--border); border-radius: 999px; color: var(--warn); font-size: 10px; cursor: help; }
 
 .board-card.issue-card { --card-accent: var(--text-faint); }
 .board-page .board-card.issue-card { border-left: 4px solid var(--card-accent); }
@@ -167,7 +185,7 @@ html.light .board-page { --board-meeting: #326dc2; }
 .board-card .board-priority.priority-urgent { background: var(--status-failed); color: var(--bg-inset); }
 .board-card .board-priority.priority-high { background: var(--status-queued); color: var(--bg-inset); }
 .board-card-open { display: block; width: 100%; padding: 0; border: 0; background: transparent; text-align: left; cursor: pointer; }
-.board-card-open:focus-visible, .board-workers-toggle:focus-visible, .board-child-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-sm); }
+.board-card-open:focus-visible, .board-workers-toggle:focus-visible, .board-child-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-sm); }
 .board-card-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-bottom: 10px; font-size: var(--text-micro); }
 .board-kind-badge { color: var(--card-accent); background: color-mix(in srgb, var(--card-accent) 12%, transparent); padding: 2px 6px; border-radius: var(--radius-sm); font-weight: 600; }
 .board-running-label { color: var(--status-running); }
@@ -176,18 +194,37 @@ html.light .board-page { --board-meeting: #326dc2; }
 .board-elapsed { font-family: var(--mono); }
 .board-updated { margin-left: auto; white-space: nowrap; }
 .board-card .board-card-start { margin-top: 8px; }
-.board-workers { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 7px; }
+/* ---------- 子单收纳：有界容器（浅底/圆角/左连接竖线）+ 两行迷你卡 ---------- */
+.board-workers { margin-top: 10px; padding: 7px 8px 8px; border: 1px solid var(--border); border-left: 3px solid var(--card-accent); border-radius: var(--radius-md); background: color-mix(in srgb, var(--bg-inset) 45%, transparent); }
 .board-workers-toggle { display: flex; align-items: center; width: 100%; gap: 5px; padding: 2px 0; border: 0; background: transparent; color: var(--text-dim); font-size: var(--text-micro); cursor: pointer; }
 .board-workers-toggle:disabled { cursor: default; }
 .board-workers-toggle strong { color: var(--text); font-family: var(--mono); }
 .board-worker-progress { flex: 1; height: 4px; margin-left: 5px; overflow: hidden; border-radius: var(--radius-pill); background: var(--border); }
 .board-worker-progress > span { display: block; height: 100%; background: var(--status-done); }
-.board-child-list { margin: 6px 0 0 6px; padding-left: 7px; border-left: 1px solid var(--border-strong); }
-.board-child-row { display: flex; width: 100%; align-items: center; gap: 6px; padding: 7px 3px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-dim); font-size: var(--text-micro); text-align: left; cursor: pointer; }
-.board-child-row:hover { background: var(--bg-hover); color: var(--text); }
-.board-child-row .dot { flex-shrink: 0; }
-.board-child-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
-.board-child-time { flex-shrink: 0; font-family: var(--mono); }
+.board-child-root { margin-top: 7px; }
+.board-child-list { display: flex; flex-direction: column; gap: 5px; }
+/* 深层子单沿左连接竖线缩进 */
+.board-child-list .board-child-list { margin: 5px 0 0 10px; padding-left: 9px; border-left: 1px solid var(--border-strong); }
+.board-child-card { display: flex; flex-direction: column; gap: 4px; width: 100%; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-raised); color: var(--text-dim); font-size: var(--text-micro); text-align: left; cursor: pointer; transition: border-color var(--duration-base) var(--ease-in-out), background var(--duration-base) var(--ease-in-out); }
+.board-child-card:hover { border-color: var(--border-strong); background: var(--bg-hover); color: var(--text); }
+.board-child-card[data-status='running'] { border-color: color-mix(in srgb, var(--status-running) 40%, transparent); background: linear-gradient(180deg, var(--status-running-bg) 0%, transparent 70%), var(--bg-raised); }
+.board-child-line1 { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.board-child-line1 .dot { flex-shrink: 0; }
+.board-child-dot-running { animation: board-child-breathe 1.8s ease-in-out infinite; }
+.board-child-title { flex: 1; min-width: 0; overflow: hidden; color: var(--text); font-weight: 560; text-overflow: ellipsis; white-space: nowrap; }
+.board-child-state { flex-shrink: 0; font-size: 10px; }
+.board-child-card[data-status='queued'] .board-child-state { color: var(--warn); }
+.board-child-card[data-status='running'] .board-child-state { color: var(--status-running); }
+.board-child-card[data-status='done'] .board-child-state { color: var(--ok); }
+.board-child-card[data-status='failed'] .board-child-state { color: var(--err); }
+.board-child-card[data-status='cancelled'] .board-child-state { color: var(--text-dim); }
+.board-child-time { flex-shrink: 0; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.board-child-line2 { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.board-child-backend { flex-shrink: 0; padding: 0 6px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--bg-inset); color: var(--text-faint); font-family: var(--mono); font-size: 9px; line-height: 15px; }
+.board-child-diff { display: inline-flex; gap: 5px; flex-shrink: 0; margin-left: auto; padding: 0 6px; border: 1px solid var(--border); border-radius: var(--radius-pill); font-family: var(--mono); font-size: 9px; line-height: 15px; color: var(--text-dim); }
+.board-child-diff .diff-add { color: var(--ok); }
+.board-child-diff .diff-del { color: var(--err); }
 .board-card.issue-card.status-running { animation: board-breathe 2.4s ease-in-out infinite; }
 @keyframes board-breathe { 0%, 100% { box-shadow: 0 0 0 0 transparent; } 50% { box-shadow: 0 0 0 1px var(--status-running-glow), 0 0 15px var(--status-running-bg); } }
-@media (prefers-reduced-motion: reduce) { .board-card.issue-card.status-running { animation: none; } .board-card { transition: none; } }
+@keyframes board-child-breathe { 0%, 100% { box-shadow: 0 0 0 0 transparent; } 50% { box-shadow: 0 0 0 3px var(--status-running-glow); } }
+@media (prefers-reduced-motion: reduce) { .board-card.issue-card.status-running { animation: none; } .board-child-dot-running { animation: none; } .board-card { transition: none; } }

@@ -107,12 +107,37 @@ try {
   assert.equal(board.boardCardKind(task('h', { trigger: 'handoff' }), undefined, empty, empty), 'handoff')
   assert.equal(board.boardCardKind(task('g', { goalId: 'g' }), undefined, empty, empty), 'goal')
   assert.equal(board.boardCardKind(task('m'), issue('m', 'm'), empty, new Set(['m'])), 'meeting')
-  assert.equal(board.boardDateGroup(now, now), '今天')
-  assert.equal(board.boardDateGroup(new Date(now).setDate(new Date(now).getDate() - 1), now), '昨天')
-  assert.equal(board.boardDateGroup(now - 3 * DAY, now), '近7天')
-  assert.equal(board.boardDateGroup(now - 30 * DAY, now), '更早（≤30天）')
-  assert.equal(board.boardDateGroup(now - 31 * DAY, now), '超30天 · 保留')
-  console.log('PASS board: five type classes, date buckets, child folding, historical leader alias, orphan/cycle grouping')
+  // 单日视图：跨天归属按本地时区 0 点切（23:59 归当天，次日 00:01 归明天）
+  const todayFloor = board.boardDayFloor(now)
+  const lateTonight = new Date(todayFloor).setHours(23, 59, 0, 0)
+  const nextMorning = new Date(todayFloor).setHours(24, 1, 0, 0)
+  assert.equal(board.boardDayFloor(lateTonight), todayFloor)
+  assert.notEqual(board.boardDayFloor(nextMorning), todayFloor, '次日 00:01 归明天')
+  assert.ok(board.onBoardDay(lateTonight, todayFloor) && !board.onBoardDay(nextMorning, todayFloor), '跨天归属唯一')
+  assert.equal(board.formatBoardDay(todayFloor, todayFloor), `今天·${new Date(now).getMonth() + 1}月${new Date(now).getDate()}日`)
+  assert.ok(board.formatBoardDay(new Date(todayFloor).setFullYear(new Date(todayFloor).getFullYear() - 1), todayFloor).startsWith('20'), '跨年补年份')
+  // 日期下拉：只列有卡片的日期（空日期不列），去重降序；超龄受保护日期保留
+  const stamps = [lateTonight, nextMorning, now - 40 * DAY]
+  const options = board.boardDayOptions(stamps)
+  assert.equal(options.length, 3, '三个时间戳分属三天')
+  assert.deepEqual(options, [...options].sort((a, b) => b - a), '下拉按日期降序')
+  assert.ok(options.every((floor) => stamps.some((ts) => board.onBoardDay(ts, floor))), '下拉只列有卡片的日期')
+  assert.equal(board.boardDayOptions([lateTonight, lateTonight + 1]).length, 1, '同日时间戳去重')
+  assert.ok(options.includes(board.boardDayFloor(now - 40 * DAY)), '超龄受保护日期仍在下拉')
+  // 导航：› 钳在今天不越界，‹ 向旧不受限
+  assert.equal(board.shiftBoardDay(todayFloor, 1, todayFloor), todayFloor, '› 在今天停住')
+  assert.equal(board.shiftBoardDay(todayFloor - 3 * DAY, 1, todayFloor), todayFloor - 2 * DAY, '› 单步前进')
+  assert.equal(board.shiftBoardDay(todayFloor, -1, todayFloor), todayFloor - DAY, '‹ 向旧不受限')
+  // 超龄受保护卡：按 updatedAt 归入对应日期、选中即可见；该日节头出现唯一的「将自动清理」角标
+  const overAgeFloor = board.boardDayFloor(now - 40 * DAY)
+  assert.ok(board.onBoardDay(now - 40 * DAY, overAgeFloor), '超龄卡归属其 updatedAt 当日')
+  assert.ok(board.isOverAgeDay(overAgeFloor, todayFloor), '越过 30 天保留窗的日期出现角标')
+  assert.ok(!board.isOverAgeDay(todayFloor, todayFloor) && !board.isOverAgeDay(todayFloor - 5 * DAY, todayFloor), '窗内日期无角标')
+  // 改动徽标：有 gitStat 才有数据，无则次行跳过
+  assert.deepEqual(board.boardDiffStat('a.ts | 2 +-\nb.ts | 3 +\n2 files changed, 4 insertions(+), 1 deletion(-)'), { files: 2, plus: 4, minus: 1 })
+  assert.equal(board.boardDiffStat(undefined), undefined)
+  assert.equal(board.boardDiffStat(''), undefined)
+  console.log('PASS board: five type classes, single-day filter/day-nav/over-age protection/diff badge, child folding, historical leader alias, orphan/cycle grouping')
 } finally {
   store?.flush()
   delete globalThis.window

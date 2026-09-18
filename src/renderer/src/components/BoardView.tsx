@@ -7,7 +7,7 @@ import { taskService } from '../task-service'
 import { toast } from '../ui/Toasts'
 import { IssueIdChip } from '../ui/IssueIdChip'
 import { EmptyState } from '../ui/EmptyState'
-import { CheckCircle2, CircleAlert, CircleDot, Clock3, Ban, Eye, ListTodo, Search, ChevronDown, ChevronRight } from 'lucide-react'
+import { CheckCircle2, CircleAlert, CircleDot, Clock3, Ban, Eye, ListTodo, Search, ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react'
 
 type Scope = 'all' | 'mine' | 'agents'
 type CardKind = 'normal' | 'delegate' | 'handoff' | 'goal' | 'meeting'
@@ -15,7 +15,9 @@ export type BoardNode = { task: Task; issue?: Issue; children: BoardNode[] }
 const PRIORITY_LABELS: Record<Issue['priority'], string> = { urgent: '紧急', high: '高', medium: '中', low: '低', none: '无' }
 const KIND_LABELS: Record<CardKind, string> = { normal: '普通', delegate: '委派', handoff: '接力', goal: '目标', meeting: '会议' }
 const DAY = 86_400_000
-const DATE_GROUPS = ['今天', '昨天', '近7天', '更早（≤30天）', '超30天 · 保留']
+const EXPIRING_TITLE = '超过 30 天且全部执行终结的 Issue 会被自动清理；未完成工作始终保留'
+/** 选中日期没有任何卡片时，列空态的统一提示 */
+export const BOARD_EMPTY_DAY_HINT = '这一天没有 Issue'
 const COLUMNS: { key: IssueStatus; label: string; icon: typeof Clock3 }[] = [
   { key: 'backlog', label: ISSUE_STATUS_LABELS.backlog, icon: ListTodo },
   { key: 'todo', label: ISSUE_STATUS_LABELS.todo, icon: Clock3 },
@@ -26,14 +28,56 @@ const COLUMNS: { key: IssueStatus; label: string; icon: typeof Clock3 }[] = [
   { key: 'cancelled', label: ISSUE_STATUS_LABELS.cancelled, icon: Ban }
 ]
 
-export function boardDateGroup(ts: number, now: number): string {
-  const today = new Date(now).setHours(0, 0, 0, 0)
-  const yesterday = new Date(today)
-  yesterday.setDate(yesterday.getDate() - 1)
-  if (ts >= today) return DATE_GROUPS[0]
-  if (ts >= yesterday.getTime()) return DATE_GROUPS[1]
-  if (now - ts < 7 * DAY) return DATE_GROUPS[2]
-  return now - ts <= 30 * DAY ? DATE_GROUPS[3] : DATE_GROUPS[4]
+/** 本地时区当日 0 点：单日视图跨天归属的唯一基准 */
+export function boardDayFloor(ts: number): number {
+  return new Date(ts).setHours(0, 0, 0, 0)
+}
+
+/** 本地日期键 YYYY-MM-DD（日节头 DOM 标记 / 下拉选项展示） */
+export function boardDayKey(floor: number): string {
+  const day = new Date(floor)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${day.getFullYear()}-${pad(day.getMonth() + 1)}-${pad(day.getDate())}`
+}
+
+/** 顶栏日期文案：今天·9月18日 / 9月15日，跨年补年份 */
+export function formatBoardDay(floor: number, todayFloor: number): string {
+  const day = new Date(floor)
+  const monthDay = `${day.getMonth() + 1}月${day.getDate()}日`
+  if (floor === todayFloor) return `今天·${monthDay}`
+  return day.getFullYear() === new Date(todayFloor).getFullYear() ? monthDay : `${day.getFullYear()}年${monthDay}`
+}
+
+/** 单步日期导航：+1 向未来但钳在今天，-1 向过去不设上限（受 30 天保留窗自然约束） */
+export function shiftBoardDay(floor: number, delta: number, todayFloor: number): number {
+  return delta > 0 ? Math.min(floor + DAY, todayFloor) : floor - DAY
+}
+
+/** 时间戳是否归属选中日期（本地 0 点至次日 0 点） */
+export function onBoardDay(ts: number, floor: number): boolean {
+  return boardDayFloor(ts) === floor
+}
+
+/** 日期下拉选项：只列有卡片的日期（去重降序），空日期不列；超龄受保护日期自然保留 */
+export function boardDayOptions(timestamps: number[]): number[] {
+  return [...new Set(timestamps.map(boardDayFloor))].sort((a, b) => b - a)
+}
+
+/** 选中日期是否已越过 30 天保留窗（这一天还可见的卡都是受保护卡，节头出现「将自动清理」角标） */
+export function isOverAgeDay(floor: number, todayFloor: number): boolean {
+  return todayFloor - floor >= 30 * DAY
+}
+
+/** gitStat（git diff --stat 文本）→ 迷你卡改动徽标数据；无数据返回 undefined（次行跳过徽标） */
+export function boardDiffStat(gitStat: string | undefined): { files: number; plus?: number; minus?: number } | undefined {
+  if (!gitStat) return undefined
+  const lines = gitStat.split('\n')
+  const files = lines.filter((line) => line.includes('|')).length
+  const summary = lines.find((line) => /files? changed/.test(line)) ?? ''
+  const plus = summary.match(/(\d+) insertions?/)
+  const minus = summary.match(/(\d+) deletions?/)
+  if (!files && !plus && !minus) return undefined
+  return { files, plus: plus ? Number(plus[1]) : undefined, minus: minus ? Number(minus[1]) : undefined }
 }
 
 export function relativeBoardTime(ts: number, now: number): string {
@@ -99,6 +143,7 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
   const [meetings, setMeetings] = useState<Meeting[]>([])
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [now, setNow] = useState(Date.now)
+  const [selectedDay, setSelectedDay] = useState(() => boardDayFloor(Date.now()))
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null)
   const [dropTarget, setDropTarget] = useState<IssueStatus | null>(null)
   const [starting, setStarting] = useState<string | null>(null)
@@ -128,6 +173,13 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
   const goalIssues = useMemo(() => new Set(goals.map((g) => g.issueId)), [goals])
   const meetingIssues = useMemo(() => new Set(meetings.map((m) => m.issueId)), [meetings])
   const tree = useMemo(() => buildBoardTree(tasks, issues), [tasks, issues])
+  const todayFloor = boardDayFloor(now)
+  const dayRoots = useMemo(() => tree.roots.filter((node) => onBoardDay(updatedAt(node), selectedDay)), [tree, selectedDay])
+  const dayOrphans = useMemo(() => tree.orphans.filter((node) => onBoardDay(updatedAt(node), selectedDay)), [tree, selectedDay])
+  const dayHasCards = dayRoots.length + dayOrphans.length > 0
+  const dayTotal = dayRoots.length + dayOrphans.length
+  const overAgeDay = isOverAgeDay(selectedDay, todayFloor) && dayHasCards
+  const dayOptions = useMemo(() => boardDayOptions([...tree.roots, ...tree.orphans].map((node) => updatedAt(node))), [tree])
   const filtering = !!query.trim() || scope !== 'all' || status !== 'all'
   const matches = (node: BoardNode): boolean => {
     const { task, issue } = node
@@ -156,10 +208,26 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
     } catch { toast.error('启动失败') } finally { setStarting(null) }
   }
   const toggle = (id: string) => setExpanded((current) => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next })
-  const childRows = (nodes: BoardNode[]): React.ReactNode => <div className="board-child-list">{nodes.map((node) => <div key={node.task.id}>
-    <button className={`board-child-row status-${node.task.status}`} onClick={() => onOpen(node.task.id)} title={`${TASK_STATUS_LABELS[node.task.status]} · ${node.task.title}`}>
-      <span className={`dot dot-${node.task.status}`} /><span className="board-child-title">{node.task.title}</span><span className="board-child-time">{elapsed(node.task, now)}</span>
-    </button>{node.children.length > 0 && childRows(node.children)}
+  /** 子单两行迷你卡：首行状态点+标题+状态文字/耗时，次行 backend 芯片+改动徽标（有 gitStat 才出现） */
+  const diffBadge = (gitStat: string | undefined) => {
+    const stat = boardDiffStat(gitStat)
+    if (!stat) return null
+    return <span className="badge board-child-diff" title="完成时抓取的 git 改动统计">{stat.files > 0 && <span>{stat.files}文件</span>}{stat.plus !== undefined && <span className="diff-add">+{stat.plus}</span>}{stat.minus !== undefined && <span className="diff-del">−{stat.minus}</span>}</span>
+  }
+  const childCards = (nodes: BoardNode[]): React.ReactNode => <div className="board-child-list">{nodes.map((node) => <div key={node.task.id} className="board-child-item">
+    <button className="board-child-card" data-status={node.task.status} onClick={() => onOpen(node.task.id)} title={`${TASK_STATUS_LABELS[node.task.status]} · ${node.task.title}`}>
+      <span className="board-child-line1">
+        <span className={`dot dot-${node.task.status}${node.task.status === 'running' ? ' board-child-dot-running' : ''}`} />
+        <span className="board-child-title">{node.task.title}</span>
+        <span className="board-child-state">{TASK_STATUS_LABELS[node.task.status]}</span>
+        {node.task.startedAt && <span className="board-child-time">{elapsed(node.task, now)}</span>}
+      </span>
+      <span className="board-child-line2">
+        <span className="badge board-child-backend">{node.task.backend}</span>
+        {diffBadge(node.task.gitStat)}
+      </span>
+    </button>
+    {node.children.length > 0 && childCards(node.children)}
   </div>)}</div>
   const renderCard = (node: BoardNode) => {
     const { task, issue } = node
@@ -177,7 +245,10 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
       <div className="board-card-tags"><span className="board-kind-badge">{KIND_LABELS[kind]}</span>{parked && <span className="badge badge-parked">{PARKED_QUEUED_LABEL}</span>}{task.status === 'running' && <span className="board-running-label">运行中</span>}{issue?.labels.filter((label) => label !== '委派').slice(0, 2).map((label) => <span className="badge badge-meta" key={label}>{label}</span>)}</div>
       <div className="board-card-meta"><span className="badge board-backend">{task.backend}</span><span className="board-elapsed" title="执行耗时">{elapsed(task, now)}</span><time className="board-updated" dateTime={new Date(updatedAt(node)).toISOString()} title={new Date(updatedAt(node)).toLocaleString()}>{relativeBoardTime(updatedAt(node), now)}</time></div>
       {parked && <button className="btn board-card-start" disabled={starting === task.id} onClick={() => void startTask(task.id)}>▶ 启动</button>}
-      {workers.length > 0 && <div className="board-workers"><button className="board-workers-toggle" aria-expanded={open} aria-controls={`workers-${task.id}`} onClick={() => toggle(task.id)} disabled={filtering} title={filtering ? '筛选时展开子单以保留匹配上下文' : '展开或折叠子派单'}>{open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}<span>子单</span><strong>{done}/{workers.length}</strong><span className="board-worker-progress" role="progressbar" aria-label="子单完成进度" aria-valuenow={done} aria-valuemin={0} aria-valuemax={workers.length}><span style={{ width: `${done / workers.length * 100}%` }} /></span></button>{open && <div id={`workers-${task.id}`}>{childRows(node.children)}</div>}</div>}
+      {workers.length > 0 && <section className="board-workers">
+        <button className="board-workers-toggle" aria-expanded={open} aria-controls={`workers-${task.id}`} onClick={() => toggle(task.id)} disabled={filtering} title={filtering ? '筛选时展开子单以保留匹配上下文' : '展开或折叠子派单'}>{open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}<span>子单</span><strong>{done}/{workers.length}</strong><span className="board-worker-progress" role="progressbar" aria-label="子单完成进度" aria-valuenow={done} aria-valuemin={0} aria-valuemax={workers.length}><span style={{ width: `${done / workers.length * 100}%` }} /></span></button>
+        {open && <div className="board-child-root" id={`workers-${task.id}`}>{childCards(node.children)}</div>}
+      </section>}
     </article>
   }
   const menuIssue = menu ? byTask.get(menu.id) : undefined
@@ -186,19 +257,29 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
       <div className="issues-scopes" role="tablist" aria-label="看板范围">{([['all', '全部'], ['mine', '我的'], ['agents', '智能体']] as const).map(([key, label]) => <button key={key} className={scope === key ? 'active' : ''} role="tab" aria-selected={scope === key} onClick={() => setScope(key)}>{label}</button>)}</div>
       <label className="issues-search"><Search size={14} /><input aria-label="搜索 Issue" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索 Issue…" /></label>
       <select className="issues-status-select" value={status} onChange={(event) => setStatus(event.target.value as IssueStatus | 'all')} aria-label="按状态筛选"><option value="all">所有状态</option>{COLUMNS.map((column) => <option value={column.key} key={column.key}>{column.label}</option>)}</select>
+      <div className="board-day-nav" role="group" aria-label="看板日期导航">
+        <button type="button" className="board-day-nav-btn" aria-label="前一天" title="前一天" onClick={() => setSelectedDay((day) => shiftBoardDay(day, -1, todayFloor))}><ChevronLeft size={14} /></button>
+        <span className="board-day-nav-label" aria-live="polite">{formatBoardDay(selectedDay, todayFloor)}</span>
+        <button type="button" className="board-day-nav-btn" aria-label="后一天" title="后一天" disabled={selectedDay >= todayFloor} onClick={() => setSelectedDay((day) => shiftBoardDay(day, 1, todayFloor))}><ChevronRight size={14} /></button>
+        <button type="button" className="board-day-nav-today" disabled={selectedDay === todayFloor} onClick={() => setSelectedDay(todayFloor)}>今天</button>
+        <select className="board-day-nav-select" aria-label="跳转到有 Issue 的日期" value={String(selectedDay)} onChange={(event) => setSelectedDay(Number(event.target.value))}>
+          {!dayOptions.includes(selectedDay) && <option value={String(selectedDay)}>{formatBoardDay(selectedDay, todayFloor)}</option>}
+          {dayOptions.map((floor) => <option key={floor} value={String(floor)}>{formatBoardDay(floor, todayFloor)}</option>)}
+        </select>
+      </div>
       <span className="board-retention-note" title="仅清理超过30天、全部执行终结且无活跃目标/会议绑定的 Issue；未完成工作始终保留">终态保留 30 天</span>
     </div>
+    <div className="board-day-head" data-day-key={boardDayKey(selectedDay)}>
+      <span className="board-day-head-date">{formatBoardDay(selectedDay, todayFloor)}</span>
+      <span className="board-day-head-count">{dayTotal > 0 ? `共 ${dayTotal} 个 Issue` : BOARD_EMPTY_DAY_HINT}</span>
+      {overAgeDay && <span className="board-expiring-badge" title={EXPIRING_TITLE}>将自动清理</span>}
+    </div>
     <div className="board issue-board">{COLUMNS.map((column) => {
-      const items = tree.roots.filter((node) => nodeStatus(node) === column.key && matches(node)).sort((a, b) => updatedAt(b) - updatedAt(a))
-      const orphans = tree.orphans.filter((node) => nodeStatus(node) === column.key && matches(node)).sort((a, b) => updatedAt(b) - updatedAt(a))
+      const items = dayRoots.filter((node) => nodeStatus(node) === column.key && matches(node)).sort((a, b) => updatedAt(b) - updatedAt(a))
+      const orphans = dayOrphans.filter((node) => nodeStatus(node) === column.key && matches(node)).sort((a, b) => updatedAt(b) - updatedAt(a))
       return <section key={column.key} className={`board-col ${dropTarget === column.key ? 'is-drag-target' : ''}`} aria-label={column.label} onDragEnter={() => setDropTarget(column.key)} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move' }} onDragLeave={(event) => { if (event.currentTarget === event.target) setDropTarget(null) }} onDrop={(event) => { event.preventDefault(); const id = event.dataTransfer.getData('text/task-id'); if (id) void move(id, column.key); setDropTarget(null) }}>
         <div className="board-col-head"><span className={`dot board-col-dot board-col-dot-${column.key}`} /><column.icon size={14} aria-hidden="true" /><span className="board-col-title">{column.label}</span><span className="board-col-count">{items.length + orphans.length}</span></div>
-        <div className="board-col-body">{DATE_GROUPS.map((group) => {
-          const grouped = items.filter((node) => boardDateGroup(updatedAt(node), now) === group)
-          // 「更早（≤30天）」节已贴 30 天清理边界：一次性角标提醒这批卡会被自动清扫
-          const expiring = group === DATE_GROUPS[3]
-          return grouped.length > 0 && <section className="board-date-section" key={group}><h3 className="board-section-head">{group}{expiring && <span className="board-expiring-badge" title="超过 30 天且全部执行终结的 Issue 会被自动清理；未完成工作始终保留">将自动清理</span>}<span>{grouped.length}</span></h3>{grouped.map(renderCard)}</section>
-        })}{orphans.length > 0 && <section className="board-orphans"><h3 className="board-section-head">（无领队）<span>{orphans.length}</span></h3>{orphans.map(renderCard)}</section>}{!items.length && !orphans.length && <EmptyState compact title={filtering ? '无匹配' : '空'} />}</div>
+        <div className="board-col-body">{items.map(renderCard)}{orphans.length > 0 && <section className="board-orphans"><h3 className="board-orphans-head">（无领队）<span>{orphans.length}</span></h3>{orphans.map(renderCard)}</section>}{!items.length && !orphans.length && <EmptyState compact title={!dayHasCards ? BOARD_EMPTY_DAY_HINT : filtering ? '无匹配' : '空'} />}</div>
       </section>
     })}</div>
     {menu && menuIssue && <div className="board-context-menu" role="menu" style={{ left: menu.x, top: menu.y }} onClick={(event) => event.stopPropagation()}><button role="menuitem" onClick={() => { setMenu(null); onOpen(menu.id) }}>打开 Issue</button><div className="board-context-separator" />{COLUMNS.filter((column) => column.key !== menuIssue.status).map((column) => <button key={column.key} role="menuitem" onClick={() => void move(menu.id, column.key)}>移到「{column.label}」</button>)}</div>}
