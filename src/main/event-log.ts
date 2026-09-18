@@ -124,24 +124,158 @@ function canonicalEvent(event: TaskEvent): string {
  * not consume the durable sequence or appear in replay.
  */
 export class EventLog {
-  private nextSequence: number | undefined
   private liveSequence = 0
-  private offsets = new Map<number, number>()
+  /** Durable events by seq. Readers slice this cache; the file is only
+   * touched to fold in growth beyond the watermark. */
+  private events = new Map<number, TaskEvent>()
   private eventsByIdentity = new Map<string, TaskEvent>()
+  private maxSeq = 0
   private indexed = false
+  /** Bytes of the file already folded into the cache. Growth beyond it is
+   * parsed incrementally; a line still missing its newline holds the
+   * watermark back so a torn write is never half-indexed. */
+  private indexedSize = 0
+  /** True when unconsumed bytes exist past the watermark (a trailing
+   * fragment without its newline). Re-checked before any append, because
+   * writing after it would concatenate onto the fragment. */
+  private pendingTail = false
 
   constructor(private readonly file: string) {}
 
-  private ensureSequence() {
-    if (this.nextSequence !== undefined) return
-    this.ensureIndex()
-    this.nextSequence = this.maxSequence()
+  /** Bring the cache up to date with the file before serving a read or
+   * assigning a sequence. Without this an instance that indexed earlier
+   * would allocate a stale maxSeq+1 and collide with an external writer —
+   * the duplicate-seq mode seen on restart reconciliation. */
+  private ensureFresh() {
+    if (!this.indexed) return this.rebuild()
+    let size = -1
+    // A missing file (e.g. retention purging the task dir from another
+    // process) must drop the cached events, not serve ghosts forever.
+    try { size = fs.statSync(this.file).size } catch { return this.rebuild() }
+    if (size === this.indexedSize) return
+    if (size < this.indexedSize) return this.rebuild()
+    this.consumeFrom(this.indexedSize)
   }
 
-  private maxSequence() {
-    let max = 0
-    for (const seq of this.offsets.keys()) max = Math.max(max, seq)
-    return max
+  private rebuild() {
+    this.events.clear()
+    this.eventsByIdentity.clear()
+    this.maxSeq = 0
+    this.pendingTail = false
+    let bytes: Buffer
+    try {
+      bytes = this.recoverTail(fs.readFileSync(this.file))
+    } catch {
+      this.indexedSize = 0
+      this.indexed = true
+      return
+    }
+    this.indexedSize = this.consumeLines(bytes, 0)
+    this.indexed = true
+  }
+
+  /** Index every newline-terminated line in `bytes`; returns the consumed
+   * length. A trailing fragment without its newline is left unconsumed. */
+  private consumeLines(bytes: Buffer, from: number): number {
+    let pos = from
+    while (pos < bytes.length) {
+      const end = bytes.indexOf(0x0a, pos)
+      if (end < 0) break
+      this.indexLine(bytes.subarray(pos, end))
+      pos = end + 1
+    }
+    this.pendingTail = pos < bytes.length
+    return pos
+  }
+
+  /** Fold file bytes in `[start, EOF)` into the cache without re-reading
+   * what the watermark already covers. */
+  private consumeFrom(start: number) {
+    let bytes: Buffer
+    try {
+      const fd = fs.openSync(this.file, 'r')
+      try {
+        const length = fs.fstatSync(fd).size - start
+        if (length <= 0) return
+        bytes = Buffer.alloc(length)
+        let read = 0
+        while (read < length) {
+          const chunk = fs.readSync(fd, bytes, read, length - read, start + read)
+          if (chunk <= 0) break
+          read += chunk
+        }
+        if (read < length) bytes = bytes.subarray(0, read)
+      } finally {
+        fs.closeSync(fd)
+      }
+    } catch {
+      return
+    }
+    this.indexedSize = start + this.consumeLines(bytes, 0)
+  }
+
+  private indexLine(line: Buffer) {
+    const text = line.toString('utf8').trim()
+    if (!text) return
+    try {
+      this.indexEvent(migrateTaskEvent(JSON.parse(text)))
+    } catch (error) {
+      if (error instanceof UnsupportedTaskEventVersionError) throw error
+      // Malformed historical lines stay untouched; they cannot enter the
+      // replay index and therefore cannot create a duplicate sequence.
+    }
+  }
+
+  private indexEvent(event: TaskEvent | null) {
+    if (!event) return
+    if (isTaskEventDurable(event)) {
+      this.events.set(event.seq, event)
+      if (event.seq > this.maxSeq) this.maxSeq = event.seq
+    }
+    const identity = eventIdentity(event)
+    if (identity) this.eventsByIdentity.set(identity, event)
+  }
+
+  /** Resolve a pending trailing fragment before an append lands after it:
+   * consume it if it has become a complete event by now, otherwise drop the
+   * torn write so the new line does not concatenate onto garbage. */
+  private reconcileTail() {
+    if (!this.pendingTail) return
+    const size = this.fileSize()
+    if (size <= this.indexedSize) {
+      this.pendingTail = false
+      return
+    }
+    let bytes: Buffer
+    try {
+      const fd = fs.openSync(this.file, 'r')
+      try {
+        const length = size - this.indexedSize
+        bytes = Buffer.alloc(length)
+        let read = 0
+        while (read < length) {
+          const chunk = fs.readSync(fd, bytes, read, length - read, this.indexedSize + read)
+          if (chunk <= 0) break
+          read += chunk
+        }
+        if (read < length) bytes = bytes.subarray(0, read)
+      } finally {
+        fs.closeSync(fd)
+      }
+    } catch {
+      return
+    }
+    try {
+      this.indexEvent(migrateTaskEvent(JSON.parse(bytes.toString('utf8'))))
+      this.indexedSize = size
+    } catch (error) {
+      if (error instanceof UnsupportedTaskEventVersionError) throw error
+      try {
+        const fd = fs.openSync(this.file, 'r+')
+        try { fs.ftruncateSync(fd, this.indexedSize) } finally { fs.closeSync(fd) }
+      } catch {}
+    }
+    this.pendingTail = false
   }
 
   /** Remove a torn final line before any append can concatenate with it. */
@@ -169,49 +303,21 @@ export class EventLog {
     }
   }
 
-  private ensureIndex() {
-    if (this.indexed) return
-    this.offsets.clear()
-    this.eventsByIdentity.clear()
-    let bytes: Buffer
-    try {
-      bytes = this.recoverTail(fs.readFileSync(this.file))
-    } catch {
-      this.nextSequence = 0
-      this.indexed = true
-      return
-    }
-    let start = 0
-    while (start < bytes.length) {
-      const end = bytes.indexOf(0x0a, start)
-      if (end < 0) break
-      const line = bytes.subarray(start, end).toString('utf8').trim()
-      if (line) {
-        try {
-          const event = migrateTaskEvent(JSON.parse(line))
-          if (event) {
-            if (isTaskEventDurable(event)) this.offsets.set(event.seq, start)
-            const identity = eventIdentity(event)
-            if (identity) this.eventsByIdentity.set(identity, event)
-          }
-        } catch (error) {
-          if (error instanceof UnsupportedTaskEventVersionError) throw error
-          // Malformed historical lines stay untouched; they cannot enter the
-          // replay index and therefore cannot create a duplicate sequence.
-        }
-      }
-      start = end + 1
-    }
-    this.nextSequence = this.maxSequence()
-    this.indexed = true
-  }
-
   private writeLines(lines: string[]) {
     if (lines.length === 0) return
     fs.mkdirSync(path.dirname(this.file), { recursive: true })
+    let payload = lines.join('')
+    const size = this.fileSize()
+    if (size > 0) {
+      // The file may legitimately end without a newline (a consumed legacy
+      // tail); separate the new line instead of concatenating onto it.
+      const last = Buffer.alloc(1)
+      const probe = fs.openSync(this.file, 'r')
+      try { fs.readSync(probe, last, 0, 1, size - 1) } finally { fs.closeSync(probe) }
+      if (last[0] !== 0x0a) payload = '\n' + payload
+    }
     const fd = fs.openSync(this.file, 'a')
     try {
-      const payload = lines.join('')
       let written = 0
       while (written < payload.length) written += fs.writeSync(fd, payload.slice(written), null, 'utf8')
       // append() is the durable boundary; a successful return means bytes are
@@ -226,7 +332,8 @@ export class EventLog {
   append(event: TaskEventInput): TaskEvent | null {
     const fullInput = migrateTaskEvent(event, 1)
     if (!fullInput) return null
-    this.ensureSequence()
+    this.ensureFresh()
+    this.reconcileTail()
 
     const identity = eventIdentity(fullInput)
     if (identity) {
@@ -238,7 +345,7 @@ export class EventLog {
       // Live events have no durable cursor. A fractional cursor keeps their
       // renderer ordering between surrounding durable records while never
       // matching an integer `afterSeq`; it is process-local.
-      fullInput.seq = this.maxSequence() + (++this.liveSequence / 1_000_000)
+      fullInput.seq = this.maxSeq + (++this.liveSequence / 1_000_000)
       fullInput.durability = 'live'
       fullInput.durable = false
       if (identity) this.eventsByIdentity.set(identity, fullInput)
@@ -246,13 +353,10 @@ export class EventLog {
     }
 
     const requestedSeq = event.seq
-    const next = this.maxSequence() + 1
+    const next = this.maxSeq + 1
     if (requestedSeq !== undefined && requestedSeq !== next) {
-      const existingOffset = this.offsets.get(requestedSeq)
-      if (existingOffset !== undefined) {
-        const existing = this.readOneAt(existingOffset)
-        if (existing && canonicalEvent(existing) === canonicalEvent(fullInput)) return existing
-      }
+      const existing = this.events.get(requestedSeq)
+      if (existing && canonicalEvent(existing) === canonicalEvent(fullInput)) return existing
       return null
     }
     fullInput.seq = next
@@ -262,28 +366,24 @@ export class EventLog {
     } else {
       fullInput.durable = { ...fullInput.durable, seq: next, version: fullInput.durable.version ?? TASK_EVENT_SCHEMA_VERSION }
     }
-    const offset = this.fileSize()
     try {
       this.writeLines([JSON.stringify(fullInput) + '\n'])
     } catch {
-      this.nextSequence = undefined
       this.indexed = false
       return null
     }
-    this.nextSequence = next
-    this.offsets.set(next, offset)
-    if (identity) this.eventsByIdentity.set(identity, fullInput)
-    this.indexed = true
+    this.indexEvent(fullInput)
     return fullInput
   }
 
   /** Append multiple events in one fsync boundary while preserving ordering. */
   appendBatch(events: readonly TaskEventInput[]): TaskEvent[] {
     const result: TaskEvent[] = []
+    const durable: TaskEvent[] = []
     const lines: string[] = []
-    this.ensureSequence()
-    let next = this.maxSequence()
-    const startOffset = this.fileSize()
+    this.ensureFresh()
+    this.reconcileTail()
+    let next = this.maxSeq
     for (const event of events) {
       const normalized = migrateTaskEvent(event, 1)
       if (!normalized) continue
@@ -294,7 +394,7 @@ export class EventLog {
         continue
       }
       if (isTaskEventLiveOnly(normalized)) {
-        normalized.seq = this.maxSequence() + (++this.liveSequence / 1_000_000)
+        normalized.seq = this.maxSeq + (++this.liveSequence / 1_000_000)
         normalized.durability = 'live'
         normalized.durable = false
         if (identity) this.eventsByIdentity.set(identity, normalized)
@@ -314,42 +414,33 @@ export class EventLog {
         normalized.durable = { ...normalized.durable, seq: normalized.seq, version: normalized.durable.version ?? TASK_EVENT_SCHEMA_VERSION }
       }
       result.push(normalized)
+      durable.push(normalized)
       lines.push(JSON.stringify(normalized) + '\n')
       if (identity) this.eventsByIdentity.set(identity, normalized)
-      this.offsets.set(normalized.seq, startOffset + Buffer.byteLength(lines.slice(0, -1).join(''), 'utf8'))
     }
     try {
       this.writeLines(lines)
     } catch {
-      this.nextSequence = undefined
       this.indexed = false
       return []
     }
-    this.nextSequence = next
-    this.indexed = true
+    for (const event of durable) this.indexEvent(event)
     return result
   }
 
   /** Synchronous appends are already fsync'd; retained as an explicit API boundary. */
   flush() {
-    this.ensureIndex()
+    this.ensureFresh()
   }
 
   private fileSize() {
     try { return fs.statSync(this.file).size } catch { return 0 }
   }
 
-  private readOneAt(offset: number): TaskEvent | null {
-    try {
-      const line = fs.readFileSync(this.file).subarray(offset).toString('utf8').split('\n', 1)[0]
-      return migrateTaskEvent(JSON.parse(line))
-    } catch { return null }
-  }
-
   truncate(keepThroughSeq: number): TaskEvent[] | null {
     const kept: TaskEvent[] = []
     try {
-      this.ensureIndex()
+      this.ensureFresh()
       for (const event of this.read(0, Number.MAX_SAFE_INTEGER)) {
         if (event.seq <= keepThroughSeq) kept.push(event)
       }
@@ -359,9 +450,8 @@ export class EventLog {
       const fd = fs.openSync(tmp, 'r+')
       try { fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
       fs.renameSync(tmp, this.file)
-      this.nextSequence = undefined
       this.indexed = false
-      this.ensureIndex()
+      this.ensureFresh()
       return kept
     } catch {
       return null
@@ -369,23 +459,21 @@ export class EventLog {
   }
 
   count() {
-    this.ensureIndex()
-    return this.offsets.size
+    this.ensureFresh()
+    return this.events.size
   }
 
   read(afterSeq = 0, limit = 5000): TaskEvent[] {
     const out: TaskEvent[] = []
-    this.ensureIndex()
+    this.ensureFresh()
     if (!Number.isFinite(limit) || limit <= 0) return out
-    try {
-      const offsets = [...this.offsets.entries()].sort(([a], [b]) => a - b)
-      for (const [seq, offset] of offsets) {
-        if (seq <= afterSeq) continue
-        const event = this.readOneAt(offset)
-        if (event && isTaskEventDurable(event)) out.push(event)
-        if (out.length >= limit) break
-      }
-    } catch {}
+    const seqs = [...this.events.keys()].sort((a, b) => a - b)
+    for (const seq of seqs) {
+      if (seq <= afterSeq) continue
+      const event = this.events.get(seq)
+      if (event) out.push(event)
+      if (out.length >= limit) break
+    }
     return out
   }
 

@@ -63,6 +63,31 @@ function loadArray(file: string, key?: string): unknown[] {
   return []
 }
 
+/** Reused per-file EventLog instances. Building one parses the whole JSONL,
+ * so recreating it per request turned every events.read on a large log into
+ * a multi-second full re-read and starved the sidecar's single thread. The
+ * watermark freshness check in EventLog keeps reused instances correct, and
+ * the LRU cap bounds memory when a userData dir holds many task logs. */
+const eventLogCache = new Map<string, EventLog>()
+const EVENT_LOG_CACHE_LIMIT = 16
+
+function sharedEventLog(file: string): EventLog {
+  const existing = eventLogCache.get(file)
+  if (existing) {
+    // Re-insert to keep the map in least-recently-used order.
+    eventLogCache.delete(file)
+    eventLogCache.set(file, existing)
+    return existing
+  }
+  const log = new EventLog(file)
+  eventLogCache.set(file, log)
+  if (eventLogCache.size > EVENT_LOG_CACHE_LIMIT) {
+    const oldest = eventLogCache.keys().next().value
+    if (oldest !== undefined) eventLogCache.delete(oldest)
+  }
+  return log
+}
+
 function durableState(userDataDir: string) {
   // TaskStore keeps its versioned index under userData/tasks/tasks.json.
   // Accept the old flat path as a compatibility fallback for early builds.
@@ -88,13 +113,13 @@ function durableState(userDataDir: string) {
   const specSnapshots = Array.isArray(goalDocument.specSnapshots) ? goalDocument.specSnapshots : []
   const specDecisions = Array.isArray(goalDocument.specDecisions) ? goalDocument.specDecisions : []
   const specApprovals = Array.isArray(goalDocument.specApprovals) ? goalDocument.specApprovals : []
-  const goalEvents = new EventLog(path.join(userDataDir, 'goals', 'events.jsonl')).read()
+  const goalEvents = sharedEventLog(path.join(userDataDir, 'goals', 'events.jsonl')).read()
   const orphanRuns = tasks.filter((task) => record(task).status === 'running')
   return { tasks, issues, runs, comments, goals, checkpoints, specSnapshots, specDecisions, specApprovals, goalEvents, orphanRuns }
 }
 
 function readEvents(userDataDir: string, taskId: string, afterSeq = 0) {
-  return new EventLog(eventFile(userDataDir, taskId)).read(afterSeq)
+  return sharedEventLog(eventFile(userDataDir, taskId)).read(afterSeq)
 }
 
 function eventFile(userDataDir: string, taskId: string) {
@@ -106,7 +131,7 @@ function eventFile(userDataDir: string, taskId: string) {
 }
 
 function appendEvent(userDataDir: string, taskId: string, input: unknown) {
-  return new EventLog(eventFile(userDataDir, taskId)).append(record(input) as Omit<TaskEvent, 'seq'>)
+  return sharedEventLog(eventFile(userDataDir, taskId)).append(record(input) as Omit<TaskEvent, 'seq'>)
 }
 
 /** Convert claimed stale executions back into runnable durable tasks. The
@@ -141,7 +166,7 @@ function claimOrphanTasks(userDataDir: string, runIds: readonly string[], owner:
       data: { orphanClaim: owner }
     })
     const task = document.tasks.find((entry) => String(record(entry).id || '') === taskId)
-    if (task) record(task).eventCount = new EventLog(eventFile(userDataDir, taskId)).count()
+    if (task) record(task).eventCount = sharedEventLog(eventFile(userDataDir, taskId)).count()
   }
   const tmp = `${file}.tmp`
   fs.mkdirSync(path.dirname(file), { recursive: true })

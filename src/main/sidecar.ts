@@ -130,7 +130,10 @@ export class SidecarManager {
   private readonly rpcQueue: Array<{ method: string; params: unknown; resolve: (value: unknown) => void; reject: (error: unknown) => void }> = []
 
   constructor(options: SidecarManagerOptions) {
-    this.options = { requestTimeoutMs: 2_000, ...options }
+    // Must exceed the slowest events.read full replay of the largest task log:
+    // a short timeout aborts the RPC, the manager kills and re-spawns the
+    // sidecar, and the renderer retry immediately re-blocks the fresh instance.
+    this.options = { requestTimeoutMs: 30_000, ...options }
     this.stateFile = path.join(options.userDataDir, SIDECAR_STATE_FILE)
   }
 
