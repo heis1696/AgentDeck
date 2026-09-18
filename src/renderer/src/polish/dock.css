@@ -4,7 +4,10 @@
    WorkerPane 强制只读（隐藏回退控件），内部时间线独立滚动，不抢主任务滚动容器。 */
 .side-dock {
   display: flex;
-  flex: 0 0 auto;
+  /* 可收缩（flex-shrink 1）：窗口变窄时优先收分栏到 320 下限，绝不溢出行外遮蔽窗口边缘（反馈三轮1） */
+  flex: 0 1 auto;
+  min-width: 320px;
+  max-width: 720px;
   min-height: 0;
   margin-left: auto;
   border-left: 1px solid var(--border);

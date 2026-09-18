@@ -6,6 +6,12 @@
 
 ### 修复
 
+- **双列最小宽与收缩策略（反馈三轮1）**：主内容列硬最小宽 380→420；SideDock 改 `flex-shrink:1` + `min-width:320/max-width:720`——窗口变窄时优先收分栏到 320 下限，配合窗口 minWidth 980（侧栏+两列最小宽之和）两列都不再被挤没或溢出遮蔽。
+- **追问框历史不再劫持有内容的 ↑（反馈三轮2）**：↑ 只在**空框**（或已在历史浏览中）时翻历史；框里有草稿时 ↑/↓ 恢复普通光标移动，编辑不被打断。
+- **看板子卡溢出根治（反馈三轮3）**：子卡整条容器链（board-workers/child-root/child-list/child-card）钉死 `min-width:0 + max-width:100%`，次行 backend/改动徽标允许换行+省略。
+- **看板日期「全部」档（反馈三轮4）**：日期导航新增「全部」切换（含下拉"全部日期"选项）——显示 30 天保留窗内所有卡；全部档下 ‹/›/今天 禁用、超龄角标隐藏。
+- **日期下拉离开变白（反馈三轮5）**：`board-day-nav-select` 从透明底改为实底（bg-inset）+悬停高亮，Windows 原生 select 失焦不再闪白。
+- **顶部 tab 等宽制表（反馈三轮6）**：tab 改 `flex:1 1 0`（150–230px 区间平分），不同标题长度不再产生不同宽度，超长省略。
 - **API 预设支持声明线协议（修复 OpenAI 兼容网关 404）**：预设连接新增 `protocol: 'anthropic' | 'openai'`，注册 v2 provider 时 `api.type` 相应为 `anthropic-messages` / `openai-chat-completions`——此前一律注册 anthropic-messages，OpenRouter 等 OpenAI 兼容网关没有 `/messages` 路由直接 404。缺省按 baseURL 推断（`/v1` 结尾或 openrouter.ai → openai，其余 anthropic 维持历史行为）；设置页预设表单同步加协议选择，契约只增不改。
 - **sidecar 大事件日志点开即卡死**：EventLog 每次读取 O(n²) 整文件重扫改内存索引 + 水位线增量；RPC 超时 2s→30s；堵死重启对账撞 seq。
 - **SideDock v3 回归常规布局（反馈二轮 1-4）**：v2 的"窗口物理延展 + 悬浮覆盖层"方向错误——拖动窗口时主内容居中怪异、拉窄时右侧分栏遮挡全部内容、拖分割线居然缩放整个窗口。v3 改为**行布局列**：`.detail` 改行布局（`.detail-left` 弹性主列 + SideDock 分栏列），分栏与主内容共分界面宽度、不再悬浮不再动窗口尺寸；分割线拖动只在行内重新分配宽度（向左=分栏吃掉主内容空白，向右=分栏收窄）；窗口 `minWidth` 提至 980（侧栏+主区最小+分栏最小之和兜底），极限拉窄也不会互相遮挡。`window:resizeBy` IPC 全链路移除。

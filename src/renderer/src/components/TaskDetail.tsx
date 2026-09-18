@@ -276,11 +276,11 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
               if (event.key === 'Escape') { event.preventDefault(); setSkillMenuOpen(false); return }
             }
             if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
-              // readline 式历史：菜单关闭时 ↑↓ 只在首行/末行（或正在浏览）时翻历史，不劫持多行编辑
+              // 历史重写（反馈三轮2）：只有**空框**（或已在历史里浏览）时 ↑ 才翻历史——
+              // 框里有内容时 ↑/↓ 就是普通光标移动，不打断正在编辑的草稿
               const element = event.currentTarget
-              const atFirstLine = element.selectionStart === 0 || !followUp.slice(0, element.selectionStart).includes('\n')
               const atLastLine = element.selectionEnd >= followUp.length || !followUp.slice(element.selectionEnd).includes('\n')
-              if (event.key === 'ArrowUp' && (history.index >= 0 || atFirstLine || !followUp)) {
+              if (event.key === 'ArrowUp' && (history.index >= 0 || !followUp.trim())) {
                 event.preventDefault()
                 const text = history.navigate(-1)
                 if (text != null) { setFollowUp(text); requestAnimationFrame(() => { element.selectionStart = element.selectionEnd = text.length; autoGrow(element) }) }

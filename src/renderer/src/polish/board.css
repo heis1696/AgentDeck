@@ -160,8 +160,9 @@
 .board-day-nav-today { min-height: 22px; padding: 0 8px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: transparent; color: var(--text-dim); font-size: 10px; font-weight: 600; cursor: pointer; }
 .board-day-nav-today:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
 .board-day-nav-today:disabled { opacity: 0.4; cursor: default; }
-.board-day-nav-select { max-width: 112px; height: 24px; padding: 0 2px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-dim); font-size: 11px; cursor: pointer; }
-.board-day-nav-select:hover { background: var(--bg-hover); }
+/* 实底背景（反馈三轮5）：透明底在 Windows 原生 select 失焦/离开时会闪白 */
+.board-day-nav-select { max-width: 112px; height: 24px; padding: 0 4px; border: 1px solid transparent; border-radius: var(--radius-sm); background: var(--bg-inset); color: var(--text-dim); font-size: 11px; cursor: pointer; }
+.board-day-nav-select:hover, .board-day-nav-select:focus { background: var(--bg-hover); color: var(--text); }
 .board-day-nav-btn:focus-visible, .board-day-nav-today:focus-visible, .board-day-nav-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* ---------- 日节头：全局唯一选中日的节头；超龄保留日的「将自动清理」角标只出现这一处 ---------- */
@@ -235,3 +236,14 @@ html.light .board-page { --board-meeting: #326dc2; }
 .board-card .board-backend, .board-card .board-updated, .board-card .board-elapsed,
 .board-card .board-workers-toggle, .board-child-title, .board-child-state, .board-child-time { overflow-wrap: anywhere; word-break: break-word; }
 .board-card .board-card-tags { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
+
+/* 子卡溢出根治（反馈三轮3）：整条容器链钉死 min-width，次行徽标允许换行与省略 */
+.board-card .board-workers, .board-child-root, .board-child-list, .board-child-card { min-width: 0; max-width: 100%; }
+.board-child-card { overflow: hidden; }
+.board-child-line2 { flex-wrap: wrap; row-gap: 3px; }
+.board-child-backend { max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.board-child-diff { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.board-child-state, .board-child-time { white-space: nowrap; }
+.board-day-nav-all { min-height: 22px; padding: 0 8px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: transparent; color: var(--text-dim); font-size: 10px; font-weight: 600; cursor: pointer; }
+.board-day-nav-all:hover { border-color: var(--accent); color: var(--accent); }
+.board-day-nav-all.is-active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
