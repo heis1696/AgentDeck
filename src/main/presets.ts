@@ -13,6 +13,9 @@ export interface ApiPreset {
   backend: string
   baseURL: string
   apiKey: string
+  /** 线协议：openai（OpenAI 兼容 /chat/completions，OpenRouter/OneAPI/DeepSeek 等）| anthropic（/messages）。
+   *  缺省自动推断：baseURL 以 /v1 结尾或含 openrouter.ai → openai，否则 anthropic（历史行为）。 */
+  protocol?: 'anthropic' | 'openai'
   note?: string
   createdAt: number
 }
@@ -34,6 +37,7 @@ export function normalizePreset(value: unknown, fallback?: ApiPreset): ApiPreset
     backend: backend as ApiPreset['backend'],
     baseURL,
     apiKey,
+    ...(raw.protocol === 'openai' || raw.protocol === 'anthropic' ? { protocol: raw.protocol } : {}),
     ...(typeof raw.note === 'string' && raw.note.trim() ? { note: raw.note.trim() } : {}),
     createdAt: typeof raw.createdAt === 'number' ? raw.createdAt : Date.now()
   }

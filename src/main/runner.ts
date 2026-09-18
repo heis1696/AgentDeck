@@ -14,6 +14,7 @@ interface PresetLike {
   backend: string
   baseURL: string
   apiKey: string
+  protocol?: 'anthropic' | 'openai'
 }
 
 /** 阶段接力处理器：主进程接 createTask（同 issue 新 run、新会话硬切） */
@@ -835,7 +836,7 @@ export class TaskRunner {
   private resolveConnection(agentId?: string) {
     const me = (this.getTeam?.() ?? []).find((a) => a.id === agentId)
     const preset = me?.presetId ? this.getPresets?.().find((p) => p.id === me.presetId) : undefined
-    return me?.model && preset ? { name: preset.name, baseURL: preset.baseURL, apiKey: preset.apiKey } : undefined
+    return me?.model && preset ? { name: preset.name, baseURL: preset.baseURL, apiKey: preset.apiKey, protocol: preset.protocol } : undefined
   }
 
   private newRunId(taskId: string) {

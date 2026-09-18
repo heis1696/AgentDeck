@@ -380,6 +380,13 @@ export function AgentsView() {
             </label>
             <label className="field"><span>Base URL *</span><input value={editingPreset.baseURL} onChange={(e) => setEditingPreset({ ...editingPreset, baseURL: e.target.value })} placeholder="https://api.z.ai/api/anthropic" /></label>
             <label className="field"><span>API Key *</span><input type="password" value={editingPreset.apiKey} onChange={(e) => setEditingPreset({ ...editingPreset, apiKey: e.target.value })} placeholder="sk-…" /></label>
+            <label className="field"><span>线协议</span>
+              <select value={editingPreset.protocol ?? ''} onChange={(e) => setEditingPreset({ ...editingPreset, protocol: (e.target.value || undefined) as Preset['protocol'] })}>
+                <option value="">自动（按 Base URL 推断）</option>
+                <option value="anthropic">anthropic（/messages）</option>
+                <option value="openai">openai（/chat/completions，OpenRouter 等）</option>
+              </select>
+            </label>
             <label className="field"><span>备注</span><input value={editingPreset.note ?? ''} onChange={(e) => setEditingPreset({ ...editingPreset, note: e.target.value })} /></label>
             <div className="dialog-footer">
               <span className="hint">只存本机（userData/api-presets.json）；保存后可用列表里的 ↻ 测试拉取</span>

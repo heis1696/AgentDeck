@@ -72,6 +72,8 @@ export interface PresetInfo {
   backend: string
   baseURL: string
   apiKey: string
+  /** 线协议：openai = OpenAI 兼容（OpenRouter/OneAPI 等 /chat/completions），anthropic = /messages；缺省按 baseURL 推断 */
+  protocol?: 'anthropic' | 'openai'
   note?: string
   createdAt: number
 }

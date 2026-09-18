@@ -75,7 +75,7 @@ export function ensureZcodeCliConfig(): { ok: boolean; detail: string } {
  */
 export function buildModelSelectionFromCliConfig(
   modelRef?: string,
-  connection?: { name: string; baseURL: string; apiKey: string }
+  connection?: { name: string; baseURL: string; apiKey: string; protocol?: 'anthropic' | 'openai' }
 ): { providerId: string; modelId: string; options?: { reasoningLevel: string } } | null {
   const ref = modelRef?.trim()
   if (connection && ref) {
@@ -123,15 +123,24 @@ function presetProviderId(connection: { baseURL: string }): string {
   return `agentdeck-${hash.toString(16).padStart(8, '0')}`
 }
 
+/** 预设线协议：显式声明优先；缺省按 baseURL 推断——/v1 结尾或 openrouter.ai 是 OpenAI 兼容惯例，其余 anthropic（历史行为） */
+function resolvePresetProtocol(connection: { baseURL: string; protocol?: 'anthropic' | 'openai' }): 'anthropic-messages' | 'openai-chat-completions' {
+  const explicit = connection.protocol
+  const openai = explicit ? explicit === 'openai' : /openrouter\.ai/i.test(connection.baseURL) || /\/v1\/?$/.test(connection.baseURL.replace(/\/+$/, ''))
+  return openai ? 'openai-chat-completions' : 'anthropic-messages'
+}
+
 /**
  * 把预设连接 upsert 成 v2 注册表的个人 provider：providerRule 声明凭据/端点/模型目录
  * （group 必填 standard-personal，缺了整条规则被静默过滤），providerModelRule 用
  * 完整模型定义（注册表完整性校验必查 properties/optionSpecs；只写 enabled 会被内置
  * 通用规则补成"reasoning 必选"，外部模型没法定义 level 就卡死）。optionSpecs 显式
  * 声明 reasoningLevel values=['high']、map '{}'（不发 thinking 参数），引用端始终带
- * options.reasoningLevel='high' 同款。只动自己 id 的条目，桌面端规则不受影响。
+ * options.reasoningLevel='high' 同款。api.type 按预设协议（openai 网关注册
+ * anthropic-messages 会 404：OpenRouter 等没有 /messages 路由）。只动自己 id 的
+ * 条目，桌面端规则不受影响。
  */
-function upsertPresetProvider(connection: { name: string; baseURL: string; apiKey: string }, modelId: string): boolean {
+function upsertPresetProvider(connection: { name: string; baseURL: string; apiKey: string; protocol?: 'anthropic' | 'openai' }, modelId: string): boolean {
   const id = presetProviderId(connection)
   try {
     const configPath = path.join(os.homedir(), '.zcode', 'v2', 'provider_config.json')
@@ -152,7 +161,7 @@ function upsertPresetProvider(connection: { name: string; baseURL: string; apiKe
       config: {
         group: 'standard-personal',
         access: { type: 'api-key', apiKey: connection.apiKey },
-        api: { type: 'anthropic-messages', baseUrl: connection.baseURL },
+        api: { type: resolvePresetProtocol(connection), baseUrl: connection.baseURL },
         personalModelIds: [modelId]
       }
     })

@@ -112,6 +112,20 @@ assert(rmPresetSlash?.modelId === 'glm-x9', '预设+prov/model 形式：取尾�
 const rmConnNoModel = buildModelSelectionFromCliConfig(undefined, conn)
 assert(rmConnNoModel?.providerId === 'bigmodel-api' && rmConnNoModel.modelId === 'GLM-5.3', '预设无模型：忽略连接，走平台默认')
 
+// 线协议：显式声明优先，缺省按 baseURL 推断（/v1 结尾或 openrouter.ai → openai）
+const openaiConn = { name: 'OpenRouter', baseURL: 'https://openrouter.ai/api/v1', apiKey: 'sk-or' }
+const rmOpenai = buildModelSelectionFromCliConfig('deepseek/deepseek-v4-pro', openaiConn)
+const openaiRule = readPresetConfig().config.providerConfigRules.providerRules.find((r) => r.providerId === rmOpenai.providerId)
+assert(openaiRule?.config?.api?.type === 'openai-chat-completions', 'OpenRouter 预设自动推断为 openai 协议（/messages 会 404）')
+const anthropicConn = { name: 'anthropic 直连', baseURL: 'https://relay.example/anthropic', apiKey: 'sk-a' }
+buildModelSelectionFromCliConfig('glm-5.3', anthropicConn)
+const anthropicRule = readPresetConfig().config.providerConfigRules.providerRules.find((r) => r.providerName === 'anthropic 直连')
+assert(anthropicRule?.config?.api?.type === 'anthropic-messages', '无推断特征保持 anthropic（历史行为）')
+const explicitConn = { name: '显式覆盖', baseURL: 'https://relay.example/anthropic', apiKey: 'sk-a', protocol: 'openai' }
+buildModelSelectionFromCliConfig('glm-5.3', explicitConn)
+const explicitRule = readPresetConfig().config.providerConfigRules.providerRules.find((r) => r.providerName === '显式覆盖')
+assert(explicitRule?.config?.api?.type === 'openai-chat-completions', '显式 protocol 声明优先于推断')
+
 const catalog = listZcodeModels()
 assert(catalog.models.length === 2 && catalog.models.includes('GLM-5.3') && catalog.defaultModel === undefined, `模型目录来自 v2 桌面端目录（${catalog.models.join(',')}）`)
 

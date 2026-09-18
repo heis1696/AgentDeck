@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+### 修复
+
+- **API 预设支持声明线协议（修复 OpenAI 兼容网关 404）**：预设连接新增 `protocol: 'anthropic' | 'openai'`，注册 v2 provider 时 `api.type` 相应为 `anthropic-messages` / `openai-chat-completions`——此前一律注册 anthropic-messages，OpenRouter 等 OpenAI 兼容网关没有 `/messages` 路由直接 404。缺省按 baseURL 推断（`/v1` 结尾或 openrouter.ai → openai，其余 anthropic 维持历史行为）；设置页预设表单同步加协议选择，契约只增不改。
+- **sidecar 大事件日志点开即卡死**：EventLog 每次读取 O(n²) 整文件重扫改内存索引 + 水位线增量；RPC 超时 2s→30s；堵死重启对账撞 seq。
+
 ### 变更
 
 - **看板单日视图 + 子单收纳重做（反馈1/5）**：去掉列内多日期分节堆叠，改为全局单一选中日期（默认今天）——七列只显示 updatedAt 落在当日的卡片；顶栏新增日期导航（‹ 前一天 / 日期文案 / › 后一天钳在今天 / 「今天」快捷钮 / 只列「有卡片日期」的下拉）；空日期列空态提示。受保护超龄卡归入其 updatedAt 对应日期可见，「将自动清理」角标收敛到超龄日节头一处。子单收纳重做：有界容器（浅底+圆角+左侧类型色连接竖线，深层沿细竖线缩进），子单改两行迷你卡（状态点/标题/状态/耗时 + backend 芯片 + gitStat 改动徽标），并修掉旧子单行被全局 status-chip 规则漏染的根因（data-status 属性隔离）。`smoke-board-retention` board 断言改写为单日过滤四场景。
