@@ -16,12 +16,13 @@
 
 - **阶段接力（硬切）协议与解析对齐 + 兜底通道**（用户反馈"完全没见 agent 触发过"）：事件日志实据复盘显示机制本身未坏（9月8日前 8 连链正常），真实断点是 ① agent 在标记后补客套收尾或整体包进代码围栏——末尾锚定正则全灭且零留痕；② 协议文本承诺"缺省 start 按 auto"而解析器实作"缺省一律 parked"，语义互相矛盾。修复：解析新增兜底通道（末尾锚定失守时取全文最后一个完整标记，仅显式 `start="auto"` 且简报 ≥20 字才采纳，协议示例指纹拒收防复述）；协议文本改为显式要求 `start="auto"`、缺省/写错明确按停放，并新增"拿不准时输出 parked 而不是『后续可以…』口头交接"条款；全链路可观测——兜底触发、检测到标记字样但拒收（未闭合/围栏/复述）均落 status 事件留痕。`smoke:continue` 扩充兜底/防复述/围栏/缺省矩阵与 E1/E2 端到端场景。
 
-### 修复
+### 变更（续）
 
 - **zcode 模型接线迁移 CLI 3.12.3 新协议（注册表引用 + session/setModel）**：新协议 create/resume 的 strict schema 不再收模型字段（传了报 Unrecognized key，执行期也带不住 options）——统一改为会话建立后 `session/setModel {providerId, modelId, options?}` 补设；reasoning 模型必须带 `options.reasoningLevel`（取桌面端目录 defaultVariant，报 "Reasoning level is required" 的坑）。**API 预设（连接）替代旧 runtimeModel 内联凭据**：预设 upsert 成 `~/.zcode/v2/provider_config.json` 的个人 provider 规则（id 由 baseURL fnv1a 派生，`agentdeck-xxxxxxxx`，同预设幂等、异预设不冲突；group 必填 standard-personal 否则整条被静默过滤），模型解析为注册表引用（providerId 必须在 providerRules 内，模型 id 大小写按目录归一）；**解析/upsert 必须先于 spawn**——app-server 启动加载注册表快照，拉起后再写它看不到。resume 后同样 setModel 补设（沿用 agent 钉死模型），修复「历史任务使用的模型已不可用」类失效。`smoke:model` 重写为新协议（引用解析/预设 upsert/目录归一/显式前缀四组场景）。
 
 ### 修复
 
+- **被拒派单改「随报告捎带」回灌（修复混合轮拒单永远无人知晓）**：此前拒单回灌只接「整轮零新单」的收尾回合——领队每轮都有新单时永远收不到拒单通知，带着「该单在途」的幻觉继续排计划（iss_t_mu5t2em6_ymbllw 实测：混合轮里一单被拒，领队连着多轮评估「仍在途等回灌」，该工作项无人领）。现在每轮报告自动捎带本轮被拒清单（take 即清空，与兜底通道不重复），明确告知「队员没有收到任何指令、不存在在途」，要求改派名单内队员；循环结束仍有未送达拒单时留痕 + Issue 评论，工作项不再静默消失。`smoke:delegate-reject` 扩充捎带场景。
 - **预设 provider 注册改完整模型定义（修复外部中转模型选不上）**：providerModelRule 只写 `enabled` 会被内置通用规则按 modelId 正则补全成"reasoning 必选"——外部模型没法定义 level，选择校验直接卡死。现在注册时带完整定义（properties 上下文窗/输入输出格式/工具调用 + optionSpecs 显式声明 `reasoningLevel values=['high']`、map '{}' 不发 thinking 参数），引用端始终带同款 `options.reasoningLevel='high'`；目录外模型同样注册完整定义。
 
 - **旧协议会话 resume 后回合必败（"Select a model before continuing"）**：内联注册表时代建立的老会话，其历史模型（如 `zai/*`）在新版 v2 注册表里不可解析——resume 后会话无可用模型，回合在 model_creation 阶段报 CONFIGURATION_ERROR。现在 resume 后无条件 `session/setModel`（agent 钉死模型，缺省取目录默认），等价于旧 runtimeModel 每次重传；create 不带模型时服务端自选默认（实测可用），仅钉选时设置。

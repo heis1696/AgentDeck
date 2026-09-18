@@ -462,8 +462,9 @@ export async function runDelegationLoop(
     note(`领队评估：${n.outcome}${n.reason ? ' — ' + n.reason : ''}`)
   }
 
-  // 被拒派单的回灌（有界防循环）：目标护栏拒单时领队并不知道，若不回灌它会在
-  // 「等回灌」的幻觉里干等（实际事故：派给队长 claude/codex 被跳过，单子永远不出现）。
+  // 被拒派单的零新单兜底回灌（有界防循环）：主通道是随每轮报告捎带（下方），这里只接
+  // 「领队没派任何新单」的收尾回合——那种回合没有报告可搭。目标护栏拒单时领队并不知道，
+  // 若不回灌它会在「等回灌」的幻觉里干等（实际事故：派给队长 claude/codex 被跳过，单子永远不出现）。
   let rejectedFeedbacks = 0
   const rosterText = subs.map((a) => `${a.name}（${a.backend}）`).join('、')
   const feedbackRejections = async (): Promise<boolean> => {
@@ -545,6 +546,20 @@ export async function runDelegationLoop(
         return `### 队员 ${call?.to ?? c.agentId ?? c.backend} 的结果（${c.status}，单号 #${seq}）\n${body}`
       })
       .join('\n\n')
+    // 拒单随报告捎带：只靠「整轮零新单」兜底送达的话，领队每轮都有新单时永远收不到，
+    // 会带着「该单在途」的幻觉继续排计划（iss_t_mu5t2em6_ymbllw 实测：混合轮里一单被拒，
+    // 领队连着多轮评估「仍在途等回灌」，该工作项无人领）。take 即清空，兜底通道不会重复送。
+    const rideAlongRejects = runner.takeDelegateRejections(taskId)
+    let rejectNotice = ''
+    let continueInstruction = '请先输出一行本轮评估标记（<round outcome="..." reason="..."/>），再继续推进：需要再派发就继续用 <delegate> 标记；已全部完成就输出最终总结（不要再派发）。'
+    if (rideAlongRejects.length) {
+      note(`⚠ ${rideAlongRejects.length} 条派单被拒（未建单），原因随报告回灌给领队改派`)
+      rejectNotice =
+        `\n\n以下派单没有被执行，队员没有收到任何指令，不存在「在途」：\n` +
+        `${rideAlongRejects.map((r) => `- ${r}`).join('\n')}\n` +
+        `你的队员名单：${rosterText || '（空，无人可派）'}。请改派给名单内的队员或自己补做；被拒的目标不要再次派发。`
+      continueInstruction = '请先输出一行本轮评估标记（<round outcome="..." reason="..."/>），再继续推进：需要再派发就继续用 <delegate> 标记（含上面的被拒单改派）；确无遗留工作才输出最终总结。'
+    }
     note(`第 ${round} 轮结果已回灌，等待领队继续`)
     const reviewInstruction = `\n\n对报告里每个状态为 done 的单给出审核结论（maker/checker：队员是 maker，你是 checker）：
 <review of="#单号" verdict="pass|fail" note="一句话：通过理由或退回原因"/>
@@ -552,7 +567,7 @@ export async function runDelegationLoop(
 - 未出结论的单将保留在人工审核列。`
     try {
       const turn = await runner.sendTurn(taskId, session,
-        `【系统】队员执行结果汇报：\n\n${report}\n\n请先输出一行本轮评估标记（<round outcome="..." reason="..."/>），再继续推进：需要再派发就继续用 <delegate> 标记；已全部完成就输出最终总结（不要再派发）。${reviewInstruction}`
+        `【系统】队员执行结果汇报：\n\n${report}${rejectNotice}\n\n${continueInstruction}${reviewInstruction}`
       )
       if (!turn.ok) throw new Error(turn.error || '回灌回合失败')
       for (const n of parseRoundNotes(turn.response)) {
@@ -590,6 +605,15 @@ export async function runDelegationLoop(
         ctx.addIssueComment?.(issueId, `⚠ 委派报告未送达：领队会话已结束（回灌失败）。以下为队员报告摘要：\n${excerpts}`)
       }
       break
+    }
+  }
+
+  // 循环结束仍有未送达的拒单（预算耗尽等路径）：留痕 + Issue 评论，不让工作项静默消失
+  const leftoverRejects = runner.takeDelegateRejections(taskId)
+  if (leftoverRejects.length) {
+    note(`⚠ 委派结束仍有 ${leftoverRejects.length} 条派单被拒且未回灌：${leftoverRejects.map((r) => r.slice(0, 80)).join('；')}`)
+    if (task.issueId) {
+      ctx.addIssueComment?.(task.issueId, `⚠ 以下派单始终未执行（队员未收到任何指令），需要人工跟进或重新派发：\n${leftoverRejects.map((r) => `- ${r}`).join('\n')}`)
     }
   }
 

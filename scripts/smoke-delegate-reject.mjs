@@ -1,5 +1,6 @@
 // 派单被拒回灌冒烟：领队派给名单外的目标（不存在的 / 队长）→ 拒单原因回灌 →
-// 场景A 改派成功交付；场景B 回合末解析被拒后自行收尾；场景C 顽固重派时有界终止。
+// 场景A 改派成功交付；场景B 回合末解析被拒后自行收尾；场景C 顽固重派时有界终止；
+// 场景D 混合轮（好单坏单同回合）→ 拒单随报告捎带送达，不等「零新单」兜底。
 import { build } from 'esbuild'
 import { pathToFileURL } from 'node:url'
 import path from 'node:path'
@@ -38,8 +39,11 @@ function makeLeaderBackend(script) {
     sent,
     id: 'zcode', label: 'Boss',
     async probe() { return { ok: true, detail: '' } },
+    // 先让出一个微任务再发首回合事件：同步发会撞上 scheduler.pump 的重入闸
+    // （launch(领队)→run→start 还在 pump 栈上，此时建单 enqueue 会被 pumping 闸吞掉，子任务永远 queued）
     async start({ events }) {
       const sid = 'sess_lead'
+      await Promise.resolve()
       script.step(0, { events })
       return { sessionId: sid, async send(content) { sent.push(content); script.step(sent.length, { events, content }) }, async stop() {}, async close() {} }
     }
@@ -172,6 +176,45 @@ function harness(team, leaderBackend) {
   assert(store.list().filter((x) => x.parentTaskId === t.id).length === 0, '顽派全程没有建出子任务')
   const feedbackCount = leader.sent.filter((c) => c.includes('没有被执行')).length
   assert(feedbackCount === 2, `回灌恰好 2 次后有界终止（${feedbackCount}）`)
+}
+
+// ================= 场景 D：混合轮（一好一坏同回合）→ 拒单随报告捎带，不等零新单兜底 =================
+{
+  const team = [
+    { id: 'L1', name: 'Boss', backend: 'zcode', role: '领队', systemPrompt: '', subordinates: ['W1'] },
+    { id: 'W1', name: 'Alpha', backend: 'alpha', role: '工程师', systemPrompt: '' }
+  ]
+  let reportRounds = 0
+  const leader = makeLeaderBackend({
+    step(n, { events: ev, content }) {
+      if (n === 0) {
+        // 同一回合混派：Alpha 能建单，Ghost 被拒——混合轮正是零新单兜底覆盖不到的形态
+        emitTurn(ev, '两路并行。', ['<delegate to="Alpha">做 A</delegate>', '<delegate to="Ghost">做 B</delegate>'])
+      } else if (content.includes('队员执行结果汇报') && content.includes('没有被执行')) {
+        // 报告捎带了拒单 → 当场改派，不再「等回灌」
+        emitTurn(ev, 'B 单原被拒，改派 Alpha。', ['<delegate to="Alpha">做 B</delegate>'])
+      } else if (content.includes('队员执行结果汇报')) {
+        reportRounds++
+        emitTurn(ev, reportRounds >= 2 ? '最终总结：A、B 都完成了。' : '继续。')
+      } else {
+        emitTurn(ev, '继续。')
+      }
+    }
+  })
+  const { store, runner } = harness(team, leader)
+  const t = store.create({ title: '混合派单', prompt: 'A 和 B', backend: 'zcode', agentId: 'L1' })
+  runner.enqueue(t)
+  const fin = await settle(store, t.id, 30000)
+
+  assert(fin.status === 'done', `场景D 领队 done（${fin.status}${fin.error ? ' ' + fin.error : ''}）`)
+  const children = store.list().filter((x) => x.parentTaskId === t.id)
+  assert(children.length === 2 && children.every((x) => x.backend === 'alpha'), `混合轮后 Alpha 共两单（${children.length}）`)
+  const rideAlong = leader.sent.find((c) => c.includes('队员执行结果汇报') && c.includes('没有被执行'))
+  assert(!!rideAlong, '拒单随报告捎带给领队（不等零新单兜底）')
+  assert(rideAlong.includes('to="Ghost"') && rideAlong.includes('不存在「在途」'), '捎带说清 Ghost 没执行且不存在在途')
+  assert(rideAlong.includes('Alpha（alpha）'), '捎带带有效队员名单')
+  const rideAlongCount = leader.sent.filter((c) => c.includes('队员执行结果汇报') && c.includes('没有被执行')).length
+  assert(rideAlongCount === 1, `捎带恰好一次，不与兜底重复（${rideAlongCount}）`)
 }
 
 console.log('\n✅ 派单被拒回灌冒烟全绿')
