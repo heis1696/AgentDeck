@@ -1,7 +1,8 @@
 /**
  * R3 契约：<WorkerPane taskId={id} tasks={tasks} onOpen={onSelect} /> 为 Dock 内紧凑只读详情。
  * tasks 由宿主持续传入最新列表；内部按 taskId 订阅 useTaskEvents/useTurnModel，切换任务重建订阅。
- * onOpen(id) 仅在「打开完整详情」按钮触发；无运行/追问/权限审批/回退操作，结果用 Markdown 展示。
+ * onOpen(id) 仅在「打开完整详情」按钮触发；无运行/追问/权限审批/回退操作——最终回复
+ * 本身就在时间线末尾，不再额外挂底部执行结果区（反馈二轮7）。
  * 样式依赖 polish/dock.css；独立使用时同样隐藏时间线回退按钮且回调为空操作。
  */
 import { useEffect, useRef, useState } from 'react'
@@ -11,7 +12,6 @@ import { fmtDuration } from '../../api'
 import { PARKED_QUEUED_LABEL } from '../../labels'
 import { useTaskEvents } from '../../hooks/useTaskEvents'
 import { useTurnModel } from '../../hooks/turnModel'
-import { Markdown } from '../Markdown'
 import { TurnTimeline } from './TurnTimeline'
 
 export interface WorkerPaneProps {
@@ -70,9 +70,5 @@ function WorkerDetail({ task, onOpen }: { task: Task; onOpen: (id: string) => vo
     </header>
     {task.error && <div className="worker-pane-error" role="status">{task.failure?.title ?? task.error}</div>}
     <div className="worker-pane-timeline"><TurnTimeline task={task} turns={turns} activeNav={activeNav} onNavigate={navigate} onRewind={noRewind} logRef={logRef} onScroll={onScroll} /></div>
-    <details className="worker-pane-result" open={task.result ? true : undefined}>
-      <summary>执行结果</summary>
-      <div>{task.result ? <Markdown text={task.result} /> : <p className="dim">{task.status === 'running' || task.status === 'queued' ? '尚未生成最终结果。' : '无结果。'}</p>}</div>
-    </details>
   </section>
 }

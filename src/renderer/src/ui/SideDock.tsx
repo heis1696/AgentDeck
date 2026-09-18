@@ -1,18 +1,17 @@
 /**
- * SideDock v2（反馈3）：右侧分页容器——
- * - 不再挤压原布局：固定定位贴窗口右缘，打开时通过 window:resizeBy 把窗口**向右延展**出分页宽度；
- *   屏幕放不下（已顶到右缘/最大化）时退化为覆盖层（带阴影提示层级）。
- * - tab 导航为**顶部横向**标签条；左缘为可拖分割线（320–720px，localStorage 记忆），
- *   拖动同步增减窗口宽度。
- * - openDockItem/closeDockItem 经 window CustomEvent('agentdeck:dock') 通信，零 prop 透传；
- *   同 id 重复打开=更新快照并激活（TurnTimeline 用它做「先开快照、git diff 回来再补」的二段式）。
- * - file 项 payload：事件参数快照（DockEditMetadata）+ 可选 git 权威 diff（diff/additions/deletions/diffNote）。
- * - items 清空 → 整体卸载并收回延展的窗口宽度。
+ * SideDock v3（反馈二轮 1-4）：右侧分页容器是**常规布局列**——
+ * 挂在 .detail 行布局末位，与左侧主内容共分界面宽度；分割线拖动只在此区域内
+ * 重新分配（dock 变宽=主内容让出空白，反之亦然），**不再改变窗口尺寸、不再悬浮覆盖**。
+ * 窗口最小宽度由主进程 minWidth 兜底（主区最小 + 分栏最小），拉窄不会互相遮挡。
+ * tab 导航为顶部横向标签条；宽度 320–720px，localStorage 记忆。
+ * openDockItem/closeDockItem 经 window CustomEvent('agentdeck:dock') 通信，零 prop 透传；
+ * 同 id 重复打开=更新快照并激活（TurnTimeline 用它做「先开快照、git diff 回来再补」的二段式）。
+ * file 项 payload：事件参数快照（DockEditMetadata）+ 可选 git 权威 diff（diff/additions/deletions/diffNote）。
+ * items 清空 → 整体卸载，主内容自动占回全宽。
  */
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { FileCode2, ListTodo, X } from 'lucide-react'
 import type { Task } from '../../../shared/types'
-import { bridge } from '../api'
 import { CodeViewer } from './CodeViewer'
 import { WorkerPane } from '../components/task/WorkerPane'
 
@@ -49,17 +48,12 @@ export function closeDockItem(id: string) {
   window.dispatchEvent(new CustomEvent<DockEvent>(DOCK_EVENT, { detail: { type: 'close', id } }))
 }
 
-/** 窗口宽度增减（主进程 window:resizeBy）；失败静默——放不下就当覆盖层用 */
-const resizeWindowBy = (dx: number) => { if (dx) void bridge.resizeBy(dx).catch(() => {}) }
-
 export function SideDock({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: string) => void }) {
   const [state, setState] = useState<{ items: DockItem[]; activeId: string | null }>({ items: [], activeId: null })
   const [width, setWidth] = useState(() => {
     const saved = Number(localStorage.getItem(DOCK_WIDTH_KEY))
     return Number.isFinite(saved) && saved >= DOCK_MIN && saved <= DOCK_MAX ? saved : 480
   })
-  /** 当前因 dock 打开而延展出的窗口宽度（items 清空时收回） */
-  const widenedRef = useRef(0)
   const stripRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null)
   const prefix = useId()
@@ -83,21 +77,7 @@ export function SideDock({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: string
     return () => window.removeEventListener(DOCK_EVENT, receive)
   }, [])
 
-  // 打开首个分页 → 向右延展窗口；全部关闭 → 收回；卸载（主任务切换重建）同样收回
-  useEffect(() => {
-    const open = state.items.length > 0
-    if (open && !widenedRef.current) {
-      widenedRef.current = width
-      resizeWindowBy(width)
-    } else if (!open && widenedRef.current) {
-      resizeWindowBy(-widenedRef.current)
-      widenedRef.current = 0
-    }
-  }, [state.items.length, width])
-  const widenedOnUnmount = useRef(0)
-  widenedOnUnmount.current = widenedRef.current
-  useEffect(() => () => resizeWindowBy(-widenedOnUnmount.current), [])
-
+  // 分割线只重新分配本行内宽度：向左拖=分栏变宽（主内容让空白），向右拖=分栏收窄
   const onSplitterDown = useCallback((event: React.PointerEvent) => {
     event.preventDefault()
     dragRef.current = { startX: event.clientX, startWidth: width }
@@ -107,11 +87,9 @@ export function SideDock({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: string
     const drag = dragRef.current
     if (!drag) return
     const next = Math.min(DOCK_MAX, Math.max(DOCK_MIN, drag.startWidth - (event.clientX - drag.startX)))
-    const delta = next - width
-    if (!delta) return
+    if (next === width) return
     setWidth(next)
     localStorage.setItem(DOCK_WIDTH_KEY, String(next))
-    if (widenedRef.current) { widenedRef.current += delta; resizeWindowBy(delta) }
   }, [width])
   const onSplitterUp = useCallback((event: React.PointerEvent) => {
     dragRef.current = null
@@ -128,7 +106,7 @@ export function SideDock({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: string
     stripRef.current?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[index]?.focus()
   }
   return <aside className="side-dock" aria-label="子任务与文件预览" style={{ width }}>
-    <div ref={stripRef} className="dock-splitter" role="separator" aria-orientation="vertical" aria-label="拖动调整分页宽度" title="拖动调整宽度（窗口随之延展/收回）" onPointerDown={onSplitterDown} onPointerMove={onSplitterMove} onPointerUp={onSplitterUp} onPointerCancel={onSplitterUp} />
+    <div ref={stripRef} className="dock-splitter" role="separator" aria-orientation="vertical" aria-label="拖动调整分页宽度" title="拖动调整分页宽度" onPointerDown={onSplitterDown} onPointerMove={onSplitterMove} onPointerUp={onSplitterUp} onPointerCancel={onSplitterUp} />
     <div className="dock-body">
       <div className="dock-tabs" role="tablist" aria-label="右侧分页" aria-orientation="horizontal">
         {state.items.map((item, index) => <div className={`dock-tab-row${item.id === active.id ? ' is-active' : ''}`} key={item.id}>

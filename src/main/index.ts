@@ -150,7 +150,9 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1180,
     height: 760,
-    minWidth: 860,
+    // 侧栏 + 主内容最小宽 + SideDock 分栏最小宽（320）之和兜底：拉窄到极限时
+    // 主内容与右侧分页都不会被挤没或互相遮挡（反馈二轮3）
+    minWidth: 980,
     minHeight: 560,
     autoHideMenuBar: true,
     backgroundColor: '#0f1115',

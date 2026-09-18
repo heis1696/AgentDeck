@@ -228,3 +228,10 @@ html.light .board-page { --board-meeting: #326dc2; }
 @keyframes board-breathe { 0%, 100% { box-shadow: 0 0 0 0 transparent; } 50% { box-shadow: 0 0 0 1px var(--status-running-glow), 0 0 15px var(--status-running-bg); } }
 @keyframes board-child-breathe { 0%, 100% { box-shadow: 0 0 0 0 transparent; } 50% { box-shadow: 0 0 0 3px var(--status-running-glow); } }
 @media (prefers-reduced-motion: reduce) { .board-card.issue-card.status-running { animation: none; } .board-child-dot-running { animation: none; } .board-card { transition: none; } }
+
+/* 文字溢出兜底（反馈二轮5）：长路径/长命令/无空格串不再撑破卡片容器 */
+.board-card, .board-card * { min-width: 0; }
+.board-card .board-card-title, .board-card .board-card-open, .board-card .board-kind-badge,
+.board-card .board-backend, .board-card .board-updated, .board-card .board-elapsed,
+.board-card .board-workers-toggle, .board-child-title, .board-child-state, .board-child-time { overflow-wrap: anywhere; word-break: break-word; }
+.board-card .board-card-tags { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }

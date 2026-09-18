@@ -205,7 +205,9 @@ body {
 .empty-icon { font-size: 40px; opacity: 0.5; }
 
 /* ---------- 详情 ---------- */
-.detail { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+/* 行布局：左列（头+主体）+ 右侧 SideDock 分栏（常规布局列，与主内容共分宽度，v3） */
+.detail { flex: 1; display: flex; flex-direction: row; min-height: 0; }
+.detail-left { flex: 1; min-width: 380px; display: flex; flex-direction: column; min-height: 0; }
 .detail-header {
   display: flex;
   justify-content: space-between;
@@ -482,9 +484,10 @@ body {
 .log-line b { font-weight: 600; }
 .log-line .preview { opacity: 0.75; }
 .log-line.tool-result { color: var(--ok); }
-.log-line { font: 11px var(--mono); padding: 2px 0; color: var(--text-dim); }
+.log-line { font: 11px var(--mono); padding: 2px 0; color: var(--text-dim); overflow-wrap: anywhere; word-break: break-word; min-width: 0; }
 .log-line .ts { color: #565f70; margin-right: 8px; }
 .log-line.tool { color: var(--text); }
+.log-line .mono, .log-line .preview { overflow-wrap: anywhere; word-break: break-word; min-width: 0; }
 .log-line.usage { color: var(--warn); }
 .log-line.error { color: var(--err); }
 .log-running { color: var(--accent); font-size: 12px; padding: 8px 0; animation: pulse 1.2s infinite; }
@@ -1304,12 +1307,12 @@ html.light {
   display: flex; flex-direction: column;
   overflow-y: auto;
 }
-/* 主列内容限宽居中：banner/tabs/body/followup 全部收进内层 */
-.detail-main > * { margin-left: auto; margin-right: auto; width: 100%; max-width: calc(896px + 40px); padding-left: 20px; padding-right: 20px; }
+/* 主列内容限宽居中：banner/tabs/body/followup 全部收进内层（v3 提升限宽减少两侧留空） */
+.detail-main > * { margin-left: auto; margin-right: auto; width: 100%; max-width: calc(1080px + 40px); padding-left: 20px; padding-right: 20px; }
 .detail-main > .tabs, .detail-main > .detail-body { padding-left: 20px; padding-right: 20px; }
 .detail-body { max-width: none; }
-.log.chat { max-width: 856px; }
-.result { max-width: 856px; }
+.log.chat { max-width: 1060px; }
+.result { max-width: 1060px; }
 .git-pane { max-width: 936px; }
 
 /* ---- 属性栏（w-80，border-l，行式 label+控件，hr 分组） ---- */

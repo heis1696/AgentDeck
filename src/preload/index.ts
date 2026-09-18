@@ -169,7 +169,6 @@ const api: AgentDeckApi = {
   pickDir: (): Promise<string> => ipcRenderer.invoke('dialog:pick-dir'),
   openPath: (target: string): Promise<void> => ipcRenderer.invoke('shell:open', target),
   notify: (title: string, body: string): void => ipcRenderer.send('notify', { title, body }),
-  resizeBy: (dx: number): Promise<{ ok: boolean; width?: number; reason?: string }> => ipcRenderer.invoke('window:resizeBy', dx),
   agents: {
     list: (): Promise<Array<AgentInfo>> =>
       ipcRenderer.invoke('agents:list'),

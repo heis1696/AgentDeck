@@ -8,6 +8,10 @@
 
 - **API 预设支持声明线协议（修复 OpenAI 兼容网关 404）**：预设连接新增 `protocol: 'anthropic' | 'openai'`，注册 v2 provider 时 `api.type` 相应为 `anthropic-messages` / `openai-chat-completions`——此前一律注册 anthropic-messages，OpenRouter 等 OpenAI 兼容网关没有 `/messages` 路由直接 404。缺省按 baseURL 推断（`/v1` 结尾或 openrouter.ai → openai，其余 anthropic 维持历史行为）；设置页预设表单同步加协议选择，契约只增不改。
 - **sidecar 大事件日志点开即卡死**：EventLog 每次读取 O(n²) 整文件重扫改内存索引 + 水位线增量；RPC 超时 2s→30s；堵死重启对账撞 seq。
+- **SideDock v3 回归常规布局（反馈二轮 1-4）**：v2 的"窗口物理延展 + 悬浮覆盖层"方向错误——拖动窗口时主内容居中怪异、拉窄时右侧分栏遮挡全部内容、拖分割线居然缩放整个窗口。v3 改为**行布局列**：`.detail` 改行布局（`.detail-left` 弹性主列 + SideDock 分栏列），分栏与主内容共分界面宽度、不再悬浮不再动窗口尺寸；分割线拖动只在行内重新分配宽度（向左=分栏吃掉主内容空白，向右=分栏收窄）；窗口 `minWidth` 提至 980（侧栏+主区最小+分栏最小之和兜底），极限拉窄也不会互相遮挡。`window:resizeBy` IPC 全链路移除。
+- **文字溢出兜底（反馈二轮5）**：执行记录工具行的长命令/参数/路径（`.log-line` 系）与看板卡片内长路径/无空格串（卡片标题/角标/子单行）加 `overflow-wrap:anywhere` + `min-width:0`，不再撑破包裹容器。
+- **issue 内部留空优化（反馈二轮6）**：主列内容限宽 896→1080（对话/结果 856→1060），侧栏移除后的大片两侧空白显著收敛。
+- **SideDock 子任务面板去底部执行结果区（反馈二轮7）**：最终回复本就在时间线末尾，底部重复的「执行结果」折叠区与相关样式删除。
 
 ### 变更
 

@@ -283,8 +283,6 @@ export interface AgentDeckApi {
   pickDir: () => Promise<string>
   openPath: (target: string) => Promise<void>
   notify: (title: string, body: string) => void
-  /** SideDock 延展窗口：dx>0 向右加宽、dx<0 收回（最大化/全屏/屏宽不足时主进程拒绝） */
-  resizeBy: (dx: number) => Promise<{ ok: boolean; width?: number; reason?: string }>
   agents: {
     list: () => Promise<AgentInfo[]>
     save: (list: AgentInfo[]) => Promise<AgentInfo[]>

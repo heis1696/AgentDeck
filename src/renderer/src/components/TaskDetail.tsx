@@ -218,6 +218,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   const duration = task.startedAt ? (task.endedAt ?? Date.now()) - task.startedAt : 0
 
   return <div className="detail">
+    <div className="detail-left">
     <header className="detail-header page-header-bar"><div className="detail-title-wrap">
       {editingTitle ? <input className="title-edit-input" value={titleDraft} autoFocus onChange={(event) => setTitleDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void saveTitle() } else if (event.key === 'Escape') cancelTitleEdit() }} onBlur={() => void saveTitle()} /> : <h1 className="detail-title">{task.title}<button className="title-edit" type="button" title="重命名" onClick={beginTitleEdit}><Pencil size={13} aria-hidden="true" /></button></h1>}
       <div className="detail-meta">
@@ -296,8 +297,9 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
         <button className="btn" disabled={busy || !!task.parentTaskId || (task.status !== 'done' && task.status !== 'failed')} title={task.parentTaskId ? '委派子任务不参与阶段接力' : '让本执行交出下一阶段简报，并在同一 Issue 上硬切新会话'} onClick={() => void sendFollowUp('执行下一阶段', { relay: true })}>⇥ 接力下一阶段</button><button className="btn primary" disabled={busy || !followUp.trim()} onClick={() => { void sendFollowUp(); setSkillMenuOpen(false) }}>发送</button>
       </footer>}
     </div>
-    <SideDock key={task.id} tasks={tasks} onOpen={onSelect} />
     </div>
+    </div>
+    <SideDock key={task.id} tasks={tasks} onOpen={onSelect} />
     {/* 目标/会议浮窗（队员任务不挂）：面板常驻挂载以持续上报状态，浮窗本体仅 open 时渲染 */}
     {!task.parentTaskId && <>
       <GoalPanel task={task} issueId={issueId} open={float === 'goal'} onToggle={(next) => setFloat((cur) => (next ? 'goal' : cur === 'goal' ? null : cur))} onGoal={setGoal} />
