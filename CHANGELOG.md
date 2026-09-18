@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+### 变更
+
+- **反馈迭代一（UI 五项 + 编辑详情数据源）**：
+  - **Issue 主页重做**：默认即新建 Issue 表单为底（Ctrl+N/侧栏「新建任务」直达）；已打开的 issue 改为表单上方一条紧凑横排胶囊（状态点+标题+×，点击进详情），不再是看板块状卡片；独立 create 视图移除。
+  - **详情页右侧栏去常驻竖铺**：`detail-panel` 整列删除——保留信息横向压缩进 header meta 行（IssueID/工作流下拉/状态/backend/工作目录/用时/用量合并芯片/集成/重试），低频信息（原始指令/交接备注/会话 ID/接力链）收进「ℹ」弹层；优先级与标签编辑删除；RunHistory 与评论输入/评论区删除（动态时间线单行化保留 agent 评论——接力停放通知走这条通道）。
+  - **目标/会议改浮窗 + 输入框命令触发**：GoalPanel/MeetingPanel 不再常驻侧栏，仅在该 issue 活跃时 header 出现 🎯/💬 进度芯片，点击弹可拖浮窗（`ui/FloatWindow.tsx`）；追问框斜杠菜单顶部新增「命令」组（`/goal`、`/meeting`，本地触发不发给后端）。
+  - **SideDock v2**：不再挤压原布局——固定贴窗口右缘，打开时经 `window:resizeBy` 把窗口**向右延展**出分页宽（最大化/屏宽不足退化为覆盖层）；tab 导航改**顶部横向**标签条；左缘可拖分割线（320–720px，localStorage 记忆，拖动同步增减窗口宽度）。
+  - **编辑详情改 git 权威 diff**：角标点击二段式——先以工具入参快照立即开页，`tasks:fileDiff`（git.ts：工作区+暂存对 HEAD 的单文件 unified diff、numstat 计数、二进制/新文件/截断处理）回来后同 id 补写；CodeViewer 新增 GitHub 风格统一 diff 模式（双行号、hunk 头、+/- 底色、分段语法高亮），clean/失败回退参数快照并注明来源。`smoke:file-diff` 八场景。
+
 ## [0.22.0] - 2026-09-18
 
 ### 新增

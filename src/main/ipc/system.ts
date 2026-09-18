@@ -1,4 +1,4 @@
-import { BrowserWindow, dialog, ipcMain, Notification } from 'electron'
+import { BrowserWindow, dialog, ipcMain, Notification, screen } from 'electron'
 import fs from 'node:fs'
 import { buildAnalytics } from '../analytics'
 import { parseAnalyticsRange, parseContent, parseNotification, parseSettingsPatch } from '../ipc-validation'
@@ -8,6 +8,25 @@ import { listWorktreeMetadata, pruneWorktrees } from '../git'
 import type { IpcContext } from './context'
 
 export function registerSystemIpc(ctx: IpcContext) {
+  // SideDock 延展窗口用：dx>0 向右加宽（顶左锚定），dx<0 收回；屏宽不足自动夹住。
+  // 渲染层约定见 ui/SideDock.tsx —— 打开分页延展、全关收回、拖分割线同步增减。
+  ipcMain.handle('window:resizeBy', (_e, input: unknown) => {
+    const dx = typeof input === 'number' && Number.isFinite(input) ? Math.round(input) : 0
+    if (!dx) return { ok: true }
+    const win = BrowserWindow.getAllWindows().find((w) => !w.isDestroyed())
+    if (!win) return { ok: false }
+    try {
+      if (win.isMaximized() || win.isFullScreen()) return { ok: false, reason: 'maximized' }
+      const bounds = win.getBounds()
+      const workArea = screen.getDisplayMatching(bounds).workArea
+      const maxWidth = Math.max(540, workArea.x + workArea.width - bounds.x)
+      const nextWidth = Math.min(maxWidth, Math.max(480, bounds.width + dx))
+      win.setBounds({ x: bounds.x, y: bounds.y, width: nextWidth, height: bounds.height })
+      return { ok: true, width: nextWidth }
+    } catch {
+      return { ok: false }
+    }
+  })
   ipcMain.handle('sidecar:status', () => {
     const snapshot = ctx.sidecar?.snapshot
     if (!snapshot) return null

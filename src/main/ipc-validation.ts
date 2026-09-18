@@ -66,6 +66,22 @@ export function parseContent(value: unknown, label = '内容') {
   return stringValue(value, label)!
 }
 
+/** 单文件 diff 的文件参数：仓库相对路径（正斜杠）；拒绝绝对路径/盘符/`..` 逃逸。
+ *  git.ts 侧还会再校验一次——这里只负责在 IPC 边界把人话错误挡下来。 */
+export function parseRepoRelativePath(value: unknown, label = 'file'): string {
+  const raw = stringValue(value, label)!
+  const normalized = raw.replace(/\\/g, '/')
+  if (normalized.startsWith('/') || /^[A-Za-z]:/.test(normalized)) throw new Error(`${label} 必须是仓库相对路径`)
+  const segments: string[] = []
+  for (const segment of normalized.split('/')) {
+    if (!segment || segment === '.') continue
+    if (segment === '..') throw new Error(`${label} 不能包含 ..`)
+    segments.push(segment)
+  }
+  if (!segments.length) throw new Error(`${label} 不能为空`)
+  return segments.join('/')
+}
+
 export function parseTaskCreate(value: unknown): TaskCreateInput {
   const input = record(value, '任务参数')
   assertKeys(input, ['title', 'prompt', 'workdir', 'backend', 'agentId', 'handoff', 'startNow', 'trigger', 'requestId', 'idempotencyKey'], '任务参数')

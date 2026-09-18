@@ -1,6 +1,6 @@
 // 渲染层 API 封装：window.agentdeck 的类型 + 常用 hooks
 import { useEffect, useState, useCallback } from 'react'
-import type { AgentDeckApi, AgentInfo, AgentModelCatalog, PresetInfo, PermissionRequest, SidecarSnapshot } from '../../shared/contracts'
+import type { AgentDeckApi, AgentInfo, AgentModelCatalog, FileDiffResult, PresetInfo, PermissionRequest, SidecarSnapshot } from '../../shared/contracts'
 import type { Task, TaskEvent, AppSettings, Issue, Run, Comment, Automation, RuntimeSnapshot, AnalyticsSummary, IssuePriority, IssueStatus, RunTrigger } from '../../shared/types'
 
 /** 队员（agent 身份）——与主进程 agents.ts 的 Agent 对齐 */
@@ -14,6 +14,12 @@ export type ApiPresetInfo = PresetInfo
 
 /** 模型目录（agents:models 返回）：zcode 有本地 catalog，其余平台 freeform */
 export const bridge: AgentDeckApi = (window as unknown as { agentdeck: AgentDeckApi }).agentdeck
+
+/** 编辑详情：单文件的 git 权威未提交 diff（工作区 + 暂存对 HEAD）；失败返回 ok:false + code，不抛。
+ *  文件无改动时 ok:true 且 note:'clean'（回退事件里的 +/- 快照）。 */
+export function fileDiff(taskId: string, file: string): Promise<FileDiffResult> {
+  return bridge.tasks.fileDiff(taskId, file)
+}
 
 /** Sidecar lifecycle state is a read-only renderer projection. A ready event
  * is emitted only after the main process has completed its state barrier. */

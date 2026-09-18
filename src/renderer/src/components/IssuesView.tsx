@@ -1,23 +1,42 @@
-import { ListTodo, Plus } from 'lucide-react'
+import { X } from 'lucide-react'
+import type { ReactNode } from 'react'
 import type { Task } from '../../../shared/types'
 import { useIssues } from '../api'
-import { ISSUE_STATUS_LABELS, TASK_STATUS_LABELS } from '../labels'
-import { EmptyState } from '../ui/EmptyState'
 
-export function IssuesView({ tasks, tabs, onOpen, onCreate }: { tasks: Task[]; tabs: string[]; onOpen: (taskId: string) => void; onCreate: () => void }) {
+/**
+ * Issue 主页：新建表单（WorkspaceView）即主体；
+ * 上方一条紧凑横条汇总已打开的 Issue——流式胶囊（状态点+标题截断+×），
+ * 单行横向滚动，点胶囊进详情，× 只关标签页不删任务。
+ */
+export function IssuesView({ tasks, tabs, onOpen, onClose, children }: {
+  tasks: Task[]
+  tabs: string[]
+  onOpen: (taskId: string) => void
+  onClose: (taskId: string) => void
+  children: ReactNode
+}) {
   const { issues } = useIssues()
   const opened = tabs.flatMap((id) => {
     const task = tasks.find((item) => item.id === id)
-    return task ? [{ task, issue: issues.find((item) => item.taskId === id || item.id === task.issueId) }] : []
+    if (!task) return []
+    const issue = issues.find((item) => item.taskId === id || item.id === task.issueId)
+    return [{ id: task.id, status: task.status, title: issue?.title ?? task.title }]
   })
-  return <div className="issues-page page-surface">
-    <header className="page-header-bar issues-header">
-      <div className="page-title-row"><ListTodo size={17} className="page-icon" /><h1 className="page-title">Issue</h1><span className="page-count">{opened.length}</span><span className="page-desc">已打开的 Issue；全部工作在看板管理。</span></div>
-      <button className="btn primary" onClick={onCreate}><Plus size={14} /> 新建 Issue</button>
-    </header>
-    {opened.length ? <div className="issue-open-grid">{opened.map(({ task, issue }) => <button className="issue-open-card" key={task.id} onClick={() => onOpen(task.id)}>
-      <span className="issue-open-card-head"><span className={`dot dot-${task.status}`} /><span className="issue-identifier">{issue?.identifier ?? task.id}</span><span>{issue ? ISSUE_STATUS_LABELS[issue.status] : TASK_STATUS_LABELS[task.status]}</span></span>
-      <strong>{issue?.title ?? task.title}</strong><span className="issue-open-backend">{task.backend}</span>
-    </button>)}</div> : <EmptyState title="还没有打开的 Issue" description="从看板打开工作单，或新建一个 Issue。" />}
+  return <div className="issues-page page-surface issue-home">
+    {opened.length > 0 && <div className="issue-open-strip">
+      <span className="issue-open-label">已打开</span>
+      <div className="issue-open-track" role="list" aria-label="已打开的 Issue">
+        {opened.map((item) => (
+          <span className="issue-pill" role="listitem" key={item.id}>
+            <button type="button" className="issue-pill-main" title={item.title} onClick={() => onOpen(item.id)}>
+              <span className={`dot dot-${item.status}`} aria-hidden="true" />
+              <span className="issue-pill-title">{item.title}</span>
+            </button>
+            <button type="button" className="issue-pill-close" title="关闭标签" onClick={() => onClose(item.id)}><X size={11} aria-hidden="true" /></button>
+          </span>
+        ))}
+      </div>
+    </div>}
+    <div className="issue-home-body">{children}</div>
   </div>
 }

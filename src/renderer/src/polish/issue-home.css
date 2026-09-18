@@ -1,8 +1,107 @@
-.issue-open-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; padding: 22px; overflow-y: auto; }
-.issue-open-card { display: flex; flex-direction: column; align-items: stretch; gap: 12px; padding: 18px; min-width: 0; text-align: left; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-raised); color: var(--text); cursor: pointer; transition: border-color var(--duration-base), background var(--duration-base); }
-.issue-open-card:hover { border-color: var(--accent); background: var(--bg-hover); }
-.issue-open-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
-.issue-open-card-head { display: flex; align-items: center; gap: 8px; color: var(--text-dim); font-size: var(--text-micro); }
-.issue-open-card-head .issue-identifier { margin: 0; flex: 1; font-family: var(--mono); }
-.issue-open-card strong { font-size: var(--text-body); line-height: 1.5; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-.issue-open-backend { color: var(--text-faint); font: var(--text-micro)/1.4 var(--mono); }
+/* ============================================================
+   Issue 主页（issue-home）：新建表单即主体 + 已打开 Issue 胶囊横条
+   职责：主页 flex 布局、已打开横条（单行横向滚动流式胶囊）、
+   WorkspaceView 撑满剩余宽度的主页化覆盖。
+   ============================================================ */
+
+/* 主页整体：竖向 flex，横条在上、表单占满剩余高度 */
+.issues-page.issue-home {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ---------- 已打开横条：左侧小标 + 单行横向滚动胶囊 ---------- */
+.issue-open-strip {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 20px 0;
+  min-width: 0;
+}
+.issue-open-label {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-size: var(--text-micro);
+  font-weight: 650;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+}
+.issue-open-track {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow-x: auto;
+  padding: 2px 2px 6px;
+  scrollbar-width: thin;
+}
+/* 流式胶囊：状态点 + 标题截断 + × 关闭，与看板块状卡片区分的紧凑形态 */
+.issue-pill {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 264px;
+  padding: 2px 5px 2px 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-raised);
+  color: var(--text);
+  font-size: var(--text-caption);
+  transition: border-color var(--duration-base) var(--ease-in-out), background var(--duration-base) var(--ease-in-out);
+}
+.issue-pill:hover { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); background: var(--bg-hover); }
+.issue-pill-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 3px 2px 3px 8px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.issue-pill-main:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-pill); }
+.issue-pill .dot { width: 7px; height: 7px; flex: 0 0 auto; }
+.issue-pill-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.issue-pill-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: background var(--duration-quick) var(--ease-out), color var(--duration-quick) var(--ease-out);
+}
+.issue-pill-close:hover { background: var(--bg-hover); color: var(--err); }
+.issue-pill-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* ---------- 主页主体：WorkspaceView 撑满剩余宽度，不留大片空白 ---------- */
+.issue-home-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.issue-home .workspace {
+  flex: 1;
+  min-height: 0;
+  padding: 14px 24px 32px;
+}
+.issue-home .workspace-card { width: min(920px, 100%); }

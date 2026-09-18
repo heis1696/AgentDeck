@@ -24,7 +24,7 @@ import type {
   SkillsFromUrlResult,
   SkillsShEntry
 } from '../shared/extensions'
-import type { AgentDeckApi, AgentInfo, AgentModelCatalog, GoalCheckpointInput, GoalCreateInput, MeetingCreateInput, PermissionRequest, PresetInfo, SidecarSnapshot, TaskCreateInput, UpdateChannel, UpdateStateSnapshot } from '../shared/contracts'
+import type { AgentDeckApi, AgentInfo, AgentModelCatalog, FileDiffResult, GoalCheckpointInput, GoalCreateInput, MeetingCreateInput, PermissionRequest, PresetInfo, SidecarSnapshot, TaskCreateInput, UpdateChannel, UpdateStateSnapshot } from '../shared/contracts'
 
 const api: AgentDeckApi = {
   worktrees: {
@@ -47,6 +47,9 @@ const api: AgentDeckApi = {
       ipcRenderer.invoke('tasks:rewind', id, toSeq),
     rename: (id: string, title: string): Promise<Task | null> =>
       ipcRenderer.invoke('tasks:rename', id, title),
+    /** 编辑详情：单文件的 git 权威未提交 diff（工作区 + 暂存对 HEAD） */
+    fileDiff: (taskId: string, file: string): Promise<FileDiffResult> =>
+      ipcRenderer.invoke('tasks:fileDiff', taskId, file),
     onEventsInvalidated: (cb: (taskId: string) => void) => {
       const h = (_e: unknown, payload: { taskId: string }) => cb(payload.taskId)
       ipcRenderer.on('task:events-invalidated', h)
@@ -166,6 +169,7 @@ const api: AgentDeckApi = {
   pickDir: (): Promise<string> => ipcRenderer.invoke('dialog:pick-dir'),
   openPath: (target: string): Promise<void> => ipcRenderer.invoke('shell:open', target),
   notify: (title: string, body: string): void => ipcRenderer.send('notify', { title, body }),
+  resizeBy: (dx: number): Promise<{ ok: boolean; width?: number; reason?: string }> => ipcRenderer.invoke('window:resizeBy', dx),
   agents: {
     list: (): Promise<Array<AgentInfo>> =>
       ipcRenderer.invoke('agents:list'),

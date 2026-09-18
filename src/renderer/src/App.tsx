@@ -19,7 +19,7 @@ import { ConfirmHost } from './ui/Confirm'
 import { Palette, type PaletteCommand } from './ui/Palette'
 import type { Task } from '../../shared/types'
 
-type View = 'issues' | 'create' | 'detail' | 'usage' | 'settings' | 'automation' | 'skills' | 'board' | 'agents'
+type View = 'issues' | 'detail' | 'usage' | 'settings' | 'automation' | 'skills' | 'board' | 'agents'
 const MAX_TABS = 8
 /** 最近工作区列表的上限（切换器下拉里展示） */
 const MAX_RECENT_WORKSPACES = 8
@@ -69,7 +69,8 @@ export function App() {
     setTabs((current) => current.includes(id) ? current : [...current, id].slice(-MAX_TABS)); setActiveId(id); setView('detail')
   }
   const closeTab = (id: string) => { const next = tabs.filter((tab) => tab !== id); setTabs(next); if (activeId === id) setActiveId(next[next.length - 1] ?? null) }
-  const goWorkspace = () => { setView('create'); window.dispatchEvent(new Event(FOCUS_WORKSPACE)) }
+  /** Ctrl+N/侧栏「新建任务」：导航到 Issue 主页（新建表单即主页主体）并聚焦输入框 */
+  const goWorkspace = () => { setView('issues'); window.dispatchEvent(new Event(FOCUS_WORKSPACE)) }
   /** 切到某个最近用过的工作区：新任务默认目录随之变化 */
   const chooseWorkspace = (dir: string) => {
     if (!dir) return
@@ -155,7 +156,7 @@ export function App() {
       <div className="sidebar-footer"><span className="connection-dot" /> 本地引擎就绪</div>
     </aside>
     <main className="main">
-      {view === 'agents' ? <AgentsView /> : view === 'automation' ? <AutomationView /> : view === 'skills' ? <ExtensionsView /> : view === 'settings' ? <SettingsView section={settingsSection} onSection={setSettingsSection} /> : view === 'usage' ? <UsageView /> : view === 'board' ? <Page title="看板" count={tasks.length}><BoardView tasks={tasks} onOpen={openTask} /></Page> : view === 'detail' && selected ? <div className="tasks-column detail-page"><Chrome title={selected.title} onBack={() => { setActiveId(null); setView('issues') }} />{tabs.length > 0 && <TabBar tabs={tabs.filter((id) => !tasks.find((task) => task.id === id)?.parentTaskId)} tasks={tasks} activeId={activeId} onSelect={openTask} onClose={closeTab} />}<TaskDetail task={selected} tasks={tasks} onSelect={openTask} /></div> : view === 'create' ? <Page title="新建 Issue" count={0}><WorkspaceView onCreated={(task) => openTask(task.id)} workspaceDir={workspaceDir} onPickWorkspace={pickWorkspace} /></Page> : <IssuesView tasks={tasks} tabs={tabs} onOpen={openTask} onCreate={goWorkspace} />}
+      {view === 'agents' ? <AgentsView /> : view === 'automation' ? <AutomationView /> : view === 'skills' ? <ExtensionsView /> : view === 'settings' ? <SettingsView section={settingsSection} onSection={setSettingsSection} /> : view === 'usage' ? <UsageView /> : view === 'board' ? <Page title="看板" count={tasks.length}><BoardView tasks={tasks} onOpen={openTask} /></Page> : view === 'detail' && selected ? <div className="tasks-column detail-page"><Chrome title={selected.title} onBack={() => { setActiveId(null); setView('issues') }} />{tabs.length > 0 && <TabBar tabs={tabs.filter((id) => !tasks.find((task) => task.id === id)?.parentTaskId)} tasks={tasks} activeId={activeId} onSelect={openTask} onClose={closeTab} />}<TaskDetail task={selected} tasks={tasks} onSelect={openTask} /></div> : <IssuesView tasks={tasks} tabs={tabs} onOpen={openTask} onClose={closeTab}><WorkspaceView onCreated={(task) => openTask(task.id)} workspaceDir={workspaceDir} onPickWorkspace={pickWorkspace} /></IssuesView>}
     </main>
   </div>
 }

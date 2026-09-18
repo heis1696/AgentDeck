@@ -1,9 +1,10 @@
 import { BrowserWindow, ipcMain } from 'electron'
 import { validateMove } from '../../shared/taskflow'
 import { aggregateUsage } from '../usage'
-import { removeWorktree } from '../git'
-import { parseContent, parseFollowUpOptions, parseId, parseNonNegativeInteger, parsePermissionDecision, parseTaskCreate, parseTaskStatus } from '../ipc-validation'
+import { fileDiff, fileDiffFailure, removeWorktree } from '../git'
+import { parseContent, parseFollowUpOptions, parseId, parseNonNegativeInteger, parsePermissionDecision, parseRepoRelativePath, parseTaskCreate, parseTaskStatus } from '../ipc-validation'
 import type { IpcContext } from './context'
+import type { Task } from '../../shared/types'
 
 export function registerTaskIpc(ctx: IpcContext) {
   const send = (channel: string, payload: unknown) => ctx.getWindow()?.webContents.send(channel, payload)
@@ -101,6 +102,36 @@ export function registerTaskIpc(ctx: IpcContext) {
     const task = ctx.store.get(taskId)
     if (task) ctx.runner.pushTask(taskId)
     return task ?? null
+  })
+  // 渲染契约：tasks:fileDiff(taskId, file) —— 编辑详情「看某个文件改了什么」的 git 权威数据通道
+  //   入参：taskId（任务 id）、file（仓库相对路径；正/反斜杠均可，拒绝绝对路径与 .. 逃逸）
+  //   出参：{ ok, file, additions, deletions, diff, binary, truncated, note? }
+  //     · workdir 定位：优先 task.worktree.path（WorktreeInfo 是元数据对象，真实目录在 .path），
+  //       否则 task.workdir —— 委派子任务两者本就是同一隔离工作树
+  //     · diff：`git diff --unified=3 -- <file>`（索引→工作区）在前，
+  //       `git diff --cached --unified=3 -- <file>`（HEAD→索引）在后，两段按序拼接；
+  //       未跟踪新文件用 `git diff --no-index -- /dev/null <file>` 生成「新增整文件」diff；
+  //       文本保留 git 原样的结尾换行
+  //     · additions/deletions：两段 numstat 之和（截断只影响文本，不影响计数；二进制不可数 → 0）
+  //     · binary=true（git 判为二进制）时 diff 为空串，渲染层只显示「二进制文件」占位
+  //     · 文件存在但无未提交改动 → note:'clean'，渲染层回退事件里的 +/- 参数快照
+  //     · diff 超 256KB → 按行截断并置 truncated:true
+  //   失败一律不 reject：{ ok:false, code:'bad-request'|'no-task'|'no-workdir'|'not-a-repo'|'file-missing'|'git-failed', error }
+  ipcMain.handle('tasks:fileDiff', async (_e, id: unknown, file: unknown) => {
+    const taskId = typeof id === 'string' ? id.trim() : ''
+    if (!taskId) return fileDiffFailure('', 'bad-request', 'taskId 不能为空')
+    const task: Task | undefined = ctx.store.get(taskId)
+    if (!task) return fileDiffFailure('', 'no-task', '任务不存在')
+    // Task.worktree 是 durable 元数据（ownerTaskId/repoDir/path/branch/...），不是路径字符串
+    const workdir = task.worktree?.path?.trim() || task.workdir
+    if (!workdir) return fileDiffFailure('', 'no-workdir', '任务没有绑定工作目录')
+    let relative: string
+    try {
+      relative = parseRepoRelativePath(file)
+    } catch (error) {
+      return fileDiffFailure(String(file ?? ''), 'bad-request', error instanceof Error ? error.message : String(error))
+    }
+    return fileDiff(workdir, relative)
   })
   ipcMain.handle('tasks:move', (_e, id: unknown, status: unknown) => {
     const taskId = parseId(id)

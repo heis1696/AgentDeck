@@ -147,6 +147,37 @@ export interface IpcResult {
   error?: string
 }
 
+/** 单文件未提交 diff 的失败原因码（`tasks:fileDiff`）。 */
+export type FileDiffErrorCode =
+  | 'bad-request'   // taskId/file 参数非法（空、绝对路径、.. 逃逸）
+  | 'no-task'       // 任务不存在
+  | 'no-workdir'    // 任务未绑定工作目录，或目录已不存在
+  | 'not-a-repo'    // 工作目录不是 Git 仓库
+  | 'file-missing'  // 文件既未被 git 跟踪，也不在工作区
+  | 'git-failed'    // git 命令异常退出
+
+/** `tasks:fileDiff` 的渲染契约：git 权威的单文件未提交改动。
+ *  - diff = `git diff --unified=3`（索引→工作区）+ `git diff --cached --unified=3`（HEAD→索引）按序拼接，
+ *    保留 git 原样的结尾换行；未跟踪新文件用 `--no-index` 生成「新增整文件」diff。
+ *  - additions/deletions 取两段 numstat 之和，与展示文本是否截断无关。
+ *  - binary=true（二进制，git 无 +/- 行数）时 diff 为空串；无改动但文件存在时 note='clean'；
+ *    diff 超过 256KB 按行截断并置 truncated=true。
+ *  - 失败不 reject：ok=false 且带 code（渲染层可分流提示）。 */
+export interface FileDiffResult {
+  ok: boolean
+  /** 归一化后的仓库相对路径（与 git 一致，正斜杠）。 */
+  file: string
+  additions: number
+  deletions: number
+  diff: string
+  binary: boolean
+  truncated: boolean
+  /** 目前只有 'clean'：无未提交改动，渲染层回退事件里的 +/- 快照。 */
+  note?: 'clean'
+  code?: FileDiffErrorCode
+  error?: string
+}
+
 /** Renderer-safe snapshot of the optional business-brain sidecar. */
 export interface SidecarSnapshot {
   protocolVersion: number
@@ -178,6 +209,8 @@ export interface AgentDeckApi {
     start: (id: string) => Promise<IpcResult>
     rewind: (id: string, toSeq: number) => Promise<IpcResult>
     rename: (id: string, title: string) => Promise<Task | null>
+    /** 编辑详情：单文件的 git 权威未提交 diff（工作区 + 暂存对 HEAD），右侧只读代码分页用。 */
+    fileDiff: (taskId: string, file: string) => Promise<FileDiffResult>
     onEventsInvalidated: (cb: (taskId: string) => void) => () => void
     onUpdated: (cb: (task: Task) => void) => () => void
     onDeleted: (cb: (id: string) => void) => () => void
@@ -248,6 +281,8 @@ export interface AgentDeckApi {
   pickDir: () => Promise<string>
   openPath: (target: string) => Promise<void>
   notify: (title: string, body: string) => void
+  /** SideDock 延展窗口：dx>0 向右加宽、dx<0 收回（最大化/全屏/屏宽不足时主进程拒绝） */
+  resizeBy: (dx: number) => Promise<{ ok: boolean; width?: number; reason?: string }>
   agents: {
     list: () => Promise<AgentInfo[]>
     save: (list: AgentInfo[]) => Promise<AgentInfo[]>

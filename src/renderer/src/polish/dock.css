@@ -1,36 +1,49 @@
-/* R3 契约：main.tsx 最后导入；SideDock 放 .detail-columns 内作为 .detail-main 的右侧兄弟。
-   全部选择器局限于 Dock / CodeViewer / WorkerPane / 编辑角标，不覆盖 detail.css 布局。
-   竖向分页条在预览面板左缘；空 Dock 无 DOM、不占宽；html.light 自动切换 Shiki 双主题。
+/* SideDock v2（反馈3）：固定贴窗口右缘的全高覆盖层，打开时主进程把窗口向右延展出分页宽度，
+   原 UI 布局零挤压；左缘分割线可拖（320–720px，localStorage 记忆）；tab 改顶部横向条。
+   空 Dock 无 DOM；html.light 自动切换 Shiki 双主题。
    WorkerPane 强制只读（隐藏回退控件），内部时间线和结果独立滚动，不抢主任务滚动容器。 */
 .side-dock {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 60;
   display: flex;
-  flex: 0 1 620px;
-  width: 46%;
-  min-width: min(360px, 100%);
-  min-height: 0;
-  max-width: 100%;
-  overflow: hidden;
+  max-width: 100vw;
   border-left: 1px solid var(--border);
   background: var(--bg);
   color: var(--text);
+  box-shadow: -12px 0 32px rgb(0 0 0 / 0.22);
 }
+.dock-splitter {
+  flex: 0 0 7px;
+  width: 7px;
+  cursor: col-resize;
+  background: transparent;
+  touch-action: none;
+  transition: background .15s;
+}
+.dock-splitter:hover, .dock-splitter:active { background: var(--accent-soft); }
+.dock-body { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 .dock-tabs {
-  flex: 0 0 116px;
-  width: 116px;
-  overflow-y: auto;
-  padding: 8px 5px;
-  border-right: 1px solid var(--border);
+  display: flex;
+  flex: 0 0 auto;
+  align-items: stretch;
+  gap: 2px;
+  overflow-x: auto;
+  padding: 7px 8px 0;
+  border-bottom: 1px solid var(--border);
   background: var(--bg-inset);
 }
-.dock-tab-row { display: flex; align-items: center; min-height: 38px; margin-bottom: 4px; border-left: 2px solid transparent; border-radius: 4px; }
+.dock-tab-row { display: flex; align-items: center; max-width: 220px; min-height: 34px; border: 1px solid transparent; border-bottom: 0; border-radius: 7px 7px 0 0; }
 .dock-tab-row:hover { background: var(--bg-hover); }
-.dock-tab-row.is-active { border-left-color: var(--accent); background: var(--accent-soft); }
+.dock-tab-row.is-active { border-color: var(--border); background: var(--bg); box-shadow: inset 0 2px 0 var(--accent); }
 .dock-tab, .dock-tab-close { border: 0; background: transparent; color: var(--text-dim); cursor: pointer; }
-.dock-tab { display: flex; align-items: center; gap: 5px; flex: 1; min-width: 0; padding: 9px 2px 9px 5px; text-align: left; font-size: var(--text-caption); }
+.dock-tab { display: flex; align-items: center; gap: 5px; flex: 1; min-width: 0; padding: 7px 4px 7px 9px; text-align: left; font-size: var(--text-caption); }
 .dock-tab svg { flex-shrink: 0; }
-.dock-tab span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dock-tab .dock-tab-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .is-active > .dock-tab { color: var(--accent); }
-.dock-tab-close { display: grid; place-items: center; padding: 5px 3px; border-radius: 3px; }
+.dock-tab-close { display: grid; place-items: center; padding: 5px 4px 5px 2px; border-radius: 3px; }
 .dock-tab-close:hover { background: var(--status-failed-bg); color: var(--err); }
 .dock-panel { display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
 .side-dock button:focus-visible, .worker-pane button:focus-visible, .code-viewer button:focus-visible, .timeline-edit-badge:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
@@ -120,5 +133,11 @@ html.light .code-token { color: var(--shiki-light); font-style: var(--shiki-ligh
 .worker-pane-result > div { padding: 0 12px 12px; overflow-wrap: anywhere; font-size: var(--text-caption); }
 .worker-pane-error { flex-shrink: 0; max-height: 90px; overflow: auto; padding: 8px 12px; background: var(--status-failed-bg); color: var(--err); font-size: var(--text-caption); overflow-wrap: anywhere; }
 .worker-pane-empty { justify-content: center; padding: 24px; text-align: center; color: var(--text-dim); }
-@media (max-width: 1100px) { .dock-tabs { flex-basis: 82px; width: 82px; } .side-dock { min-width: min(310px, 100%); } }
+@media (max-width: 1100px) { .dock-tab-row { max-width: 150px; } }
 @media (prefers-reduced-motion: reduce) { .code-skeleton i { animation: none; } }
+
+/* ---- 统一 diff 模式（反馈4）：双行号列 + hunk 头，GitHub 风格 ---- */
+.code-viewer.is-diff .code-line-number { flex: 0 0 42px; width: 42px; padding: 0 6px 0 2px; }
+.code-viewer.is-diff .code-line-number-old { border-right: 1px solid var(--border); color: var(--text-faint); }
+.code-line.is-hunk { background: var(--bg-inset); color: var(--text-dim); }
+.code-line.is-hunk > code { font-size: 11px; }

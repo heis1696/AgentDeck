@@ -2,6 +2,7 @@
 import { execFile } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
+import type { FileDiffErrorCode, FileDiffResult } from '../shared/contracts'
 import type { WorktreeCleanupStatus, WorktreeInfo } from '../shared/types'
 
 export interface GitCommandResult {
@@ -96,6 +97,139 @@ export async function snapshotGitAfter(
   return {
     diff: (diff + untrackedBlock).trim().slice(0, 200_000),
     stat: (stat.trim() + (untracked ? `\n未跟踪: ${untracked.split('\n').filter(Boolean).length} 个文件` : '')).trim()
+  }
+}
+
+// ---- 单文件未提交 diff（编辑详情：渲染层右侧只读代码分页） ----
+
+/** 展示用 diff 文本上限（字符，256KB）：超出按行截断并置 truncated；± 行数仍按全量 numstat 统计。 */
+export const FILE_DIFF_MAX_CHARS = 256 * 1024
+
+const FILE_DIFF_TIMEOUT_MS = 15000
+/** core.quotepath=false：中文文件名不转义成 \346\226\207 八进制串，渲染层直接可读。
+ *  --no-ext-diff：用户全局配置的外部 diff 驱动（difftastic 等）不劫持输出。 */
+const FILE_DIFF_PREFIX = ['-c', 'core.quotepath=false'] as const
+const FILE_DIFF_OPTS = ['--no-ext-diff', '--unified=3'] as const
+
+/** 统一失败形状：渲染层永远拿到完整字段，不必处理 reject。 */
+export function fileDiffFailure(file: string, code: FileDiffErrorCode, error: string): FileDiffResult {
+  return { ok: false, file, additions: 0, deletions: 0, diff: '', binary: false, truncated: false, code, error }
+}
+
+function fileDiffClean(file: string): FileDiffResult {
+  return { ok: true, file, additions: 0, deletions: 0, diff: '', binary: false, truncated: false, note: 'clean' }
+}
+
+/** 仓库相对路径归一化：反斜杠转正斜杠；拒绝绝对路径/盘符/`..` 逃逸。
+ *  IPC 边界已校验一次，这里再兜一层（本函数也被非 IPC 调用方复用）。 */
+export function normalizeRepoFilePath(file: string): string | null {
+  const raw = String(file ?? '').trim().replace(/\\/g, '/')
+  if (!raw || raw.includes('\0')) return null
+  if (raw.startsWith('/') || /^[A-Za-z]:/.test(raw)) return null
+  const segments: string[] = []
+  for (const segment of raw.split('/')) {
+    if (!segment || segment === '.') continue
+    if (segment === '..') return null
+    segments.push(segment)
+  }
+  return segments.length ? segments.join('/') : null
+}
+
+/** 解析 `--numstat`：`<+>\t<->\t<path>`；二进制行是 `-\t-`（行数不可数，只置 binary）。 */
+function parseNumstat(stdout: string): { additions: number; deletions: number; binary: boolean; entries: number } {
+  let additions = 0
+  let deletions = 0
+  let binary = false
+  let entries = 0
+  for (const line of stdout.split('\n')) {
+    if (!line.trim()) continue
+    entries++
+    const [added, removed] = line.split('\t')
+    if (added === '-' || removed === '-') { binary = true; continue }
+    const plus = Number.parseInt(added ?? '', 10)
+    const minus = Number.parseInt(removed ?? '', 10)
+    if (Number.isInteger(plus)) additions += plus
+    if (Number.isInteger(minus)) deletions += minus
+  }
+  return { additions, deletions, binary, entries }
+}
+
+function isBinaryDiff(text: string): boolean {
+  return /(^|\n)Binary files /.test(text) || text.includes('GIT binary patch')
+}
+
+/** 多段 diff 按序拼接（未暂存在前、已暂存在后），每段补齐结尾换行。 */
+function joinDiffSections(sections: string[]): string {
+  return sections
+    .filter((text) => text.trim() !== '')
+    .map((text) => (text.endsWith('\n') ? text : `${text}\n`))
+    .join('')
+}
+
+/** 超限按行截断（保留结尾换行，避免半行）。 */
+function truncateDiff(text: string): { diff: string; truncated: boolean } {
+  if (text.length <= FILE_DIFF_MAX_CHARS) return { diff: text, truncated: false }
+  const head = text.slice(0, FILE_DIFF_MAX_CHARS)
+  const boundary = head.lastIndexOf('\n')
+  return { diff: boundary >= 0 ? head.slice(0, boundary + 1) : head, truncated: true }
+}
+
+/** 单文件未提交改动的统一 diff（git 权威，只读，不改索引）。
+ *  - 未暂存段 `git diff --unified=3 -- <file>`：索引 → 工作区
+ *  - 已暂存段 `git diff --cached --unified=3 -- <file>`：HEAD → 索引
+ *  两段按序拼接（未跟踪新文件改走 `--no-index`，git 退出码 1 = 有差异，属正常）。
+ *  失败一律返回 fileDiffFailure（带 code），不抛异常。 */
+export async function fileDiff(workdir: string, file: string): Promise<FileDiffResult> {
+  const relative = normalizeRepoFilePath(file)
+  if (!relative) return fileDiffFailure(String(file ?? ''), 'bad-request', '文件路径必须是仓库相对路径')
+  if (!workdir) return fileDiffFailure(relative, 'no-workdir', '任务没有绑定工作目录')
+  let stat: fs.Stats | null = null
+  try { stat = fs.statSync(workdir) } catch { stat = null }
+  if (!stat?.isDirectory()) return fileDiffFailure(relative, 'no-workdir', `工作目录不存在或不是目录: ${workdir}`)
+  if (!(await isGitRepo(workdir))) return fileDiffFailure(relative, 'not-a-repo', '工作目录不是 Git 仓库')
+
+  const tracked = (await runGit(workdir, ['ls-files', '--error-unmatch', '--', relative], FILE_DIFF_TIMEOUT_MS)).ok
+  if (!tracked) {
+    let exists = false
+    try { exists = fs.statSync(path.resolve(workdir, relative)).isFile() } catch { exists = false }
+    if (!exists) return fileDiffFailure(relative, 'file-missing', `文件不存在: ${relative}`)
+    // 未跟踪新文件不在 `git diff` 视野内：用 --no-index 对 /dev/null 生成「新增整文件」diff
+    // （注意用相对路径，否则 git 会把绝对路径写进 +++ 头）
+    const [text, numstat] = await Promise.all([
+      runGit(workdir, [...FILE_DIFF_PREFIX, 'diff', '--no-index', ...FILE_DIFF_OPTS, '--', '/dev/null', relative], FILE_DIFF_TIMEOUT_MS),
+      runGit(workdir, [...FILE_DIFF_PREFIX, 'diff', '--no-index', '--numstat', '--', '/dev/null', relative], FILE_DIFF_TIMEOUT_MS)
+    ])
+    const failed = [text, numstat].find((result) => !result.ok && result.code !== 1)
+    if (failed) return fileDiffFailure(relative, 'git-failed', gitError(failed))
+    const counts = parseNumstat(numstat.stdout)
+    const binary = counts.binary || isBinaryDiff(text.stdout)
+    const { diff, truncated } = truncateDiff(binary ? '' : joinDiffSections([text.stdout]))
+    return { ok: true, file: relative, additions: counts.additions, deletions: counts.deletions, diff, binary, truncated }
+  }
+
+  const [unstaged, staged, unstagedStat, stagedStat] = await Promise.all([
+    runGit(workdir, [...FILE_DIFF_PREFIX, 'diff', ...FILE_DIFF_OPTS, '--', relative], FILE_DIFF_TIMEOUT_MS),
+    runGit(workdir, [...FILE_DIFF_PREFIX, 'diff', '--cached', ...FILE_DIFF_OPTS, '--', relative], FILE_DIFF_TIMEOUT_MS),
+    // numstat 与 diff 分开取：截断只影响展示文本，± 行数始终是全量真值
+    runGit(workdir, [...FILE_DIFF_PREFIX, 'diff', '--numstat', '--', relative], FILE_DIFF_TIMEOUT_MS),
+    runGit(workdir, [...FILE_DIFF_PREFIX, 'diff', '--cached', '--numstat', '--', relative], FILE_DIFF_TIMEOUT_MS)
+  ])
+  const failed = [unstaged, staged, unstagedStat, stagedStat].find((result) => !result.ok)
+  if (failed) return fileDiffFailure(relative, 'git-failed', gitError(failed))
+  const unstagedCounts = parseNumstat(unstagedStat.stdout)
+  const stagedCounts = parseNumstat(stagedStat.stdout)
+  // 文件存在但没有未提交改动：交渲染层回退事件里的 +/- 参数快照
+  if (unstagedCounts.entries + stagedCounts.entries === 0) return fileDiffClean(relative)
+  const binary = unstagedCounts.binary || stagedCounts.binary || isBinaryDiff(unstaged.stdout) || isBinaryDiff(staged.stdout)
+  const { diff, truncated } = truncateDiff(binary ? '' : joinDiffSections([unstaged.stdout, staged.stdout]))
+  return {
+    ok: true,
+    file: relative,
+    additions: unstagedCounts.additions + stagedCounts.additions,
+    deletions: unstagedCounts.deletions + stagedCounts.deletions,
+    diff,
+    binary,
+    truncated
   }
 }
 

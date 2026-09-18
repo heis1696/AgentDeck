@@ -1,7 +1,9 @@
 /* ============================================================
    0.15.0 UI Polish Wave · detail（任务详情页专属文件）
-   职责：详情页头部 chrome、tab 条、时间线、属性栏、
-   追问输入区的视觉层级与交互打磨。
+   职责：详情页头部 chrome（meta 行横向压缩：IssueID/工作流/状态/
+   backend/工作目录/用时/用量/集成分支/重试 + ℹ 弹层）、tab 条、
+   单行化时间线、目标/会议浮窗（FloatWindow）、追问输入区与
+   斜杠命令菜单的视觉层级与交互打磨。
    约定：只覆盖详情页类名；颜色一律引用令牌变量；
    全局 .btn 体系归 foundation.css 管，页内只做局部覆盖。
    ============================================================ */
@@ -73,31 +75,6 @@
   min-height: 22px;
   padding: 1px 9px;
   background: var(--bg-inset);
-}
-/* 原始指令：收成 meta 行里的徽章；展开时独占一行 */
-.detail .detail-meta .detail-prompt { margin: 0; }
-.detail .detail-meta .detail-prompt[open] { flex-basis: 100%; }
-.detail .detail-prompt summary {
-  padding: 2px 9px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
-  background: var(--bg-inset);
-  color: var(--text-faint);
-  font-size: var(--text-micro);
-  transition: color var(--duration-base) var(--ease-in-out), border-color var(--duration-base) var(--ease-in-out);
-}
-.detail .detail-prompt summary:hover { color: var(--text-dim); border-color: var(--border-strong); }
-.detail .detail-prompt[open] summary { color: var(--text-dim); border-color: var(--border-strong); }
-.detail .detail-prompt p {
-  max-width: 100%;
-  margin: 8px 0 2px;
-  padding: 9px 12px;
-  border-left: 2px solid var(--border-strong);
-  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-  background: var(--bg-inset);
-  color: var(--text-dim);
-  font-size: var(--text-caption);
-  line-height: 1.6;
 }
 
 /* ---------- 2. tab 条：active = accent 文字 + 2px accent 底线 ---------- */
@@ -230,24 +207,48 @@ html.light .detail-actions .detail-btn-ghost-danger {
 }
 .detail-body .timeline-content > p { color: var(--text-dim); font-size: var(--text-caption); }
 
-/* 属性栏里的执行记录：点的大小/颜色按 --status-* 区分，行距收紧成一组 */
-.detail-panel .run-history { gap: 3px; margin: 6px 0 2px; }
-.detail-panel .run-history-row {
+/* 单行化时间线：图标 + 一句话 + 时间（Run 与 agent 评论共用一行式布局） */
+.detail-body .timeline-content.timeline-line {
+  display: flex;
+  align-items: center;
   gap: 8px;
-  padding: 5px 0;
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  min-width: 0;
 }
-.detail-panel .run-history-row:last-child { border-bottom: 0; }
-.detail-panel .run-history-row .dot { width: 7px; height: 7px; background: var(--status-cancelled); }
-.detail-panel .run-history-row .dot-running {
-  width: 9px;
-  height: 9px;
-  background: var(--status-running);
-  box-shadow: 0 0 0 3px var(--status-running-bg);
+.detail-body .timeline-line strong { flex: 0 0 auto; }
+.detail-body .timeline-line .timeline-sentence {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+  font-size: var(--text-caption);
 }
-.detail-panel .run-history-row .dot-done { background: var(--status-done); }
-.detail-panel .run-history-row .dot-failed { background: var(--status-failed); }
-.detail-panel .run-history-row .dot-cancelled { width: 5px; height: 5px; background: var(--status-cancelled); }
+.detail-body .timeline-line .timeline-sentence.is-expanded { white-space: normal; }
+.detail-body .timeline-line time {
+  flex: 0 0 auto;
+  margin-left: 0;
+  color: var(--text-faint);
+  font: var(--text-micro) var(--mono);
+  white-space: nowrap;
+}
+.detail-body .timeline-line .timeline-action { flex: 0 0 auto; white-space: nowrap; }
+.detail-body .timeline-comment-line { cursor: pointer; }
+/* 展开全文块：article 是 flex row，这里强制换行并按头像列对齐（24px 头像 + 12px 间距） */
+.detail-body .timeline-comment { flex-wrap: wrap; }
+.detail-body .timeline-comment-full {
+  flex: 0 0 calc(100% - 36px);
+  width: calc(100% - 36px);
+  box-sizing: border-box;
+  margin: 2px 0 4px 36px;
+  padding: 8px 12px;
+  border-left: 2px solid var(--border-strong);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: var(--bg-inset);
+  color: var(--text-dim);
+  font-size: var(--text-caption);
+  line-height: 1.6;
+}
 
 /* ---------- 5. 错误横幅：图标 + 标题 + 副文 + 折叠原文 ---------- */
 .detail .error-banner {
@@ -310,56 +311,133 @@ html.light .detail-actions .detail-btn-ghost-danger {
   word-break: break-word;
 }
 
-/* ---------- 6. 右侧属性栏：定宽 label、右对齐控件、分组分隔线 ---------- */
-.detail-panel .prop-label {
-  width: 64px;
-  flex: 0 0 64px;
-  margin-right: auto;
-  color: var(--text-faint);
-  font-size: var(--text-caption);
-  font-weight: 550;
-}
-.detail-panel .issue-meta-edit .prop-label { margin-right: 0; }
-.detail-panel .prop-row {
-  gap: 10px;
-  min-height: 28px;
-  padding: 5px 0;
-  border-bottom: 0;
-}
-.detail-panel .prop-row .prop-value {
-  text-align: right;
-  color: var(--text);
-  font-size: var(--text-label);
-}
-.detail-panel .prop-row .prop-value.dim { color: var(--text-faint); }
-.detail-panel .prop-sep { margin: 10px 0; border-top: 1px solid var(--border); }
-.detail-panel .prop-group-label {
-  margin: 2px 0 6px;
-  color: var(--text-dim);
-  font-size: var(--text-micro);
-  font-weight: 650;
-  letter-spacing: 0.4px;
-}
-.detail-panel .issue-meta-edit { gap: 10px; margin-bottom: 10px; }
-.detail-panel .issue-meta-edit .prop-label { width: 64px; flex: 0 0 64px; }
-.detail-panel .issue-meta-edit select,
-.detail-panel .issue-meta-edit input {
-  padding: 5px 8px;
+/* ---------- 6. meta 行横向压缩（原右侧属性栏信息并入 header） ---------- */
+.detail { position: relative; }
+.detail .meta-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 22px;
+  max-width: 260px;
+  padding: 1px 9px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-pill);
   background: var(--bg-inset);
-  color: var(--text);
-  font-size: var(--text-caption);
-  text-align: right;
+  color: var(--text-dim);
+  font: 600 var(--text-micro) var(--font-ui);
+  white-space: nowrap;
+}
+.detail .meta-chip.mono { font-family: var(--mono); }
+/* 工作流下拉（原有 7 态）：收成 chip 形态 */
+.detail .meta-workflow {
+  min-height: 22px;
+  padding: 0 4px 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-inset);
+  color: var(--text-dim);
+  font: 600 var(--text-micro) var(--font-ui);
+  cursor: pointer;
   transition: border-color var(--duration-base) var(--ease-in-out), box-shadow var(--duration-base) var(--ease-in-out);
 }
-.detail-panel .issue-meta-edit select:focus,
-.detail-panel .issue-meta-edit input:focus {
+.detail .meta-workflow:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-glow);
 }
-.detail-panel .issue-labels { margin-left: 74px; }
+/* 目标/会议浮窗的状态芯片（header 右侧，仅有活跃 goal/meeting 时出现） */
+.detail .meta-chip.float-chip { cursor: pointer; transition: border-color var(--duration-base) var(--ease-in-out), background var(--duration-base) var(--ease-in-out), color var(--duration-base) var(--ease-in-out); }
+.detail .meta-chip.float-chip.is-goal {
+  border-color: color-mix(in srgb, var(--accent) 42%, transparent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.detail .meta-chip.float-chip.is-meeting {
+  border-color: color-mix(in srgb, var(--teal, var(--status-running)) 42%, transparent);
+  background: color-mix(in srgb, var(--teal, var(--status-running)) 12%, transparent);
+  color: var(--teal, var(--status-running));
+}
+.detail .meta-chip.float-chip:hover { filter: brightness(1.08); }
+
+/* ℹ 弹层：原始指令 / 交接备注 / 用量明细 / 会话 / 接力链等低频信息 */
+.detail .meta-info-wrap { position: relative; display: inline-flex; }
+.detail .meta-info-btn { cursor: pointer; padding: 1px 7px; }
+.detail .meta-info-btn:hover, .detail .meta-info-btn.open { color: var(--text); border-color: var(--border-strong); }
+.meta-info-pop {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 40;
+  width: min(420px, calc(100vw - 64px));
+  max-height: min(420px, 60vh);
+  overflow-y: auto;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+  box-shadow: 0 16px 40px rgb(0 0 0 / 0.3);
+  text-align: left;
+}
+.meta-info-sec + .meta-info-sec { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.meta-info-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 5px;
+  color: var(--text-faint);
+  font-size: var(--text-micro);
+  font-weight: 650;
+  letter-spacing: 0.4px;
+}
+.meta-info-sec p { margin: 0; color: var(--text-dim); font-size: var(--text-caption); line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+.meta-info-sec p.dim { color: var(--text-faint); }
+.meta-info-prompt {
+  max-height: 180px;
+  margin: 0;
+  padding: 8px 10px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  color: var(--text-dim);
+  font: var(--text-caption)/1.6 var(--mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.meta-info-mono { font-family: var(--mono); font-size: var(--text-caption); color: var(--text-dim); word-break: break-all; }
+
+/* ---------- 6b. 目标/会议浮窗（FloatWindow 外壳 + 面板内容） ---------- */
+.float-window {
+  position: absolute;
+  top: 74px;
+  right: 18px;
+  z-index: 38;
+  display: flex;
+  flex-direction: column;
+  max-height: min(560px, calc(100% - 96px));
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+  box-shadow: 0 18px 48px rgb(0 0 0 / 0.36);
+}
+.float-window-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 0 0 auto;
+  padding: 9px 10px 9px 12px;
+  border-bottom: 1px solid var(--border);
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+body.float-dragging { cursor: grabbing; user-select: none; }
+body.float-dragging .float-window-head { cursor: grabbing; }
+.float-window-icon { display: inline-flex; color: var(--text-dim); }
+.float-window-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-label); font-weight: 650; }
+.float-window-close { flex: 0 0 auto; cursor: pointer; }
+.float-window-body { flex: 1; min-height: 0; overflow-y: auto; padding: 12px; }
+.float-window .float-panel { margin-bottom: 0; padding: 0; border: 0; background: transparent; }
 
 /* 状态胶囊：颜色全部走 --status-* 令牌 */
 .detail .status-chip {
@@ -485,3 +563,18 @@ html.light .tab.active {
 .skill-menu-item.active .skill-menu-name { color: var(--accent, var(--text)); }
 .skill-menu-name { font-family: var(--mono); font-size: 12px; flex-shrink: 0; }
 .skill-menu-desc { font-size: var(--text-micro); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 分组：内置「命令」（本地动作）在前，「技能」在后 */
+.skill-menu-group { padding: 6px 10px 3px; color: var(--text-faint); font-size: 10px; font-weight: 650; letter-spacing: 0.8px; text-transform: uppercase; }
+.skill-menu-item.is-command .skill-menu-name { color: var(--accent, var(--text)); }
+.skill-menu-item.is-command .skill-menu-desc { color: var(--text); }
+.skill-menu-tag {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 0 6px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: var(--radius-pill);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 650;
+}
