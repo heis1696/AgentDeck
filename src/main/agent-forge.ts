@@ -130,13 +130,13 @@ const FORGE_SKILL_BODIES_PREVIOUS = [FORGE_SKILL_BODY_V1, FORGE_SKILL_BODY_V2]
 /** v3 内置正文：生成（含澄清追问）+ 改进 + 评测三模式；用户可在共享目录编辑同名技能覆盖它 */
 const FORGE_SKILL_BODY = `# 使命
 
-你是 AgentDeck 的「锻造师」，有三种模式：**生成**（一句队员描述 → 定义草稿）、**改进**（现有定义 + 反馈 → 最小改动修订）与**评测**（定义 → 触发命中体检）。目标都是让用户免于逐项手填与逐字打磨——尤其是系统提示词。
+你是 AgentDeck 的「锻造师」，有三种模式：**生成**（一句队员描述 → 定义草稿）、**改进**（现有定义 + 反馈 → 最小改动修订）与**评测**（定义 → 触发命中体检）。三者的共同目标都是让用户免于逐项手填与逐字打磨——尤其是系统提示词。
 
 ## 模式一：生成
 
 ### 工作流
 
-1. 判断是否需要澄清：描述同时说清「领域/职责」时直接出稿；明显缺其一（如只说"帮我建个厉害的 agent"）且未附【澄清回答】→ 输出澄清问题。已附【澄清回答】（哪怕留空）或描述足够清晰 → 一律直接出稿，不再追问。
+1. 判断是否需要澄清：只有描述明显缺「领域/职责」（如只说"帮我建个厉害的 agent"）且未附【澄清回答】时才输出澄清问题；已附【澄清回答】（哪怕留空）或描述足够清晰，一律直接出稿，不再追问。
 2. 提炼专长：从描述（含澄清回答）提取核心职责、领域技术栈与典型场景。
 3. 定 role：4~10 字的头衔，一眼能看出分工（如「前端测试工程师」「文档工程师」）。
 4. 写 systemPrompt（100~500 字，具体不空话），依次覆盖四层：
@@ -188,8 +188,8 @@ const FORGE_SKILL_BODY = `# 使命
 ### 工作流
 
 1. 构造 5 条典型任务输入：3 条该队员**应该接**（should-match，覆盖其核心职责的不同侧面）+ 2 条**不该接**（should-not，选与其职责邻近但确属他人的领域，如"前端测试工程师"不该接"后端接口集成测试"）。
-2. 逐条判定：仅凭这份定义（role + systemPrompt 的字面职责），把该输入交给它是否合适（matched）——照实判定，不要脑补能力。
-3. 诊断：存在误判时，suggestion 一句话指出定义中导致误判的表述（过宽/过窄/歧义）与修改方向；全对则 suggestion 输出空字符串 ""。passRate 由应用侧按 verdicts 复算，你照实判定即可。
+2. 逐条判定：仅凭这份定义（role + systemPrompt 的字面职责），把该输入交给它是否合适（matched）——照实判定，不脑补它不具备的能力。
+3. 诊断：存在误判时，suggestion 一句话指出定义中导致误判的表述（过宽/过窄/歧义）与修改方向；全对则输出空字符串 ""。passRate 由应用侧按 verdicts 复算，照实判定即可、无需自算。
 
 ### 示例 5：评测测试哨兵
 
@@ -252,7 +252,7 @@ export function buildDraftPrompt(skillBody: string, description: string, answers
 【本次任务·生成模式】根据下面的队员描述生成定义草稿：
 ${description}${qa}
 
-【输出重申】生成模式只输出两种形态之一：{"questions":[…]}（需澄清时）或六字段草稿 JSON 对象；不输出任何解释或代码围栏。`
+【输出重申】生成模式只输出两种形态之一：{"questions":[…]}（需澄清时）或六字段草稿 JSON 对象；不输出解释，不带代码围栏。`
 }
 
 /** 拼改进模式 prompt：技能正文 + 现有定义 + 反馈 + 输出契约重申 */
@@ -267,7 +267,7 @@ export function buildImprovePrompt(skillBody: string, agent: Agent, feedback: st
 
 反馈：${feedback}
 
-【输出重申】只输出 {"draft":{六个字段},"changes":[1~3 条摘要]}；draft 带回全套六字段（未涉及的按原样）；不输出解释或围栏。`
+【输出重申】只输出 {"draft":{六个字段},"changes":[1~3 条摘要]}；draft 带回全套六字段（未涉及的按原样）；不输出解释，不带围栏。`
 }
 
 /** 派发协议标记：混进字段值会劫持领队的派发/接力循环，逐字段剥离 */
@@ -360,7 +360,7 @@ export function buildEvaluatePrompt(skillBody: string, draft: AgentDraft): strin
 【本次任务·评测模式】对下面的队员定义做触发评测：
 定义：${definition}
 
-【输出重申】只输出 {"verdicts":[{"input":"…","shouldMatch":true|false,"matched":true|false} ×5],"passRate":0~1,"suggestion":"…"}；不输出解释或围栏。`
+【输出重申】只输出 {"verdicts":[{"input":"…","shouldMatch":true|false,"matched":true|false} ×5],"passRate":0~1,"suggestion":"…"}；不输出解释，不带围栏。`
 }
 
 /** 解析评测回复 → 判定列表；passRate 本地复算（matched===shouldMatch 占比），不信任模型自报值 */

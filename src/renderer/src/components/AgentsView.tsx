@@ -625,7 +625,7 @@ export function AgentsView() {
                 value={editing.systemPrompt ?? ''}
                 onChange={(e) => update(editing, { systemPrompt: e.target.value })}
                 rows={5}
-                placeholder="你是资深前端工程师，擅长 React/TS。写代码前先读现有实现…"
+                placeholder="你是资深前端工程师，擅长 React/TS 组件与状态管理。写代码前先读现有实现、与既有风格保持一致；只改与任务相关的代码，拿不准的先问清再动手。"
               />
             </label>
             <label className="field">

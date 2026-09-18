@@ -2,7 +2,7 @@
 export const FORGE_AGENT_ID = 'ag_forge'
 export const FORGE_SKILL_NAME = 'agent-crafter'
 /** 技能内容版本：内置正文升级时 +1；共享目录里用户编辑过的旧版不强制覆盖 */
-export const FORGE_SKILL_VERSION = 3
+export const FORGE_SKILL_VERSION = 4
 
 /** 草稿/改进产物字段（白名单；backend/presetId/subordinates 永不生成） */
 export interface AgentDraft {

@@ -97,8 +97,18 @@ export class SidecarRuntime {
       maxRetryAttempts: () => this.settings.maxRetryAttempts
     })
     this.runner.attachContinue(({ sourceTaskId, issueId, brief, start }) => {
+      const source = this.store.get(sourceTaskId)
       const task = this.taskService.createHandoffTask({ sourceTaskId, issueId, brief, start })
       if (task && start !== 'parked') this.runner.enqueue(task)
+      else if (task) this.onTaskChanged(task)
+      // 与主进程接线（index.ts attachContinue）对齐：停放的后继对用户是隐形的
+      // （调度泵与重启对账都跳过 parked），sidecar 又没有 notifyTaskChanged 推送通道——
+      // 落一条 Issue 评论把"等你启动"喊到用户看得到的地方。只对新建（10s 内）落评论，
+      // 幂等复用/重放不刷屏。
+      if (task?.parked && task.issueId && Date.now() - task.createdAt < 10_000) {
+        const firstLine = task.prompt.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? task.title
+        this.issueStore.addComment(task.issueId, `⏸ 阶段接力已备好：${firstLine.slice(0, 80)}——下一阶段在等你启动（打开该 Issue 的最新执行，点「▶ 启动」）`, { type: 'agent', id: source?.agentId ?? 'relay' })
+      }
       return task
     })
   }
