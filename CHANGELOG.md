@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-09-18
+
 ### 新增
 
 - **看板全面升级（Issue 任务视图融合）**：Issue 导航精简为「新建 + 已打开」极简主页，搜索/范围（全部/我的/智能体）/状态筛选全部并入看板顶栏，应用默认落地看板。看板卡片信息密度与类型区分重做——左侧强调边按类型着色（普通/委派紫/接力青/目标金/会议蓝）、优先级角标、backend 芯片、相对更新时间、耗时、运行中呼吸光效、领队卡子单进度条（done/total）与折叠子单列表（缩进小行：状态点+标题+耗时），孤儿子单归入列底「（无领队）」弱化组。列内按日期分装（今天/昨天/近7天/更早（≤30天）/超30天·保留），「更早」节带「将自动清理」角标。
@@ -15,8 +17,6 @@
 ### 变更
 
 - **阶段接力（硬切）协议与解析对齐 + 兜底通道**（用户反馈"完全没见 agent 触发过"）：事件日志实据复盘显示机制本身未坏（9月8日前 8 连链正常），真实断点是 ① agent 在标记后补客套收尾或整体包进代码围栏——末尾锚定正则全灭且零留痕；② 协议文本承诺"缺省 start 按 auto"而解析器实作"缺省一律 parked"，语义互相矛盾。修复：解析新增兜底通道（末尾锚定失守时取全文最后一个完整标记，仅显式 `start="auto"` 且简报 ≥20 字才采纳，协议示例指纹拒收防复述）；协议文本改为显式要求 `start="auto"`、缺省/写错明确按停放，并新增"拿不准时输出 parked 而不是『后续可以…』口头交接"条款；全链路可观测——兜底触发、检测到标记字样但拒收（未闭合/围栏/复述）均落 status 事件留痕。`smoke:continue` 扩充兜底/防复述/围栏/缺省矩阵与 E1/E2 端到端场景。
-
-### 变更（续）
 
 - **zcode 模型接线迁移 CLI 3.12.3 新协议（注册表引用 + session/setModel）**：新协议 create/resume 的 strict schema 不再收模型字段（传了报 Unrecognized key，执行期也带不住 options）——统一改为会话建立后 `session/setModel {providerId, modelId, options?}` 补设；reasoning 模型必须带 `options.reasoningLevel`（取桌面端目录 defaultVariant，报 "Reasoning level is required" 的坑）。**API 预设（连接）替代旧 runtimeModel 内联凭据**：预设 upsert 成 `~/.zcode/v2/provider_config.json` 的个人 provider 规则（id 由 baseURL fnv1a 派生，`agentdeck-xxxxxxxx`，同预设幂等、异预设不冲突；group 必填 standard-personal 否则整条被静默过滤），模型解析为注册表引用（providerId 必须在 providerRules 内，模型 id 大小写按目录归一）；**解析/upsert 必须先于 spawn**——app-server 启动加载注册表快照，拉起后再写它看不到。resume 后同样 setModel 补设（沿用 agent 钉死模型），修复「历史任务使用的模型已不可用」类失效。`smoke:model` 重写为新协议（引用解析/预设 upsert/目录归一/显式前缀四组场景）。
 
