@@ -325,7 +325,11 @@ export interface AgentDeckApi {
     setPersona: (text: string) => Promise<PetStateSnapshot | null>
     setAutonomy: (sec: number) => Promise<PetStateSnapshot | null>
     setPreset: (presetId: string, model?: string) => Promise<PetStateSnapshot | null>
-    /** 渲染层 → 主进程：窗体移动/拖拽/聊天开合（fire-and-forget） */
+    /** 缩放档切换（1/1.5/2）：主进程改窗体尺寸并广播快照 */
+    setZoom: (zoom: number) => Promise<PetStateSnapshot | null>
+    /** 投喂：好感/心情落 pet.json，返回新快照（吃动画由渲染层自播） */
+    feed: (foodId: string) => Promise<PetStateSnapshot | null>
+    /** 渲染层 → 主进程：窗体移动/拖拽/聊天开合/交互上报（fire-and-forget） */
     windowEvent: (event: PetWindowEvent) => void
     /** 主进程 → 渲染层：脑台词推送（自主发言/聊天回复的气泡播报） */
     onSay: (cb: (say: PetSayPayload) => void) => () => void

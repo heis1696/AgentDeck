@@ -4,7 +4,7 @@
 import { BrowserWindow, app, screen } from 'electron'
 import path from 'node:path'
 import { resolveHotState } from '../hot/resolve'
-import { PET_WINDOW_SIZE, petSpriteRect, type PetDragPosition, type PetThrowVelocity, type PetWindowEvent } from '../../shared/pet'
+import { normalizePetZoom, petSpriteRect, petSpriteScale, petWindowSize, type PetDragPosition, type PetThrowVelocity, type PetWindowEvent } from '../../shared/pet'
 
 const PASS_THROUGH_POLL_MS = 150
 const DRAG_POLL_MS = 16
@@ -13,6 +13,8 @@ const VELOCITY_WINDOW_MS = 80
 
 export interface PetWindowDeps {
   getWindow: () => BrowserWindow | null
+  /** 当前缩放档（穿透命中区与窗体尺寸的同步来源） */
+  getZoom: () => number
 }
 
 export class PetWindowController {
@@ -51,9 +53,11 @@ export class PetWindowController {
       this.window?.show()
       return
     }
+    const zoom = normalizePetZoom(this.deps.getZoom())
+    const size = petWindowSize(zoom)
     const win = new BrowserWindow({
-      width: PET_WINDOW_SIZE.width,
-      height: PET_WINDOW_SIZE.height,
+      width: size.width,
+      height: size.height,
       // 透明窗三件套：transparent + frame:false + 不设 backgroundColor（设了就不透明）
       transparent: true,
       frame: false,
@@ -79,16 +83,36 @@ export class PetWindowController {
     const workArea = screen.getPrimaryDisplay().workArea
     if (position) {
       win.setPosition(
-        Math.min(Math.max(Math.round(position.x), workArea.x), workArea.x + workArea.width - PET_WINDOW_SIZE.width),
-        Math.min(Math.max(Math.round(position.y), workArea.y), workArea.y + workArea.height - PET_WINDOW_SIZE.height)
+        Math.min(Math.max(Math.round(position.x), workArea.x), workArea.x + workArea.width - size.width),
+        Math.min(Math.max(Math.round(position.y), workArea.y), workArea.y + workArea.height - size.height)
       )
     } else {
-      win.setPosition(workArea.x + workArea.width - PET_WINDOW_SIZE.width - 40, workArea.y + workArea.height - PET_WINDOW_SIZE.height)
+      win.setPosition(workArea.x + workArea.width - size.width - 40, workArea.y + workArea.height - size.height)
     }
     this.loadRenderer(win)
     win.showInactive()
     this.window = win
     this.startPolling()
+  }
+
+  /** 缩放档切换：窗体尺寸随档位变化，保「底边中点」锚（精灵脚不移位），再 clamp 进工作区 */
+  applyZoom(zoom: number): void {
+    const normalized = normalizePetZoom(zoom)
+    if (!this.isOpen()) return
+    const win = this.window!
+    const [oldX, oldY] = win.getPosition()
+    const [oldW, oldH] = win.getSize()
+    const size = petWindowSize(normalized)
+    if (oldW === size.width && oldH === size.height) return
+    const x = Math.round(oldX + (oldW - size.width) / 2)
+    const y = Math.round(oldY + oldH - size.height)
+    win.setBounds({ x, y, width: size.width, height: size.height })
+    const workArea = screen.getPrimaryDisplay().workArea
+    const [newX, newY] = win.getPosition()
+    win.setPosition(
+      Math.min(Math.max(newX, workArea.x), workArea.x + workArea.width - size.width),
+      Math.min(Math.max(newY, workArea.y), workArea.y + workArea.height - size.height)
+    )
   }
 
   hide(): void {
@@ -158,7 +182,9 @@ export class PetWindowController {
       const win = this.window!
       const cursor = screen.getCursorScreenPoint()
       const [wx, wy] = win.getPosition()
-      const sprite = petSpriteRect()
+      const [ww, wh] = win.getSize()
+      // 命中区与窗体/精灵同缩放：尺寸取窗体实际大小，倍率取当前档位
+      const sprite = petSpriteRect(ww, wh, petSpriteScale(normalizePetZoom(this.deps.getZoom())))
       const margin = 8
       const inside =
         cursor.x >= wx + sprite.left - margin && cursor.x <= wx + sprite.left + sprite.width + margin &&

@@ -36,6 +36,14 @@ export function registerPetIpc(ctx: IpcContext) {
     if (!ctx.pet) return null
     return ctx.pet.setPreset(typeof presetId === 'string' ? presetId : '', typeof model === 'string' ? model : undefined)
   })
+  ipcMain.handle('pet:set-zoom', (_e, zoom: unknown) => {
+    if (!ctx.pet) return null
+    return ctx.pet.setZoom(typeof zoom === 'number' && Number.isFinite(zoom) ? zoom : 1)
+  })
+  ipcMain.handle('pet:feed', (_e, foodId: unknown) => {
+    if (!ctx.pet) return null
+    return ctx.pet.feed(typeof foodId === 'string' ? foodId.slice(0, 40) : '')
+  })
   ipcMain.handle('pet:send-chat', async (_e, text: unknown) => {
     if (!ctx.pet) return null
     return ctx.pet.sendChat(parseContent(text, '聊天内容'))
@@ -45,7 +53,7 @@ export function registerPetIpc(ctx: IpcContext) {
 /** 窗体事件弱校验：形状不对就丢弃（渲染层是唯一来源，不抛错打断渲染） */
 export function parsePetWindowEvent(value: unknown): PetWindowEvent | null {
   if (!value || typeof value !== 'object') return null
-  const raw = value as { type?: unknown; x?: unknown; y?: unknown; offsetX?: unknown; offsetY?: unknown; open?: unknown }
+  const raw = value as { type?: unknown; x?: unknown; y?: unknown; offsetX?: unknown; offsetY?: unknown; open?: unknown; kind?: unknown }
   const num = (v: unknown) => typeof v === 'number' && Number.isFinite(v) ? v : null
   switch (raw.type) {
     case 'move': {
@@ -62,6 +70,8 @@ export function parsePetWindowEvent(value: unknown): PetWindowEvent | null {
       return { type: 'drag-end' }
     case 'chat':
       return typeof raw.open === 'boolean' ? { type: 'chat', open: raw.open } : null
+    case 'interact':
+      return raw.kind === 'click' || raw.kind === 'throw' ? { type: 'interact', kind: raw.kind } : null
     case 'open-settings':
       return { type: 'open-settings' }
     default:

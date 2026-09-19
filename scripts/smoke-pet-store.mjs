@@ -37,12 +37,19 @@ ok(!fs.existsSync(path.join(dir, 'pet.json.tmp')), 'tmp+rename 无残留 .tmp')
 const reopened = new PetStore(dir)
 ok(reopened.get().enabled === true, '重开读取持久化配置')
 
-// —— 环形截断 ——
+// —— 环形截断 + 溢出进记忆队列 ——
 for (let i = 0; i < 25; i++) store.appendChat({ role: 'user', text: `消息 ${i}` })
 let history = store.get().chatHistory
 ok(history.length === PET_CHAT_HISTORY_CAP, `环形截断到 ${PET_CHAT_HISTORY_CAP}（got ${history.length}）`)
 ok(history[history.length - 1].text === '消息 24' && history[0].text === '消息 5', '截断保留最新一端')
+const reopenedStore = new PetStore(dir)
 ok(new PetStore(dir).get().chatHistory.length === PET_CHAT_HISTORY_CAP, '截断结果持久化')
+ok(reopenedStore.get().memoryQueue.length === 5, `滚出窗口的 5 条溢出进入 memoryQueue（got ${reopenedStore.get().memoryQueue.length}）`)
+const drained = reopenedStore.drainMemoryQueue(3)
+ok(drained.length === 3 && drained[0].text === '消息 0', 'drainMemoryQueue 按序取走指定条数')
+ok(reopenedStore.get().memoryQueue.length === 2, '未摘要的队列条目保留')
+reopenedStore.drainMemoryQueue()
+ok(new PetStore(dir).get().memoryQueue.length === 0, '全量 drain 后队列清空')
 
 // —— clamp 与 bounds ——
 store.setAutonomy(5)
@@ -56,6 +63,23 @@ const preset = new PetStore(dir).get()
 ok(preset.presetId === 'pst_x' && preset.model === 'claude-3-5-haiku', '预设与模型持久化')
 store.setPersona('你是测试人设')
 ok(new PetStore(dir).get().personaPrompt === '你是测试人设', '人设持久化')
+
+// —— 养成数值 / 缩放档 / 问候日期持久化 ——
+store.setLife({ affection: 42, mood: 88, lastInteractAt: 1234567890 })
+const lifeSaved = new PetStore(dir).get()
+ok(lifeSaved.affection === 42 && lifeSaved.mood === 88 && lifeSaved.lastInteractAt === 1234567890, '好感/心情/最近交互持久化')
+store.setZoom(1.5)
+ok(new PetStore(dir).get().zoom === 1.5, '缩放档 1.5 持久化')
+store.setZoom(7)
+ok(new PetStore(dir).get().zoom === 1, '白名单外缩放档回退 1')
+store.setMemory('主人喜欢薄荷味的东西')
+ok(new PetStore(dir).get().memory === '主人喜欢薄荷味的东西', '长期记忆持久化')
+store.setGreeted('2026-09-19')
+ok(new PetStore(dir).get().greetedDate === '2026-09-19', '问候日期持久化')
+store.mergeInMemory({ mood: 30 })
+ok(store.get().mood === 30, 'mergeInMemory 内存合并生效')
+store.flush()
+ok(new PetStore(dir).get().mood === 30, 'flush 后内存合并值落盘')
 
 // —— 坏文件回退默认 ——
 fs.writeFileSync(path.join(dir, 'pet.json'), '{corrupt!!!')
@@ -75,7 +99,7 @@ const listed = packs.listPacks(dir)
 const good = listed.find((item) => item.id === 'goodpack')
 const bad = listed.find((item) => item.id === 'badpack')
 ok(listed.some((item) => item.id === 'default' && item.builtin), '内置包始终在列')
-ok(good && good.ok === true && good.frameCount === 16, `好包登记（${good && good.frameCount} 帧）`)
+ok(good && good.ok === true && good.frameCount === 19, `好包登记（${good && good.frameCount} 帧，含 eat 3 帧）`)
 ok(bad && bad.ok === false && !!bad.reason, `坏包跳过并标注原因（${bad && bad.reason}）`)
 const assets = packs.readUserPackAssets(dir, 'goodpack')
 ok(assets.manifest.frameSize[0] === 64 && assets.frames.idle.length === 3, '用户包 manifest 读取')

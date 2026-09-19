@@ -1,8 +1,14 @@
 // 桌宠共享契约与纯函数：manifest 校验、行为状态机（stepBrain）、一帧推进（advancePet）。
 // 主进程与渲染层共用，禁止 import electron / node API——smoke 直连打包即公共 API。
 
-export type PetStateId = 'idle' | 'walk' | 'fall' | 'dragged' | 'sleep' | 'happy' | 'think'
-export const PET_STATE_IDS: readonly PetStateId[] = ['idle', 'walk', 'fall', 'dragged', 'sleep', 'happy', 'think']
+/** 七态契约（必需）：文档 §4.3 承诺的稳定状态名，缺失即坏素材包 */
+export type PetCoreStateId = 'idle' | 'walk' | 'fall' | 'dragged' | 'sleep' | 'happy' | 'think'
+export const PET_CORE_STATE_IDS: readonly PetCoreStateId[] = ['idle', 'walk', 'fall', 'dragged', 'sleep', 'happy', 'think']
+/** 扩展态白名单：素材包可选用（eat=喂食动画），缺失不算坏包——七态契约向后兼容 */
+export const PET_EXTRA_STATE_IDS = ['eat'] as const
+export type PetExtraStateId = (typeof PET_EXTRA_STATE_IDS)[number]
+export type PetStateId = PetCoreStateId | PetExtraStateId
+export const PET_STATE_IDS: readonly PetStateId[] = [...PET_CORE_STATE_IDS, ...PET_EXTRA_STATE_IDS]
 
 /** 状态转移项：weight 参与加权随机（land / afterSec 到期 / 非循环动画播完共用） */
 export interface PetTransition {
@@ -23,7 +29,8 @@ export interface PetStateDef {
 /** 素材包清单（pet.json 的稳定 schema，字段名不得偏离——用户文档按此契约撰写） */
 export interface PetManifest {
   frameSize: [number, number]
-  states: Record<PetStateId, PetStateDef>
+  /** 七态必需；eat 为白名单可选态（缺省时喂食退回 happy 动画） */
+  states: Record<PetCoreStateId, PetStateDef> & Partial<Record<PetExtraStateId, PetStateDef>>
   movement: {
     walkSpeedPx: number
     gravity: number
@@ -33,6 +40,28 @@ export interface PetManifest {
   bubble: { offset: [number, number] }
 }
 
+/** 单态定义解析（七态与扩展态同规则）：不合法返回 null */
+function parseStateDef(def: Partial<PetStateDef>): PetStateDef | null {
+  if (!def || typeof def !== 'object') return null
+  if (!Array.isArray(def.frames) || def.frames.length === 0 || def.frames.some((f) => typeof f !== 'string' || !f.trim())) return null
+  if (!Number.isFinite(def.fps) || (def.fps as number) <= 0) return null
+  if (typeof def.loop !== 'boolean') return null
+  if (!Array.isArray(def.next)) return null
+  const next: PetTransition[] = []
+  for (const item of def.next) {
+    if (!item || typeof item !== 'object') return null
+    if (!PET_STATE_IDS.includes((item as PetTransition).to)) return null
+    if (!Number.isFinite((item as PetTransition).weight) || (item as PetTransition).weight <= 0) return null
+    next.push({ to: (item as PetTransition).to, weight: (item as PetTransition).weight })
+  }
+  const stateDef: PetStateDef = { frames: [...def.frames], fps: def.fps as number, loop: def.loop, next }
+  if (def.afterSec !== undefined) {
+    if (!Number.isFinite(def.afterSec) || (def.afterSec as number) <= 0) return null
+    stateDef.afterSec = def.afterSec
+  }
+  return stateDef
+}
+
 /** 校验 manifest：全字段强约束，任一不合法返回 null（坏素材包跳过的依据） */
 export function validatePetManifest(value: unknown): PetManifest | null {
   if (!value || typeof value !== 'object') return null
@@ -40,27 +69,22 @@ export function validatePetManifest(value: unknown): PetManifest | null {
   const frameSize = raw.frameSize
   if (!Array.isArray(frameSize) || frameSize.length !== 2 || frameSize.some((n) => !Number.isFinite(n) || n <= 0)) return null
   if (!raw.states || typeof raw.states !== 'object') return null
-  const states = {} as Record<PetStateId, PetStateDef>
+  const rawStates = raw.states as Record<string, Partial<PetStateDef>>
+  const states = {} as PetManifest['states']
+  // 白名单内的态逐个校验：七态必需，eat 可选（出现即同规则校验）
   for (const id of PET_STATE_IDS) {
-    const def = (raw.states as Record<string, Partial<PetStateDef>>)[id]
-    if (!def || typeof def !== 'object') return null
-    if (!Array.isArray(def.frames) || def.frames.length === 0 || def.frames.some((f) => typeof f !== 'string' || !f.trim())) return null
-    if (!Number.isFinite(def.fps) || (def.fps as number) <= 0) return null
-    if (typeof def.loop !== 'boolean') return null
-    if (!Array.isArray(def.next)) return null
-    const next: PetTransition[] = []
-    for (const item of def.next) {
-      if (!item || typeof item !== 'object') return null
-      if (!PET_STATE_IDS.includes((item as PetTransition).to)) return null
-      if (!Number.isFinite((item as PetTransition).weight) || (item as PetTransition).weight <= 0) return null
-      next.push({ to: (item as PetTransition).to, weight: (item as PetTransition).weight })
+    const def = rawStates[id]
+    if (!def) {
+      if ((PET_CORE_STATE_IDS as readonly string[]).includes(id)) return null
+      continue
     }
-    const stateDef: PetStateDef = { frames: [...def.frames], fps: def.fps as number, loop: def.loop, next }
-    if (def.afterSec !== undefined) {
-      if (!Number.isFinite(def.afterSec) || (def.afterSec as number) <= 0) return null
-      stateDef.afterSec = def.afterSec
-    }
-    states[id] = stateDef
+    const parsed = parseStateDef(def)
+    if (!parsed) return null
+    ;(states as Record<string, PetStateDef>)[id] = parsed
+  }
+  // 白名单外的自定义态名一律拒收（防脏数据混进状态机）
+  for (const key of Object.keys(rawStates)) {
+    if (!PET_STATE_IDS.includes(key as PetStateId)) return null
   }
   const movement = raw.movement
   if (!movement || typeof movement !== 'object') return null
@@ -78,16 +102,34 @@ export function validatePetManifest(value: unknown): PetManifest | null {
 }
 
 // —— 透明窗体布局常量：渲染层绘制与主进程鼠标命中必须共用同一份数值 ——
-/** 桌宠透明窗尺寸（px） */
+/** 桌宠透明窗基准尺寸（px，zoom=1 档） */
 export const PET_WINDOW_SIZE = { width: 220, height: 220 }
-/** 精灵显示倍率与底部留白：精灵显示尺寸 = frameSize * scale，贴窗底居中 */
+/** 精灵显示倍率基准与底部留白：精灵显示尺寸 = frameSize * scale，贴窗底居中 */
 export const PET_SPRITE_SCALE = 2
 export const PET_SPRITE_BOTTOM_PAD = 10
+/** 缩放档位白名单（右键菜单「尺寸」；倍率作用于精灵与窗体） */
+export const PET_ZOOM_STEPS = [1, 1.5, 2] as const
+export type PetZoom = (typeof PET_ZOOM_STEPS)[number]
+
+/** 缩放档 → 精灵显示倍率（基准 2 倍 × 档位） */
+export function petSpriteScale(zoom: number = 1): number {
+  return PET_SPRITE_SCALE * zoom
+}
+
+/** 缩放档 → 透明窗尺寸（基准 220 等比放大，取整） */
+export function petWindowSize(zoom: number = 1): { width: number; height: number } {
+  return { width: Math.round(PET_WINDOW_SIZE.width * zoom), height: Math.round(PET_WINDOW_SIZE.height * zoom) }
+}
+
+/** 合法缩放档归一：白名单外的值回退 1（持久化旧值/脏数据容错） */
+export function normalizePetZoom(value: unknown): PetZoom {
+  return (PET_ZOOM_STEPS as readonly number[]).includes(value as number) ? (value as PetZoom) : 1
+}
 
 /** 精灵在窗体内的显示矩形（鼠标命中区的基础，主进程按此 + 8px 余量判定穿透） */
-export function petSpriteRect(windowWidth = PET_WINDOW_SIZE.width, windowHeight = PET_WINDOW_SIZE.height): { left: number; top: number; width: number; height: number } {
-  const width = 64 * PET_SPRITE_SCALE
-  const height = 64 * PET_SPRITE_SCALE
+export function petSpriteRect(windowWidth = PET_WINDOW_SIZE.width, windowHeight = PET_WINDOW_SIZE.height, scale = PET_SPRITE_SCALE): { left: number; top: number; width: number; height: number } {
+  const width = 64 * scale
+  const height = 64 * scale
   return { left: Math.round((windowWidth - width) / 2), top: windowHeight - PET_SPRITE_BOTTOM_PAD - height, width, height }
 }
 
@@ -144,7 +186,8 @@ export function weightedPick<T extends { weight: number }>(items: T[], rand: () 
 }
 
 function toNext(brain: PetBrain, manifest: PetManifest, rand: () => number): PetBrain {
-  const exits = manifest.states[brain.state].next
+  // 扩展态可能缺定义（白名单可选），缺出口视为不转移
+  const exits = manifest.states[brain.state]?.next ?? []
   if (!exits.length) return brain
   const target = weightedPick(exits, rand).to
   return { state: target, frame: 0, frameTime: 0, stateTime: 0, finished: false }
@@ -198,7 +241,8 @@ export function advancePet(brain: PetBrain, physics: PetPhysics, manifest: PetMa
   let nextBrain: PetBrain = { ...brain, stateTime: brain.stateTime + step }
   let nextPhysics: PetPhysics = { ...physics }
   let moved = false
-  const def = manifest.states[nextBrain.state]
+  // 扩展态缺定义（白名单可选）时按 idle 段推进（校验层保证七态必在，这里只兜扩展态）
+  const def = manifest.states[nextBrain.state] ?? manifest.states.idle
 
   // 翻帧：非 loop 态钳在末帧，播完触发一次性加权转移
   const frameDur = 1 / def.fps
@@ -222,7 +266,7 @@ export function advancePet(brain: PetBrain, physics: PetPhysics, manifest: PetMa
   }
 
   // afterSec 到期：loop 态自主转移（fall 只认 land；dragged 只认 throw）
-  const current = manifest.states[nextBrain.state]
+  const current = manifest.states[nextBrain.state] ?? manifest.states.idle
   if (current.loop && current.afterSec !== undefined && current.next.length > 0 && nextBrain.stateTime >= current.afterSec) {
     nextBrain = toNext(nextBrain, manifest, rand)
   }
@@ -268,11 +312,15 @@ export function advancePet(brain: PetBrain, physics: PetPhysics, manifest: PetMa
 
 // —— 渲染层 ↔ 主进程的窗体事件（IPC payload，弱校验）——
 
+/** 交互种类（好感/心情累积的输入；feed 走独立 IPC，不在窗体事件里） */
+export type PetInteractionKind = 'click' | 'throw'
 export type PetWindowEvent =
   | { type: 'move'; x: number; y: number }
   | { type: 'drag-start'; offsetX: number; offsetY: number }
   | { type: 'drag-end' }
   | { type: 'chat'; open: boolean }
+  /** 交互上报（单击/抛掷）：主进程据此累积好感与心情 */
+  | { type: 'interact'; kind: PetInteractionKind }
   /** 右键菜单「打开设置」：聚焦主窗并跳设置页（C 期） */
   | { type: 'open-settings' }
 
@@ -331,6 +379,18 @@ export interface PetPresetSummary {
 /** 模型预设显式关闭哨兵：桌宠「不接 AI（用本地台词）」；'' = 未配置（自动用第一个预设） */
 export const PET_PRESET_NONE = '__none__'
 
+/** 亲密度/心情快照（设置卡片与渲染层共用；数值均 0-100） */
+export interface PetLifeSnapshot {
+  affection: number
+  mood: number
+  /** 好感等级名（陌生/点头之交/熟悉/亲近/挚友） */
+  tier: string
+  /** 心情文案（开心/平静/低落） */
+  moodLabel: string
+  /** 今日已投喂次数 */
+  fedToday: number
+}
+
 export interface PetStateSnapshot {
   enabled: boolean
   packId: string
@@ -347,4 +407,10 @@ export interface PetStateSnapshot {
   packs: PetPackInfo[]
   /** 渲染层物理换算工作区（主进程 screen.getPrimaryDisplay().workArea） */
   screen?: { workArea: { x: number; y: number; width: number; height: number } }
+  /** 亲密度/心情（D 期起有值；旧快照消费方按可选读取） */
+  life?: PetLifeSnapshot
+  /** 缩放档（1/1.5/2）；窗体与精灵同缩放 */
+  zoom: number
+  /** 最近一次看板事件文案（{recent_event} 宏与设置卡片同源） */
+  recentEvent: string
 }
