@@ -25,6 +25,7 @@ import type {
   SkillsShEntry
 } from '../shared/extensions'
 import type { AgentDeckApi, AgentInfo, AgentModelCatalog, FileDiffResult, GoalCheckpointInput, GoalCreateInput, MeetingCreateInput, PermissionRequest, PresetInfo, SidecarSnapshot, TaskCreateInput, UpdateChannel, UpdateStateSnapshot } from '../shared/contracts'
+import type { PackAssets, PetDragPosition, PetSayPayload, PetStateSnapshot, PetThrowVelocity, PetWindowEvent } from '../shared/pet'
 
 const api: AgentDeckApi = {
   worktrees: {
@@ -202,6 +203,47 @@ const api: AgentDeckApi = {
       const h = (_e: unknown, snapshot: SidecarSnapshot) => cb(snapshot)
       ipcRenderer.on('sidecar:status', h)
       return () => ipcRenderer.removeListener('sidecar:status', h)
+    }
+  },
+  pet: {
+    getState: (): Promise<PetStateSnapshot | null> => ipcRenderer.invoke('pet:get-state'),
+    setEnabled: (on: boolean): Promise<PetStateSnapshot | null> => ipcRenderer.invoke('pet:set-enabled', on),
+    setPack: (packId: string): Promise<PetStateSnapshot | null> => ipcRenderer.invoke('pet:set-pack', packId),
+    getPackAssets: (packId: string): Promise<PackAssets | null> => ipcRenderer.invoke('pet:get-pack-assets', packId),
+    sendChat: (text: string): Promise<PetSayPayload | null> => ipcRenderer.invoke('pet:send-chat', text),
+    setPersona: (text: string): Promise<PetStateSnapshot | null> => ipcRenderer.invoke('pet:set-persona', text),
+    setAutonomy: (sec: number): Promise<PetStateSnapshot | null> => ipcRenderer.invoke('pet:set-autonomy', sec),
+    setPreset: (presetId: string, model?: string): Promise<PetStateSnapshot | null> => ipcRenderer.invoke('pet:set-preset', presetId, model),
+    windowEvent: (event: PetWindowEvent): void => ipcRenderer.send('pet:window-event', event),
+    onSay: (cb: (say: PetSayPayload) => void) => {
+      const h = (_e: unknown, say: PetSayPayload) => cb(say)
+      ipcRenderer.on('pet:say', h)
+      return () => ipcRenderer.removeListener('pet:say', h)
+    },
+    onState: (cb: (snapshot: PetStateSnapshot) => void) => {
+      const h = (_e: unknown, snapshot: PetStateSnapshot) => cb(snapshot)
+      ipcRenderer.on('pet:state', h)
+      return () => ipcRenderer.removeListener('pet:state', h)
+    },
+    onDrag: (cb: (position: PetDragPosition) => void) => {
+      const h = (_e: unknown, position: PetDragPosition) => cb(position)
+      ipcRenderer.on('pet:drag', h)
+      return () => ipcRenderer.removeListener('pet:drag', h)
+    },
+    onThrown: (cb: (velocity: PetThrowVelocity) => void) => {
+      const h = (_e: unknown, velocity: PetThrowVelocity) => cb(velocity)
+      ipcRenderer.on('pet:thrown', h)
+      return () => ipcRenderer.removeListener('pet:thrown', h)
+    },
+    onPackChanged: (cb: () => void) => {
+      const h = () => cb()
+      ipcRenderer.on('pet:pack-changed', h)
+      return () => ipcRenderer.removeListener('pet:pack-changed', h)
+    },
+    onOpenSettings: (cb: () => void) => {
+      const h = () => cb()
+      ipcRenderer.on('pet:open-settings', h)
+      return () => ipcRenderer.removeListener('pet:open-settings', h)
     }
   },
   updates: {

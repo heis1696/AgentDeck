@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { AppSettings } from '../../../shared/types'
-import { bridge, useSettings } from '../api'
+import { PET_PERSONA_PRESETS } from '../../../shared/pet-lines'
+import { bridge, usePetState, useSettings } from '../api'
 import { Settings } from 'lucide-react'
 import { Menu } from '../ui/Menu'
 import { EmptyState } from '../ui/EmptyState'
@@ -118,6 +119,8 @@ function GeneralSection() {
           <span>任务完成/失败时弹系统通知</span>
         </label>
       </section>
+
+      <PetSection />
     </div>
   )
 }
@@ -359,5 +362,123 @@ function StorageSection() {
         </p>
       </section>
     </div>
+  )
+}
+
+/** 桌宠：开关 + 素材包 + 人设编辑（三版预设/宏插入）+ 自主间隔 + 模型预设 */
+function PetSection() {
+  const { state } = usePetState()
+  const [personaDraft, setPersonaDraft] = useState<string | null>(null)
+  if (!state) return null
+  const persona = personaDraft ?? state.personaPrompt
+  const insertMacro = (macro: string) => setPersonaDraft((current) => {
+    const base = current ?? state.personaPrompt
+    return `${base.trimEnd()}${base.trim() ? '\n' : ''}{${macro}}`
+  })
+  return (
+    <section className="settings-card">
+      <h3>桌宠</h3>
+      <label className="field row-field">
+        <input type="checkbox" checked={state.enabled} onChange={(e) => void bridge.pet.setEnabled(e.target.checked)} />
+        <span>启用桌宠（透明置顶小窗，可拖拽、可聊天）</span>
+      </label>
+      <label className="field">
+        <span>素材包</span>
+        <Menu
+          items={state.packs.filter((pack) => pack.ok).map((pack) => ({
+            value: pack.id,
+            label: pack.builtin ? pack.id : `${pack.id}（用户）`,
+            hint: `${pack.frameCount} 帧`
+          }))}
+          value={state.packId}
+          onChange={(v) => void bridge.pet.setPack(v)}
+          trigger={(cur, open) => (
+            <button className="btn menu-trigger" type="button">
+              {cur?.label ?? state.packId} <span className="menu-caret">{open ? '▴' : '▾'}</span>
+            </button>
+          )}
+        />
+      </label>
+      <label className="field">
+        <span>人设预设</span>
+        <Menu
+          items={PET_PERSONA_PRESETS.map((preset) => ({ value: preset.id, label: preset.label }))}
+          value={PET_PERSONA_PRESETS.find((preset) => preset.template === persona)?.id ?? ''}
+          onChange={(id) => {
+            const preset = PET_PERSONA_PRESETS.find((item) => item.id === id)
+            if (preset) setPersonaDraft(preset.template)
+          }}
+          trigger={(cur, open) => (
+            <button className="btn menu-trigger" type="button">
+              {cur?.label ?? '自定义（基于当前文本）'} <span className="menu-caret">{open ? '▴' : '▾'}</span>
+            </button>
+          )}
+        />
+        <span className="hint">选中预设会把模板填入下方文本域，可继续手改；点「保存人设」才生效</span>
+      </label>
+      <label className="field">
+        <span>人设提示词（系统提示词，支持宏；空 = 内置「活泼」预设）</span>
+        <textarea
+          rows={6}
+          value={persona}
+          onChange={(e) => setPersonaDraft(e.target.value)}
+          placeholder="留空使用内置「活泼」预设"
+        />
+        <span className="hint">
+          可用宏：{'{board_summary} 看板摘要'}、{'{pack_name} 素材包'}、{'{time_of_day} 时段'}、{'{model} 模型'}；缺失的宏自动降级为「暂无」。
+          模板需内联输出契约（只输出 JSON {'{"say","action"}'}，say≤30 字，action 五值枚举）。
+        </span>
+        <span className="row" style={{ gap: 6, marginTop: 6 }}>
+          {['board_summary', 'pack_name', 'time_of_day', 'model'].map((macro) => (
+            <button key={macro} className="btn" type="button" onClick={() => insertMacro(macro)}>+{macro}</button>
+          ))}
+        </span>
+        <span className="row" style={{ gap: 6, marginTop: 6 }}>
+          <button className="btn primary" type="button" disabled={personaDraft === null} onClick={() => { void bridge.pet.setPersona(persona); setPersonaDraft(null); toast.success('人设已保存') }}>保存人设</button>
+          <button className="btn" type="button" disabled={personaDraft === null} onClick={() => setPersonaDraft(null)}>放弃修改</button>
+        </span>
+      </label>
+      <label className="field">
+        <span>自主发言间隔：{state.autonomySec}s（下限 20s）</span>
+        <input
+          type="range"
+          min={20}
+          max={300}
+          step={10}
+          value={state.autonomySec}
+          onChange={(e) => void bridge.pet.setAutonomy(Number(e.target.value))}
+        />
+      </label>
+      <label className="field">
+        <span>模型预设（桌宠 AI 脑走这里；密钥不离开主进程）</span>
+        <Menu
+          items={[{ value: '', label: '不接 AI（用本地台词）' }, ...state.presets.map((preset) => ({ value: preset.id, label: `${preset.name}（${preset.protocol}）` }))]}
+          value={state.presetId}
+          onChange={(v) => void bridge.pet.setPreset(v, state.model)}
+          trigger={(cur, open) => (
+            <button className="btn menu-trigger" type="button">
+              {cur?.label ?? '选择预设'} <span className="menu-caret">{open ? '▴' : '▾'}</span>
+            </button>
+          )}
+        />
+      </label>
+      <label className="field">
+        <span>模型名（OpenAI 兼容协议建议填写；Anthropic 协议必填）</span>
+        <input
+          type="text"
+          defaultValue={state.model}
+          placeholder="例如 deepseek-chat / claude-3-5-haiku-latest"
+          onBlur={(e) => {
+            const next = e.target.value.trim()
+            if (next !== state.model) void bridge.pet.setPreset(state.presetId, next)
+          }}
+        />
+      </label>
+      {state.packs.some((pack) => !pack.ok) && (
+        <span className="hint">
+          已跳过坏素材包：{state.packs.filter((pack) => !pack.ok).map((pack) => `${pack.id}（${pack.reason}）`).join('、')}
+        </span>
+      )}
+    </section>
   )
 }

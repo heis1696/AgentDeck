@@ -1,0 +1,209 @@
+/* ============================================================
+   桌宠舞台样式（#/pet 透明窗）
+   全走 tokens.css 设计令牌，不写裸色值；
+   html.pet-mode 隔离透明窗背景（主 UI 的画布底色在这里必须透明）。
+   ============================================================ */
+
+/* 透明窗隔离：主 UI 的 html/body 底色与滚动在这里全部关掉 */
+html.pet-mode,
+html.pet-mode body {
+  background: transparent !important;
+  margin: 0;
+  overflow: hidden;
+  user-select: none;
+}
+html.pet-mode #root {
+  height: 100vh;
+}
+
+.pet-stage {
+  position: relative;
+  width: 100%;
+  height: 100vh;
+  font-family: var(--font-ui);
+  color: var(--text);
+}
+
+/* 精灵容器：位置由 petSpriteRect() 内联给出；命中区即精灵区 */
+.pet-sprite {
+  position: absolute;
+  cursor: grab;
+  touch-action: none;
+  -webkit-user-drag: none;
+  /* 空气感：落地下沉一点软阴影（不透明窗体上不可见，透明窗上是纯装饰） */
+  filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.28));
+}
+.pet-sprite.dragging {
+  cursor: grabbing;
+}
+.pet-sprite-img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  pointer-events: none;
+  image-rendering: pixelated;
+}
+
+/* 台词气泡：锚点 = 精灵左上角 + manifest.bubble.offset */
+.pet-bubble {
+  position: absolute;
+  max-width: 196px;
+  padding: 6px 10px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--menu-shadow);
+  color: var(--text);
+  font-size: var(--text-label);
+  line-height: 1.45;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 3;
+}
+
+/* 聊天面板：铺在窗体下半部（窗体小，一切从简） */
+.pet-chat {
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  top: 6px;
+  bottom: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-pop);
+  z-index: 4;
+}
+.pet-chat-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: var(--text-caption);
+  color: var(--text-dim);
+}
+.pet-chat-close {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: var(--text-caption);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+}
+.pet-chat-close:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.pet-chat-log {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--text-caption);
+}
+.pet-chat-empty {
+  color: var(--text-faint);
+}
+.pet-chat-line {
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  max-width: 92%;
+  word-break: break-word;
+}
+.pet-chat-line.user {
+  align-self: flex-end;
+  background: var(--accent-soft);
+  color: var(--text);
+}
+.pet-chat-line.pet {
+  align-self: flex-start;
+  background: var(--bg-inset);
+  color: var(--text-dim);
+}
+.pet-chat-input {
+  display: flex;
+  gap: 6px;
+}
+.pet-chat-input input {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: var(--text-caption);
+  font-family: var(--font-ui);
+}
+.pet-chat-input input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.pet-chat-input button {
+  padding: 5px 10px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-caption);
+  cursor: pointer;
+}
+.pet-chat-input button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* 右键菜单（自绘 DOM，窗体即整个世界） */
+.pet-menu {
+  position: absolute;
+  min-width: 132px;
+  padding: 4px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--menu-shadow);
+  z-index: 9;
+}
+.pet-menu-item {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: var(--text-label);
+  font-family: var(--font-ui);
+  text-align: left;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+.pet-menu-item:hover {
+  background: var(--bg-hover);
+}
+.pet-menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
+}
+.pet-menu-sub {
+  position: relative;
+}
+.pet-menu-submenu {
+  position: absolute;
+  left: calc(100% - 4px);
+  top: -4px;
+  min-width: 128px;
+  padding: 4px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--menu-shadow);
+}
+.pet-menu-item.danger {
+  color: var(--status-failed);
+}

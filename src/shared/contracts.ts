@@ -2,6 +2,8 @@ import type { AcceptanceCriterion, Automation, AppSettings, AnalyticsSummary, Co
 import type { SkillDetail, SkillMeta, SkillTarget, SyncState } from './skills'
 import type { AgentDraft, DraftResult, ExportResult, ImproveResult, ImportResult, EvaluateResult } from './forge'
 import type { Meeting, MeetingCreateInput } from './meeting'
+import type { PackAssets } from './pet'
+import type { PetDragPosition, PetSayPayload, PetStateSnapshot, PetThrowVelocity, PetWindowEvent } from './pet'
 export type { MeetingCreateInput } from './meeting'
 import type {
   CatalogEntry,
@@ -311,6 +313,32 @@ export interface AgentDeckApi {
     sync: () => Promise<unknown>
     reconnect: () => Promise<SidecarSnapshot | null>
     onStatus: (cb: (snapshot: SidecarSnapshot) => void) => () => void
+  }
+  pet: {
+    getState: () => Promise<PetStateSnapshot | null>
+    setEnabled: (on: boolean) => Promise<PetStateSnapshot | null>
+    setPack: (packId: string) => Promise<PetStateSnapshot | null>
+    /** 用户素材包帧内容（data URL）；内置包由渲染层 vite 管线自带，不走这里 */
+    getPackAssets: (packId: string) => Promise<PackAssets | null>
+    /** 聊天 → 宠物脑（B 期接线；A 期渲染层用本地占位台词，不调用） */
+    sendChat: (text: string) => Promise<PetSayPayload | null>
+    setPersona: (text: string) => Promise<PetStateSnapshot | null>
+    setAutonomy: (sec: number) => Promise<PetStateSnapshot | null>
+    setPreset: (presetId: string, model?: string) => Promise<PetStateSnapshot | null>
+    /** 渲染层 → 主进程：窗体移动/拖拽/聊天开合（fire-and-forget） */
+    windowEvent: (event: PetWindowEvent) => void
+    /** 主进程 → 渲染层：脑台词推送（自主发言/聊天回复的气泡播报） */
+    onSay: (cb: (say: PetSayPayload) => void) => () => void
+    /** 主进程 → 渲染层：快照广播（设置卡片与宠物窗同步） */
+    onState: (cb: (snapshot: PetStateSnapshot) => void) => () => void
+    /** 主进程 → 渲染层：拖拽期间窗体权威位置 */
+    onDrag: (cb: (position: PetDragPosition) => void) => () => void
+    /** 主进程 → 渲染层：松手抛掷初速（差分光标末速） */
+    onThrown: (cb: (velocity: PetThrowVelocity) => void) => () => void
+    /** 主进程 → 渲染层：素材包已切换，重载帧资源 */
+    onPackChanged: (cb: () => void) => () => void
+    /** 主进程 → 主窗：右键菜单「打开设置」聚焦设置页 */
+    onOpenSettings: (cb: () => void) => () => void
   }
   skills: {
     list: () => Promise<{ root: string; skills: SkillMeta[] }>

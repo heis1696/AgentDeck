@@ -1,0 +1,75 @@
+{
+  "frameSize": [64, 64],
+  "states": {
+    "idle": {
+      "frames": ["idle-0.png", "idle-1.png", "idle-2.png"],
+      "fps": 4,
+      "loop": true,
+      "afterSec": 6,
+      "next": [
+        { "to": "walk", "weight": 5 },
+        { "to": "think", "weight": 2 },
+        { "to": "sleep", "weight": 1 }
+      ]
+    },
+    "walk": {
+      "frames": ["walk-0.png", "walk-1.png", "walk-2.png", "walk-3.png"],
+      "fps": 6,
+      "loop": true,
+      "afterSec": 5,
+      "next": [
+        { "to": "idle", "weight": 5 },
+        { "to": "happy", "weight": 1 },
+        { "to": "think", "weight": 1 }
+      ]
+    },
+    "fall": {
+      "frames": ["fall-0.png", "fall-1.png"],
+      "fps": 8,
+      "loop": true,
+      "next": [
+        { "to": "walk", "weight": 3 },
+        { "to": "idle", "weight": 1 }
+      ]
+    },
+    "dragged": {
+      "frames": ["dragged-0.png"],
+      "fps": 8,
+      "loop": true,
+      "next": []
+    },
+    "sleep": {
+      "frames": ["sleep-0.png", "sleep-1.png"],
+      "fps": 2,
+      "loop": true,
+      "afterSec": 45,
+      "next": [
+        { "to": "idle", "weight": 1 }
+      ]
+    },
+    "happy": {
+      "frames": ["happy-0.png", "happy-1.png"],
+      "fps": 6,
+      "loop": false,
+      "next": [
+        { "to": "idle", "weight": 1 }
+      ]
+    },
+    "think": {
+      "frames": ["think-0.png", "think-1.png"],
+      "fps": 3,
+      "loop": false,
+      "next": [
+        { "to": "idle", "weight": 1 }
+      ]
+    }
+  },
+  "movement": {
+    "walkSpeedPx": 60,
+    "gravity": 1800,
+    "edgeBehavior": "turn"
+  },
+  "bubble": {
+    "offset": [8, -56]
+  }
+}

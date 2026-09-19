@@ -4,6 +4,7 @@ import { registerExtensionsIpc } from './extensions'
 import { registerGoalIpc } from './goals'
 import { registerMeetingIpc } from './meetings'
 import { registerIssueIpc } from './issues'
+import { registerPetIpc } from './pet'
 import { registerSkillsIpc } from './skills'
 import { registerSystemIpc } from './system'
 import { registerTaskIpc } from './tasks'
@@ -19,6 +20,7 @@ export function registerIpcHandlers(ctx: IpcContext) {
   registerCatalogIpc(ctx)
   registerSkillsIpc(ctx)
   registerExtensionsIpc(ctx)
+  registerPetIpc(ctx)
   registerSystemIpc(ctx)
   registerUpdatesIpc(ctx)
 }

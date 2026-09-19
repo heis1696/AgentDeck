@@ -28,6 +28,7 @@ import { ensureSharedDir } from './skills'
 import { sweepWorktrees } from './git'
 import { registerIpcHandlers, type CreateTaskInput } from './ipc/register'
 import { SidecarManager } from './sidecar'
+import { PetController } from './pet'
 import { verifyAcceptance } from './acceptance-verifier'
 import { resolveHotState } from './hot/resolve'
 import { clearPointer, readPointer } from './hot/pointer'
@@ -50,6 +51,7 @@ let taskService: TaskService
 let agentSessions!: AgentSessionRegistry
 let meetingController!: MeetingController
 let sidecarManager: SidecarManager
+let petController: PetController | null = null
 let automationTimer: NodeJS.Timeout | undefined
 let hotUpdater: HotUpdater
 /** 当前窗口加载的热更渲染层版本目录（null = 内置）；did-fail-load 溯源用（§4.3） */
@@ -603,6 +605,32 @@ const initMain = async (): Promise<void> => {
     }
   })
 
+  // 桌宠：配置存储 + 透明窗 + AI 脑；enabled 时启动即亮窗
+  // TODO: {board_summary} 挂点——目前是 store 粗统计（状态计数 + 活跃 goal 数），
+  // 后续接 Issue 标题/Goal 阶段进度后替换成更细的看板摘要
+  const buildBoardSummary = (): string => {
+    const tasks = store.list()
+    if (!tasks.length) return '暂无任务摘要'
+    const count = (status: Task['status']) => tasks.filter((task) => task.status === status).length
+    const parts = [
+      `共 ${tasks.length} 个任务`,
+      `进行中 ${count('running')}`,
+      `排队 ${count('queued')}`,
+      `已完成 ${count('done')}`
+    ]
+    const failed = count('failed')
+    if (failed) parts.push(`失败 ${failed}`)
+    const activeGoals = goalStore.list().filter((goal) => goal.status === 'active').length
+    if (activeGoals) parts.push(`活跃目标 ${activeGoals} 个`)
+    return parts.join('、')
+  }
+  petController = new PetController({
+    userDataDir: app.getPath('userData'),
+    getPresets: () => presets,
+    getMainWindow: () => mainWindow,
+    getBoardSummary: buildBoardSummary
+  })
+
   registerIpcHandlers({
     getWindow: () => mainWindow,
     get settings() { return settings },
@@ -618,6 +646,7 @@ const initMain = async (): Promise<void> => {
     zcode,
     sidecar: sidecarManager,
     updates: hotUpdater,
+    pet: petController ?? undefined,
     get agents() { return agents },
     set agents(value) { agents = value },
     get presets() { return presets },
@@ -629,6 +658,7 @@ const initMain = async (): Promise<void> => {
 
   createWindow()
   createTray()
+  petController?.start()
 
   const stopRetention = startIssueRetention({
     store, issueStore, taskService,
@@ -678,6 +708,8 @@ app.on('before-quit', (event) => {
     if (hotUpdater?.hasStagedPayload()) await hotUpdater.applyStagedOnQuit()
     await runner?.shutdown()
     await sidecarManager?.stop()
+    petController?.dispose()
+    petController = null
     store?.flush()
   })().finally(() => {
     quitReady = true
