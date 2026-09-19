@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **桌面宠物（AI Desktop Pet，A/B/C 三期全量落地）**：像素风桌宠常驻透明置顶小窗——原创素材生成器（Node 内置模块产 PNG 帧动画，零新依赖）、双端行为状态机（`src/shared/pet.ts` 七态：待机/走动/发呆/睡觉/拖拽/聊天/说话，纯函数 smoke 直连）、点击互动 + 拖拽抛掷 + 气泡聊天。**AI 脑**（B 期）：`pet-llm.ts` 双协议（OpenAI/Anthropic）chat 调用，persona 系统提示词可编辑带宏替换（`{board_summary}` 看板摘要 / `{pack_name}` / `{time_of_day}`），自主循环按可配间隔决策（走动/说话/发呆，静默防重入）；台词库 `pet-lines` 兜底离线场景。**素材包体系**：默认包经 vite import 进 bundle（双热更通道零登记），用户包目录热切换（`pet.json` 定义走速/动画节奏/状态转移，换目录即换皮肤）；右键菜单（聊天/打开设置/切素材包子菜单/隐藏）。设置集中在「桌宠」卡片（开关/素材包/persona/自主间隔/模型预设——可单独选小模型省钱），独立持久化 `userData/pet.json` 不混入全局设置广播。设计文档 [docs/plan/desktop-pet.md](docs/plan/desktop-pet.md) + 功能规格 [docs/features/desktop-pet.md](docs/features/desktop-pet.md) + 调研 [docs/research/desktop-pet-references.md](docs/research/desktop-pet-references.md)；`smoke:pet-behavior` / `smoke:pet-brain` / `smoke:pet-store` 三门禁全绿。
+
 ### 变更
 
 - **协作提示词全域润色（只改表达不改逻辑）**：默认队员人设具体化（领队补「评估与审核」职责；工程师补「先读现有代码/改动最小/标注假设」；分析员补「结论必须给依据、不臆测」）；派发协议块分组排版 + 时序澄清（评估先行、派发即收尾、最终总结不含标记）；goal 协议明确 checkpoint 逐条对照原文、完成轮一次性填全、blockers 不猜测执行；forge/meeting 提示词同步精化。
