@@ -3386,6 +3386,23 @@
           "valid": true
         },
         {
+          "module": "./pet-brain",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/pet/pet-brain.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "./pet-store",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -3432,6 +3449,7 @@
       "dependents": [
         "src/main/pet/index.ts",
         "src/main/pet/packs.ts",
+        "src/shared/pet-lines.ts",
         "src/main/pet/pet-window.ts",
         "src/renderer/src/pet/PetStage.tsx"
       ],
@@ -3501,10 +3519,110 @@
       "valid": true
     },
     {
+      "source": "src/main/pet/pet-brain.ts",
+      "dependencies": [
+        {
+          "module": "../../shared/pet-lines",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/shared/pet-lines.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "./pet-llm",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/pet/pet-llm.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "./pet-store",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/pet/pet-store.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
+      "dependents": [
+        "src/main/pet/index.ts"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
+      "source": "src/shared/pet-lines.ts",
+      "dependencies": [
+        {
+          "module": "./pet",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/shared/pet.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
+      "dependents": [
+        "src/main/pet/pet-brain.ts",
+        "src/renderer/src/components/SettingsView.tsx",
+        "src/renderer/src/pet/PetStage.tsx"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
+      "source": "src/main/pet/pet-llm.ts",
+      "dependencies": [],
+      "dependents": [
+        "src/main/pet/pet-brain.ts"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
       "source": "src/main/pet/pet-store.ts",
       "dependencies": [],
       "dependents": [
-        "src/main/pet/index.ts"
+        "src/main/pet/index.ts",
+        "src/main/pet/pet-brain.ts"
       ],
       "orphan": false,
       "valid": true
@@ -5283,6 +5401,23 @@
       "source": "src/renderer/src/components/SettingsView.tsx",
       "dependencies": [
         {
+          "module": "../../../shared/pet-lines",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/shared/pet-lines.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "../api",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -6822,6 +6957,23 @@
           "valid": true
         },
         {
+          "module": "../../../shared/pet-lines",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/shared/pet-lines.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "../api",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -7305,8 +7457,8 @@
     "warn": 0,
     "info": 0,
     "ignore": 0,
-    "totalCruised": 160,
-    "totalDependenciesCruised": 321,
+    "totalCruised": 163,
+    "totalDependenciesCruised": 328,
     "optionsUsed": {
       "baseDir": "D:\\agentdeck\\.agentdeck-worktrees\\t_mu8bp1d0_4v1tjc_c7",
       "combinedDependencies": false,

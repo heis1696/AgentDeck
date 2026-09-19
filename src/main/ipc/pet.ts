@@ -36,6 +36,10 @@ export function registerPetIpc(ctx: IpcContext) {
     if (!ctx.pet) return null
     return ctx.pet.setPreset(typeof presetId === 'string' ? presetId : '', typeof model === 'string' ? model : undefined)
   })
+  ipcMain.handle('pet:send-chat', async (_e, text: unknown) => {
+    if (!ctx.pet) return null
+    return ctx.pet.sendChat(parseContent(text, '聊天内容'))
+  })
 }
 
 /** 窗体事件弱校验：形状不对就丢弃（渲染层是唯一来源，不抛错打断渲染） */

@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { bridge, type PackAssets, type PetStateSnapshot } from '../api'
 import builtinManifestJson from './assets/default/pet.json'
+import { pickPetLine } from '../../../shared/pet-lines'
 import {
   PET_WINDOW_SIZE,
   advancePet,
@@ -57,15 +58,8 @@ function builtinRuntime(): PackRuntime {
   return { packId: BUILTIN_PACK_ID, manifest: builtinManifest, urls }
 }
 
-// A 期占位台词池（B 期换成 pet-lines 兜底 + AI 脑真回复）
-const PLACEHOLDER_LINES = [
-  '薄荷团子待命中～',
-  '看板上的任务都在等你哦',
-  '拖我一把试试？',
-  '双击可以跟我聊天！',
-  '呼噜……呼噜……',
-  '今天的进度怎么样啦？'
-]
+// A 期占位台词池已退役：兜底台词统一走 shared pet-lines（主进程与渲染层同源）
+const FALLBACK_LINE = '……'
 
 export function PetStage() {
   const assetsRef = useRef<PackRuntime>(builtinRuntime())
@@ -83,6 +77,7 @@ export function PetStage() {
   const [bubble, setBubble] = useState<string | null>(null)
   const [chatOpen, setChatOpen] = useState(false)
   const [chatDraft, setChatDraft] = useState('')
+  const [chatBusy, setChatBusy] = useState(false)
   const [chatLog, setChatLog] = useState<Array<{ role: 'user' | 'pet'; text: string }>>([])
   const chatInputRef = useRef<HTMLInputElement | null>(null)
 
@@ -98,7 +93,7 @@ export function PetStage() {
     bubbleTimerRef.current = window.setTimeout(() => setBubble(null), BUBBLE_MS)
   }, [])
 
-  const placeholderLine = useCallback(() => PLACEHOLDER_LINES[Math.floor(Math.random() * PLACEHOLDER_LINES.length)], [])
+  const placeholderLine = useCallback(() => pickPetLine('click'), [])
 
   /** 切换素材包：内置包同步装配，用户包异步拉 data URL（期间继续用旧包播放） */
   const loadPack = useCallback((packId: string) => {
@@ -156,11 +151,17 @@ export function PetStage() {
       const packId = snapshotRef.current?.packId ?? BUILTIN_PACK_ID
       loadPack(packId)
     })
+    // AI 脑自主发言（主进程 pet-brain）：气泡播报 + 聊天记录留痕
+    const offSay = bridge.pet.onSay((say) => {
+      showBubble(say.text)
+      setChatLog((log) => [...log.slice(-2), { role: 'pet' as const, text: say.text }])
+    })
     return () => {
       offState()
       offDrag()
       offThrown()
       offPackChanged()
+      offSay()
     }
   }, [loadPack])
 
@@ -230,7 +231,7 @@ export function PetStage() {
     openChat()
   }
 
-  // —— 聊天面板（A 期占位回复；B 期换 bridge.pet.sendChat 真 AI 脑）——
+  // —— 聊天面板：真 AI 脑（pet:send-chat → persona+历史 → LLM；失败主进程兜底 pet-lines）——
   const openChat = () => {
     setChatOpen(true)
     bridge.pet.windowEvent({ type: 'chat', open: true })
@@ -244,12 +245,19 @@ export function PetStage() {
   }
   const submitChat = () => {
     const text = chatDraft.trim()
-    if (!text) return
+    if (!text || chatBusy) return
     setChatDraft('')
+    setChatBusy(true)
     setChatLog((log) => [...log.slice(-2), { role: 'user' as const, text }])
-    window.setTimeout(() => {
-      setChatLog((log) => [...log.slice(-2), { role: 'pet' as const, text: placeholderLine() }])
-    }, 400)
+    void bridge.pet.sendChat(text).then((reply) => {
+      const line = reply?.text || FALLBACK_LINE
+      setChatLog((log) => [...log.slice(-2), { role: 'pet' as const, text: line }])
+      showBubble(line)
+      // 回复携带的动作驱动一段小动画（happy/think 等）
+      if (reply && !draggingRef.current) brainRef.current = createPetBrain(reply.action)
+    }).catch(() => {
+      setChatLog((log) => [...log.slice(-2), { role: 'pet' as const, text: FALLBACK_LINE }])
+    }).finally(() => setChatBusy(false))
   }
 
   const sprite = petSpriteRect()
@@ -291,7 +299,7 @@ export function PetStage() {
               placeholder="说点什么…"
               maxLength={200}
             />
-            <button type="submit" disabled={!chatDraft.trim()}>发送</button>
+            <button type="submit" disabled={!chatDraft.trim() || chatBusy}>{chatBusy ? '思考中…' : '发送'}</button>
           </form>
         </div>
       )}

@@ -4,15 +4,16 @@ import { BrowserWindow, screen } from 'electron'
 import type { ApiPreset } from '../presets'
 import { PetStore } from './pet-store'
 import { PetWindowController } from './pet-window'
+import { PetBrainLoop, type PetSay } from './pet-brain'
 import { listPacks, readUserPackAssets } from './packs'
-import { PET_WINDOW_SIZE, type PackAssets, type PetStateSnapshot, type PetWindowEvent } from '../../shared/pet'
+import { PET_WINDOW_SIZE, type PackAssets, type PetSayPayload, type PetStateSnapshot, type PetWindowEvent } from '../../shared/pet'
 
 export interface PetControllerDeps {
   userDataDir: string
   getPresets: () => ApiPreset[]
   getMainWindow: () => BrowserWindow | null
-  /** B 期 AI 脑挂载点：脑循环由此启停（A 期无脑，仅骨架） */
-  getBoardSummary?: () => string
+  /** 看板摘要宏来源（{board_summary}；取不到返回「暂无任务摘要」由宏层兜底） */
+  getBoardSummary: () => string
 }
 
 const BOUNDS_FLUSH_MS = 3000
@@ -20,6 +21,7 @@ const BOUNDS_FLUSH_MS = 3000
 export class PetController {
   readonly store: PetStore
   readonly windows: PetWindowController
+  readonly brain: PetBrainLoop
   private pendingBounds: { x: number; y: number } | null = null
   private boundsFlushTimer: NodeJS.Timeout | undefined
   private disposed = false
@@ -27,11 +29,25 @@ export class PetController {
   constructor(private readonly deps: PetControllerDeps) {
     this.store = new PetStore(deps.userDataDir)
     this.windows = new PetWindowController({ getWindow: () => deps.getMainWindow() })
+    this.brain = new PetBrainLoop({
+      store: this.store,
+      getPresets: deps.getPresets,
+      getWindow: () => this.windows.getWindow(),
+      getBoardSummary: deps.getBoardSummary,
+      onSay: (say: PetSay) => {
+        // 自主发言：宠物窗播报 + 落聊天历史（聊天回复的落盘在 brain.chat 内做）
+        this.windows.broadcast('pet:say', say)
+        this.store.appendChat({ role: 'pet', text: say.say })
+      }
+    })
   }
 
-  /** 启动入口（initMain 末尾调用）：配置开启则亮窗 */
+  /** 启动入口（initMain 末尾调用）：配置开启则亮窗 + 起脑 */
   start(): void {
-    if (this.store.get().enabled) this.showWindow()
+    if (this.store.get().enabled && !this.disposed) {
+      this.showWindow()
+      this.brain.start()
+    }
   }
 
   private showWindow(): void {
@@ -66,8 +82,13 @@ export class PetController {
 
   setEnabled(enabled: boolean): PetStateSnapshot {
     this.store.setEnabled(enabled)
-    if (enabled && !this.disposed) this.showWindow()
-    else this.windows.close()
+    if (enabled && !this.disposed) {
+      this.showWindow()
+      this.brain.start()
+    } else {
+      this.brain.stop()
+      this.windows.close()
+    }
     return this.notifyState()
   }
 
@@ -94,12 +115,19 @@ export class PetController {
 
   setAutonomy(sec: number): PetStateSnapshot {
     this.store.setAutonomy(sec)
+    this.brain.restart()
     return this.notifyState()
   }
 
   setPreset(presetId: string, model?: string): PetStateSnapshot {
     this.store.setPreset(presetId, model)
     return this.notifyState()
+  }
+
+  /** 聊天一问一答（B 期接线：A 期的本地占位在渲染层已替换为这一路） */
+  async sendChat(text: string): Promise<PetSayPayload> {
+    const reply = await this.brain.chat(text)
+    return { text: reply.say, action: reply.action }
   }
 
   /** 渲染层 → 主进程的窗体事件（移动/拖拽/聊天开合） */
@@ -140,6 +168,7 @@ export class PetController {
 
   dispose(): void {
     this.disposed = true
+    this.brain.stop()
     this.flushBounds()
     this.windows.close()
   }

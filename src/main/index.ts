@@ -605,11 +605,30 @@ const initMain = async (): Promise<void> => {
     }
   })
 
-  // 桌宠：配置存储 + 透明窗（AI 脑 B 期接线）；enabled 时启动即亮窗
+  // 桌宠：配置存储 + 透明窗 + AI 脑；enabled 时启动即亮窗
+  // TODO: {board_summary} 挂点——目前是 store 粗统计（状态计数 + 活跃 goal 数），
+  // 后续接 Issue 标题/Goal 阶段进度后替换成更细的看板摘要
+  const buildBoardSummary = (): string => {
+    const tasks = store.list()
+    if (!tasks.length) return '暂无任务摘要'
+    const count = (status: Task['status']) => tasks.filter((task) => task.status === status).length
+    const parts = [
+      `共 ${tasks.length} 个任务`,
+      `进行中 ${count('running')}`,
+      `排队 ${count('queued')}`,
+      `已完成 ${count('done')}`
+    ]
+    const failed = count('failed')
+    if (failed) parts.push(`失败 ${failed}`)
+    const activeGoals = goalStore.list().filter((goal) => goal.status === 'active').length
+    if (activeGoals) parts.push(`活跃目标 ${activeGoals} 个`)
+    return parts.join('、')
+  }
   petController = new PetController({
     userDataDir: app.getPath('userData'),
     getPresets: () => presets,
-    getMainWindow: () => mainWindow
+    getMainWindow: () => mainWindow,
+    getBoardSummary: buildBoardSummary
   })
 
   registerIpcHandlers({
