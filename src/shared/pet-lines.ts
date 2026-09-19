@@ -4,13 +4,14 @@
 // ③三版 persona 预设模板（内联输出契约与宏缺失降级写法）。
 import type { PetSayAction } from './pet'
 import { weightedPick } from './pet'
+import { fallbackActionWeights } from './pet-life'
 
 /** 台词对应的动作五值（与 pet.json 状态子集对齐：无 fall/dragged 台词态） */
 export type PetAction = PetSayAction
 
-export type PetLineGroup = 'idle' | 'click' | 'drag' | 'land' | 'sleep' | 'think'
+export type PetLineGroup = 'idle' | 'click' | 'drag' | 'land' | 'sleep' | 'think' | 'event_start' | 'event_done' | 'event_failed'
 
-/** 本地台词分组：idle12 / click10 / drag6 / land4 / sleep4 / think6（每句 ≤20 字） */
+/** 本地台词分组：idle12 / click10 / drag6 / land4 / sleep4 / think6 / 事件×3 各6（每句 ≤20 字） */
 export const PET_LINES: Record<PetLineGroup, string[]> = {
   idle: [
     '薄荷团子待命中～',
@@ -65,6 +66,30 @@ export const PET_LINES: Record<PetLineGroup, string[]> = {
     '要不问问 AI 脑？',
     '嗯……有道理',
     '答案快出来了！'
+  ],
+  event_start: [
+    '开工啦？我盯着哦',
+    '任务跑起来了～',
+    '这单我看着，放心',
+    '新任务！加油加油',
+    '我搬好小板凳了',
+    '开工大吉～'
+  ],
+  event_done: [
+    '任务完成！好耶！',
+    '又打下一城！',
+    '顺利收工，鼓掌！',
+    '完成得真漂亮！',
+    '要不要休息一下？',
+    '这么快就搞定啦'
+  ],
+  event_failed: [
+    '失败了也没关系',
+    '抱抱，下次一定行',
+    '别灰心，我陪你',
+    '翻车了？摸摸头',
+    '错误而已，不怕',
+    '休息一下再战吧'
   ]
 }
 
@@ -90,10 +115,50 @@ export function pickPetLine(group: PetLineGroup, rand: () => number = Math.rando
   return lines[Math.floor(rand() * lines.length) % lines.length]
 }
 
-/** 兜底发言：动作按权重抽，台词从对应组取（模型不可用时的最终防线） */
-export function pickFallbackSay(rand: () => number = Math.random): { say: string; action: PetAction } {
-  const action = weightedPick(GROUP_ACTION_WEIGHTS, rand).action
+/** 兜底动作权重（基线 idle70/walk20/sleep10）；带好感/心情时按 pet-life 偏置 */
+export function pickFallbackSay(rand: () => number = Math.random, vars?: { affection?: number; mood?: number }): { say: string; action: PetAction } {
+  const action = weightedPick(fallbackActionWeights(vars), rand).action
   return { say: pickPetLine(ACTION_GROUP[action], rand), action }
+}
+
+// —— 投喂台词（本地即时反馈，不走模型；food id → 两句） ——
+export interface PetFood {
+  id: string
+  name: string
+}
+
+/** 投喂菜单（固定三样，id 稳定可持久化） */
+export const PET_FOODS: PetFood[] = [
+  { id: 'fish', name: '小鱼干' },
+  { id: 'cookie', name: '薄荷饼干' },
+  { id: 'daifuku', name: '草莓大福' }
+]
+
+export const PET_FOOD_LINES: Record<string, string[]> = {
+  fish: ['呜哇！小鱼干！', '咔嚓咔嚓……香！'],
+  cookie: ['薄荷味！是同类的味道', '嘎嘣脆，好吃！'],
+  daifuku: ['软软的，幸福……', '草莓芯！最爱了！']
+}
+
+export function pickFoodLine(foodId: string, rand: () => number = Math.random): string {
+  const lines = PET_FOOD_LINES[foodId] ?? PET_FOOD_LINES.cookie
+  return lines[Math.floor(rand() * lines.length) % lines.length]
+}
+
+// —— 时间感知问候兜底台词：按时段各两句（LLM 不可用时的早安/晚安） ——
+export type GreetBucket = '凌晨' | '早上' | '中午' | '下午' | '晚上'
+
+export const GREET_LINES: Record<GreetBucket, string[]> = {
+  凌晨: ['这么晚还没睡？注意身体呀', '凌晨的看板很安静呢……早'],
+  早上: ['早安！今天也一起加油～', '早上好！我等你好久了'],
+  中午: ['中午好！记得吃午饭哦', '午安～要不要歇一会儿？'],
+  下午: ['下午好！继续努力呀', '下午茶时间，陪我玩会儿？'],
+  晚上: ['晚上好，今天辛苦啦', '晚上好～看板今天怎么样？']
+}
+
+export function pickGreetLine(bucket: string, rand: () => number = Math.random): string {
+  const lines = GREET_LINES[(bucket as GreetBucket) in GREET_LINES ? (bucket as GreetBucket) : '早上']
+  return lines[Math.floor(rand() * lines.length) % lines.length]
 }
 
 const SAY_MAX = 30
@@ -138,7 +203,7 @@ export function parsePetSayPayload(text: unknown): { say: string; action: PetAct
 }
 
 // —— persona 预设模板（宏缺失的降级写法内联在模板里：占位是「暂无」就自然跳过） ——
-// 支持宏：{board_summary} 看板摘要 / {pack_name} 素材包 / {time_of_day} 时段 / {model} 模型名
+// 支持宏：{board_summary} 看板摘要 / {pack_name} 素材包 / {time_of_day} 时段 / {model} 模型名 / {recent_event} 最近看板事件
 export interface PetPersonaPreset {
   id: 'lively' | 'calm' | 'sharp'
   label: string
@@ -152,7 +217,7 @@ const OUTPUT_CONTRACT = [
 ].join('\n')
 
 const MACRO_LINE = [
-  '当前信息：现在是{time_of_day}；看板概况——{board_summary}；素材包：{pack_name}；驱动模型：{model}。',
+  '当前信息：现在是{time_of_day}；看板概况——{board_summary}；最近看板事件——{recent_event}；素材包：{pack_name}；驱动模型：{model}。',
   '（上面某项是「暂无」或留空时，自然跳过它，不要在台词里提及或解释。）'
 ].join('\n')
 

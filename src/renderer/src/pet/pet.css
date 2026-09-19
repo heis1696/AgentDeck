@@ -162,6 +162,8 @@ html.pet-mode #root {
 .pet-menu {
   position: absolute;
   min-width: 132px;
+  max-height: calc(100% - 8px);
+  overflow-y: auto;
   padding: 4px;
   background: var(--bg-raised);
   border: 1px solid var(--border-strong);
@@ -194,11 +196,11 @@ html.pet-mode #root {
   position: relative;
 }
 .pet-menu-submenu {
-  position: absolute;
-  left: calc(100% - 4px);
-  top: -4px;
-  min-width: 128px;
-  padding: 4px;
+  /* 内联手风琴展开：220px 小窗放不下 flyout，展开块随菜单流式排布（配合 .pet-menu 的 max-height 滚动） */
+  position: static;
+  width: auto;
+  margin: 2px 0 2px 12px;
+  padding: 2px;
   background: var(--bg-raised);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);

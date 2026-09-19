@@ -379,6 +379,16 @@ function PetSection() {
   return (
     <section className="settings-card">
       <h3>桌宠</h3>
+      {state.enabled && state.life && (
+        <label className="field">
+          <span>当前状态</span>
+          <span className="hint">
+            好感 {state.life.affection}（{state.life.tier}）· 心情 {state.life.mood}（{state.life.moodLabel}）· 今日投喂 {state.life.fedToday} 次
+            {state.recentEvent ? ` · 最近事件：${state.recentEvent}` : ''}
+          </span>
+          <span className="hint">点它、陪它聊天、给它投喂、完成任务都会累积好感；好感与心情会悄悄影响它的行为和台词。</span>
+        </label>
+      )}
       <label className="field row-field">
         <input type="checkbox" checked={state.enabled} onChange={(e) => void bridge.pet.setEnabled(e.target.checked)} />
         <span>启用桌宠（透明置顶小窗，可拖拽、可聊天）</span>
@@ -426,11 +436,11 @@ function PetSection() {
           placeholder="留空使用内置「活泼」预设"
         />
         <span className="hint">
-          可用宏：{'{board_summary} 看板摘要'}、{'{pack_name} 素材包'}、{'{time_of_day} 时段'}、{'{model} 模型'}；缺失的宏自动降级为「暂无」。
+          可用宏：{'{board_summary} 看板摘要'}、{'{pack_name} 素材包'}、{'{time_of_day} 时段'}、{'{model} 模型'}、{'{recent_event} 最近看板事件'}；缺失的宏自动降级为「暂无」。
           模板需内联输出契约（只输出 JSON {'{"say","action"}'}，say≤30 字，action 五值枚举）。
         </span>
         <span className="row" style={{ gap: 6, marginTop: 6 }}>
-          {['board_summary', 'pack_name', 'time_of_day', 'model'].map((macro) => (
+          {['board_summary', 'pack_name', 'time_of_day', 'model', 'recent_event'].map((macro) => (
             <button key={macro} className="btn" type="button" onClick={() => insertMacro(macro)}>+{macro}</button>
           ))}
         </span>

@@ -26,9 +26,9 @@ const assetsDir = path.join(root, 'src/renderer/src/pet/assets/default')
 const raw = JSON.parse(fs.readFileSync(path.join(assetsDir, 'pet.json'), 'utf8'))
 const m = pet.validatePetManifest(raw)
 ok(m !== null, '内置 pet.json 通过 validatePetManifest')
-ok(Object.keys(m.states).length === 7, `七态齐备（got ${Object.keys(m.states).length}）`)
+ok(Object.keys(m.states).length === 8, `七态 + eat 扩展态齐备（got ${Object.keys(m.states).length}）`)
 const totalFrames = Object.values(m.states).reduce((sum, def) => sum + def.frames.length, 0)
-ok(totalFrames === 16, `总帧数 16（got ${totalFrames}）`)
+ok(totalFrames === 19, `总帧数 19（16 + eat 3；got ${totalFrames}）`)
 const missing = []
 for (const def of Object.values(m.states)) {
   for (const frame of def.frames) if (!fs.existsSync(path.join(assetsDir, frame))) missing.push(frame)
@@ -38,6 +38,32 @@ ok(m.movement.edgeBehavior === 'turn' && m.movement.gravity > 0 && m.movement.wa
 // 坏 manifest 拒收
 ok(pet.validatePetManifest({ ...raw, states: {} }) === null, '缺状态列的 manifest 被拒')
 ok(pet.validatePetManifest({ ...raw, movement: { ...raw.movement, edgeBehavior: 'bounce' } }) === null, 'edgeBehavior 非 turn 被拒')
+// 七态契约向后兼容：老素材包没有 eat 态仍应通过校验
+const legacy = JSON.parse(JSON.stringify(raw))
+delete legacy.states.eat
+const legacyManifest = pet.validatePetManifest(legacy)
+ok(legacyManifest !== null && legacyManifest.states.eat === undefined, '无 eat 的老 pet.json 仍通过（七态契约向后兼容）')
+// 白名单外自定义态拒收
+ok(pet.validatePetManifest({ ...raw, states: { ...raw.states, dance: { frames: ['idle-0.png'], fps: 4, loop: true, next: [] } } }) === null, '白名单外自定义态被拒')
+// eat 态：非 loop 播完回 idle；缺 eat 的包转 eat 视为未知（advancePet 兜 idle 段不崩）
+ok(m.states.eat && m.states.eat.loop === false && m.states.eat.next.every((t) => t.to === 'idle'), 'eat 态契约：非 loop、出口 idle')
+{
+  const eatBrain = pet.createPetBrain('eat')
+  let cur = { brain: eatBrain, physics: pet.createPetPhysics(400, 600) }
+  for (let i = 0; i < 100; i++) {
+    cur = pet.advancePet(cur.brain, cur.physics, m, 0.05, { minX: 0, maxX: 800, floorY: 600 }, () => 0)
+    if (cur.brain.state === 'idle') break
+  }
+  ok(cur.brain.state === 'idle', 'eat 播完回到 idle')
+}
+// —— 缩放契约：petWindowSize / petSpriteScale / petSpriteRect 同步 ——
+ok(pet.petWindowSize(1).width === 220 && pet.petWindowSize(2).height === 440, 'petWindowSize 随档位等比')
+ok(pet.petSpriteScale(1.5) === 3, 'petSpriteScale = 基准 2 × 档位')
+ok(pet.normalizePetZoom(1.5) === 1.5 && pet.normalizePetZoom(3) === 1 && pet.normalizePetZoom('x') === 1, 'normalizePetZoom 白名单外回退 1')
+const sprite150 = pet.petSpriteRect(330, 330, pet.petSpriteScale(1.5))
+ok(sprite150.width === 192 && sprite150.left === Math.round((330 - 192) / 2) && sprite150.top === 330 - 10 - 192, '150% 档精灵命中区居中贴底')
+const sprite100 = pet.petSpriteRect()
+ok(sprite100.width === 128 && sprite100.height === 128 && sprite100.top === 220 - 10 - 128, '默认档 petSpriteRect 与旧值一致（向后兼容）')
 
 // —— 事件转移表 ——
 const brain = (state) => pet.createPetBrain(state)

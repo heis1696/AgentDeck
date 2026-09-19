@@ -2,16 +2,20 @@
 // rAF 循环调 shared 纯函数推进状态机与物理；DOM 只做最小写——帧变化才换 src，
 // 位置由主进程移动窗体承载（渲染层不做 transform）。帧资源：内置包走
 // import.meta.glob（vite 管线），用户包走 IPC data URL。
+// D 期：右键菜单投喂（eat 态）与尺寸缩放（窗/精灵/命中区同缩放，主进程承载窗体尺寸）；
+// 好感/心情经 tuneTransitions 调制行为权重（不改素材包文件本身）；单击/抛掷上报累积好感。
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { bridge, type PackAssets, type PetStateSnapshot } from '../api'
 import builtinManifestJson from './assets/default/pet.json'
-import { pickPetLine } from '../../../shared/pet-lines'
+import { pickFoodLine, pickPetLine, PET_FOODS } from '../../../shared/pet-lines'
+import { tuneTransitions } from '../../../shared/pet-life'
 import {
-  PET_WINDOW_SIZE,
+  petSpriteRect,
+  petSpriteScale,
+  petWindowSize,
   advancePet,
   createPetBrain,
   createPetPhysics,
-  petSpriteRect,
   stepBrain,
   validatePetManifest,
   type PetBrain,
@@ -22,8 +26,6 @@ import {
 import './pet.css'
 
 const BUILTIN_PACK_ID = 'default'
-const PET_WINDOW_WIDTH = PET_WINDOW_SIZE.width
-const PET_WINDOW_HEIGHT = PET_WINDOW_SIZE.height
 /** 单击气泡台词显示时长（ms） */
 const BUBBLE_MS = 3000
 /** 拖拽判定阈值（px）：低于它是点击，超过它交给主进程拖窗 */
@@ -71,6 +73,8 @@ export function PetStage() {
   const pointerStartRef = useRef<{ pointerId: number; x: number; y: number } | null>(null)
   const frameSrcRef = useRef('')
   const bubbleTimerRef = useRef<number | undefined>(undefined)
+  /** 行为权重调制后的 manifest（好感/心情偏置；原包 manifest 不动） */
+  const manifestRef = useRef<PetManifest>(builtinManifest)
 
   const [frameSrc, setFrameSrc] = useState('')
   const [dragging, setDragging] = useState(false)
@@ -80,8 +84,10 @@ export function PetStage() {
   const [chatBusy, setChatBusy] = useState(false)
   const [chatLog, setChatLog] = useState<Array<{ role: 'user' | 'pet'; text: string }>>([])
   const chatInputRef = useRef<HTMLInputElement | null>(null)
-  // 右键菜单（C 期）：自绘 DOM；pack 子菜单列出可用素材包
-  const [menu, setMenu] = useState<{ x: number; y: number; packOpen: boolean } | null>(null)
+  /** 当前缩放档（快照同步；窗体尺寸与精灵显示都随它走） */
+  const [zoom, setZoom] = useState(1)
+  // 右键菜单（C 期）：自绘 DOM；pack/feed/zoom 子菜单
+  const [menu, setMenu] = useState<{ x: number; y: number; sub: 'pack' | 'feed' | 'zoom' | null } | null>(null)
 
   // pet-mode 隔离：透明窗背景不走主 UI 的画布底色
   useEffect(() => {
@@ -97,16 +103,37 @@ export function PetStage() {
 
   const placeholderLine = useCallback(() => pickPetLine('click'), [])
 
+  /** 好感/心情 → 行为权重偏置（包加载与快照更新后都要重算） */
+  const retuneManifest = useCallback(() => {
+    const life = snapshotRef.current?.life
+    manifestRef.current = tuneTransitions(assetsRef.current.manifest, { affection: life?.affection ?? 0, mood: life?.mood ?? 50 })
+  }, [])
+
   /** 切换素材包：内置包同步装配，用户包异步拉 data URL（期间继续用旧包播放） */
   const loadPack = useCallback((packId: string) => {
     if (packId === BUILTIN_PACK_ID) {
       assetsRef.current = builtinRuntime()
+      retuneManifest()
       return
     }
     void bridge.pet.getPackAssets(packId).then((assets) => {
       if (!assets) return
       assetsRef.current = { packId, manifest: assets.manifest, urls: assets.frames }
+      retuneManifest()
     }).catch(() => { /* 坏包保持旧包播放，状态面板已标注 */ })
+  }, [retuneManifest])
+
+  /** 快照换算物理边界（窗尺寸随缩放档变化） */
+  const applyBounds = useCallback((state: PetStateSnapshot) => {
+    const area = state.screen?.workArea
+    const size = petWindowSize(state.zoom)
+    if (area) {
+      boundsRef.current = {
+        minX: area.x,
+        maxX: area.x + area.width - size.width,
+        floorY: area.y + area.height - size.height
+      }
+    }
   }, [])
 
   // 初始化：拉快照 + 订阅主进程推送
@@ -114,27 +141,25 @@ export function PetStage() {
     void bridge.pet.getState().then((state) => {
       if (!state) return
       snapshotRef.current = state
-      const area = state.screen?.workArea
-      if (area) {
-        boundsRef.current = {
-          minX: area.x,
-          maxX: area.x + area.width - PET_WINDOW_WIDTH,
-          floorY: area.y + area.height - PET_WINDOW_HEIGHT
-        }
-      }
+      setZoom(state.zoom)
+      applyBounds(state)
       loadPack(state.packId)
     })
     const offState = bridge.pet.onState((state) => {
       const packChanged = state.packId !== snapshotRef.current?.packId
+      const prevZoom = snapshotRef.current?.zoom ?? state.zoom
+      const zoomChanged = state.zoom !== prevZoom
       snapshotRef.current = state
-      const area = state.screen?.workArea
-      if (area) {
-        boundsRef.current = {
-          minX: area.x,
-          maxX: area.x + area.width - PET_WINDOW_WIDTH,
-          floorY: area.y + area.height - PET_WINDOW_HEIGHT
-        }
+      if (zoomChanged) {
+        // 主进程按「底边中点」锚缩放窗体：渲染层物理坐标（窗左上角）同步平移，宠物脚不移位
+        const oldSize = petWindowSize(prevZoom)
+        const newSize = petWindowSize(state.zoom)
+        physRef.current.x += (oldSize.width - newSize.width) / 2
+        physRef.current.y += oldSize.height - newSize.height
+        setZoom(state.zoom)
       }
+      applyBounds(state)
+      retuneManifest()
       if (packChanged) loadPack(state.packId)
     })
     const offDrag = bridge.pet.onDrag(({ x, y }) => {
@@ -147,7 +172,9 @@ export function PetStage() {
       setDragging(false)
       physRef.current.vx = vx
       physRef.current.vy = vy
-      brainRef.current = stepBrain(brainRef.current, assetsRef.current.manifest, 'throw')
+      brainRef.current = stepBrain(brainRef.current, manifestRef.current, 'throw')
+      // 抛掷上报：心情小扣（好玩但委屈），好感不动
+      bridge.pet.windowEvent({ type: 'interact', kind: 'throw' })
     })
     const offPackChanged = bridge.pet.onPackChanged(() => {
       const packId = snapshotRef.current?.packId ?? BUILTIN_PACK_ID
@@ -166,7 +193,7 @@ export function PetStage() {
       offPackChanged()
       offSay()
     }
-  }, [loadPack])
+  }, [loadPack, applyBounds, retuneManifest])
 
   // rAF 主循环：物理 + 状态机推进（窗体位置由主进程按 move 事件承载）
   useEffect(() => {
@@ -179,7 +206,7 @@ export function PetStage() {
       const bounds = boundsRef.current
       if (!bounds) return
       if (!draggingRef.current) {
-        const result = advancePet(brainRef.current, physRef.current, assetsRef.current.manifest, dt, bounds)
+        const result = advancePet(brainRef.current, physRef.current, manifestRef.current, dt, bounds)
         brainRef.current = result.brain
         physRef.current = result.physics
         if (result.moved) {
@@ -212,7 +239,7 @@ export function PetStage() {
     if (dist > DRAG_THRESHOLD) {
       draggingRef.current = true
       setDragging(true)
-      brainRef.current = stepBrain(brainRef.current, assetsRef.current.manifest, 'dragStart')
+      brainRef.current = stepBrain(brainRef.current, manifestRef.current, 'dragStart')
       bridge.pet.windowEvent({ type: 'drag-start', offsetX: e.clientX, offsetY: e.clientY })
     }
   }
@@ -225,16 +252,29 @@ export function PetStage() {
       bridge.pet.windowEvent({ type: 'drag-end' })
       return
     }
-    brainRef.current = stepBrain(brainRef.current, assetsRef.current.manifest, 'click')
+    brainRef.current = stepBrain(brainRef.current, manifestRef.current, 'click')
     showBubble(placeholderLine())
+    // 单击上报：好感 +1 / 心情 +2（主进程落 pet.json）
+    bridge.pet.windowEvent({ type: 'interact', kind: 'click' })
   }
   const onDoubleClick = () => {
     if (draggingRef.current) return
-    brainRef.current = stepBrain(brainRef.current, assetsRef.current.manifest, 'doubleClick')
+    brainRef.current = stepBrain(brainRef.current, manifestRef.current, 'doubleClick')
     openChat()
   }
 
-  // —— 右键菜单（C 期）：聊天 / 打开设置 / 切换素材包 / 隐藏桌宠 ——
+  // —— 右键菜单（C 期 + D 期投喂/尺寸）：自绘 DOM；子菜单单开（内联手风琴）——
+  const winSize = petWindowSize(zoom)
+  // 菜单比窗体高时（小窗 + 展开子菜单）自动上移左移到窗内，放不下交给 .pet-menu 的 max-height 滚动
+  const menuRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (!menu || !menuRef.current) return
+    const el = menuRef.current
+    const rect = el.getBoundingClientRect()
+    const dx = Math.min(0, winSize.width - 4 - rect.right)
+    const dy = Math.min(0, winSize.height - 4 - rect.bottom)
+    el.style.transform = dx || dy ? `translate(${dx}px, ${dy}px)` : ''
+  }, [menu, winSize.width, winSize.height])
   useEffect(() => {
     if (!menu) return
     const dismiss = () => setMenu(null)
@@ -248,10 +288,10 @@ export function PetStage() {
   }, [menu])
   const onContextMenu = (e: React.MouseEvent) => {
     e.preventDefault()
-    // 菜单弹在光标处并 clamp 进窗体（窗只有 220 宽，菜单得往左上收）
-    const x = Math.min(e.clientX, PET_WINDOW_WIDTH - 140)
-    const y = Math.min(e.clientY, PET_WINDOW_HEIGHT - 132)
-    setMenu({ x: Math.max(x, 4), y: Math.max(y, 4), packOpen: false })
+    // 菜单弹在光标处并 clamp 进窗体（菜单约 190 高，往左上收）
+    const x = Math.min(e.clientX, winSize.width - 150)
+    const y = Math.min(e.clientY, winSize.height - 200)
+    setMenu({ x: Math.max(x, 4), y: Math.max(y, 4), sub: null })
   }
   const openSettingsFromMenu = () => {
     setMenu(null)
@@ -261,8 +301,15 @@ export function PetStage() {
     setMenu(null)
     void bridge.pet.setEnabled(false)
   }
+  /** 投喂：eat 态动画（素材包缺 eat 退回 happy）+ 本地零食台词 + 主进程落数值 */
+  const feedPet = (foodId: string) => {
+    setMenu(null)
+    brainRef.current = createPetBrain(manifestRef.current.states.eat ? 'eat' : 'happy')
+    showBubble(pickFoodLine(foodId))
+    void bridge.pet.feed(foodId)
+  }
 
-  // —— 聊天面板：真 AI 脑（pet:send-chat → persona+历史 → LLM；失败主进程兜底 pet-lines）——
+  // —— 聊天面板：真 AI 脑（pet:send-chat → persona+历史+记忆 → LLM；失败主进程兜底 pet-lines）——
   const openChat = () => {
     setChatOpen(true)
     bridge.pet.windowEvent({ type: 'chat', open: true })
@@ -291,7 +338,7 @@ export function PetStage() {
     }).finally(() => setChatBusy(false))
   }
 
-  const sprite = petSpriteRect()
+  const sprite = petSpriteRect(winSize.width, winSize.height, petSpriteScale(zoom))
   const bubbleOffset = assetsRef.current.manifest.bubble.offset
   return (
     <div className="pet-stage" onContextMenu={onContextMenu}>
@@ -335,14 +382,47 @@ export function PetStage() {
         </div>
       )}
       {menu && (
-        <div className="pet-menu" style={{ left: menu.x, top: menu.y }} onPointerDown={(e) => e.stopPropagation()}>
+        <div ref={menuRef} className="pet-menu" style={{ left: menu.x, top: menu.y }} onPointerDown={(e) => e.stopPropagation()}>
           <button className="pet-menu-item" onClick={() => { setMenu(null); openChat() }}>聊天</button>
+          <div className="pet-menu-sub">
+            <button className="pet-menu-item" onClick={() => setMenu((cur) => (cur ? { ...cur, sub: cur.sub === 'feed' ? null : 'feed' } : cur))}>
+              投喂 ▸
+            </button>
+            {menu.sub === 'feed' && (
+              <div className="pet-menu-submenu">
+                {PET_FOODS.map((food) => (
+                  <button key={food.id} className="pet-menu-item" onClick={() => feedPet(food.id)}>{food.name}</button>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="pet-menu-sub">
+            <button className="pet-menu-item" onClick={() => setMenu((cur) => (cur ? { ...cur, sub: cur.sub === 'zoom' ? null : 'zoom' } : cur))}>
+              尺寸 ▸
+            </button>
+            {menu.sub === 'zoom' && (
+              <div className="pet-menu-submenu">
+                {[1, 1.5, 2].map((step) => (
+                  <button
+                    key={step}
+                    className="pet-menu-item"
+                    onClick={() => {
+                      setMenu(null)
+                      if (step !== zoom) void bridge.pet.setZoom(step)
+                    }}
+                  >
+                    {step === 1 ? '100%' : step === 1.5 ? '150%' : '200%'}{step === zoom ? ' ✓' : ''}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
           <button className="pet-menu-item" onClick={openSettingsFromMenu}>打开设置</button>
           <div className="pet-menu-sub">
-            <button className="pet-menu-item" onClick={() => setMenu((cur) => (cur ? { ...cur, packOpen: !cur.packOpen } : cur))}>
+            <button className="pet-menu-item" onClick={() => setMenu((cur) => (cur ? { ...cur, sub: cur.sub === 'pack' ? null : 'pack' } : cur))}>
               切换素材包 ▸
             </button>
-            {menu.packOpen && (
+            {menu.sub === 'pack' && (
               <div className="pet-menu-submenu">
                 {(snapshotRef.current?.packs ?? []).filter((pack) => pack.ok).map((pack) => (
                   <button

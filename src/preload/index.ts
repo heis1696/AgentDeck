@@ -214,6 +214,8 @@ const api: AgentDeckApi = {
     setPersona: (text: string): Promise<PetStateSnapshot | null> => ipcRenderer.invoke('pet:set-persona', text),
     setAutonomy: (sec: number): Promise<PetStateSnapshot | null> => ipcRenderer.invoke('pet:set-autonomy', sec),
     setPreset: (presetId: string, model?: string): Promise<PetStateSnapshot | null> => ipcRenderer.invoke('pet:set-preset', presetId, model),
+    setZoom: (zoom: number): Promise<PetStateSnapshot | null> => ipcRenderer.invoke('pet:set-zoom', zoom),
+    feed: (foodId: string): Promise<PetStateSnapshot | null> => ipcRenderer.invoke('pet:feed', foodId),
     windowEvent: (event: PetWindowEvent): void => ipcRenderer.send('pet:window-event', event),
     onSay: (cb: (say: PetSayPayload) => void) => {
       const h = (_e: unknown, say: PetSayPayload) => cb(say)

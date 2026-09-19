@@ -146,6 +146,8 @@ function notifyTaskChanged(task: Task | null) {
   if (!task) return
   publishIssueUpdate(task)
   goalController?.onTaskChanged(task)
+  // 桌宠事件联动：任务开始/完成/失败的即时反应（动画+台词）与好感/心情联动
+  petController?.onTaskChanged(task)
 }
 
 function createWindow() {

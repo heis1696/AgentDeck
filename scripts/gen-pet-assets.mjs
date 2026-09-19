@@ -27,7 +27,8 @@ const PALETTE = {
   w: [244, 255, 251, 255],      // 眼白
   m: [29, 75, 79, 255],         // 嘴
   p: [244, 169, 184, 255],      // 腮红
-  z: [191, 241, 228, 255]       // 睡眠 zzz
+  z: [191, 241, 228, 255],      // 睡眠 zzz
+  c: [234, 176, 96, 255]        // 零食（饼干色，eat 帧用）
 }
 
 // ---- 最小 PNG 编码器：RGBA8 + deflate + CRC32 ----
@@ -200,7 +201,21 @@ const FRAMES = [
   ['think-1', assemble({
     3: HEAD, 4: UPPER, 5: WIDE, 6: EYES_OPEN_T, 7: EYES_OPEN_B, 8: CHEEKS, 9: MOUTH_TINY, 10: WIDE,
     11: LOWER, 12: BASE, 13: HEAD
-  })]
+  })],
+
+  // —— eat：举零食 → 张嘴咬 → 嚼眯眼（零食饼乾色浮在头侧）——
+  ['eat-0', withCookie(assemble({
+    3: HEAD, 4: UPPER, 5: WIDE, 6: EYES_OPEN_T, 7: EYES_OPEN_B, 8: CHEEKS, 9: MOUTH_O, 10: WIDE,
+    11: LOWER, 12: BASE, 13: HEAD
+  }), 8)],
+  ['eat-1', withCookie(assemble({
+    3: HEAD, 4: UPPER, 5: WIDE, 6: EYES_SHUT, 7: WIDE, 8: CHEEKS, 9: MOUTH_GRIN_T, 10: MOUTH_GRIN_B,
+    11: LOWER, 12: BASE, 13: HEAD
+  }), 9)],
+  ['eat-2', withCookie(assemble({
+    3: HEAD, 4: UPPER, 5: WIDE, 6: EYES_HAPPY, 7: WIDE, 8: CHEEKS, 9: MOUTH_GRIN_T, 10: MOUTH_GRIN_B,
+    11: LOWER, 12: BASE, 13: HEAD
+  }), 11)]
 ]
 
 // walk 体段：抬步帧（脚在 13 行）与并脚压缩帧（脚在 11 行，身体上收制造起伏）
@@ -230,6 +245,14 @@ function putZ(rows, x, y) {
   next = put(next, x, y, 'z'); next = put(next, x + 1, y, 'z'); next = put(next, x + 2, y, 'z')
   next = put(next, x + 1, y + 1, 'z')
   next = put(next, x, y + 2, 'z'); next = put(next, x + 1, y + 2, 'z'); next = put(next, x + 2, y + 2, 'z')
+  return next
+}
+
+// 2×2 零食块盖章在头侧（列 14-15 恒为透明区，不与任何体段冲突）
+function withCookie(rows, y) {
+  let next = rows
+  next = put(next, 14, y, 'c'); next = put(next, 15, y, 'c')
+  next = put(next, 14, y + 1, 'c'); next = put(next, 15, y + 1, 'c')
   return next
 }
 
