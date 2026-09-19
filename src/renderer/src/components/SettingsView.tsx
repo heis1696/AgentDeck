@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { AppSettings } from '../../../shared/types'
 import { PET_PERSONA_PRESETS } from '../../../shared/pet-lines'
+import { PET_PRESET_NONE } from '../../../shared/pet'
 import { bridge, usePetState, useSettings } from '../api'
 import { Settings } from 'lucide-react'
 import { Menu } from '../ui/Menu'
@@ -452,15 +453,24 @@ function PetSection() {
       <label className="field">
         <span>模型预设（桌宠 AI 脑走这里；密钥不离开主进程）</span>
         <Menu
-          items={[{ value: '', label: '不接 AI（用本地台词）' }, ...state.presets.map((preset) => ({ value: preset.id, label: `${preset.name}（${preset.protocol}）` }))]}
+          items={[{ value: PET_PRESET_NONE, label: '不接 AI（用本地台词）' }, ...state.presets.map((preset) => ({ value: preset.id, label: `${preset.name}（${preset.protocol}）` }))]}
           value={state.presetId}
           onChange={(v) => void bridge.pet.setPreset(v, state.model)}
           trigger={(cur, open) => (
             <button className="btn menu-trigger" type="button">
-              {cur?.label ?? '选择预设'} <span className="menu-caret">{open ? '▴' : '▾'}</span>
+              {cur?.label ?? (state.activePresetId ? `${state.presets.find((preset) => preset.id === state.activePresetId)?.name ?? state.activePresetId}（自动）` : '选择预设')} <span className="menu-caret">{open ? '▴' : '▾'}</span>
             </button>
           )}
         />
+        <span className="hint">
+          {state.brainStatus.source === 'llm' && 'AI 脑正常：最近一次发言走了模型'}
+          {state.brainStatus.source === 'fallback' && `AI 走兜底台词${state.brainStatus.lastError ? `：${state.brainStatus.lastError}` : ''}`}
+          {state.brainStatus.source === 'none' && 'AI 脑尚未发言（等一个自主间隔，或先在聊天里问一句）'}
+          {state.brainStatus.silenced ? '；连续失败已进入 10 分钟静默' : ''}
+        </span>
+        {state.presetId === '' && state.presets.length > 0 && (
+          <span className="hint">未选择预设——已自动使用第一个预设；要停用 AI 请选「不接 AI」</span>
+        )}
       </label>
       <label className="field">
         <span>模型名（OpenAI 兼容协议建议填写；Anthropic 协议必填）</span>

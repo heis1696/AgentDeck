@@ -153,9 +153,10 @@ export function PetStage() {
       const packId = snapshotRef.current?.packId ?? BUILTIN_PACK_ID
       loadPack(packId)
     })
-    // AI 脑自主发言（主进程 pet-brain）：气泡播报 + 聊天记录留痕
+    // AI 脑自主发言（主进程 pet-brain）：气泡播报 + 动作动画 + 聊天记录留痕
     const offSay = bridge.pet.onSay((say) => {
       showBubble(say.text)
+      if (!draggingRef.current) brainRef.current = createPetBrain(say.action)
       setChatLog((log) => [...log.slice(-2), { role: 'pet' as const, text: say.text }])
     })
     return () => {

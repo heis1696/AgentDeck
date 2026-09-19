@@ -328,14 +328,21 @@ export interface PetPresetSummary {
 }
 
 /** pet:get-state 快照（A 期基础字段 + B 期脑字段 + C 期包列表） */
+/** 模型预设显式关闭哨兵：桌宠「不接 AI（用本地台词）」；'' = 未配置（自动用第一个预设） */
+export const PET_PRESET_NONE = '__none__'
+
 export interface PetStateSnapshot {
   enabled: boolean
   packId: string
   personaPrompt: string
   autonomySec: number
   presetId: string
+  /** 实际生效的预设 id（presetId 未配置时自动落到第一个；'' = 没有任何可用预设） */
+  activePresetId: string
   model: string
   presets: PetPresetSummary[]
+  /** AI 脑最近一次结果（source=none 尚未跑过；fallback 的 lastError 说明兜底原因） */
+  brainStatus: { source: 'llm' | 'fallback' | 'none'; lastError: string; silenced: boolean }
   chatHistory: PetChatMessage[]
   packs: PetPackInfo[]
   /** 渲染层物理换算工作区（主进程 screen.getPrimaryDisplay().workArea） */

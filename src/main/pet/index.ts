@@ -4,7 +4,8 @@ import { BrowserWindow, screen } from 'electron'
 import type { ApiPreset } from '../presets'
 import { PetStore } from './pet-store'
 import { PetWindowController } from './pet-window'
-import { PetBrainLoop, type PetSay } from './pet-brain'
+import { PetBrainLoop, resolveActivePreset, type PetSay } from './pet-brain'
+import { inferPresetProtocol } from './pet-llm'
 import { listPacks, readUserPackAssets } from './packs'
 import { PET_WINDOW_SIZE, type PackAssets, type PetSayPayload, type PetStateSnapshot, type PetWindowEvent } from '../../shared/pet'
 
@@ -35,8 +36,8 @@ export class PetController {
       getWindow: () => this.windows.getWindow(),
       getBoardSummary: deps.getBoardSummary,
       onSay: (say: PetSay) => {
-        // 自主发言：宠物窗播报 + 落聊天历史（聊天回复的落盘在 brain.chat 内做）
-        this.windows.broadcast('pet:say', say)
+        // 自主发言：宠物窗播报（PetSayPayload 契约 {text,action}，渲染层按此解包）+ 落聊天历史
+        this.windows.broadcast('pet:say', { text: say.say, action: say.action })
         this.store.appendChat({ role: 'pet', text: say.say })
       }
     })
@@ -61,19 +62,23 @@ export class PetController {
 
   getState(): PetStateSnapshot {
     const config = this.store.get()
+    const presets = this.deps.getPresets()
+    const active = resolveActivePreset(config.presetId, presets)
     return {
       enabled: config.enabled,
       packId: config.packId,
       personaPrompt: config.personaPrompt,
       autonomySec: config.autonomySec,
       presetId: config.presetId,
+      activePresetId: active?.id ?? '',
       model: config.model,
-      presets: this.deps.getPresets().map((preset) => ({
+      presets: presets.map((preset) => ({
         id: preset.id,
         name: preset.name,
-        protocol: preset.protocol ?? (/(\/v1$|openrouter)/.test(preset.baseURL) ? 'openai' : 'anthropic'),
+        protocol: inferPresetProtocol(preset),
         baseURL: preset.baseURL
       })),
+      brainStatus: this.brain.status(),
       chatHistory: config.chatHistory,
       packs: listPacks(this.deps.userDataDir),
       screen: { workArea: screen.getPrimaryDisplay().workArea }

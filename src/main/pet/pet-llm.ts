@@ -10,30 +10,40 @@ export interface PetChatMessage {
 
 export interface PetChatRequestDraft {
   protocol: 'openai' | 'anthropic'
-  url: string
+  /** 候选端点按序尝试（照 fetchPresetModels 惯例）：网关直挂路径优先，/v1 形态兜底 */
+  urls: string[]
   headers: Record<string, string>
   body: string
 }
 
-/** 协议推断：显式 protocol 优先，否则照 presets.ts 惯例按 baseURL 推（/v1 或 openrouter → openai） */
+/** 协议推断：显式 protocol 优先；否则 anthropic 是例外而非常态——仅 anthropic/claude 网关或 /v1/messages 端点走原生协议，其余（/v1、/v4、openrouter、各 OpenAI 兼容网关）一律 openai */
 export function inferPresetProtocol(preset: Pick<ApiPreset, 'protocol' | 'baseURL'>): 'openai' | 'anthropic' {
   if (preset.protocol === 'openai' || preset.protocol === 'anthropic') return preset.protocol
-  const base = preset.baseURL.replace(/\/+$/, '')
-  return /openrouter\.ai|\/v1$/.test(base) ? 'openai' : 'anthropic'
+  const base = preset.baseURL.replace(/\/+$/, '').toLowerCase()
+  return /anthropic|claude/.test(base) || base.endsWith('/v1/messages') ? 'anthropic' : 'openai'
 }
 
 /** 请求构造纯函数：smoke 直连断言形状，不发真网络 */
 export function buildChatRequest(preset: ApiPreset, messages: PetChatMessage[], model?: string): PetChatRequestDraft {
   const protocol = inferPresetProtocol(preset)
-  const base = preset.baseURL.replace(/\/+$/, '').replace(/\/v1$/, '')
+  const trimmed = preset.baseURL.replace(/\/+$/, '')
+  // 双鉴权头照 fetchPresetModels 惯例：网关对多余头不敏感，省一次协议猜错
+  const authHeaders = {
+    authorization: `Bearer ${preset.apiKey}`,
+    'x-api-key': preset.apiKey
+  }
   if (protocol === 'openai') {
+    // baseURL 可能带完整端点（…/chat/completions）、带版本段（…/v1、…/v4）或裸主机；两种候选覆盖主流网关
+    const base = trimmed.endsWith('/chat/completions')
+      ? trimmed.slice(0, -'/chat/completions'.length)
+      : trimmed.replace(/\/v1$/, '')
+    const urls = trimmed.endsWith('/chat/completions')
+      ? [trimmed]
+      : [`${base}/chat/completions`, `${base}/v1/chat/completions`]
     return {
       protocol,
-      url: `${base}/v1/chat/completions`,
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${preset.apiKey}`
-      },
+      urls,
+      headers: { 'content-type': 'application/json', ...authHeaders },
       body: JSON.stringify({ ...(model ? { model } : {}), messages })
     }
   }
@@ -43,36 +53,43 @@ export function buildChatRequest(preset: ApiPreset, messages: PetChatMessage[], 
     .map((message) => ({ role: message.role, content: message.content }))
   return {
     protocol,
-    url: `${base}/v1/messages`,
-    headers: {
-      'content-type': 'application/json',
-      'x-api-key': preset.apiKey,
-      'anthropic-version': '2023-06-01'
-    },
+    urls: [`${trimmed.replace(/\/v1\/messages$/, '')}/v1/messages`],
+    headers: { 'content-type': 'application/json', ...authHeaders, 'anthropic-version': '2023-06-01' },
     body: JSON.stringify({ ...(model ? { model } : {}), max_tokens: 200, ...(system ? { system } : {}), messages: rest })
   }
 }
 
-/** 单轮对话：返回首个文本块；非 2xx / 超时 / 无文本都抛错（错误信息不含 key） */
+/** 单轮对话：候选端点按序尝试；非 2xx / 超时 / 无文本都抛错（错误信息不含 key） */
 export async function chatCompletion(preset: ApiPreset, messages: PetChatMessage[], opts: { timeoutMs?: number; model?: string } = {}): Promise<string> {
   const draft = buildChatRequest(preset, messages, opts.model)
-  const res = await fetch(draft.url, {
-    method: 'POST',
-    headers: draft.headers,
-    body: draft.body,
-    signal: AbortSignal.timeout(opts.timeoutMs ?? 12_000)
-  })
-  if (!res.ok) throw new Error(`模型请求失败：HTTP ${res.status}`)
-  const json: unknown = await res.json()
-  if (draft.protocol === 'openai') {
-    const content = (json as { choices?: Array<{ message?: { content?: unknown } }> })?.choices?.[0]?.message?.content
-    if (typeof content === 'string' && content.trim()) return content
-  } else {
-    const parts = (json as { content?: Array<{ type?: unknown; text?: unknown }> })?.content
-    const text = Array.isArray(parts)
-      ? parts.filter((part) => part?.type === 'text' && typeof part.text === 'string').map((part) => part.text as string).join('')
-      : ''
-    if (text.trim()) return text
+  const errors: string[] = []
+  for (const url of draft.urls) {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: draft.headers,
+        body: draft.body,
+        signal: AbortSignal.timeout(opts.timeoutMs ?? 12_000)
+      })
+      if (!res.ok) {
+        errors.push(`HTTP ${res.status} @ ${url.replace(/^https?:\/\//, '')}`)
+        continue
+      }
+      const json: unknown = await res.json()
+      if (draft.protocol === 'openai') {
+        const content = (json as { choices?: Array<{ message?: { content?: unknown } }> })?.choices?.[0]?.message?.content
+        if (typeof content === 'string' && content.trim()) return content
+      } else {
+        const parts = (json as { content?: Array<{ type?: unknown; text?: unknown }> })?.content
+        const text = Array.isArray(parts)
+          ? parts.filter((part) => part?.type === 'text' && typeof part.text === 'string').map((part) => part.text as string).join('')
+          : ''
+        if (text.trim()) return text
+      }
+      errors.push('响应没有文本内容')
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : String(err))
+    }
   }
-  throw new Error('模型响应没有文本内容')
+  throw new Error(`模型请求失败：${errors.join('；')}`)
 }

@@ -70,17 +70,28 @@ const openaiPreset = { id: 'p1', name: 'OpenAI GW', backend: 'zcode', baseURL: '
 const anthropicPreset = { id: 'p2', name: 'Anthropic GW', backend: 'claude', baseURL: 'https://api.example.com', apiKey: 'sk-another', protocol: 'anthropic', createdAt: 0 }
 const messages = [{ role: 'system', content: 'SYS' }, { role: 'user', content: 'HI' }]
 const openaiDraft = llm.buildChatRequest(openaiPreset, messages, 'gpt-x')
-ok(openaiDraft.url === 'https://gw.example.com/v1/chat/completions', `openai 端点（${openaiDraft.url}）`)
-ok(openaiDraft.headers.authorization === 'Bearer sk-secret', 'openai Bearer 鉴权')
+ok(Array.isArray(openaiDraft.urls) && openaiDraft.urls.length === 2, 'openai 端点候选数组')
+ok(openaiDraft.urls[0] === 'https://gw.example.com/chat/completions', `openai 网关直挂候选优先（${openaiDraft.urls.join(' | ')}）`)
+ok(openaiDraft.urls[1] === 'https://gw.example.com/v1/chat/completions', 'openai /v1 形态候选兜底')
+ok(openaiDraft.headers.authorization === 'Bearer sk-secret' && openaiDraft.headers['x-api-key'] === 'sk-secret', 'openai 双鉴权头')
 const openaiBody = JSON.parse(openaiDraft.body)
 ok(openaiBody.model === 'gpt-x' && openaiBody.messages.length === 2 && !('system' in openaiBody), 'openai 体：model+messages、无独立 system')
 ok(llm.inferPresetProtocol({ protocol: undefined, baseURL: 'https://openrouter.ai/api' }) === 'openai', 'openrouter 推断 openai')
-ok(llm.inferPresetProtocol({ protocol: undefined, baseURL: 'https://api.anthropic.com' }) === 'anthropic', '缺省推断 anthropic')
+ok(llm.inferPresetProtocol({ protocol: undefined, baseURL: 'https://api.anthropic.com' }) === 'anthropic', 'anthropic 域名推断 anthropic')
+ok(llm.inferPresetProtocol({ protocol: undefined, baseURL: 'https://open.bigmodel.cn/api/paas/v4' }) === 'openai', 'bigmodel /v4 网关推断 openai（回归：曾误判 anthropic 致零请求）')
+ok(llm.inferPresetProtocol({ protocol: undefined, baseURL: 'https://gw.example.com/v1/messages' }) === 'anthropic', '/v1/messages 端点推断 anthropic')
 const anthropicDraft = llm.buildChatRequest(anthropicPreset, messages, 'claude-x')
-ok(anthropicDraft.url === 'https://api.example.com/v1/messages', `anthropic 端点（${anthropicDraft.url}）`)
+ok(anthropicDraft.urls[0] === 'https://api.example.com/v1/messages', `anthropic 端点（${anthropicDraft.urls[0]}）`)
 ok(anthropicDraft.headers['x-api-key'] === 'sk-another' && anthropicDraft.headers['anthropic-version'] === '2023-06-01', 'anthropic 头鉴权')
 const anthropicBody = JSON.parse(anthropicDraft.body)
 ok(anthropicBody.model === 'claude-x' && anthropicBody.max_tokens === 200 && anthropicBody.system === 'SYS' && anthropicBody.messages[0].role === 'user', 'anthropic 体：model/max_tokens/system/messages')
+
+// —— 预设解析：未选自动用第一个；__none__ / 空列表 = 不接 AI ——
+ok(typeof brainMod.resolveActivePreset === 'function', 'resolveActivePreset 导出')
+ok(brainMod.resolveActivePreset('', [openaiPreset])?.id === 'p1', '未配置自动用第一个预设')
+ok(brainMod.resolveActivePreset('p9', [openaiPreset, anthropicPreset])?.id === 'p1', '失配回退第一个预设')
+ok(brainMod.resolveActivePreset('__none__', [openaiPreset]) === null, '__none__ 显式不接 AI')
+ok(brainMod.resolveActivePreset('p1', []) === null, '无预设列表返回 null')
 
 // —— PetBrainLoop：fetch mock 驱动 ——
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-pet-brain-'))
@@ -109,6 +120,7 @@ const makeBrain = () => new brainMod.PetBrainLoop({
   ok(say && say.say === '你好呀' && say.action === 'happy', `自主发言成功（${say && say.say}/${say && say.action}）`)
   ok(said.length === 1, 'onSay 出口触发')
   ok(!brain.isSilenced(), '成功不清零静默')
+  ok(brain.status().source === 'llm' && brain.status().lastError === '', '状态出口 source=llm')
   brain.stop()
 }
 
@@ -179,14 +191,33 @@ const makeBrain = () => new brainMod.PetBrainLoop({
   void pending
 }
 
-// 无预设：直接兜底（不发网络）
+// 预设解析：未选自动用第一个（回归：曾静默走台词库零请求）；__none__ / 空列表才不接 AI
 {
   store.setPreset('', 'test-model')
   const brain = makeBrain()
   let called = 0
+  fetchImpl = async () => { called += 1; return { ok: true, json: async () => ({ choices: [{ message: { content: '{"say":"自动预设","action":"idle"}' } }] }) } }
+  const say = await brain.tick()
+  ok(called === 1 && say && say.say === '自动预设', '未选预设自动用第一个（发出了请求）')
+  ok(brain.status().source === 'llm', '自动预设状态 source=llm')
+  brain.stop()
+}
+{
+  const brain = new brainMod.PetBrainLoop({ store, getPresets: () => [], getWindow: () => fakeWindow, getBoardSummary: () => '摘要', onSay: (say) => said.push(say) })
+  let called = 0
   fetchImpl = async () => { called += 1; return { ok: true, json: async () => ({}) } }
   const say = await brain.tick()
-  ok(say && called === 0, '无预设不发网络直接兜底')
+  ok(called === 0 && say && typeof say.say === 'string', '没有任何预设不发网络直接兜底')
+  ok(brain.status().source === 'fallback' && brain.status().lastError.includes('API 预设'), '状态出口暴露「没有可用 API 预设」')
+  brain.stop()
+}
+{
+  store.setPreset('__none__', 'test-model')
+  const brain = makeBrain()
+  let called = 0
+  fetchImpl = async () => { called += 1; return { ok: true, json: async () => ({}) } }
+  const say = await brain.tick()
+  ok(called === 0 && say && typeof say.say === 'string', '__none__ 显式不接 AI 不发网络')
   brain.stop()
   store.setPreset('p1', 'test-model')
 }

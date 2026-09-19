@@ -8,6 +8,7 @@ import type { PetSayAction } from '../../shared/pet'
 import { DEFAULT_PERSONA_TEMPLATE, parsePetSayPayload, pickFallbackSay } from '../../shared/pet-lines'
 import { chatCompletion, type PetChatMessage } from './pet-llm'
 import { PET_AUTONOMY_SEC_MIN, type PetStore } from './pet-store'
+import { PET_PRESET_NONE } from '../../shared/pet'
 
 export interface PersonaMacros {
   board_summary: string
@@ -31,11 +32,24 @@ export interface PetBrainDeps {
   onSay?: (say: PetSay) => void
 }
 
-const LLM_TIMEOUT_MS = 3000
+const LLM_TIMEOUT_MS = 15_000
 const FAIL_SILENCE_THRESHOLD = 3
 const FAIL_SILENCE_MS = 10 * 60 * 1000
 /** 聊天上下文携带的最近消息条数 */
 const HISTORY_CONTEXT_MAX = 6
+
+/** 实际生效的预设：精确匹配优先；未配置自动用第一个（防「配了预设但桌宠静默走台词库」）；显式 __none__ / 无预设 = 不接 AI */
+export function resolveActivePreset(presetId: string, presets: ApiPreset[]): ApiPreset | null {
+  if (presetId === PET_PRESET_NONE) return null
+  return presets.find((item) => item.id === presetId) ?? presets[0] ?? null
+}
+
+/** AI 脑最近一次结果（设置卡片展示：source=none 尚未跑过；fallback 带 lastError 说明原因） */
+export interface PetBrainStatus {
+  source: 'llm' | 'fallback' | 'none'
+  lastError: string
+  silenced: boolean
+}
 
 /** 人设解析：配置为空回填内置「活泼」模板 */
 export function resolvePersona(personaPrompt: string): string {
@@ -65,6 +79,17 @@ export class PetBrainLoop {
   private inFlight = false
   private failCount = 0
   private silentUntil = 0
+  private lastSource: PetBrainStatus['source'] = 'none'
+  private lastError = ''
+
+  status(): PetBrainStatus {
+    return { source: this.lastSource, lastError: this.lastError, silenced: this.isSilenced() }
+  }
+
+  private record(source: PetBrainStatus['source'], lastError = ''): void {
+    this.lastSource = source
+    this.lastError = lastError
+  }
 
   constructor(private readonly deps: PetBrainDeps) {}
 
@@ -104,6 +129,7 @@ export class PetBrainLoop {
     this.inFlight = true
     try {
       const outcome = await this.speakAutonomous()
+      this.record(outcome.source, outcome.error ?? '')
       if (outcome.source === 'llm') {
         this.failCount = 0
       } else {
@@ -128,9 +154,10 @@ export class PetBrainLoop {
   async chat(text: string): Promise<PetSay> {
     this.deps.store.appendChat({ role: 'user', text })
     const config = this.deps.store.get()
-    const preset = this.deps.getPresets().find((item) => item.id === config.presetId)
+    const preset = resolveActivePreset(config.presetId, this.deps.getPresets())
     const fallback = pickFallbackSay()
     if (!preset) {
+      this.record('fallback', '没有可用的 API 预设（设置 → API 预设先添加，或在桌宠卡片选择）')
       this.deps.store.appendChat({ role: 'pet', text: fallback.say })
       return fallback
     }
@@ -146,19 +173,23 @@ export class PetBrainLoop {
       const parsed = parsePetSayPayload(raw)
       if (parsed) {
         this.failCount = 0
+        this.record('llm')
         this.deps.store.appendChat({ role: 'pet', text: parsed.say })
         return parsed
       }
-    } catch { /* 超时/网络/HTTP 错 → 兜底 */ }
+      this.record('fallback', '模型回复无法解析为 {"say","action"} 契约')
+    } catch (err) {
+      this.record('fallback', err instanceof Error ? err.message : String(err))
+    }
     this.deps.store.appendChat({ role: 'pet', text: fallback.say })
     return fallback
   }
 
-  private async speakAutonomous(): Promise<{ source: 'llm' | 'fallback'; say: PetSay }> {
+  private async speakAutonomous(): Promise<{ source: 'llm' | 'fallback'; say: PetSay; error?: string }> {
     const config = this.deps.store.get()
-    const preset = this.deps.getPresets().find((item) => item.id === config.presetId)
+    const preset = resolveActivePreset(config.presetId, this.deps.getPresets())
     const fallback = pickFallbackSay()
-    if (!preset) return { source: 'fallback', say: fallback }
+    if (!preset) return { source: 'fallback', say: fallback, error: '没有可用的 API 预设（设置 → API 预设先添加，或在桌宠卡片选择）' }
     const history = config.chatHistory.slice(-HISTORY_CONTEXT_MAX)
     const messages: PetChatMessage[] = [
       { role: 'system', content: this.systemPrompt(config.packId, config.personaPrompt, config.model, preset) },
@@ -169,8 +200,10 @@ export class PetBrainLoop {
       const raw = await chatCompletion(preset, messages, { timeoutMs: LLM_TIMEOUT_MS, model: config.model || undefined })
       const parsed = parsePetSayPayload(raw)
       if (parsed) return { source: 'llm', say: parsed }
-    } catch { /* 超时/网络错 → 兜底 */ }
-    return { source: 'fallback', say: fallback }
+    } catch (err) {
+      return { source: 'fallback', say: fallback, error: err instanceof Error ? err.message : String(err) }
+    }
+    return { source: 'fallback', say: fallback, error: '模型回复无法解析为 {"say","action"} 契约' }
   }
 
   /** system 提示词：人设模板 + 宏替换（看板摘要取不到时由宏层降级为「暂无」） */
