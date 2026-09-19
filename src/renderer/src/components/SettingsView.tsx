@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { AppSettings } from '../../../shared/types'
-import { bridge, useSettings } from '../api'
+import { bridge, usePetState, useSettings } from '../api'
 import { Settings } from 'lucide-react'
 import { Menu } from '../ui/Menu'
 import { EmptyState } from '../ui/EmptyState'
@@ -118,6 +118,8 @@ function GeneralSection() {
           <span>任务完成/失败时弹系统通知</span>
         </label>
       </section>
+
+      <PetSection />
     </div>
   )
 }
@@ -359,5 +361,51 @@ function StorageSection() {
         </p>
       </section>
     </div>
+  )
+}
+
+/** 桌宠：开关 + 素材包 + 人设（A 期骨架；B 期接 AI 脑后 persona/自主间隔/模型预设在此编辑） */
+function PetSection() {
+  const { state } = usePetState()
+  if (!state) return null
+  return (
+    <section className="settings-card">
+      <h3>桌宠</h3>
+      <label className="field row-field">
+        <input type="checkbox" checked={state.enabled} onChange={(e) => void bridge.pet.setEnabled(e.target.checked)} />
+        <span>启用桌宠（透明置顶小窗，可拖拽、可聊天）</span>
+      </label>
+      <label className="field">
+        <span>素材包</span>
+        <Menu
+          items={state.packs.filter((pack) => pack.ok).map((pack) => ({
+            value: pack.id,
+            label: pack.builtin ? pack.id : `${pack.id}（用户）`,
+            hint: `${pack.frameCount} 帧`
+          }))}
+          value={state.packId}
+          onChange={(v) => void bridge.pet.setPack(v)}
+          trigger={(cur, open) => (
+            <button className="btn menu-trigger" type="button">
+              {cur?.label ?? state.packId} <span className="menu-caret">{open ? '▴' : '▾'}</span>
+            </button>
+          )}
+        />
+      </label>
+      <label className="field">
+        <span>人设提示词</span>
+        <textarea
+          rows={3}
+          readOnly
+          value={state.personaPrompt || '（使用内置「活泼」预设——AI 脑接入后可在此编辑）'}
+          onFocus={(e) => e.currentTarget.blur()}
+        />
+      </label>
+      {state.packs.some((pack) => !pack.ok) && (
+        <span className="hint">
+          已跳过坏素材包：{state.packs.filter((pack) => !pack.ok).map((pack) => `${pack.id}（${pack.reason}）`).join('、')}
+        </span>
+      )}
+    </section>
   )
 }

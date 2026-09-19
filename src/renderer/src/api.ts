@@ -2,6 +2,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import type { AgentDeckApi, AgentInfo, AgentModelCatalog, FileDiffResult, PresetInfo, PermissionRequest } from '../../shared/contracts'
 import type { Task, TaskEvent, AppSettings, Issue, Run, Comment, Automation, RuntimeSnapshot, AnalyticsSummary, IssuePriority, IssueStatus, RunTrigger } from '../../shared/types'
+import type { PackAssets, PetSayPayload, PetStateSnapshot } from '../../shared/pet'
 
 /** 队员（agent 身份）——与主进程 agents.ts 的 Agent 对齐 */
 export type { AgentInfo, AgentModelCatalog }
@@ -65,6 +66,22 @@ export function useSettings() {
   }, [])
   return { settings, update }
 }
+
+/** 桌宠状态快照 + 实时广播订阅（设置卡片用） */
+export function usePetState() {
+  const [state, setState] = useState<PetStateSnapshot | null>(null)
+  const refresh = useCallback(async () => {
+    setState(await bridge.pet.getState())
+  }, [])
+  useEffect(() => {
+    refresh()
+    return bridge.pet.onState(setState)
+  }, [refresh])
+  return { state, refresh }
+}
+
+/** 桌宠共享类型再导出（组件层统一从 api.ts 取桌宠契约） */
+export type { PackAssets, PetSayPayload, PetStateSnapshot }
 
 export function fmtDuration(ms?: number): string {
   if (!ms || ms < 0) return ''

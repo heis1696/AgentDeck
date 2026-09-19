@@ -17,6 +17,7 @@ import { ListTodo, Kanban, Gauge, Settings, Search, Plus, Command, FolderOpen, C
 import { ToastHost, toast } from './ui/Toasts'
 import { ConfirmHost } from './ui/Confirm'
 import { Palette, type PaletteCommand } from './ui/Palette'
+import { PetStage } from './pet/PetStage'
 import type { Task } from '../../shared/types'
 
 type View = 'issues' | 'detail' | 'usage' | 'settings' | 'automation' | 'skills' | 'board' | 'agents'
@@ -25,6 +26,9 @@ const MAX_TABS = 8
 const MAX_RECENT_WORKSPACES = 8
 
 export function App() {
+  // 桌宠透明窗复用同一 renderer 入口：#/pet hash 直接渲染舞台，不挂主 UI
+  //（hash 每窗固定，早退在所有 hook 之前，不违反 hooks 规则）
+  if (window.location.hash === '#/pet') return <PetStage />
   const { tasks } = useTasks()
   const { settings, update } = useSettings()
   const [view, setView] = useState<View>('board')

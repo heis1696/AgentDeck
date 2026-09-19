@@ -28,6 +28,7 @@ import { ensureSharedDir } from './skills'
 import { sweepWorktrees } from './git'
 import { registerIpcHandlers, type CreateTaskInput } from './ipc/register'
 import { SidecarManager } from './sidecar'
+import { PetController } from './pet'
 import { verifyAcceptance } from './acceptance-verifier'
 import { resolveHotState } from './hot/resolve'
 import { clearPointer, readPointer } from './hot/pointer'
@@ -50,6 +51,7 @@ let taskService: TaskService
 let agentSessions!: AgentSessionRegistry
 let meetingController!: MeetingController
 let sidecarManager: SidecarManager
+let petController: PetController | null = null
 let automationTimer: NodeJS.Timeout | undefined
 let hotUpdater: HotUpdater
 /** 当前窗口加载的热更渲染层版本目录（null = 内置）；did-fail-load 溯源用（§4.3） */
@@ -603,6 +605,13 @@ const initMain = async (): Promise<void> => {
     }
   })
 
+  // 桌宠：配置存储 + 透明窗（AI 脑 B 期接线）；enabled 时启动即亮窗
+  petController = new PetController({
+    userDataDir: app.getPath('userData'),
+    getPresets: () => presets,
+    getMainWindow: () => mainWindow
+  })
+
   registerIpcHandlers({
     getWindow: () => mainWindow,
     get settings() { return settings },
@@ -618,6 +627,7 @@ const initMain = async (): Promise<void> => {
     zcode,
     sidecar: sidecarManager,
     updates: hotUpdater,
+    pet: petController ?? undefined,
     get agents() { return agents },
     set agents(value) { agents = value },
     get presets() { return presets },
@@ -629,6 +639,7 @@ const initMain = async (): Promise<void> => {
 
   createWindow()
   createTray()
+  petController?.start()
 
   const stopRetention = startIssueRetention({
     store, issueStore, taskService,
@@ -678,6 +689,8 @@ app.on('before-quit', (event) => {
     if (hotUpdater?.hasStagedPayload()) await hotUpdater.applyStagedOnQuit()
     await runner?.shutdown()
     await sidecarManager?.stop()
+    petController?.dispose()
+    petController = null
     store?.flush()
   })().finally(() => {
     quitReady = true
