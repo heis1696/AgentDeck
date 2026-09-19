@@ -15,8 +15,8 @@ export interface PetConfig {
   /** OpenAI 兼容协议必需的模型名；空 = 让网关用默认模型（anthropic 协议必须有） */
   model: string
   chatHistory: PetChatMessage[]
-  /** 上次窗位置（恢复用；clamp 在工作区里进行） */
-  bounds: { x: number; y: number }
+  /** 上次窗位置（恢复用；clamp 在工作区里进行）；null = 从未拖放过，亮窗走默认右下位 */
+  bounds: { x: number; y: number } | null
 }
 
 export const PET_CHAT_HISTORY_CAP = 20
@@ -31,7 +31,7 @@ export function defaultPetConfig(): PetConfig {
     presetId: '',
     model: '',
     chatHistory: [],
-    bounds: { x: 0, y: 0 }
+    bounds: null
   }
 }
 
@@ -39,6 +39,16 @@ function isChatMessage(value: unknown): value is PetChatMessage {
   if (!value || typeof value !== 'object') return false
   const item = value as Partial<PetChatMessage>
   return (item.role === 'user' || item.role === 'pet') && typeof item.text === 'string' && typeof item.at === 'number'
+}
+
+/** (0,0) 视为未设置：真实位置总被 clamp 进工作区（Windows 工作区原点 ≥ 8,8），精确 (0,0) 只可能来自 hot.21 首次开开关时落盘的旧默认值 */
+function normalizeBounds(value: unknown): PetConfig['bounds'] {
+  if (!value || typeof value !== 'object') return null
+  const raw = value as { x?: unknown; y?: unknown }
+  if (!Number.isFinite(raw.x) || !Number.isFinite(raw.y)) return null
+  const x = raw.x as number
+  const y = raw.y as number
+  return x === 0 && y === 0 ? null : { x, y }
 }
 
 function normalizeConfig(value: unknown): PetConfig {
@@ -53,9 +63,7 @@ function normalizeConfig(value: unknown): PetConfig {
     presetId: typeof raw.presetId === 'string' ? raw.presetId : base.presetId,
     model: typeof raw.model === 'string' ? raw.model : base.model,
     chatHistory: Array.isArray(raw.chatHistory) ? raw.chatHistory.filter(isChatMessage).slice(-PET_CHAT_HISTORY_CAP) : base.chatHistory,
-    bounds: raw.bounds && typeof raw.bounds === 'object' && Number.isFinite((raw.bounds as PetConfig['bounds']).x) && Number.isFinite((raw.bounds as PetConfig['bounds']).y)
-      ? { x: (raw.bounds as PetConfig['bounds']).x, y: (raw.bounds as PetConfig['bounds']).y }
-      : base.bounds
+    bounds: normalizeBounds(raw.bounds)
   }
 }
 
@@ -75,7 +83,7 @@ export class PetStore {
     fs.renameSync(tmp, this.file)
   }
   get(): PetConfig {
-    return { ...this.config, chatHistory: [...this.config.chatHistory], bounds: { ...this.config.bounds } }
+    return { ...this.config, chatHistory: [...this.config.chatHistory], bounds: this.config.bounds ? { ...this.config.bounds } : null }
   }
   patch(partial: Partial<PetConfig>): PetConfig {
     this.config = normalizeConfig({ ...this.config, ...partial })

@@ -28,7 +28,8 @@ const MAX_RECENT_WORKSPACES = 8
 export function App() {
   // 桌宠透明窗复用同一 renderer 入口：#/pet hash 直接渲染舞台，不挂主 UI
   //（hash 每窗固定，早退在所有 hook 之前，不违反 hooks 规则）
-  if (window.location.hash === '#/pet') return <PetStage />
+  // 兼容 #/pet（dev 拼接与新版 loadFile '/pet'）与 #pet（旧主进程 loadFile 'pet'——热更错峰期防主 UI 误入宠物窗）
+  if (/^#\/?pet$/.test(window.location.hash)) return <PetStage />
   const { tasks } = useTasks()
   const { settings, update } = useSettings()
   const [view, setView] = useState<View>('board')

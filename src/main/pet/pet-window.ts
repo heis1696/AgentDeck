@@ -146,7 +146,8 @@ export class PetWindowController {
     const hot = app.isPackaged
       ? resolveHotState(app.getPath('userData'), app.getVersion())
       : resolveHotState(app.getPath('userData'), app.getVersion(), { skipPayload: true })
-    void win.loadFile(hot.rendererIndexHtml ?? path.join(__dirname, '../renderer/index.html'), { hash: 'pet' })
+    // hash 选项原样拼在 # 后：'/pet' → index.html#/pet，与 dev 的 `${URL}#/pet` 同构（'pet' 会生成 #pet，主 UI 会误入宠物窗）
+    void win.loadFile(hot.rendererIndexHtml ?? path.join(__dirname, '../renderer/index.html'), { hash: '/pet' })
   }
 
   // —— 鼠标穿透轮询：光标在精灵命中区（+8px 余量）或聊天打开才收鼠标 ——

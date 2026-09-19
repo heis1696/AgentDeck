@@ -51,7 +51,7 @@ export class PetController {
   }
 
   private showWindow(): void {
-    this.windows.show(this.store.get().bounds)
+    this.windows.show(this.store.get().bounds ?? undefined)
   }
 
   /** 供 pet-brain 取宠物窗 webContents（B 期推台词） */
