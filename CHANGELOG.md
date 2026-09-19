@@ -8,6 +8,10 @@
 
 - **协作提示词全域润色（只改表达不改逻辑）**：默认队员人设具体化（领队补「评估与审核」职责；工程师补「先读现有代码/改动最小/标注假设」；分析员补「结论必须给依据、不臆测」）；派发协议块分组排版 + 时序澄清（评估先行、派发即收尾、最终总结不含标记）；goal 协议明确 checkpoint 逐条对照原文、完成轮一次性填全、blockers 不猜测执行；forge/meeting 提示词同步精化。
 
+
+### 变更（结构）
+
+- **文档架构重组 + 提示词模块化**：冻结的一次性设计/拆解/报告归档 docs/archive/（teardown、reports、施工册，保留热更活文档在 docs/ 顶层）；新增 docs/README.md 导航索引与 docs/graph/ 结构图谱（scripts/view-graph.mjs 生成/查看）；根新增 AGENTS.md（代理协作入口说明）。主进程提示词按域抽取到 src/main/prompts/（delegation/forge/goal/handoff/meeting/personas 纯函数模块，业务模块只取文案、解析器留在原地）；src/main/sidecar/ 三文件目录合并回平铺 sidecar*.ts（index.ts 再导出层移除）。
 ### 修复
 
 - **sidecar 停放后继对用户隐形**：sidecar 通道的硬切 parked 后继此前无任何可见信号（调度泵与重启对账都跳过 parked，sidecar 又没有任务变更推送通道）——现在新建停放（10s 内）落一条 Issue 评论「⏸ 阶段接力已备好……点『▶ 启动』」，幂等重放不刷屏，与主进程 attachContinue 行为对齐。
@@ -66,7 +70,7 @@
 
 ### 新增
 
-- **免安装热更阶段3-4：feed 上线 + L0 壳自替换**（docs/HOT-UPDATE-IMPL-DESIGN.md §9 / docs/INSTALLER-FREE-HOT-UPDATE.md §5）：`DEFAULT_FEED_BASE` 指向用户阿里云 IP（域名审核后换 HTTPS 重发壳）；`release:hot` 增 shell 通道（electron-builder --dir 旁路打包 → store-only zip，exe 在根，72 文件自检 → 签名进 stable/shell + versions/shell，并产出免安装分发物 dist/agentdeck-版本-portable-win-x64.zip，§9.2 zip 渠道 GA）；部署一键化 `deploy:hot`（scp + nginx reload，env 覆盖 FEED_HOST/USER/DIR）与 docs/HOT-FEED-DEPLOY.md（nginx 配置/安全组/备案换端口提示/服务端回滚/域名迁移/NSIS 并行期）；L0 壳自替换三棒机制——存活期放无锁文件 → swap helper（本 exe RUN_AS_NODE、detached 逃逸 Chromium Job 的 KILL_ON_JOB_CLOSE）等主进程退出后文件级腾挪（被占用目标改名 .old-让位，E3）→ finisher-bin 私用副本 exe 收尾 icudtl/v8 快照自举死角 → 拉起新壳；§6 协同换壳清 L1+L2 指针，启动时 sweepOldShellDirs 清扫让位残留（保留最新一批作回滚源）；updater 两段式 shell apply（staging→用户确认执行，§9.3 半自动）+ rollback('shell') 反向腾挪 + UpdatePanel 壳通道确认按钮；zip.ts 改 original-fs 绕 Electron 对 .asar 路径的读写劫持；AGENTDECK_HOT_DEBUG_LOG 状态流观测通道。smoke:hot-shell 真机演练全绿（复制打包产物→本地 feed→自动两段 apply→断言进程重启/新壳就位/指针重置/让位留证/staging 收尾；受限环境对 2 个被占用数据文件容忍文档化降级），指针四态与载荷端到端回归全绿。
+- **免安装热更阶段3-4：feed 上线 + L0 壳自替换**（docs/HOT-UPDATE-IMPL-DESIGN.md §9 / docs/archive/INSTALLER-FREE-HOT-UPDATE.md §5）：`DEFAULT_FEED_BASE` 指向用户阿里云 IP（域名审核后换 HTTPS 重发壳）；`release:hot` 增 shell 通道（electron-builder --dir 旁路打包 → store-only zip，exe 在根，72 文件自检 → 签名进 stable/shell + versions/shell，并产出免安装分发物 dist/agentdeck-版本-portable-win-x64.zip，§9.2 zip 渠道 GA）；部署一键化 `deploy:hot`（scp + nginx reload，env 覆盖 FEED_HOST/USER/DIR）与 docs/HOT-FEED-DEPLOY.md（nginx 配置/安全组/备案换端口提示/服务端回滚/域名迁移/NSIS 并行期）；L0 壳自替换三棒机制——存活期放无锁文件 → swap helper（本 exe RUN_AS_NODE、detached 逃逸 Chromium Job 的 KILL_ON_JOB_CLOSE）等主进程退出后文件级腾挪（被占用目标改名 .old-让位，E3）→ finisher-bin 私用副本 exe 收尾 icudtl/v8 快照自举死角 → 拉起新壳；§6 协同换壳清 L1+L2 指针，启动时 sweepOldShellDirs 清扫让位残留（保留最新一批作回滚源）；updater 两段式 shell apply（staging→用户确认执行，§9.3 半自动）+ rollback('shell') 反向腾挪 + UpdatePanel 壳通道确认按钮；zip.ts 改 original-fs 绕 Electron 对 .asar 路径的读写劫持；AGENTDECK_HOT_DEBUG_LOG 状态流观测通道。smoke:hot-shell 真机演练全绿（复制打包产物→本地 feed→自动两段 apply→断言进程重启/新壳就位/指针重置/让位留证/staging 收尾；受限环境对 2 个被占用数据文件容忍文档化降级），指针四态与载荷端到端回归全绿。
 
 ### 修复
 
@@ -88,7 +92,7 @@
 ### 新增
 
 - **免安装热更（阶段 0-2，`docs/HOT-UPDATE-IMPL-DESIGN.md` 全量落地）**：三层热更先落 L1 载荷 + L2 渲染层两层。新增 `src/main/hot/` 模块族——`canonical` 规范化序列化（键序字节排序，发布端与验签端同一实现）、`verifier` Ed25519 manifest 验签 + 3 段 semver 通道门禁（minMainVersion/minShellVersion 应用/加载双处执行）、`trust` 信任锚（keyId→公钥 hex，支持轮换与 `AGENTDECK_HOT_TRUST_HEX` 测试注入）、`pointer` 指针原子写与规则 1-6 校验、`resolve` 解析单源（bootstrap 与主进程共用，载荷层优先/渲染层次之/内置兜底）、`zip` store-only 读写（零依赖，解压带 zip-slip 防护与 CRC 校验）、`feed` 拉取（超时+3 次退避）、`updater` 两通道状态机（staging→验签→原子指针，任一步失败删 staging 现网零触碰；串行互斥；版本目录 GC 保留 3 版）。`src/main/bootstrap.ts` 五步加载链：dev/逃生开关直通 → 载荷指针解析 → 载荷 require → 失败自愈 → 内置兜底；三类失败路径全演练通过——指针损坏改名留证、验签失败留证+版本目录隔离、载荷 require 抛错清指针+relaunch 干净重启（`--agentdeck-hot-fallback` 循环保险 + `--agentdeck-relaunch-retry` 取锁重试环 500ms×10）。主进程：单实例锁 + second-instance 聚焦；`loadFile` 接 `resolveHotState`（L2 免重启热载）+ `did-fail-load`/`render-process-gone`（5 分钟两次防抖）自动回退并隔离坏渲染层；`runner.isIdle()` 空闲门控 L1 apply（挂起为 staged，退出时 before-quit 链补应用后 relaunch）；IPC 新增 `updates` 命名空间四 handler + `updates:state` 事件（契约只增不改），preload 桥与设置页「更新」面板（当前版本/检查/进度/应用并重载/应用并重启/回退 + `updateFeedUrl` feed 基址覆盖）。发布脚本 `scripts/release-hot.mjs`（npm build→§6.1 组装→store zip→签名→verifier 回读自检→`dist/feed/{stable,versions}` 树，版本历史不可变；私钥经 `HOT_SIGNING_KEY`/`HOT_SIGNING_KEY_PATH`，绝不进仓库）；验收 smoke：`smoke:hot-pointer`（打包态四态：正常/损坏/验签失败/require 抛错全绿）、`smoke:hot-payload`（载荷启动、sidecar 自载荷目录拉起、second boot 对账、指针移除回退全绿）。测试隔离通道 `AGENTDECK_USER_DATA_DIR`（Windows 上 Electron 经系统 API 解析 appData，env APPDATA 重定向无效）。开发签名密钥 keyId `ad-2026-09` 公钥内置 `trust.ts`，私钥在仓库外 `~/.agentdeck/hot-keys/`。
-- **从描述生成 Agent（锻造师）**：新建队员不再逐项手填——Agent 页新增「✦ 从描述生成」，一句描述经内置「锻造师」专职 agent（`ag_forge`，默认挂 zcode；在列表里改它的平台/模型/预设即换生成引擎）扩写成完整定义草稿（name/role/systemPrompt/note/color/model），回填表单检查后走正常保存；backend/预设/可驱使永不自动生成。元提示词随包内置为 `agent-crafter` 技能（首次调用落到共享目录 `skills/agent-crafter/SKILL.md`，用户可编辑且共享目录优先），主进程新 IPC `agents:draft` 直读技能正文发起单回合会话（90 秒硬预算、权限一律拒绝、失败静默返回 `{ok:false,error}` 不抛异常），输出经围栏剥离/派发标记清洗/白名单截断三重校验（`src/main/agent-forge.ts`）。锻造师按保留 id 启动自愈复活（`loadAgents` 补缺，与领队同平台不受按 backend 补缺盲区影响），并从任务指派/自动化/会议名册/可驱使勾选四处选择器过滤（`isForgeAgent` 共享谓词，新建任务默认执行者也跳过它）；编辑锻造师时隐藏系统提示词与可驱使字段（改为指向技能文件的提示）。设计全文见 [docs/AGENT-GENERATION-RESEARCH.md](docs/AGENT-GENERATION-RESEARCH.md)。
+- **从描述生成 Agent（锻造师）**：新建队员不再逐项手填——Agent 页新增「✦ 从描述生成」，一句描述经内置「锻造师」专职 agent（`ag_forge`，默认挂 zcode；在列表里改它的平台/模型/预设即换生成引擎）扩写成完整定义草稿（name/role/systemPrompt/note/color/model），回填表单检查后走正常保存；backend/预设/可驱使永不自动生成。元提示词随包内置为 `agent-crafter` 技能（首次调用落到共享目录 `skills/agent-crafter/SKILL.md`，用户可编辑且共享目录优先），主进程新 IPC `agents:draft` 直读技能正文发起单回合会话（90 秒硬预算、权限一律拒绝、失败静默返回 `{ok:false,error}` 不抛异常），输出经围栏剥离/派发标记清洗/白名单截断三重校验（`src/main/agent-forge.ts`）。锻造师按保留 id 启动自愈复活（`loadAgents` 补缺，与领队同平台不受按 backend 补缺盲区影响），并从任务指派/自动化/会议名册/可驱使勾选四处选择器过滤（`isForgeAgent` 共享谓词，新建任务默认执行者也跳过它）；编辑锻造师时隐藏系统提示词与可驱使字段（改为指向技能文件的提示）。设计全文见 [docs/archive/AGENT-GENERATION-RESEARCH.md](docs/archive/AGENT-GENERATION-RESEARCH.md)。
 - **锻造师二期：澄清追问 + 草稿确认视图 + 改进提示词迭代**。生成升级为三段式：描述含糊时锻造师先返回 1-3 条澄清问题（`DraftResult` 新增 `{kind:'clarify'}` 形态；UI 逐题作答带回答重试，或"跳过追问"以空 answers 强制出稿，answers 经 IPC 校验 ≤5 条、每条 ≤1000 字符）；草稿不再直接回填表单，而是进入确认视图逐字段勾选（名字恒填入，其余可跳过留空，长文本截断预览）。新增 `agents:improve`：任意队员卡片上的 ✦ 入口提交反馈（如"更严格些 / 加上 git 提交规范"），锻造师按"诊断→最小改动→摘要"重写定义（未涉及字段原样带回，name 非点名不动），UI 呈现字段级 old→new diff（仅列变化字段、旧值划除），逐字段勾选后应用并直接保存；锻造师自身与 backend/预设/可驱使不在改进范围。`agent-crafter` 技能正文升级 v2（生成/改进双模式，frontmatter 携带 `version`），落盘升级尊重用户编辑：仅"未经编辑的旧版"自动升级，用户改过或已是新版保持原样。
 
 ### 变更
@@ -111,7 +115,7 @@
 
 ### 文档
 
-- 新增 [docs/HOT-UPDATE-COMPARISON.md](docs/HOT-UPDATE-COMPARISON.md)：生产环境热更方案对比——electron-updater 全量 / 渲染层热更 / 混合三路线评估（含仓库事实盘点、风险闭环、引用清单），结论推荐混合分阶段：日常渲染层热更先行，主进程改动走全量更新。
+- 新增 [docs/archive/HOT-UPDATE-COMPARISON.md](docs/archive/HOT-UPDATE-COMPARISON.md)：生产环境热更方案对比——electron-updater 全量 / 渲染层热更 / 混合三路线评估（含仓库事实盘点、风险闭环、引用清单），结论推荐混合分阶段：日常渲染层热更先行，主进程改动走全量更新。
 
 ## [0.18.1] - 2026-09-16
 
@@ -141,7 +145,7 @@
 
 ## [0.16.0] - 2026-09-16
 
-### 团队会议模式（多队长结构化会议，设计见 docs/TEAM-MEETING-CONSTRUCTION.md）
+### 团队会议模式（多队长结构化会议，设计见 docs/archive/TEAM-MEETING-CONSTRUCTION.md）
 
 - **结构化回合制会议**：用户把 Issue 委派给队长，队长召集其他队长进会——汇报者（主张带引用收据）/ 质疑者（反对挂编号）/ 设计者（逐条答辩 + 纪要草案）三角色回合发言；**主持人是确定性代码**（`meeting-controller`），不是 LLM——发言顺序、表态收割、收敛裁决、纪要落盘全部由代码驱动，不做自由讨论与投票。
 - **主席是用户**：可插话（下一轮注入）、可喊停（级联取消）；会议挂在被讨论的真实 Issue 上，纪要（决策/反对及处置/行动项/开放问题）镜像进 Issue 评论时间线。
@@ -217,11 +221,11 @@
 
 ### Loop Engineering 调研与六项目拆解（文档）
 
-- 新增 [docs/LOOP-ENGINEERING.md](docs/LOOP-ENGINEERING.md)：Loop Engineering 方法论综述（prompt→context→loop 谱系、六大构件、LangChain 四层循环、Claude 四种循环类型）、agentdeck 现状映射，以及拆解结果与 12 条行动清单（按改动成本排序，含“明确不学”清单）。
-- 新增 `docs/teardown/` 六份深度拆解报告（共约 26 万字符，结论均带源码 文件:行号 引用）：learn-claude-code（Loop 1 教学实现）、cc-haha（桌面编排同类）、ruflo（多后端 meta-harness）、deer-flow（长时程 SuperAgent）、opencode（agentdeck 上游协议）、ouroboros（Loop 4 自我改进样本）。
+- 新增 [docs/archive/LOOP-ENGINEERING.md](docs/archive/LOOP-ENGINEERING.md)：Loop Engineering 方法论综述（prompt→context→loop 谱系、六大构件、LangChain 四层循环、Claude 四种循环类型）、agentdeck 现状映射，以及拆解结果与 12 条行动清单（按改动成本排序，含“明确不学”清单）。
+- 新增 `docs/archive/teardown/` 六份深度拆解报告（共约 26 万字符，结论均带源码 文件:行号 引用）：learn-claude-code（Loop 1 教学实现）、cc-haha（桌面编排同类）、ruflo（多后端 meta-harness）、deer-flow（长时程 SuperAgent）、opencode（agentdeck 上游协议）、ouroboros（Loop 4 自我改进样本）。
 - 关键行动项：opencode 适配器升级 server 模式（当前 `--format json` 视图旁路了 PermissionBroker 并丢弃增量/cost 事件）；goal-controller 增加产出签名熔断 + 拦截上限 + doom-loop 检测；permission-broker 增加审批-版本绑定；scheduler 增加 at-least-once 交付语义。
 - 拆解用克隆位于 `teardown/repos/`（已 gitignore，不入库）。
-- 新增 [`docs/ORCHESTRATION-GOAL-CONSTRUCTION.md`](docs/ORCHESTRATION-GOAL-CONSTRUCTION.md)：把六份 teardown 和架构审查收敛为 Agent 编排/目标模式的阶段施工总册，固定跨阶段不变量、风险台账、验收闸门及阶段 1 交互矩阵范围。
+- 新增 [`docs/archive/ORCHESTRATION-GOAL-CONSTRUCTION.md`](docs/archive/ORCHESTRATION-GOAL-CONSTRUCTION.md)：把六份 teardown 和架构审查收敛为 Agent 编排/目标模式的阶段施工总册，固定跨阶段不变量、风险台账、验收闸门及阶段 1 交互矩阵范围。
 
 ### 共享目录与技能库
 
@@ -260,7 +264,7 @@
 
 ### 变更（委派提示词对齐 Multica 源码级拆解）
 
-- **领队协议升级**（对照 [docs/MULTICA-PROMPTS.md](docs/MULTICA-PROMPTS.md) §7.1）：新增人设优先于协议的冲突规则；名册无专长说明的队员显式标注"专长未说明"；"何时亲自做"从"琐碎自己做"细化为三档（琐碎自己做 / 无人胜任可亲自 / 并行与专长一律派发）；派发后即收尾本轮、总结只陈述结果。
+- **领队协议升级**（对照 [docs/archive/reports/MULTICA-PROMPTS.md](docs/archive/reports/MULTICA-PROMPTS.md) §7.1）：新增人设优先于协议的冲突规则；名册无专长说明的队员显式标注"专长未说明"；"何时亲自做"从"琐碎自己做"细化为三档（琐碎自己做 / 无人胜任可亲自 / 并行与专长一律派发）；派发后即收尾本轮、总结只陈述结果。
 - **每轮评估留痕**（补拆解报告 §8.5 点名的第一缺口，对齐 squad activity --reason）：协议要求领队每轮结果回灌后输出自闭合评估标记，运行时截获入事件流（"第 N 轮评估：outcome — reason"）并从展示文本剥除；回灌提示同步要求评估先行。
 - **子任务提示重组**：指令不再要求自包含——领队任务原文以"背景块"附给队员（≤2000 字符，显式声明"参考非指令、冲突以指令为准"），指令只需写增量；附工程纪律两则（回合结束即执行终态 / 代码位置用相对路径行内码）。
 - **交接备注注入话术**对齐 Multica handoff note 语义（"范围指令、优先收窄工作、不要当作评论回复"，内容改 blockquote 包裹）。
@@ -281,7 +285,7 @@
 
 ### 变更（布局重构——按《设计语言与操作模型》逐项落地）
 
-新增 [docs/DESIGN-LANGUAGE.md](docs/DESIGN-LANGUAGE.md)：从 multica 源码布局组件与 42 页官方操作手册提炼的界面宪法（表面分层、页面骨架语法、签名布局、操作模型），后续 UI 改动逐项对照。
+新增 [docs/archive/DESIGN-LANGUAGE.md](docs/archive/DESIGN-LANGUAGE.md)：从 multica 源码布局组件与 42 页官方操作手册提炼的界面宪法（表面分层、页面骨架语法、签名布局、操作模型），后续 UI 改动逐项对照。
 
 - **任务详情双栏（签名布局）**：主列限宽居中（≈896px，阅读长度受控）+ 右侧 320px 属性栏（border-l）——状态/平台/会话/工作目录/用时/用量（tokens 分输入输出、回合数、成本）/集成分支/重试计数，行式 label+控件、hr 分组，窄屏自动隐藏。原先平铺在头部的 meta 行迁入属性栏。
 - **页面统一 PageHeader 骨架**：队伍/用量/设置三页换成同檐头条（h-48px + border-b + 统一 16px 沟槽）：图标 + 标题 + 计数 + 一句话描述 + 右侧操作；任务详情头部对齐同一语法。头部、工具栏、正文从此共享一条左边缘。

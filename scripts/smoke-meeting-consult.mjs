@@ -13,12 +13,13 @@ const bundle = async (source, name) => {
   return import(pathToFileURL(outfile).href)
 }
 
-const [{ AgentSessionRegistry }, { TaskStore }, { TaskService }, { TaskRunner }, delegate] = await Promise.all([
+const [{ AgentSessionRegistry }, { TaskStore }, { TaskService }, { TaskRunner }, delegate, prompts] = await Promise.all([
   bundle('src/main/agent-sessions.ts', 'agent-sessions.cjs'),
   bundle('src/main/store.ts', 'store.cjs'),
   bundle('src/main/task-service.ts', 'task-service.cjs'),
   bundle('src/main/runner.ts', 'runner.cjs'),
-  bundle('src/main/delegate.ts', 'delegate.cjs')
+  bundle('src/main/delegate.ts', 'delegate.cjs'),
+  bundle('src/main/prompts/index.ts', 'prompts.cjs')
 ])
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -31,7 +32,7 @@ check(delegate.parseConsults('<consult reason="why" to="Beta">question</consult>
 check(delegate.parseConsults('<consult>not a call</consult><consult to="Beta">real</consult>').length === 1, 'consult parser rejects phantom calls without to')
 check(delegate.stripConsults('before <consult to="Beta">question</consult> after') === 'before  after', 'consult markers are stripped from displayed text')
 
-const consultBlock = delegate.buildDelegationBlock(
+const consultBlock = prompts.buildDelegationBlock(
   { id: 'ag_alpha', name: 'Alpha', backend: 'zcode', role: '队长', subordinates: ['ag_member'] },
   [
     { id: 'ag_alpha', name: 'Alpha', backend: 'zcode', role: '队长', subordinates: ['ag_member'] },

@@ -4,7 +4,8 @@ import type { Task, TaskEvent, WorktreeInfo } from '../shared/types'
 import { createHash } from 'node:crypto'
 import type { TaskStore } from './store'
 import type { AgentBackend, BackendSession, PermissionRequest, BackendTurnResult } from './backends/types'
-import { buildAgentPrompt, buildDelegationBlock, runDelegationLoop, parseContinueMerged, stripContinue, parseDelegates, parseConsultsMerged, stripConsults, parseInvestigatesMerged, stripInvestigates, ancestorBudget, buildChildPrompt, sanitizeChildPrompt, MAX_DEPTH, MAX_TOTAL_ROUNDS, type AgentLike, type DelegateCall, type ConsultCall, type InvestigateCall } from './delegate'
+import { runDelegationLoop, parseContinueMerged, stripContinue, parseDelegates, parseConsultsMerged, stripConsults, parseInvestigatesMerged, stripInvestigates, ancestorBudget, sanitizeChildPrompt, MAX_DEPTH, MAX_TOTAL_ROUNDS, type AgentLike, type DelegateCall, type ConsultCall, type InvestigateCall } from './delegate'
+import { buildAgentPrompt, buildDelegationBlock, buildChildPrompt, CONTINUE_BLOCK, HANDOFF_CUE, RETITLE_PROMPT } from './prompts'
 import { isGitRepo, createWorktree, currentBranch, setWorktreeOwner } from './git'
 
 /** API 预设（主进程 presets.ts 的 ApiPreset 的运行时子集，避免环依赖） */
@@ -28,23 +29,10 @@ export type InvestigateHandler = (input: { sourceTaskId: string; call: Investiga
 /** Maximum source-session consultation回合 per turn; target depth is capped separately. */
 export const MAX_CONSULT_ROUNDS = 2
 
-/** 阶段接力协议：多阶段任务在阶段边界输出 <continue>，系统在同一 Issue 上硬切新会话 */
-const CONTINUE_BLOCK = `【阶段接力（分阶段任务使用）】
-本任务分阶段施工、且下一阶段的目标已明确时，在回复的最后一行输出接力标记：
-<continue start="auto">下一阶段简报</continue>
-位置要求：标记必须是整个回复的结尾（其后最多跟空白）——末尾锚定是识别接力的主通道；不在末尾的标记只有显式写 start="auto" 才会被兜底识别。正文、示例或讨论里出现标记字样不会触发接力。
-简报要求：必须自包含——阶段目标、方案文档路径、上阶段成果（commit/关键文件:行号）、约束与验收。接手的会话看不到本会话上下文，一切靠这份简报。
-start 语义：想让系统立即续跑就必须显式写 start="auto"；缺省或写错一律按 start="parked" 停放，等你手动点「▶ 启动」。
-- start="parked" 只用于你明确需要用户先做某件事才能继续（如：等你确认方案、等你提供凭据）的情形，并且必须在正文里写明"我停在阶段 N，等你 <X>"。
-- 环境受限（无头跑不了 GUI、缺权限、缺依赖）不算等用户的理由——照常 auto，把风险与规避办法写进简报，让下一阶段自行绕开。
-- 拿不准要不要切会话时：只要还存在明确值得做的下一阶段，就输出 start="parked" 的标记备好待启——**不要**改用"后续可以…"之类的口头交接段落；没有下一阶段才什么都不输出。
-- 示例：<continue start="auto">阶段2：按 docs/plan.md §3 实现模型选择 UI；阶段1 已完成数据管道（commit 09a47a4，src/main/presets.ts）；验收：两个不同模型的 agent 并发执行成功</continue>`
+/** 阶段接力协议正文与接力/重命名指令集中在 src/main/prompts/handoff.ts */
 
 /** 同一 Issue 上 <continue> 自继链上限（防无限自我接力） */
 const MAX_HANDOFF_CHAIN = 8
-
-/** 用户点「⇥ 接力下一阶段」按钮时注入的合成指令（显式人工入口；自由追问不再按关键词猜测意图） */
-const HANDOFF_CUE = `【系统】用户已通过「接力下一阶段」按钮确认进入下一阶段。请按【阶段接力】协议，在回复的最后一行输出 <continue start="auto">…</continue> 标记：简报必须自包含（下一阶段目标、方案文档/计划路径、本阶段成果与 commit、关键文件:行号、约束与验收——接手会话看不到本会话上下文）。若确实不存在明确的下一阶段，直接说明原因，不要输出标记。`
 import { classifyFailure } from './failure'
 import { canTransition } from '../shared/taskflow'
 import { Scheduler } from './scheduler'
@@ -1021,11 +1009,7 @@ export class TaskRunner {
     let budgetTimer: NodeJS.Timeout | undefined
     try {
       const r = await Promise.race([
-        this.sendTurn(
-          taskId,
-          session,
-          '【系统】根据这次任务的执行内容重起一个简短标题：不超过 24 个字，概括实际做了什么，不复述指令原文。只输出标题本身——不带编号、引号、书名号或任何解释。'
-        ),
+        this.sendTurn(taskId, session, RETITLE_PROMPT),
         new Promise<BackendTurnResult>((resolve) => {
           budgetTimer = setTimeout(() => resolve({ ok: false, response: '', error: RETITLE_BUDGET_EXCEEDED }), RETITLE_TURN_BUDGET_MS)
         })

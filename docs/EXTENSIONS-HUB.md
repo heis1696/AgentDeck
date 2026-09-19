@@ -1,4 +1,6 @@
 # 扩展模块（Extensions Hub）设计
+> ✅ 校验于 `6b2f038` / v0.22.0-hot.19（2026-09-19 文档审计）——设计已全量落地（含 §8.1 插件市场闭环：`marketplaces:*` 与 `plugins:install/uninstall`，0.15.0）；现行 IPC 面差异见 API.md 头部差异注记。
+
 
 > 目标：把「技能」页升级为完整的**扩展模块**——统一管理 Skills / MCP 服务器 / Hooks / 插件四类扩展资产，全部存放于 AgentDeck 共享目录（`~/.agentdeck`，与既有技能库同根），可一键安装到各 agent CLI 的用户级配置；并新增**扩展源仓库**层：内置常用仓库精选目录（一键添加）+ 自定义添加 git/本地仓库，扫描发现可导入资产。设计延续 [SKILLS-SHARED-DIR.md](SKILLS-SHARED-DIR.md)（skills 部分已实现，本文档只做增量）。
 

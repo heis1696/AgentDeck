@@ -1,6 +1,6 @@
 // 渲染层 API 封装：window.agentdeck 的类型 + 常用 hooks
 import { useEffect, useState, useCallback } from 'react'
-import type { AgentDeckApi, AgentInfo, AgentModelCatalog, FileDiffResult, PresetInfo, PermissionRequest, SidecarSnapshot } from '../../shared/contracts'
+import type { AgentDeckApi, AgentInfo, AgentModelCatalog, FileDiffResult, PresetInfo, PermissionRequest } from '../../shared/contracts'
 import type { Task, TaskEvent, AppSettings, Issue, Run, Comment, Automation, RuntimeSnapshot, AnalyticsSummary, IssuePriority, IssueStatus, RunTrigger } from '../../shared/types'
 
 /** 队员（agent 身份）——与主进程 agents.ts 的 Agent 对齐 */
@@ -19,19 +19,6 @@ export const bridge: AgentDeckApi = (window as unknown as { agentdeck: AgentDeck
  *  文件无改动时 ok:true 且 note:'clean'（回退事件里的 +/- 快照）。 */
 export function fileDiff(taskId: string, file: string): Promise<FileDiffResult> {
   return bridge.tasks.fileDiff(taskId, file)
-}
-
-/** Sidecar lifecycle state is a read-only renderer projection. A ready event
- * is emitted only after the main process has completed its state barrier. */
-export function useSidecar() {
-  const [sidecar, setSidecar] = useState<SidecarSnapshot | null>(null)
-  useEffect(() => {
-    let mounted = true
-    bridge.sidecar.status().then((snapshot) => { if (mounted) setSidecar(snapshot) }).catch(() => {})
-    const off = bridge.sidecar.onStatus((snapshot) => { if (mounted) setSidecar(snapshot) })
-    return () => { mounted = false; off() }
-  }, [])
-  return sidecar
 }
 
 /** 任务列表 + 实时更新 */

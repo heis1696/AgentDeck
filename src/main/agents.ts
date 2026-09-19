@@ -5,6 +5,7 @@ import path from 'node:path'
 import { app } from 'electron'
 import { BACKEND_IDS, type BackendId } from '../shared/types'
 import { FORGE_AGENT_ID, isForgeAgent } from '../shared/forge'
+import { LEAD_PERSONA, CLAUDE_PERSONA, CODEX_PERSONA, OPENCODE_PERSONA, DSH_PERSONA } from './prompts/personas'
 
 export interface Agent {
   id: string
@@ -77,11 +78,11 @@ const file = () => path.join(app.getPath('userData'), 'agents.json')
 /** 预置队伍：每个可用后端一个默认队员 */
 export function defaultAgents(): Agent[] {
   return [
-    { id: 'ag_zcode', name: 'ZetCode', backend: 'zcode', color: '#4f8cff', role: '领队', systemPrompt: '你是开发领队，负责拆解任务、统筹进度与汇总结论。琐碎小事亲自做，需要并行或专业领域的工作派给队员，并对每轮结果给出评估与审核。', subordinates: ['ag_claude', 'ag_codex', 'ag_opencode', 'ag_dsh'] },
-    { id: 'ag_claude', name: 'Claude', backend: 'claude', color: '#d97757', role: '工程师', systemPrompt: '你是资深全栈工程师，专注高质量代码实现。动手前先读现有代码与约定，改动与周边风格保持一致；关键路径用测试验证，不确定的假设标注出来而不是猜。' },
-    { id: 'ag_codex', name: 'Codex', backend: 'codex', color: '#8b95a5', role: '工程师', systemPrompt: '你是务实的工程师，按指令完成编码与文档任务。产出以可直接使用为准：改动最小、交代清楚；指令含糊时按最合理的理解执行并说明所做假设。' },
-    { id: 'ag_opencode', name: 'OpenCode', backend: 'opencode', color: '#c084fc', role: '工程师', systemPrompt: '你是通用工程师，负责补位各类常规开发工作：代码修改、脚本编写、配置调整与小范围调研。按指令直达目标，拿不准的先问清再动手。' },
-    { id: 'ag_dsh', name: 'DeepSeek', backend: 'dsh', color: '#4d6bfe', role: '分析员', systemPrompt: '你是分析员，负责调研、分析与方案对比。结论必须给依据（代码位置、数据、文档出处）；多方案时列出取舍维度并给推荐；不臆测查不到的事实，明确标注不确定项。' },
+    { id: 'ag_zcode', name: 'ZetCode', backend: 'zcode', color: '#4f8cff', role: '领队', systemPrompt: LEAD_PERSONA, subordinates: ['ag_claude', 'ag_codex', 'ag_opencode', 'ag_dsh'] },
+    { id: 'ag_claude', name: 'Claude', backend: 'claude', color: '#d97757', role: '工程师', systemPrompt: CLAUDE_PERSONA },
+    { id: 'ag_codex', name: 'Codex', backend: 'codex', color: '#8b95a5', role: '工程师', systemPrompt: CODEX_PERSONA },
+    { id: 'ag_opencode', name: 'OpenCode', backend: 'opencode', color: '#c084fc', role: '工程师', systemPrompt: OPENCODE_PERSONA },
+    { id: 'ag_dsh', name: 'DeepSeek', backend: 'dsh', color: '#4d6bfe', role: '分析员', systemPrompt: DSH_PERSONA },
     // 锻造师：agents:draft 的生成引擎；系统提示词由 agent-crafter 技能提供（agent-forge.ts），故不设 systemPrompt
     { id: FORGE_AGENT_ID, name: '锻造师', backend: 'zcode', color: '#f59e0b', role: '锻造', note: '专职生成其它 Agent——改我的平台/模型即换生成引擎；无需系统提示词（由 agent-crafter 技能提供）' }
   ]

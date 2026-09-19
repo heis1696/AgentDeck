@@ -1,6 +1,8 @@
 # AgentDeck 免安装热更实现设计（阶段 0–2）
+> ✅ 校验于 `6b2f038` / v0.22.0-hot.19（2026-09-19 文档审计）——本篇为热更机制的现行设计基准：阶段 0–2 已随 0.19.0 落地，阶段 3–4（feed 上线 + L0 壳自替换）已随 0.21.0 落地；日常发版/部署操作看 HOT-FEED-DEPLOY.md。
 
-> 前置文档：`docs/INSTALLER-FREE-HOT-UPDATE.md`（三层免安装架构：L2 渲染层 / L1 JS 载荷 / L0 壳）、`docs/HOT-UPDATE-COMPARISON.md`（机制细节：staging → 验签 → 原子指针 → 自愈回退）。
+
+> 前置文档：`docs/archive/INSTALLER-FREE-HOT-UPDATE.md`（三层免安装架构：L2 渲染层 / L1 JS 载荷 / L0 壳）、`docs/archive/HOT-UPDATE-COMPARISON.md`（机制细节：staging → 验签 → 原子指针 → 自愈回退）。
 > 本文 = 仓库侧实现设计：文件格式、接口签名、时序到可编码粒度；**不含实现代码**。阶段 3（目录式 zip 分发管线收口）只定义发布产物契约，阶段 4（L0 壳自替换）不在范围内，仅做字段/目录预留。
 > 所有引用已按工作区现状（= HEAD `4f24a77`，git status 干净）逐条核实到行号。
 > 「外部机制与开放问题」章节（§9）已由领队补齐：四问决策 + feed 终局布局 + 私钥流程，外部事实经辅程联网核实（来源随文标注）。
@@ -14,7 +16,7 @@
 | P3 | 加载解析单源：bootstrap（载荷级）与 `index.ts`（渲染层级）消费同一个解析函数 | `src/main/hot/resolve.ts`（§3.2 / §4.1） |
 | P4 | IPC 契约**只增不改**：新增 `updates` 命名空间，既有 channel 零触碰（已核对 `src/preload/index.ts` 全量 invoke/on 名称，无 `updates:` 冲突） | §5.2 |
 | P5 | 任何一层失败的最坏结果 = 回退 asar 内置版本继续可用，绝不出现"起不来" | §3.3 / §4.3 |
-| P6 | 层间覆盖规则：L1 载荷 ⊇ 自带渲染层；载荷应用时重置 L2 指针（"全量 > 增量"沿用 `docs/HOT-UPDATE-COMPARISON.md` §5.1） | §4.1 / §6.3 |
+| P6 | 层间覆盖规则：L1 载荷 ⊇ 自带渲染层；载荷应用时重置 L2 指针（"全量 > 增量"沿用 `docs/archive/HOT-UPDATE-COMPARISON.md` §5.1） | §4.1 / §6.3 |
 
 ---
 
@@ -36,7 +38,7 @@
 | V12 | runner 关机会等待全部会话 `stop()+close()`；sidecar stop 先 POST `/shutdown` 再 kill+等待 | `src/main/runner.ts:1452-1479`、`src/main/sidecar.ts:412-433` |
 | V13 | 启动对账（中断兜底）现成：僵尸 running 补记 + queued 恢复/挂起 | `src/main/index.ts:224-249`、`src/main/index.ts:256-275` |
 | V14 | tmp+rename 原子写在仓库已有两个先例；`settings.json` 是裸 write（对照项，不在本设计范围） | `src/main/store.ts:213-215`、`src/main/config-editor.ts:45-54`、`src/main/settings.ts:21-25` |
-| V15 | 主进程零运行时 npm 依赖（dependencies 全是 React 系、只在渲染层 bundle 内）；main/preload bundle 仅 require `electron` + node 内置 + 本地 chunk | `package.json:83-89` + `docs/INSTALLER-FREE-HOT-UPDATE.md` §2.2 G1（out/ 产物清点） |
+| V15 | 主进程零运行时 npm 依赖（dependencies 全是 React 系、只在渲染层 bundle 内）；main/preload bundle 仅 require `electron` + node 内置 + 本地 chunk | `package.json:83-89` + `docs/archive/INSTALLER-FREE-HOT-UPDATE.md` §2.2 G1（out/ 产物清点） |
 | V16 | IPC 注册走 `registerIpcHandlers(ctx)`；`IpcContext` 是注入面 | `src/main/ipc/register.ts:13-22`、`src/main/ipc/context.ts:17-40` |
 | V17 | `AgentDeckApi` 契约面闭合于 `src/shared/contracts.ts:163-335`（末位成员 `sources` 块 `:322-334`，接口闭合括号 `:335`）——`updates` 追加于此 | `src/shared/contracts.ts:322-335` |
 | V18 | 渲染层经 `bridge` 消费 `window.agentdeck`；设置页分区表是本地常量 | `src/renderer/src/api.ts:11`、`src/renderer/src/components/SettingsView.tsx:7-13` |
@@ -201,7 +203,7 @@ const hot = resolveHotState(app.getPath('userData'), app.getVersion())
 mainWindow.loadFile(hot.rendererIndexHtml ?? path.join(__dirname, '../renderer/index.html'))
 ```
 
-dev 分支（`:90-92` `ELECTRON_RENDERER_URL`）保持不变且优先。相对路径前提成立：electron-vite 渲染层产物 `base: './'`、全部 asset 相对引用（V3），整体搬移可加载——阶段 1 第一动作用 `npm run build` 产物落 userData 实测加载（含刷新、深链接），作为上线门禁（沿用 `docs/HOT-UPDATE-COMPARISON.md` §4.4）。
+dev 分支（`:90-92` `ELECTRON_RENDERER_URL`）保持不变且优先。相对路径前提成立：electron-vite 渲染层产物 `base: './'`、全部 asset 相对引用（V3），整体搬移可加载——阶段 1 第一动作用 `npm run build` 产物落 userData 实测加载（含刷新、深链接），作为上线门禁（沿用 `docs/archive/HOT-UPDATE-COMPARISON.md` §4.4）。
 
 ### 4.2 其余 `__dirname` 引用点逐点结论（全部**不需改**）
 
@@ -215,7 +217,7 @@ dev 分支（`:90-92` `ELECTRON_RENDERER_URL`）保持不变且优先。相对�
 
 ### 4.3 切换与运行期自愈（L2 专属）
 
-- **显式切换**：指针写好后必须显式 `mainWindow.loadFile(新路径)`；`webContents.reload()` 只会重载旧 URL（`docs/HOT-UPDATE-COMPARISON.md` §4.1）。`window-all-closed` 保活（`src/main/index.ts:434-438`）保证切换只动窗口不动 runner/sidecar。
+- **显式切换**：指针写好后必须显式 `mainWindow.loadFile(新路径)`；`webContents.reload()` 只会重载旧 URL（`docs/archive/HOT-UPDATE-COMPARISON.md` §4.1）。`window-all-closed` 保活（`src/main/index.ts:434-438`）保证切换只动窗口不动 runner/sidecar。
 - **加载失败自动回退**：`createWindow()` 给 `mainWindow.webContents` 挂 `did-fail-load`（仅主 frame、`errorCode` 非中断类）：若当前 URL 指向热更目录 → 回退加载上一版（内置或前一版本目录）+ 把该版本目录改名 `.quarantine-<ts>` + 指针回指/清除 + 推 `updates` 状态事件（§5.2）。`render-process-gone` 同策略（计数防抖，同一版本 5 分钟内两次 gon → 判坏回退）。
 
 ---
@@ -232,7 +234,7 @@ dev 分支（`:90-92` `ELECTRON_RENDERER_URL`）保持不变且优先。相对�
 | `canonical.ts` | 规范化序列化 | `canonicalJson(value: unknown): string` |
 | `trust.ts` | 信任锚 | `export const TRUST_KEYS: Record<string, string>`（keyId → 公钥 hex）；feed 基址常量 `DEFAULT_FEED_BASE`（占位 URL，§9 由领队定托管后替换；运行期可被 `AppSettings.updateFeedUrl` 覆盖） |
 | `feed.ts` | 拉取 | `fetchManifest(baseUrl, channel): Promise<{ manifest, manifestBytes }>`；`downloadArtifact(url, dest, onProgress): Promise<void>`（超时 + 3 次退避重试） |
-| `updater.ts` | 两通道共用的状态机 | `class HotUpdater { constructor(deps: UpdaterDeps) }`；`check(): Promise<UpdateStateSnapshot>`；`apply(channel): Promise<IpcResult>`；`rollback(channel): Promise<IpcResult>`；`onState(cb): () => void`；内部串行互斥（检查/下载全程单飞，两通道不同时跑，沿用 `docs/HOT-UPDATE-COMPARISON.md` §5.3 互斥锁对策） |
+| `updater.ts` | 两通道共用的状态机 | `class HotUpdater { constructor(deps: UpdaterDeps) }`；`check(): Promise<UpdateStateSnapshot>`；`apply(channel): Promise<IpcResult>`；`rollback(channel): Promise<IpcResult>`；`onState(cb): () => void`；内部串行互斥（检查/下载全程单飞，两通道不同时跑，沿用 `docs/archive/HOT-UPDATE-COMPARISON.md` §5.3 互斥锁对策） |
 
 `UpdaterDeps = { getWindow: () => BrowserWindow \| null; isMainIdle: () => boolean; relaunchForUpdate: (note: string) => void; settings: () => AppSettings }`——注入而非 import，保证 IPC 层与 bootstrap 复用无环。
 
@@ -240,7 +242,7 @@ dev 分支（`:90-92` `ELECTRON_RENDERER_URL`）保持不变且优先。相对�
 - `renderer`（阶段 1）：staging 下载验签 → rename 成版本目录 → `writePointerAtomic` → `getWindow()?.loadFile(新路径)` → GC（保留最近 3 版）；
 - `payload`（阶段 2）：同流程到 `writePointerAtomic`，**额外清 L2 指针**（P6）→ `relaunchForUpdate(version)`（§7.2 时序）；`isMainIdle()` 不过则拒绝 apply 并把状态置 `staged`（挂"待更新"，空闲提示用户，或退出时自动应用——`autoInstallOnAppQuit` 思路，挂到既有 `before-quit` 链：`src/main/index.ts:418-432` 的 async 块里、`app.quit()` 前判断 staged 标志后 relaunch）。
 
-**staging 流程**（两通道一致，对应 `docs/HOT-UPDATE-COMPARISON.md` §4.1 三阶段）：`<channelDir>/.staging-<ts>/` 下载 zip → `artifact.sha256` 核对 → 解压 → `files[]` 逐文件 sha256+size 核对 → 写入 `manifest.json`（拉取时的字节原文）→ `fs.renameSync(staging, <version>/)`（目标已存在 = 版本已装，直接复用）→ 指针原子写。任一步失败：删 staging、状态 `failed`、现网版本零触碰。zip 解压用 Node 内置（Electron 33 自带 `node:zlib`；不引 yauzl 等依赖，条目解包自实现或以 ` unzip ` 原语封装在 `updater.ts` 内——**实现约束：零新 npm 依赖**，与 V15 一致）。
+**staging 流程**（两通道一致，对应 `docs/archive/HOT-UPDATE-COMPARISON.md` §4.1 三阶段）：`<channelDir>/.staging-<ts>/` 下载 zip → `artifact.sha256` 核对 → 解压 → `files[]` 逐文件 sha256+size 核对 → 写入 `manifest.json`（拉取时的字节原文）→ `fs.renameSync(staging, <version>/)`（目标已存在 = 版本已装，直接复用）→ 指针原子写。任一步失败：删 staging、状态 `failed`、现网版本零触碰。zip 解压用 Node 内置（Electron 33 自带 `node:zlib`；不引 yauzl 等依赖，条目解包自实现或以 ` unzip ` 原语封装在 `updater.ts` 内——**实现约束：零新 npm 依赖**，与 V15 一致）。
 
 ### 5.2 `src/shared/contracts.ts` 增量（只增不改，P4）
 
@@ -318,7 +320,7 @@ dist/feed/
     shell/<ver>/…                         # 占位
 ```
 
-脚本步骤（阶段 1 先只产 renderer 子树，阶段 2 增 payload，阶段 3 增 shell 占位 + 目录式 zip 打包——对应 `docs/INSTALLER-FREE-HOT-UPDATE.md` §7 阶段 1–3）：`electron-vite build` → 组装 staging（§6.1 清单）→ zip（store-only，不压缩已达目的、解压快）→ 逐文件 sha256 → 组 payload 块 → `canonicalJson` → Ed25519 签名 → 写 manifest.json → 校验器自检（`verifier.verifyManifest` 回读验一遍，防"签出来就是坏的"）→ 输出上述树 + `RELEASE-NOTES.md` 摘要。
+脚本步骤（阶段 1 先只产 renderer 子树，阶段 2 增 payload，阶段 3 增 shell 占位 + 目录式 zip 打包——对应 `docs/archive/INSTALLER-FREE-HOT-UPDATE.md` §7 阶段 1–3）：`electron-vite build` → 组装 staging（§6.1 清单）→ zip（store-only，不压缩已达目的、解压快）→ 逐文件 sha256 → 组 payload 块 → `canonicalJson` → Ed25519 签名 → 写 manifest.json → 校验器自检（`verifier.verifyManifest` 回读验一遍，防"签出来就是坏的"）→ 输出上述树 + `RELEASE-NOTES.md` 摘要。
 
 **配套 smoke（验收工具，非产品代码）**：
 - `scripts/smoke-hot-pointer.mjs`（阶段 0）：对 `--dir` 产物注入四类指针状态（正常/损坏/验签失败/载荷 require 抛错——抛错用截断 chunk 的载荷副本制造），逐一启动断言回退内置版 + 留证文件存在（§3.3 三路径可演练）。
@@ -330,7 +332,7 @@ dist/feed/
 |---|---|
 | 版本号 | 载荷/渲染层版本 = `info` 语义化（`<壳版本>-hot.<n>`，如 `0.18.3-hot.7`）；manifest.version 是唯一事实，`package.json` 版本只属于壳 |
 | 门禁矩阵 | L2：`minMainVersion ≤ 生效主进程版本`；L1：`minShellVersion ≤ app.getVersion()`；双处执行（应用时 updater / 加载时 bootstrap） |
-| 全量 > 增量 | 载荷 apply 成功 → `clearPointer(hot-renderer)`；载荷目录自带渲染层接管。壳更新（阶段 4）→ 重置载荷指针（`docs/INSTALLER-FREE-HOT-UPDATE.md` §6 协同规则） |
+| 全量 > 增量 | 载荷 apply 成功 → `clearPointer(hot-renderer)`；载荷目录自带渲染层接管。壳更新（阶段 4）→ 重置载荷指针（`docs/archive/INSTALLER-FREE-HOT-UPDATE.md` §6 协同规则） |
 | 回滚 | 客户端：版本目录保留 3 版，`updates.rollback` 指针回退；自愈：校验失败自动回退内置版。服务端：`versions/<ver>/manifest.json` 覆盖 `stable/<channel>/manifest.json` 即止血 |
 | 契约纪律 | `src/shared/contracts.ts` 只增不改（P4）是 `minMainVersion` 门禁成立的前提；漂移即破防，纳入 review checklist |
 
@@ -436,7 +438,7 @@ dist/feed/
 
 ## 9. 外部机制与开放问题（决策）
 
-> 回答 `docs/INSTALLER-FREE-HOT-UPDATE.md` §8 四问。决策依据 = 辅程外部核实（GitHub 官方限流/发布文档、electron-builder 官方 auto-update 文档、Azure Trusted Signing 定价，本次联网核实）+ 领队裁定。每问给唯一决策。
+> 回答 `docs/archive/INSTALLER-FREE-HOT-UPDATE.md` §8 四问。决策依据 = 辅程外部核实（GitHub 官方限流/发布文档、electron-builder 官方 auto-update 文档、Azure Trusted Signing 定价，本次联网核实）+ 领队裁定。每问给唯一决策。
 
 ### 9.1 feed 托管：自管静态站为更新器唯一入口，GitHub Releases 仅作发布历史与人工下载镜像
 
@@ -509,4 +511,4 @@ GitHub Releases 作更新入口的四个硬伤（均已核实）：① 未鉴权
 
 **零命中实证（V10）**：`requestSingleInstanceLock` / `second-instance` / `app.relaunch` / `app.setName` / `app.isPackaged` 在 `src/` 全量 grep 零命中（2026-09-16，工作区 = HEAD `4f24a77`）。
 
-**前置文档**：`docs/INSTALLER-FREE-HOT-UPDATE.md`（三层模型 §3、rename dance §5、阶段表 §7）、`docs/HOT-UPDATE-COMPARISON.md`（L2 三阶段流程 §4.1、minMainVersion/互斥/协同规则 §4.4/§5.1/§5.3、asar 约束 §4.2）。
+**前置文档**：`docs/archive/INSTALLER-FREE-HOT-UPDATE.md`（三层模型 §3、rename dance §5、阶段表 §7）、`docs/archive/HOT-UPDATE-COMPARISON.md`（L2 三阶段流程 §4.1、minMainVersion/互斥/协同规则 §4.4/§5.1/§5.3、asar 约束 §4.2）。

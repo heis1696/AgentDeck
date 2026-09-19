@@ -3,6 +3,7 @@ import type { Goal, GoalApprovalSnapshot, GoalCheckpoint, GoalRun, GoalSpecDecis
 import type { GoalCheckpointInput, GoalCreateInput, GoalEvolveInput } from '../shared/contracts'
 import { isTerminalGoalStatus, validateGoalTransition } from '../shared/taskflow'
 import { GoalStore, type GoalCreateRecord } from './goal-store'
+import { goalLaunchPrompt, goalRoundRecap, ambiguousCriterionQuestion, AMBIGUITY_CLARIFY_FALLBACK } from './prompts/goal'
 
 export const DEFAULT_BLOCK_CAP = 8
 export const DEFAULT_NO_PROGRESS_CAP = 2
@@ -350,10 +351,10 @@ export class GoalController {
     }
     if (input.ambiguityScore !== undefined && input.ambiguityScore > AMBIGUITY_THRESHOLD) {
       const questions = (goal.acceptanceCriteria ?? []).filter((criterion) => criterion.status !== 'passed')
-        .map((criterion) => `Acceptance criterion ${criterion.id} still reads ambiguous; clarify it before any further work: ${criterion.text}`)
+        .map((criterion) => ambiguousCriterionQuestion(criterion.id, criterion.text))
       const reason = `Goal ambiguity ${input.ambiguityScore.toFixed(3)} exceeds threshold ${AMBIGUITY_THRESHOLD}`
       reject(reason, input.patch)
-      return { ok: false, error: reason, questions: questions.length ? questions : ['Clarify the goal outcome and its constraints before any execution begins'] }
+      return { ok: false, error: reason, questions: questions.length ? questions : [AMBIGUITY_CLARIFY_FALLBACK] }
     }
     const patch = input.patch
     const approval = input.approvalSnapshot
@@ -1029,21 +1030,8 @@ export class GoalController {
     const phaseIndex = goal.runCount
     const previous = this.goals.checkpoints(goal.id).at(-1)
     const resultConditions = acceptanceTexts(goal)
-    // v2：首个 Task（phaseIndex=0）注入目标模式块（§4.1）
-    const GOAL_BLOCK = `【目标模式（自动推进协议）】
-本任务运行在目标模式下：每轮结束后系统会核对你的 checkpoint 并自动驱动你进入下一轮，直到全部完成条件达成。
-- 每轮收尾时，在回复末尾输出一个 checkpoint JSON 代码块（用 \`\`\`json 包裹）：
-  {"summary":"本轮摘要","completedConditions":["已达成的完成条件原文"],"incompleteConditions":["未达成的完成条件原文"],"nextPlan":"下一轮计划","blockers":["阻塞项，没有则空数组"]}
-- completedConditions 与 incompleteConditions 必须逐条对照目标完成条件的原文填写：不改写、不合并、不遗漏。
-- 全部完成条件达成的那一轮：completedConditions 一次性填入所有条件，nextPlan 留空，不再派发任何工作，直接收尾。
-- 需要并行推进或依靠队员专长时，用 <delegate> 派发队员；队员结果回灌后，由你按回灌指令给出审核结论。
-- 只有确需更换会话的阶段边界才使用 <continue>（简报必须自包含）；常规推进不要硬切会话。
-- 遇到必须由人工决策的事项，或已命中停止条件时，如实写入 blockers，不要自行猜测执行。`
-    const prompt = phaseIndex === 0
-      ? `${goal.text}\n\n完成条件（逐条对照推进，全部达成才算完成）：\n${resultConditions.map((condition) => `- ${condition}`).join('\n')}${goal.stopConditions.length ? `\n\n停止条件（命中任意一条即停下等待用户）：\n${goal.stopConditions.map((condition) => `- ${condition}`).join('\n')}` : ''}\n\n${GOAL_BLOCK}`
-      : previous?.nextPlan
-        ? `${goal.text}\n\nCheckpoint summary from the last round:\n${previous.summary}\n\nNext plan drawn up last round (carry it out this round):\n${previous.nextPlan}`
-        : `${goal.text}\n\nCompletion conditions (work through them one by one; the goal is complete only when every condition below is met):\n${resultConditions.map((condition) => `- ${condition}`).join('\n')}${goal.stopConditions.length ? `\n\nStop conditions (hitting any one means halt and wait for the user):\n${goal.stopConditions.map((condition) => `- ${condition}`).join('\n')}` : ''}`
+    // v2：目标任务 prompt 组装（含首阶段 GOAL_BLOCK 注入）集中在 prompts/goal.ts
+    const prompt = goalLaunchPrompt({ goalText: goal.text, phaseIndex, resultConditions, stopConditions: goal.stopConditions, previous })
     try {
       const task = this.options.createTask({
         title: goal.text.slice(0, 120),
@@ -1083,13 +1071,15 @@ export class GoalController {
       const previous = checkpoint ?? this.goals.checkpoints(goalId).at(-1)
       const n = goal.runCount + 1
       const failures = goal.failures ?? 0
-      let content = `【系统·目标模式】第 ${goal.runCount} 轮已结束并记录 checkpoint。\n`
-      content += `- 摘要：${previous?.summary ?? '（无 checkpoint）'}\n`
-      content += `- 未完成条件：${(previous?.incompleteConditions ?? acceptanceTexts(goal)).map((c) => `${c}`).join('、')}\n`
-      if (previous?.nextPlan) content += `- 上一轮下一步计划：${previous.nextPlan}\n`
-      if (previous?.blockers?.length) content += `- 阻塞：${previous.blockers.join('、')}\n`
-      if (failures > 0) content += `- 上一轮失败原因：${task.error || '（未知）'}（自动续轮 ${failures}/2）\n`
-      content += `请继续推进目标：先输出一行 <round outcome="..." reason="..."/> 自评，再继续执行或派发；完成条件全部达成时按【目标模式】协议输出 checkpoint 收尾。`
+      const content = goalRoundRecap({
+        runCount: goal.runCount,
+        summary: previous?.summary,
+        incomplete: previous?.incompleteConditions ?? acceptanceTexts(goal),
+        nextPlan: previous?.nextPlan,
+        blockers: previous?.blockers,
+        failures,
+        taskError: task.error
+      })
 
       // 首选 continueTask（同会话续聊）
       if (this.options.continueTask && task.sessionId) {

@@ -661,10 +661,6 @@ export async function sweepWorktrees(
   return result.removed
 }
 
-/** Descriptive aliases for callers that use singular cleanup/prune terminology. */
-export const cleanupWorktree = reclaimWorktree
-export const pruneWorktree = pruneWorktrees
-
 /** Structured merge implementation. The legacy helper above remains private for compatibility during migration. */
 export async function mergeBranchInto(
   repoDir: string,

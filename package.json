@@ -55,6 +55,7 @@
     "smoke:round": "node scripts/smoke-round.mjs",
     "smoke:turn-lifecycle": "node scripts/smoke-turn-lifecycle.mjs",
     "smoke:lifecycle": "node scripts/smoke-lifecycle.mjs",
+    "smoke:queue-recovery": "node scripts/smoke-queue-recovery.mjs",
     "smoke:worktrees": "node scripts/smoke-worktree-lifecycle.mjs",
     "smoke:turn-model": "node scripts/smoke-turn-model.mjs",
     "smoke:stage6": "npm run typecheck && npm run smoke:event-log && npm run smoke:taskflow && npm run smoke:turn-model && npm run smoke:migration && npm run smoke:issues",
@@ -77,6 +78,8 @@
     "release:hot": "node scripts/release-hot.mjs",
     "smoke:hot-shell": "node scripts/smoke-hot-shell.mjs",
     "deploy:hot": "node scripts/deploy-feed.mjs",
+    "graph:deps": "npm install --no-save --no-audit --no-fund dependency-cruiser@18 3d-force-graph && depcruise src --include-only \"^src\" --output-type mermaid --no-config > docs/graph/deps.mmd && depcruise src --include-only \"^src\" --output-type json --no-config > docs/graph/deps.json && node -e \"const j=require('./docs/graph/deps.json');if(j.modules.length<140)throw new Error('deps graph too small: '+j.modules.length);console.log('deps graph ok: '+j.modules.length+' modules')\"",
+    "graph:view": "node scripts/view-graph.mjs",
     "ship": "node scripts/ship.mjs"
   },
   "devDependencies": {

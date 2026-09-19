@@ -413,10 +413,6 @@ export function parseNonNegativeInteger(value: unknown, label: string): number {
   return value
 }
 
-export function parseOptionalBoolean(value: unknown, label: string): boolean {
-  return booleanValue(value, label)!
-}
-
 export function parseBackendId(value: unknown): string {
   const id = parseId(value, 'backendId')
   if (!backendIds.has(id)) throw new Error(`backendId 无效: ${id}`)

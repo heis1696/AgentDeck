@@ -30,10 +30,6 @@ export interface ShellDirs {
   parentDir: string
 }
 
-export function shellDirs(appDir: string): ShellDirs {
-  return { appDir, parentDir: path.dirname(appDir) }
-}
-
 /** staging 工作区：<appDir>.staging-<ts>（新壳解压目录；与 appDir 同卷） */
 export const stagingDirFor = (appDir: string, ts = Date.now()) => path.join(path.dirname(appDir), `${path.basename(appDir)}.staging-${ts}`)
 

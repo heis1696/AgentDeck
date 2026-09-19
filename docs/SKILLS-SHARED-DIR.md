@@ -1,4 +1,6 @@
 # 共享目录与技能库（Shared Dir + Skills）设计
+> ✅ 校验于 `6b2f038` / v0.22.0-hot.19（2026-09-19 文档审计）——skills 部分仍为现行实现；共享目录 `mcp/`、`hooks/`、`sources/` 增量布局与安装目标见 EXTENSIONS-HUB.md。
+
 
 > 目标：AgentDeck 拥有自己的共享目录（对标各 agent 工具的 `~/.claude`、`~/.codex`、`~/.zcode`），技能以标准 `SKILL.md` 文件形式存放在其中，并可一键共享（安装）到各 agent CLI 的技能目录——参考 ccswitch 的「集中管理 + 分发同步」模式与 Multica 的 Skills（workspace 级实体、多 agent 复用）。
 

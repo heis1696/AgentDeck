@@ -1,6 +1,8 @@
 # 热更 feed 部署指南（阿里云 118.31.43.156）
+> ✅ 校验于 `6b2f038` / v0.22.0-hot.19（2026-09-19 文档审计）——`release:hot` / `deploy:hot` 脚本与 `DEFAULT_FEED_BASE`（`src/main/hot/trust.ts`）均与本文一致，为热更现行运维手册。
 
-> 配套设计：`docs/HOT-UPDATE-IMPL-DESIGN.md` §6.2/§9.1、`docs/INSTALLER-FREE-HOT-UPDATE.md`。
+
+> 配套设计：`docs/HOT-UPDATE-IMPL-DESIGN.md` §6.2/§9.1、`docs/archive/INSTALLER-FREE-HOT-UPDATE.md`。
 > 现阶段：IP 直连 HTTP（域名审核中）。内容真实性由 Ed25519 manifest 验签兜底，不依赖传输层加密；域名到位后按文末步骤迁移 HTTPS。
 
 ## 一、服务器侧（一次性，约 5 分钟）

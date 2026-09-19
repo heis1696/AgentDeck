@@ -1,4 +1,6 @@
 # Business Brain Sidecar
+> ✅ 校验于 `6b2f038` / v0.22.0-hot.19（2026-09-19 文档审计）——正文契约仍准确；渲染层桥现为 `status` / `sync` / `reconnect` 三操作（`reconnect` 为后增），停放后继已增 Issue 评论可见化通道（hot.19）。
+
 
 The Electron main process owns the window, notifications, permission UI, and
 the sidecar lifecycle. A standalone Node process exposes a loopback-only HTTP

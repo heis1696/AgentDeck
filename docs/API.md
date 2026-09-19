@@ -1,4 +1,28 @@
 # AgentDeck API 文档
+> ✅ 校验于 `6b2f038` / v0.22.0-hot.19（2026-09-19 文档审计）
+
+> 📡 **差异注记（2026-09-19 对照源码盘点，基线 `6b2f038` / v0.22.0-hot.19）**：本篇正文以 v0.13.x 为叙述基准、未重写；IPC 面已按 `src/preload/index.ts` 全量复核——**141 个调用点 / 20 个域**（与 docs/graph/INVENTORY.md 口径一致）。差异清单：
+>
+> **① 正文缺失、代码已存在（共 70 个调用点）**
+>
+> | 域 | 缺失内容 | 现处代码 |
+> |---|---|---|
+> | `meetings` | 整域 12 个：list / get / create / start / pause / resume / interject / cancel / approveAction / delete + onUpdated / onDeleted（0.16.0 会议模式） | `src/preload/index.ts:130` |
+> | `updates` | 整域 6 个：getState / check / apply / applyAll / rollback + onState（0.19.0 热更） | `src/preload/index.ts:207` |
+> | `sidecar` | 整域 4 个：status / sync / reconnect + onStatus | `src/preload/index.ts:197` |
+> | `mcp` / `hooks` / `plugins` / `marketplaces` / `sources` | 扩展模块五域共 31 个（0.15.0 Extensions Hub，设计见 EXTENSIONS-HUB.md） | `src/preload/index.ts:237-285` |
+> | `goals` | 6 个：snapshots / decisions / approveEvolution / evolve / evolveStep / rollback（目标规格进化） | `src/preload/index.ts:106-111` |
+> | `agents` | 5 个：draft / improve / evaluate / importMd / exportMd（锻造师，0.19–0.20） | `src/preload/index.ts:179-183` |
+> | `skills` | 4 个：installFromUrl / searchOnline / installOnline / openExternal（skills.sh 在线安装） | `src/preload/index.ts:226-231` |
+> | `tasks` | 1 个：fileDiff（0.22.0 编辑详情 git 权威 diff） | `src/preload/index.ts:51` |
+> | `worktrees` | 1 个：prune | `src/preload/index.ts:30` |
+>
+> **② 正文有、代码已不存在（0.18.0 移除收件箱）**：§1.3 的 `notifications` / `markNotificationRead` 与 §2.3 的 `Notification` 类型均已删除。
+>
+> **③ 契约形状变化**：`PresetInfo` 增 `protocol?`（anthropic/openai 线协议）；`AppSettings` 增调优字段（turnIdleTimeoutMs / permissionTimeoutMs / maxRetryAttempts / retryBackoffMs / maxHandoffChain / delegateMaxRounds / delegateMaxTotalRounds / delegateMaxDepth / doomLoopThreshold / worktreeMaxAgeDays）与 `updateFeedUrl?`；`Task` 增 `unavailableReason? / worktree? / backgroundRunning? / workVersion? / dedupeKey?`；`followUp` opts 增 `collectFinal? / wait?`；Goal 族增 GoalSpecSnapshot / GoalSpecDecision / GoalApprovalSnapshot；新增 Meeting（`src/shared/meeting.ts`）、锻造（`src/shared/forge.ts`）、扩展（`src/shared/extensions.ts`）与热更类型族。
+>
+> 精确签名以 `src/shared/contracts.ts` 与 `src/preload/index.ts` 为准。
+
 
 > 对齐 v0.13.x。本文描述四层接口：渲染层 IPC 桥（`window.agentdeck`，契约定义在 `src/shared/contracts.ts`）、主进程内部模块、后端适配器接口（扩展点）、委派/目标协议。
 

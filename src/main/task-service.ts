@@ -274,6 +274,3 @@ export class TaskService {
     }, 'handoff')
   }
 }
-
-/** Descriptive alias for integrations that call this boundary a creation service. */
-export const TaskCreationService = TaskService

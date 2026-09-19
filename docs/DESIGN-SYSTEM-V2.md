@@ -1,4 +1,6 @@
 # AgentDeck 设计体系 v2
+> ✅ 校验于 `6b2f038` / v0.22.0-hot.19（2026-09-19 文档审计）——令牌与组件规格仍为现行视觉规范；§5「styles.css 重组方案」已执行完毕，0.19.0 起页面级样式迁移至 `src/renderer/src/polish/` 命名空间（foundation / page-shell / usage / team / board / detail / dock / issue-home）；§3.14 详情页属性栏已被 0.22.0 反馈迭代改版（SideDock 分栏）取代。
+
 
 > 规格版本：v2.0.0 · 生效时间：2026-09-05  
 > 替代：styles.css 四代覆盖层（0.7 基础 → 0.8 Linear 式 → 0.10 浅色补丁 → 0.11 令牌 v2 → 0.12 骨架）

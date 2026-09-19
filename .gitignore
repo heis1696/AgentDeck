@@ -36,3 +36,7 @@ gui-test-screenshots/
 
 # Detached agent worktree scratch space (worktrees are registered per-machine)
 .agentdeck-worktrees/
+
+# On-demand rendered dependency graph (regenerate via npm run graph:view)
+docs/graph/deps.html
+docs/graph/deps-3d.html

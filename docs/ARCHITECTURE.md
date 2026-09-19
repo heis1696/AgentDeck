@@ -1,4 +1,11 @@
 # AgentDeck 架构文档
+> ✅ 校验于 `6b2f038` / v0.22.0-hot.19（2026-09-19 文档审计）
+
+> 🧭 **差异注记（2026-09-19，基线 `6b2f038` / v0.22.0-hot.19）**：总览、Issue-first 工作模型、关键数据流与可靠性设计仍准确；差异如下——
+> **模块地图（§3）未收录** 0.14 以来新增的主进程模块：`src/main/hot/`（9 文件，热更）、`bootstrap.ts`、`retention.ts`（终态 Issue 30 天清理，0.22.0）、`meeting-controller.ts` / `meeting-store.ts` / `agent-sessions.ts` / `agent-exchange.ts` / `agent-forge.ts` / `acceptance-verifier.ts` / `task-service.ts` / `turn-lifecycle.ts`、`sidecar.ts` / `sidecar-runtime.ts` / `sidecar-server.ts`，以及 `ipc/meetings.ts`、`ipc/updates.ts`。
+> **导航与视图（§1/§7）过时**：全局「会议 / 目标」导航页已删除（0.18.0），两种模式收敛进 Issue（0.22.0 起为浮窗 + header 进度芯片）；应用默认落地看板；详情页常驻右侧栏已移除、改 SideDock 行布局分栏（0.22.0）。渲染层新组件：`ui/SideDock.tsx`、`ui/FloatWindow.tsx`、`CodeViewer`、设置页 UpdatePanel。
+> **测试基线（§8）**：`smoke:all` 已从 25 套件扩至 **46 套件**（新增 meeting×4、goal-guards / goal-spec、orchestration-matrix、worktrees、lifecycle / turn-lifecycle、task-service、sidecar、opencode-server、board-retention、edit-meta、file-diff、dsh-acp / dsh-budget、delegate-reject、retitle-cap 等）。
+
 
 > 对齐 v0.13.x。本地多 agent 协作台：五个 agent CLI 平台（zcode/claude/codex/opencode/dsh）同队，Issue-first 工作流，委派内置、领队自主拆解派工，目标模式在 Issue 内自动推进，全程本地运行。
 
@@ -284,7 +291,7 @@ delegate 标记 → 目标解析（限 subordinates，名字/平台 id 忽略大
 
 ## 7.1 目标模式 v2：Issue 内自动推进（Goal-based Loop）
 
-目标模式 v2 不建立独立「目标」页或合成 Issue（`iss_goal_xxx`），而是**在真实 Issue 内开启**，按 Loop Engineering 的 Goal-based loop 理念自动推进（对照 `docs/LOOP-ENGINEERING.md` §3 模块映射：Goal-based loop → `goal-controller.ts` + `goal-store.ts`）。`Goal` 层作为持久化状态脊柱叠加在 `Issue -> Run -> Task` 之上，不替代该模型：
+目标模式 v2 不建立独立「目标」页或合成 Issue（`iss_goal_xxx`），而是**在真实 Issue 内开启**，按 Loop Engineering 的 Goal-based loop 理念自动推进（对照 `docs/archive/LOOP-ENGINEERING.md` §3 模块映射：Goal-based loop → `goal-controller.ts` + `goal-store.ts`）。`Goal` 层作为持久化状态脊柱叠加在 `Issue -> Run -> Task` 之上，不替代该模型：
 
 - **目标绑定真实 Issue**：`GoalCreateInput.issueId` 必填。开启即「收养」该 Issue 当前最新 Task 作为阶段任务：无 Task → 建首个（prompt 末尾注入目标模式块，startNow 即入队）；有 Task → 登记为当前阶段任务，startNow 时按其状态启动（queued/running 等执行、done/failed 走续聊回灌）。循环跟随 Issue 最新任务（天然含 `<continue>` 接力产生的 handoff 任务），不再只认自己建的任务。
 - **自省自推直到完成条件达成**：每轮 Task 终态（含失败/取消）→ 解析 checkpoint envelope 落盘 `GoalCheckpoint`（runId 幂等，状态脊柱）→ 预算扣减与护栏决策 → 续轮**优先同会话续聊回灌**（`continueTask` = `runner.followUp`，不重开上下文）；后端未注入续聊或 Task 无 `sessionId` 时**兜底新建 Task**（prompt = 目标块 + checkpoint 简报）。

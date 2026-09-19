@@ -509,7 +509,3 @@ export class EventLog {
       : this.read(typeof afterSeq === 'number' ? afterSeq : 0, limit)
   }
 }
-
-export function isDurableEvent(event: Pick<TaskEvent, 'kind' | 'type' | 'data' | 'durability' | 'durable'>) {
-  return isTaskEventDurable(event)
-}

@@ -33,10 +33,6 @@ export interface HotPointer {
 // L1 载荷通道目录名是历史既定的 hot-app（§2.1）
 const CHANNEL_DIR_NAMES: Record<HotChannel, string> = { renderer: 'hot-renderer', payload: 'hot-app' }
 
-export function channelDirName(channel: HotChannel): string {
-  return CHANNEL_DIR_NAMES[channel]
-}
-
 export function channelRoot(userDataDir: string, channel: HotChannel): string {
   return path.join(userDataDir, CHANNEL_DIR_NAMES[channel])
 }
