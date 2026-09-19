@@ -101,11 +101,10 @@ src/renderer/src/pet/assets/<packId>/
 
 ```json
 {
-  "name": "默认像素猫",
-  "frameSize": { "width": 64, "height": 64 },
+  "frameSize": [64, 64],
   "states": {
-    "idle":   { "frames": ["idle_0.png", "idle_1.png"], "fps": 6, "loop": true,
-                "next": [{ "state": "walk", "weight": 3 }, { "state": "sleep", "weight": 1 }] },
+    "idle":   { "frames": ["idle_0.png", "idle_1.png"], "fps": 6, "loop": true, "afterSec": 6,
+                "next": [{ "to": "walk", "weight": 3 }, { "to": "sleep", "weight": 1 }] },
     "walk":   { "frames": ["walk_0.png", "walk_1.png"], "fps": 10, "loop": true, "next": [] },
     "fall":   { "frames": ["fall_0.png"], "fps": 8, "loop": true, "next": [] },
     "dragged":{ "frames": ["dragged_0.png"], "fps": 8, "loop": true, "next": [] },
@@ -114,23 +113,25 @@ src/renderer/src/pet/assets/<packId>/
     "think":  { "frames": ["think_0.png", "think_1.png"], "fps": 6, "loop": true, "next": [] }
   },
   "movement": { "walkSpeedPx": 40, "gravity": 1200, "edgeBehavior": "turn" },
-  "bubble": { "offset": { "x": 0, "y": -56 } }
+  "bubble": { "offset": [0, -56] }
 }
 ```
 
+> 帧尺寸建议做 **64×64 正方形**：内置渲染舞台按 64px 精灵开孔，非 64×64 的帧会被等比缩放塞进 64px 方框（配合 §3 的尺寸档位整体放大）。上面的样例经 `validatePetManifest` 实测通过，可直接抄。
+
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `name` | 字符串 | 素材包显示名，出现在设置面板的「素材包」下拉项里。 |
-| `frameSize` | 对象 | 单帧尺寸，含 `width` 与 `height`（像素）。同一包内所有帧应保持一致，宠物窗口按此尺寸开孔。 |
-| `states` | 对象 | 状态表，键为**状态名**，值为该状态的定义。七态语义见 4.3。 |
+| `frameSize` | 数字二元组 | 单帧尺寸 `[宽, 高]`（像素），如 `[64, 64]`。同一包内所有帧应保持一致。 |
+| `states` | 对象 | 状态表，键为**状态名**，值为该状态的定义。七态必需；`eat` 为可选扩展态（见 4.3）。 |
 | `states.<id>.frames` | 字符串数组 | 该状态的图片帧**文件名**，按顺序播放。单帧也行（数组只写一个）。 |
 | `states.<id>.fps` | 数字 | 帧率：每秒播放几帧。越大动得越快，与移动速度无关。 |
 | `states.<id>.loop` | 布尔 | 是否循环播放。`false` 表示播完最后一帧就停在末帧（适合一次性的高兴、惊讶）。 |
-| `states.<id>.next` | 数组 | **加权转移表**：本状态播放到该切换时，按权重随机挑选下一个状态。每项形如 `{ "state": "walk", "weight": 3 }`。空数组 `[]` 表示"不由动画自己决定去哪儿"（多用于 `walk` / `fall` / `dragged` 等由物理或交互驱动的状态）。 |
+| `states.<id>.afterSec` | 数字（可选） | 循环态的自主转移秒数：播满该时长后按 `next` 加权挑下一个状态。省略时用包内默认节律。 |
+| `states.<id>.next` | 数组 | **加权转移表**：本状态播放到该切换时，按权重随机挑选下一个状态。每项形如 `{ "to": "walk", "weight": 3 }`（注意键名是 `to` 不是 `state`）。空数组 `[]` 表示"不由动画自己决定去哪儿"（多用于 `walk` / `fall` / `dragged` 等由物理或交互驱动的状态）。 |
 | `movement.walkSpeedPx` | 数字 | 走动速度，单位**像素/秒**。越大走得越快。 |
 | `movement.gravity` | 数字 | 重力加速度，单位**像素/秒²**。被甩出或从边缘落下时决定下坠快慢，也决定抛掷手感。 |
-| `movement.edgeBehavior` | 字符串 | 走到屏幕左/右边缘时的处理：转向（如 `"turn"`）或直接停下（如 `"stop"`）。 |
-| `bubble.offset` | 对象 | 台词气泡相对宠物左上角的偏移量（`x` / `y`，像素，`y` 为负表示在宠物上方）。用来微调气泡位置，避免压住宠物的头。 |
+| `movement.edgeBehavior` | 字符串 | 走到屏幕左/右边缘时的处理：目前支持转向（`"turn"`）。 |
+| `bubble.offset` | 数字二元组 | 台词气泡相对精灵左上角的偏移量 `[x, y]`（像素，`y` 为负表示在宠物上方）。用来微调气泡位置，避免压住宠物的头。 |
 
 **加权转移怎么算**：某个状态的 `next` 里各项权重相加为总权重，每项被选中的概率 = 自身权重 ÷ 总权重。上例 `idle` 的 `next` 总权重为 4，即 75% 概率转 `walk`、25% 概率转 `sleep`。各项权重全为 0 时视为不转移。
 
