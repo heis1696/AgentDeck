@@ -40,3 +40,6 @@ gui-test-screenshots/
 # On-demand rendered dependency graph (regenerate via npm run graph:view)
 docs/graph/deps.html
 docs/graph/deps-3d.html
+
+# 本地报错截图等杂项
+bugs/

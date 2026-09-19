@@ -194,7 +194,8 @@ export class PetWindowController {
       this.drag.history.push({ t: Date.now(), x, y })
       const cutoff = Date.now() - VELOCITY_WINDOW_MS * 3
       this.drag.history = this.drag.history.filter((item) => item.t >= cutoff)
-      this.window!.setPosition(x, y)
+      // setPosition 只收整数：显示缩放非 100% 时 clientY 带小数，不取整直接抛 conversion failure
+      this.window!.setPosition(Math.round(x), Math.round(y))
       this.push('pet:drag', { x, y } satisfies PetDragPosition)
     }
     follow()
