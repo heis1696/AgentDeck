@@ -103,6 +103,8 @@ export function App() {
   }, [tasks])
   useEffect(() => bridge.tasks.onDeleted((id) => closeTab(id)), [tabs, activeId])
   useEffect(() => bridge.tasks.onFocusTask((id) => openTask(id)), [])
+  // 桌宠右键菜单「打开设置」：主窗被派发到设置页（常规分区）
+  useEffect(() => bridge.pet.onOpenSettings(() => openSettings('general')), [])
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       const mod = event.ctrlKey || event.metaKey

@@ -62,6 +62,8 @@ export function parsePetWindowEvent(value: unknown): PetWindowEvent | null {
       return { type: 'drag-end' }
     case 'chat':
       return typeof raw.open === 'boolean' ? { type: 'chat', open: raw.open } : null
+    case 'open-settings':
+      return { type: 'open-settings' }
     default:
       return null
   }

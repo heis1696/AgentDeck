@@ -80,6 +80,8 @@ export function PetStage() {
   const [chatBusy, setChatBusy] = useState(false)
   const [chatLog, setChatLog] = useState<Array<{ role: 'user' | 'pet'; text: string }>>([])
   const chatInputRef = useRef<HTMLInputElement | null>(null)
+  // 右键菜单（C 期）：自绘 DOM；pack 子菜单列出可用素材包
+  const [menu, setMenu] = useState<{ x: number; y: number; packOpen: boolean } | null>(null)
 
   // pet-mode 隔离：透明窗背景不走主 UI 的画布底色
   useEffect(() => {
@@ -231,6 +233,34 @@ export function PetStage() {
     openChat()
   }
 
+  // —— 右键菜单（C 期）：聊天 / 打开设置 / 切换素材包 / 隐藏桌宠 ——
+  useEffect(() => {
+    if (!menu) return
+    const dismiss = () => setMenu(null)
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') dismiss() }
+    window.addEventListener('pointerdown', dismiss)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('pointerdown', dismiss)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [menu])
+  const onContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault()
+    // 菜单弹在光标处并 clamp 进窗体（窗只有 220 宽，菜单得往左上收）
+    const x = Math.min(e.clientX, PET_WINDOW_WIDTH - 140)
+    const y = Math.min(e.clientY, PET_WINDOW_HEIGHT - 132)
+    setMenu({ x: Math.max(x, 4), y: Math.max(y, 4), packOpen: false })
+  }
+  const openSettingsFromMenu = () => {
+    setMenu(null)
+    bridge.pet.windowEvent({ type: 'open-settings' })
+  }
+  const hidePet = () => {
+    setMenu(null)
+    void bridge.pet.setEnabled(false)
+  }
+
   // —— 聊天面板：真 AI 脑（pet:send-chat → persona+历史 → LLM；失败主进程兜底 pet-lines）——
   const openChat = () => {
     setChatOpen(true)
@@ -263,7 +293,7 @@ export function PetStage() {
   const sprite = petSpriteRect()
   const bubbleOffset = assetsRef.current.manifest.bubble.offset
   return (
-    <div className="pet-stage">
+    <div className="pet-stage" onContextMenu={onContextMenu}>
       <div
         className={`pet-sprite ${dragging ? 'dragging' : ''}`}
         style={{ left: sprite.left, top: sprite.top, width: sprite.width, height: sprite.height }}
@@ -301,6 +331,35 @@ export function PetStage() {
             />
             <button type="submit" disabled={!chatDraft.trim() || chatBusy}>{chatBusy ? '思考中…' : '发送'}</button>
           </form>
+        </div>
+      )}
+      {menu && (
+        <div className="pet-menu" style={{ left: menu.x, top: menu.y }} onPointerDown={(e) => e.stopPropagation()}>
+          <button className="pet-menu-item" onClick={() => { setMenu(null); openChat() }}>聊天</button>
+          <button className="pet-menu-item" onClick={openSettingsFromMenu}>打开设置</button>
+          <div className="pet-menu-sub">
+            <button className="pet-menu-item" onClick={() => setMenu((cur) => (cur ? { ...cur, packOpen: !cur.packOpen } : cur))}>
+              切换素材包 ▸
+            </button>
+            {menu.packOpen && (
+              <div className="pet-menu-submenu">
+                {(snapshotRef.current?.packs ?? []).filter((pack) => pack.ok).map((pack) => (
+                  <button
+                    key={pack.id}
+                    className="pet-menu-item"
+                    onClick={() => {
+                      setMenu(null)
+                      void bridge.pet.setPack(pack.id)
+                    }}
+                  >
+                    {pack.builtin ? pack.id : `${pack.id}（用户）`}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="pet-menu-sep" />
+          <button className="pet-menu-item danger" onClick={hidePet}>隐藏桌宠</button>
         </div>
       )}
     </div>

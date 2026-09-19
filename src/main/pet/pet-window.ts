@@ -130,6 +130,10 @@ export class PetWindowController {
       case 'chat':
         this.setChatOpen(event.open)
         break
+      case 'open-settings':
+        // 右键菜单「打开设置」：主窗可能在托盘里，先 show 再派发跳页
+        this.focusMainWindow('pet:open-settings')
+        break
     }
   }
 
@@ -222,9 +226,12 @@ export class PetWindowController {
     this.window!.webContents.send(channel, payload)
   }
 
-  /** 渲染层面板等需要主窗（设置页聚焦）时用 */
-  focusMainWindow(): void {
-    this.deps.getWindow()?.show()
-    this.deps.getWindow()?.focus()
+  /** 渲染层跳转主窗的入口：show + focus + 频道通知（设置页监听 pet:open-settings） */
+  focusMainWindow(channel?: string): void {
+    const main = this.deps.getWindow()
+    if (!main) return
+    main.show()
+    main.focus()
+    if (channel) main.webContents.send(channel, null)
   }
 }

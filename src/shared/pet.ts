@@ -273,6 +273,8 @@ export type PetWindowEvent =
   | { type: 'drag-start'; offsetX: number; offsetY: number }
   | { type: 'drag-end' }
   | { type: 'chat'; open: boolean }
+  /** 右键菜单「打开设置」：聚焦主窗并跳设置页（C 期） */
+  | { type: 'open-settings' }
 
 /** 主进程 → 渲染层：拖拽中的窗体权威位置（拖拽期间渲染层物理挂起） */
 export interface PetDragPosition {
