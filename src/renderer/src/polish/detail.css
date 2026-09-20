@@ -14,6 +14,17 @@
   container-name: detail-left;
 }
 
+/* Let the shared page canvas show through content gaps and reading surfaces. */
+.detail-page .detail,
+.detail-page .detail-left,
+.detail-page .detail-columns,
+.detail-page .detail-main,
+.detail-page .detail-body,
+.detail-page .detail-body > :is(.chat-wrap, .issue-timeline, .result, .git-pane),
+.detail-page .log.chat {
+  background: transparent;
+}
+
 /* Task detail uses the shared header contract with a stacked metadata variant. */
 .detail-left > header.view-header[data-page-header] { align-items: flex-start; }
 .detail-left > header.view-header[data-page-header] > .view-header-main {
@@ -639,7 +650,7 @@ html.light .tab.active {
 /* ============================================================
    0.22.0 详情页升级 Wave
    目标：密度（头部/页签/时间线/队员条收一行）、层级（运行檐 + 状态语义）、
-   运行反馈（实时用时、不定量进度檐）、长内容阅读（吸顶提问、回合页眉、
+   运行反馈（实时用时、不定量进度檐）、长内容阅读（回合页眉、
    回到最新、逐气泡复制）、窄窗（换行/收窄/让位）、键盘可达
    （tabs 模型、Ctrl+1..4、分隔线/代码/时间线全部可聚焦）。
    约定不变：只覆盖详情页类名，颜色全部走令牌，动效 ≤180ms 且尊重 reduced-motion。
@@ -860,13 +871,6 @@ html.light .tab.active {
 .detail-body .turn:hover .turn-rewind-inline,
 .turn-rewind-inline:focus-visible { opacity: 1; }
 .turn-rewind-inline:hover { border-color: var(--border-strong); color: var(--text); }
-/* 读长回复时提问不丢：提问气泡在自己的回合内吸顶（不透明底，避免正文透出） */
-.detail-body .log.chat .bubble.user {
-  position: sticky;
-  top: 6px;
-  z-index: 5;
-  background: color-mix(in srgb, var(--accent) 15%, var(--bg));
-}
 /* 气泡动作：默认隐形，hover / 键盘进入时浮在气泡顶缘（不占正文版面） */
 .detail-body .bubble { position: relative; }
 .detail-body .bubble-tools {

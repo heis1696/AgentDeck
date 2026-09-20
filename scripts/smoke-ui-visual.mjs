@@ -102,6 +102,13 @@ if (process.argv.includes('--serve')) {
         await page.evaluate(() => { const { ui, mock } = window.__visual; ui.setTasks(mock.store.tasks); ui.openTask('visual-0') })
         await page.waitForSelector('.detail-left > .view-header')
         await page.locator('#detail-tab-log').click()
+        const detailCanvas = await page.evaluate(() => ({
+          promptPosition: getComputedStyle(document.querySelector('.bubble.user')).position,
+          detail: getComputedStyle(document.querySelector('.detail')).backgroundColor,
+          content: getComputedStyle(document.querySelector('.detail-main')).backgroundColor
+        }))
+        check(detailCanvas.promptPosition !== 'sticky' && detailCanvas.promptPosition !== 'fixed', `${width}/${theme}: user bubbles stay in the scrolling flow`, detailCanvas)
+        check(detailCanvas.detail === 'rgba(0, 0, 0, 0)' && detailCanvas.content === 'rgba(0, 0, 0, 0)', `${width}/${theme}: detail content exposes the shared background canvas`, detailCanvas)
         check(await page.locator('.title-edit').evaluate((el) => getComputedStyle(el).opacity === '1'), `${width}/${theme}: rename button visible`)
         const scrollBefore = await page.locator('.detail').evaluate((el) => el.scrollTop)
         await page.screenshot({ path: path.join(shots, `${width}-${theme}-detail.png`) })
@@ -296,6 +303,26 @@ if (process.argv.includes('--serve')) {
         await page.keyboard.press('Escape')
       }
     }
+    await page.evaluate(() => {
+      const now = Date.now()
+      window.agentdeck.tasks.events = async () => [
+        { seq: 1, ts: now, kind: 'user', text: 'Long-response scroll regression' },
+        { seq: 2, ts: now + 1, kind: 'final', text: Array.from({ length: 80 }, (_, i) => `Response paragraph ${i}`).join('\n\n') }
+      ]
+      window.__visual.ui.navigate('board')
+    })
+    await page.locator('.board-page').waitFor()
+    await page.evaluate(() => window.__visual.ui.openTask('visual-0'))
+    await page.locator('#detail-tab-log').click()
+    const scrollLog = page.locator('.detail-main .log.chat')
+    await scrollLog.evaluate((log) => { log.scrollTop = 0 })
+    await page.waitForTimeout(100)
+    const promptBefore = await page.locator('.detail-main .bubble.user').evaluate((bubble) => bubble.getBoundingClientRect().top)
+    await scrollLog.evaluate((log) => { log.scrollTop = 180 })
+    await page.waitForTimeout(100)
+    const promptAfter = await page.locator('.detail-main .bubble.user').evaluate((bubble) => bubble.getBoundingClientRect().top)
+    check(Math.abs(promptBefore - promptAfter - 180) <= 2, 'Scrolling long responses moves the user bubble by the full scroll distance', { promptBefore, promptAfter })
+    await page.screenshot({ path: path.join(shots, '980-dark-user-bubble-scroll.png') })
     await fs.writeFile(path.join(shots, 'metrics.json'), JSON.stringify({ metrics, checks, errors }, null, 2))
     const ordered = pages.flatMap(([view]) => images.filter((item) => item.width === 1440 && item.view === view))
     const cells = await Promise.all(ordered.map(async (item) => `<figure><figcaption>${item.theme} / ${item.view}</figcaption><img src="data:image/png;base64,${(await fs.readFile(path.join(shots, item.name))).toString('base64')}"></figure>`))
