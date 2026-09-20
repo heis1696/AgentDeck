@@ -44,10 +44,10 @@ html.pet-mode #root {
   image-rendering: pixelated;
 }
 
-/* 台词气泡：锚点 = 精灵左上角 + manifest.bubble.offset */
+/* 台词气泡：锚点 = 精灵左上角 + manifest.bubble.offset；长台词换行不溢出 */
 .pet-bubble {
   position: absolute;
-  max-width: 196px;
+  max-width: 180px;
   padding: 6px 10px;
   background: var(--bg-raised);
   border: 1px solid var(--border-strong);
@@ -56,9 +56,38 @@ html.pet-mode #root {
   color: var(--text);
   font-size: var(--text-label);
   line-height: 1.45;
-  white-space: nowrap;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
   pointer-events: none;
   z-index: 3;
+}
+
+/* 悬停状态栏：精灵上方浮出（悬停 ~800ms），只读展示不影响穿透与点击 */
+.pet-status-bar {
+  position: absolute;
+  transform: translate(-50%, -100%);
+  max-width: 200px;
+  padding: 6px 9px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--menu-shadow);
+  color: var(--text);
+  font-size: var(--text-caption);
+  line-height: 1.5;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  z-index: 5;
+}
+.pet-status-bar .pet-status-row.primary {
+  color: var(--accent);
+}
+.pet-status-bar .pet-status-row + .pet-status-row {
+  margin-top: 2px;
+  color: var(--text-dim);
 }
 
 /* 聊天面板：铺在窗体下半部（窗体小，一切从简） */
