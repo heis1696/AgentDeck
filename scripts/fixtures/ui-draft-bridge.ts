@@ -9,7 +9,7 @@
  * 本模块必须先于渲染层模块执行（ui-draft-harness.tsx 里排第一个 import）：
  * api.ts 的 bridge 常量在模块初始化时读 window.agentdeck。
  */
-import type { AgentDeckApi, AgentInfo } from '../../src/shared/contracts'
+import type { AgentDeckApi, AgentInfo, PresetInfo } from '../../src/shared/contracts'
 import type { Goal, Issue, Meeting, Task, TaskEvent } from '../../src/shared/types'
 
 export interface DraftBridgeTaskSeed {
@@ -33,8 +33,8 @@ interface IdListener { (id: string): void }
 interface IssueListener { (payload: { taskId: string; issueId: string; issue: Issue | null; run: null }): void }
 
 export interface DraftBridge {
-  store: { tasks: Task[]; issues: Issue[]; agents: AgentInfo[] }
-  calls: { list: number; get: number; start: number }
+  store: { tasks: Task[]; issues: Issue[]; agents: AgentInfo[]; presets: PresetInfo[] }
+  calls: { list: number; get: number; start: number; agentSave: number; presetSave: number }
   /** tasks.list 全局延迟（ms）；listScript 优先 */
   listDelayMs: number
   /** 按调用次序脚本化的 tasks.list 响应（shift 消费；snapshot 缺省取当时 store 快照）；用尽后回退全局延迟 */
@@ -67,10 +67,11 @@ const store = {
     { id: 'agent_c1', name: '甲队长', backend: 'zcode', color: '#4a90d9', role: '队长' },
     { id: 'agent_c2', name: '乙队长', backend: 'zcode', color: '#b8860b', role: '队长' },
     { id: 'agent_c3', name: '丙队长', backend: 'zcode', color: '#9467bd', role: '队长' }
-  ] as AgentInfo[]
+  ] as AgentInfo[],
+  presets: [] as PresetInfo[]
 }
 
-const calls = { list: 0, get: 0, start: 0 }
+const calls = { list: 0, get: 0, start: 0, agentSave: 0, presetSave: 0 }
 let listDelayMs = 0
 const listScript: Array<{ snapshot?: Task[]; delayMs?: number; error?: string }> = []
 
@@ -160,6 +161,8 @@ const bridgeMock: DraftBridge = {
     calls.list = 0
     calls.get = 0
     calls.start = 0
+    calls.agentSave = 0
+    calls.presetSave = 0
     listDelayMs = 0
     listScript.length = 0
     listeners.taskUpdated.clear()
@@ -289,7 +292,7 @@ const api = {
   notify: () => undefined,
   agents: {
     list: () => settle(store.agents.map((agent) => ({ ...agent }))),
-    save: (list: AgentInfo[]) => settle(list),
+    save: (list: AgentInfo[]) => { calls.agentSave++; store.agents = list.map((agent) => ({ ...agent })); return settle(store.agents.map((agent) => ({ ...agent }))) },
     models: () => settle({ backend: 'zcode', source: 'freeform', models: [] }),
     draft: settle as unknown as AgentDeckApi['agents']['draft'],
     improve: settle as unknown as AgentDeckApi['agents']['improve'],
@@ -298,8 +301,8 @@ const api = {
     exportMd: settle as unknown as AgentDeckApi['agents']['exportMd']
   },
   presets: {
-    list: () => settle([]),
-    save: (list: never[]) => settle(list) as unknown as AgentDeckApi['presets']['save'],
+    list: () => settle(store.presets.map((preset) => ({ ...preset }))),
+    save: (list: PresetInfo[]) => { calls.presetSave++; store.presets = list.map((preset) => ({ ...preset })); return settle(store.presets.map((preset) => ({ ...preset }))) },
     newId: () => settle('preset_new'),
     models: () => settle({ backend: 'zcode', source: 'freeform', models: [] })
   },

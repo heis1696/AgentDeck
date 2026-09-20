@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { bridge, type AgentInfo as Agent, type AgentModelCatalog, type ApiPresetInfo as Preset, type AgentDraft, type ImproveOutcome, type EvaluateOutcome } from '../api'
-import { Users, KeyRound, Sparkles, X, RefreshCw, Network, Download, Upload } from 'lucide-react'
+import { Users, KeyRound, Sparkles, X, RefreshCw, Network, Download, Upload, Search } from 'lucide-react'
 import { useInteractionLayer } from '../hooks/useInteractionLayer'
 import { ui, isComposingKey } from '../ui/interaction-center'
 import { Menu } from '../ui/Menu'
@@ -32,12 +32,21 @@ export function AgentsView() {
   const [presetsRefreshing, setPresetsRefreshing] = useState(true)
   const [agentsSaving, setAgentsSaving] = useState(false)
   const [presetsSaving, setPresetsSaving] = useState(false)
+  const [agentQuery, setAgentQuery] = useState('')
+  const [creatingPreset, setCreatingPreset] = useState(false)
+  const [testingPresetId, setTestingPresetId] = useState<string | null>(null)
   const agentsSavingRef = useRef(false)
   const presetsSavingRef = useRef(false)
+  const deletingAgentRef = useRef(new Set<string>())
+  const deletingPresetRef = useRef(new Set<string>())
   const agentsSnapshotRef = useRef<Agent[] | null>(null)
   const presetsSnapshotRef = useRef<Preset[] | null>(null)
   const agentsRequestRef = useRef(0)
   const presetsRequestRef = useRef(0)
+  const modelRequestRef = useRef(0)
+  const catalogBusyRef = useRef(false)
+  const presetModelRequestRef = useRef(new Map<string, number>())
+  const presetModelBusyRef = useRef(new Set<string>())
   const [editing, setEditing] = useState<Agent | null>(null)
   const [editingPreset, setEditingPreset] = useState<Preset | null>(null)
   /** 模型目录：选了预设 → 从预设在线拉取；否则用平台目录（zcode）/ 预设 */
@@ -120,22 +129,43 @@ export function AgentsView() {
   }, [])
 
   const refreshCatalog = (backend: string, presetId?: string) => {
+    const request = ++modelRequestRef.current
+    catalogBusyRef.current = false
     setCatalog(null)
     if (!backend) return
     const source = presetId ? bridge.presets.models(presetId) : bridge.agents.models(backend)
-    source.then((c) => setCatalog(c)).catch(() => setCatalog(null))
+    source.then((c) => { if (request === modelRequestRef.current) setCatalog(c) }).catch(() => { if (request === modelRequestRef.current) setCatalog(null) })
   }
 
   useEffect(() => {
-    if (!editing) return
+    if (!editing) {
+      ++modelRequestRef.current
+      catalogBusyRef.current = false
+      setCatalog(null)
+      return
+    }
     refreshCatalog(editing.backend, editing.presetId)
   }, [editing?.backend, editing?.presetId])
 
   const refetchCatalog = () => {
-    if (!editing) return
+    if (!editing || catalogBusyRef.current) return
+    const request = ++modelRequestRef.current
+    catalogBusyRef.current = true
     setFetching(true)
-    const source = editing.presetId ? bridge.presets.models(editing.presetId) : bridge.agents.models(editing.backend)
-    source.then((c) => { setCatalog(c); ui.toast.success(`获取到 ${c.models.length} 个模型`) }).catch((e) => ui.toast.error('获取模型失败: ' + (e instanceof Error ? e.message : String(e)))).finally(() => setFetching(false))
+    const target = { backend: editing.backend, presetId: editing.presetId }
+    const source = target.presetId ? bridge.presets.models(target.presetId) : bridge.agents.models(target.backend)
+    source.then((c) => {
+      if (request !== modelRequestRef.current) return
+      setCatalog(c)
+      ui.toast.success(`获取到 ${c.models.length} 个模型`)
+    }).catch((e) => {
+      if (request === modelRequestRef.current) ui.toast.error('获取模型失败: ' + (e instanceof Error ? e.message : String(e)))
+    }).finally(() => {
+      if (request === modelRequestRef.current) {
+        catalogBusyRef.current = false
+        setFetching(false)
+      }
+    })
   }
 
   const canWriteAgents = canPersistList(agentsLoadState, agentsSnapshotRef.current, agentsRefreshing) && !agentsError && !agentsSaving
@@ -197,7 +227,18 @@ export function AgentsView() {
     })
     if (saved) setEditing(null)
   }
-  const remove = (id: string) => void saveAgents_((current) => current.filter((a) => a.id !== id))
+  const remove = async (id: string) => {
+    if (deletingAgentRef.current.has(id)) return
+    const target = agents.find((agent) => agent.id === id)
+    if (!target) return
+    deletingAgentRef.current.add(id)
+    try {
+      if (!await ui.confirm({ title: `删除 Agent「${target.name}」？`, body: '删除只移除本机队伍定义，不会删除已有任务或执行记录。', danger: true, confirmText: '删除' })) return
+      await saveAgents_((current) => current.filter((a) => a.id !== id))
+    } finally {
+      deletingAgentRef.current.delete(id)
+    }
+  }
   const add = () =>
     canWriteAgents && setEditing({ id: `ag_${Date.now().toString(36)}`, name: '', backend: 'zcode', color: '#4f8cff', note: '', role: '', systemPrompt: '', subordinates: [], model: '', presetId: '' })
   const openDraft = () => {
@@ -352,12 +393,20 @@ export function AgentsView() {
     }
   }
   const addPreset = async () => {
+    if (creatingPreset) return
     if (!canWritePresets) {
       ui.toast.error('预设列表尚未成功加载，暂不能保存')
       return
     }
-    const id = await bridge.presets.newId()
-    setEditingPreset({ id, name: '', backend: 'zcode', baseURL: '', apiKey: '', note: '', createdAt: Date.now() })
+    setCreatingPreset(true)
+    try {
+      const id = await bridge.presets.newId()
+      setEditingPreset({ id, name: '', backend: 'zcode', baseURL: '', apiKey: '', note: '', createdAt: Date.now() })
+    } catch (cause) {
+      ui.toast.error('新建预设失败：' + (cause instanceof Error ? cause.message : String(cause)))
+    } finally {
+      setCreatingPreset(false)
+    }
   }
   const commitPreset = async () => {
     if (!editingPreset) return
@@ -368,17 +417,40 @@ export function AgentsView() {
     if (saved) setEditingPreset(null)
   }
   const removePreset = async (id: string) => {
+    if (deletingPresetRef.current.has(id)) return
     if (!canWriteAgents || !canWritePresets) {
       ui.toast.error('Agent 和预设列表尚未成功加载，暂不能保存')
       return
     }
-    // Detach only this preset; retain agents and their unrelated preset bindings.
-    const agentsSaved = await saveAgents_((current) => current.map((a) => a.presetId === id ? { ...a, presetId: undefined } : a))
-    if (agentsSaved) await savePresets_((current) => current.filter((p) => p.id !== id))
+    const preset = presets.find((item) => item.id === id)
+    if (!preset) return
+    const affected = agents.filter((agent) => agent.presetId === id).length
+    deletingPresetRef.current.add(id)
+    try {
+      if (!await ui.confirm({ title: `删除 API 预设「${preset.name}」？`, body: affected ? `将同时解除 ${affected} 个 Agent 的预设绑定；Agent 本身不会删除。` : '没有 Agent 使用此预设。', danger: true, confirmText: '删除' })) return
+      // Detach only this preset; retain agents and their unrelated preset bindings.
+      const agentsSaved = await saveAgents_((current) => current.map((a) => a.presetId === id ? { ...a, presetId: undefined } : a))
+      if (agentsSaved) await savePresets_((current) => current.filter((p) => p.id !== id))
+    } finally {
+      deletingPresetRef.current.delete(id)
+    }
   }
   const testPreset = (p: Preset) => {
+    if (presetModelBusyRef.current.has(p.id)) return
+    presetModelBusyRef.current.add(p.id)
+    const request = (presetModelRequestRef.current.get(p.id) ?? 0) + 1
+    presetModelRequestRef.current.set(p.id, request)
+    setTestingPresetId(p.id)
     ui.toast.info(`正在从 ${p.name} 拉取模型…`)
-    bridge.presets.models(p.id).then((c) => ui.toast.success(`${p.name}：${c.models.length} 个模型（${c.models.slice(0, 3).join('、')}${c.models.length > 3 ? '…' : ''}）`)).catch((e) => ui.toast.error('拉取失败: ' + (e instanceof Error ? e.message : String(e))))
+    bridge.presets.models(p.id).then((c) => {
+      if (presetModelRequestRef.current.get(p.id) !== request) return
+      ui.toast.success(`${p.name}：${c.models.length} 个模型（${c.models.slice(0, 3).join('、')}${c.models.length > 3 ? '…' : ''}）`)
+    }).catch((e) => {
+      if (presetModelRequestRef.current.get(p.id) === request) ui.toast.error('拉取失败: ' + (e instanceof Error ? e.message : String(e)))
+    }).finally(() => {
+      presetModelBusyRef.current.delete(p.id)
+      if (presetModelRequestRef.current.get(p.id) === request) setTestingPresetId(null)
+    })
   }
 
   /** 确认页将填入的字段数（名字恒填入）：用于页脚计数与"只填入名字"按钮文案，防误取消全部字段 */
@@ -397,10 +469,14 @@ export function AgentsView() {
     : []
   const editingPresetRef = editing?.presetId ? presets.find((p) => p.id === editing.presetId) : undefined
   const backendPresets = presets.filter((p) => p.backend === editing?.backend)
+  const filteredAgents = agents.filter((agent) => {
+    const query = agentQuery.trim().toLowerCase()
+    return !query || [agent.name, agent.role, agent.backend].filter(Boolean).join(' ').toLowerCase().includes(query)
+  })
 
   const actions = (
     <>
-      <button className="btn" onClick={addPreset} disabled={!canWritePresets}><KeyRound size={14} /> 新建 API 预设</button>
+      <button className="btn" onClick={() => void addPreset()} disabled={!canWritePresets || creatingPreset}><KeyRound size={14} /> {creatingPreset ? '准备中…' : '新建 API 预设'}</button>
       <button className="btn" onClick={() => void importMd()} disabled={!canWriteAgents}><Upload size={14} /> 导入 .md</button>
       <button className="btn" onClick={openDraft} disabled={!canWriteAgents}>✦ 从描述生成</button>
       <button className="btn primary" onClick={add} disabled={!canWriteAgents}>＋ 新建 Agent</button>
@@ -426,8 +502,8 @@ export function AgentsView() {
                 <span className="tm-role">API 连接档案</span>
               </div>
               <div className="tm-acts">
-                <button className="tm-act" title="拉取模型列表" onClick={(e) => { e.stopPropagation(); testPreset(p) }}><RefreshCw size={13} /></button>
-                <button className="tm-act tm-act-danger" title="删除" disabled={!canWriteAgents || !canWritePresets} onClick={(e) => { e.stopPropagation(); void removePreset(p.id) }}><X size={13} /></button>
+                <button className="tm-act" title="拉取模型列表" disabled={testingPresetId === p.id} onClick={(e) => { e.stopPropagation(); testPreset(p) }}><RefreshCw size={13} className={testingPresetId === p.id ? 'spin' : undefined} /></button>
+                <button className="tm-act tm-act-danger" title="删除" disabled={!canWriteAgents || !canWritePresets || deletingPresetRef.current.has(p.id)} onClick={(e) => { e.stopPropagation(); void removePreset(p.id) }}><X size={13} /></button>
               </div>
             </div>
             <div className="tm-badges">
@@ -450,14 +526,14 @@ export function AgentsView() {
     <>
       <section className="tm-section">
         <div className="tm-section-head">
-          <h3><Users size={13} className="tm-hicon tm-hicon-accent" />队员</h3>
-          <span className="tm-section-desc">勾选「可驱使」的 Agent 成为领队：对话中可自行派发子任务，最多三层。</span>
+          <div className="tm-section-title"><h3><Users size={13} className="tm-hicon tm-hicon-accent" />队员</h3><span className="tm-section-desc">勾选「可驱使」的 Agent 成为领队：对话中可自行派发子任务，最多三层。</span></div>
+          <label className="tm-filter"><Search size={13} aria-hidden="true" /><input aria-label="筛选 Agent" value={agentQuery} onChange={(event) => setAgentQuery(event.target.value)} placeholder="筛选名称、角色、后端" /></label>
         </div>
         <div className="tm-grid">
           {agentsLoadState === 'loading' && <EmptyState compact icon={Users} title="Agent 加载中" description="正在读取队伍列表。" />}
           {agentsLoadState === 'error' && agentsSnapshotRef.current === null && <EmptyState compact icon={Users} title="Agent 加载失败" description={agentsError ?? '无法读取 Agent 列表。'} action={<button className="btn" type="button" onClick={() => void loadAgents()}><RefreshCw size={13} /> 重试</button>} />}
           {agentsError && agentsSnapshotRef.current !== null && <div className="data-state-banner data-state-stale" role="status"><RefreshCw size={13} /><span>Agent 列表显示上次成功快照：{agentsError}</span><button className="btn" type="button" onClick={() => void loadAgents()} disabled={agentsRefreshing}><RefreshCw size={12} className={agentsRefreshing ? 'spin' : ''} /> 重试</button></div>}
-          {agents.map((a) => {
+          {filteredAgents.map((a) => {
             const preset = presets.find((p) => p.id === a.presetId)
             return (
               <div key={a.id} className="tm-card" role="button" aria-disabled={!canWriteAgents} tabIndex={canWriteAgents ? 0 : -1} onClick={() => { if (canWriteAgents) setEditing(a) }} onKeyDown={(e) => { if (isComposingKey(e.nativeEvent) || !canWriteAgents) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setEditing(a) } }}>
@@ -470,7 +546,7 @@ export function AgentsView() {
                   <div className="tm-acts">
                     {!isForgeAgent(a) && <button className="tm-act" title="导出为 .md（Claude subagent 格式）" onClick={(e) => { e.stopPropagation(); void exportMd(a) }}><Download size={13} /></button>}
                     {!isForgeAgent(a) && <button className="tm-act" title="用锻造师改进提示词" disabled={!canWriteAgents} onClick={(e) => { e.stopPropagation(); openImprove(a) }}><Sparkles size={13} /></button>}
-                    <button className="tm-act tm-act-danger" title="删除" disabled={!canWriteAgents} onClick={(e) => { e.stopPropagation(); remove(a.id) }}><X size={13} /></button>
+                    <button className="tm-act tm-act-danger" title="删除" disabled={!canWriteAgents || deletingAgentRef.current.has(a.id)} onClick={(e) => { e.stopPropagation(); void remove(a.id) }}><X size={13} /></button>
                   </div>
                 </div>
                 <div className="tm-badges">
@@ -488,6 +564,13 @@ export function AgentsView() {
               </div>
             )
           })}
+          {agentsLoadState === 'ready' && agents.length > 0 && filteredAgents.length === 0 && (
+            <div className="tm-empty tm-empty-filtered">
+              <Users size={20} />
+              <span>没有匹配的 Agent。</span>
+              <button className="btn" type="button" onClick={() => setAgentQuery('')}>清除筛选</button>
+            </div>
+          )}
           {agentsLoadState === 'ready' && agents.length === 0 && (
             <div className="tm-empty">
               <Users size={20} />

@@ -106,6 +106,21 @@ const button = (text, scope = host) => [...scope.querySelectorAll('button')].fin
 const card = (index) => host.querySelectorAll('.settings-card')[index]
 const field = (label, scope = host) => [...scope.querySelectorAll('label.field')].find((node) => node.querySelector('span')?.textContent.trim().startsWith(label))
 
+/** 推进定时器与微任务：让 deferred promise 解析后的链路跑完 */
+const settle = async (rounds = 3) => {
+  await act(async () => { for (let i = 0; i < rounds; i++) await new Promise((resolve) => setTimeout(resolve, 0)) })
+}
+/** 真实失焦（focus → blur，React 的 onBlur 由 focusout 触发），不是直接调处理器 */
+const blur = (node, label) => act(async () => {
+  assert(node, `blur target exists${label ? `: ${label}` : ''}`)
+  node.focus()
+  node.blur()
+})
+const pressEscape = () => act(async () => {
+  const node = document.activeElement ?? document.body
+  node.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+})
+
 // toast 断言：不改交互中心实现，只记录它实际收到的调用
 const toasts = []
 for (const kind of ['info', 'success', 'error']) {
@@ -173,6 +188,7 @@ try {
   console.log('[2] SettingsView：运行时路径显式保存，检测先保存再探测')
   const settingsEvents = []
   const realSettingsSet = api.settings.set
+const realSettingsGet = api.settings.get
   api.settings.set = async (patch) => { settingsEvents.push({ kind: 'save', patch }); return realSettingsSet(patch) }
   api.settings.probe = async () => { settingsEvents.push({ kind: 'probe' }); return { ok: true, detail: 'zcode.cjs 可用', searched: [] } }
   api.runtimes.snapshot = async () => [runtimeSnapshot('online', 'zcode')]
@@ -250,9 +266,10 @@ try {
   await click(checkBtn, '检查更新（应先保存）')
   assert.deepEqual(updateEvents.map((event) => event.kind), ['save', 'check'], '检查更新必须先落盘 feed 草稿')
   assert.equal(updateEvents[0].patch.updateFeedUrl, 'https://feed.example/new', '保存的是输入框里的地址')
-  assert.equal(lastToast('success').text.includes('已是最新'), true, `检查后无更新要有明确结论（实际 ${lastToast('success')?.text ?? '无'}）`)
+  assert.equal(lastToast('info')?.text.includes('未发现可应用的更新'), true, `检查后无更新要有明确结论（实际 ${lastToast('info')?.text ?? '无'}）`)
+  assert.equal(host.textContent.includes('已是最新'), false, '不声称「已是最新」：逐通道检查失败会被 updater 静默吞掉')
   assert.equal(applyBtn.disabled, true, '无可用更新时应用仍不可用')
-  assert(host.querySelector('[data-update-none]'), '面板内也标注已是最新')
+  assert(host.querySelector('[data-update-none]'), '面板内给出「本次未发现可应用的更新」结论')
 
   checkedSnapshot = { ...baseState, available: { renderer: '0.23.0' } }
   await click(checkBtn, '检查更新（有新版）')
@@ -346,6 +363,181 @@ try {
   assert.equal(host.querySelectorAll('.automation-row').length, 1, '删除后列表已刷新')
   await unmount()
   console.log('PASS AutomationView：空表单复位、失败保留草稿、创建只收敛一次、启停去重、删除需确认')
+
+  /* ---------------- 5. UpdatePanel：失焦保存 / 检查竞态（deferred） ---------------- */
+  console.log('[5] UpdatePanel：失焦保存与检查串行、精确草稿、结论失效、错误快照')
+  const raceState = { ...baseState, available: {} }
+  const feedWrites = []
+  const checks = []
+  let persistedFeed = ''
+  let commitFeedSave = null
+  api.settings.set = (patch) => {
+    feedWrites.push(patch.updateFeedUrl)
+    return new Promise((resolve) => {
+      commitFeedSave = async () => {
+        const next = await realSettingsSet(patch)
+        persistedFeed = next.updateFeedUrl ?? ''
+        resolve(next)
+      }
+    })
+  }
+  api.settings.get = async () => ({ ...await realSettingsGet(), updateFeedUrl: persistedFeed })
+  api.updates.check = async () => { checks.push({ feed: persistedFeed }); return raceState }
+  await mount(UpdatePanel)
+
+  const raceCard = card(1)
+  const raceInput = raceCard.querySelector('input')
+  const raceCheck = button('检查更新')
+  const raceApply = button('开始更新')
+
+  await fill(raceInput, 'https://feed.example/race-a')
+  await blur(raceInput, '真实失焦触发保存')
+  assert.equal(feedWrites.length, 1, '失焦保存已发起（deferred，尚未落盘）')
+  assert.equal(feedWrites[0], 'https://feed.example/race-a', '失焦保存的是输入框里的地址')
+
+  // 关键复现：失焦紧接检查——两次写入必须串行，检查要等这次保存落盘
+  await click(raceCheck, '失焦后立刻检查')
+  assert.equal(feedWrites.length, 1, '检查前的保存并入同一次写入，不重复 IPC')
+  assert.equal(checks.length, 0, '保存没落盘前不发起检查')
+
+  // 保存期间继续编辑：新输入不能被设置广播回写清掉
+  await fill(raceInput, 'https://feed.example/race-b')
+  await act(async () => { commitFeedSave() })
+  await Promise.resolve()
+  await settle()
+  assert.equal(checks.length, 1, '保存落盘后才发起检查')
+  assert.equal(checks[0].feed, 'https://feed.example/race-a', '检查用的是点击那一刻提交的确切草稿')
+  assert.equal(raceInput.value, 'https://feed.example/race-b', '保存期间的新输入保留')
+  assert(host.querySelector('[data-update-stale]'), '显示地址与已查地址不一致时结论失效')
+  assert.equal(raceApply.disabled, true, '地址改动后旧的「开始更新」失效')
+  assert.equal(host.textContent.includes('已是最新'), false, '任何路径都不声称「已是最新」')
+
+  // 显式失败快照：是错误，不是「没有可用更新」
+  api.settings.set = (patch) => { feedWrites.push(patch.updateFeedUrl); return realSettingsSet(patch) }
+  api.updates.check = async () => { checks.push({ feed: persistedFeed }); return { ...baseState, phase: 'failed', error: 'manifest 验签失败' } }
+  await fill(raceInput, 'https://feed.example/error')
+  const toastMark = toasts.length
+  await click(raceCheck, '检查返回失败快照')
+  assert(host.querySelector('[data-update-check-error]').textContent.includes('manifest 验签失败'), '失败快照按错误处理并说明原因')
+  assert(host.querySelector('[data-update-error]'), '状态区也标注失败')
+  assert.equal(host.querySelector('[data-update-none]'), null, '失败快照不得渲染成「没有更新」')
+  assert.equal(lastToast('error').text.includes('检查更新失败'), true, '失败快照产生错误提示')
+  assert.equal(toasts.slice(toastMark).some((item) => item.kind === 'success' && item.text.includes('已开始更新')), false, '失败检查不产生假「已开始更新」')
+  await unmount()
+  console.log('PASS UpdatePanel：失焦/检查串行、精确草稿、结论与操作失效、失败快照按错误处理')
+
+  /* -------------- 6. SettingsView：保存期间编辑 / 探测归属 / 重复探测 -------------- */
+  console.log('[6] SettingsView：保存期间的新输入、探测结果归属已保存路径、干净路径连点')
+  const pathWrites = []
+  const probes = []
+  let commitPathSave = null
+  api.settings.set = (patch) => {
+    pathWrites.push(patch)
+    return new Promise((resolve) => { commitPathSave = async () => resolve(await realSettingsSet(patch)) })
+  }
+  api.settings.probe = async () => { probes.push(Date.now()); return { ok: true, detail: 'zcode.cjs 可用', searched: [] } }
+  api.runtimes.snapshot = async () => [runtimeSnapshot('online', 'zcode')]
+  await mount(SettingsView, { section: 'runtime', onSection() {} })
+
+  const racePathsCard = card(0)
+  const raceZcode = racePathsCard.querySelectorAll('input')[0]
+  const raceSave = button('保存路径', racePathsCard)
+  const raceProbe = button('检测路径可用性', racePathsCard)
+
+  await fill(raceZcode, 'D:\\Late\\zcode.cjs')
+  await click(raceSave, '保存（deferred）')
+  await fill(raceZcode, 'D:\\Late\\zcode-newer.cjs')
+  await act(async () => { commitPathSave() })
+  await Promise.resolve()
+  await settle()
+  assert.equal(raceZcode.value, 'D:\\Late\\zcode-newer.cjs', '保存期间的新输入不被设置广播回写清掉')
+  assert(racePathsCard.querySelector('[data-paths-dirty]'), '新输入仍是待保存状态')
+
+  // 探测结果绑定到这次真正落盘的路径
+  api.settings.set = (patch) => { pathWrites.push(patch); return realSettingsSet(patch) }
+  await click(raceProbe, '检测（先保存最新草稿）')
+  assert.equal(pathWrites[pathWrites.length - 1].zcodePath, 'D:\\Late\\zcode-newer.cjs', '探测前保存的是当前草稿')
+  assert.equal(racePathsCard.querySelector('[data-paths-probe]').getAttribute('data-paths-probe-stale'), null, '刚探测的结果对应当前已保存路径')
+  await fill(raceZcode, 'D:\\Other\\zcode.cjs')
+  const staleProbe = racePathsCard.querySelector('[data-paths-probe]')
+  assert.notEqual(staleProbe.getAttribute('data-paths-probe-stale'), null, '输入改动后结果标注为对应旧路径')
+  assert(staleProbe.textContent.includes('上次保存的路径'), '陈旧结果有文字说明')
+
+  // 干净路径下连点检测：只发一次探测
+  await click(raceSave, '保存到干净状态')
+  await settle()
+  assert.equal(racePathsCard.querySelector('[data-paths-dirty]'), null, '保存后回到干净状态')
+  const probesBefore = probes.length
+  await clickTwice(raceProbe, '干净路径连点检测')
+  await settle()
+  assert.equal(probes.length, probesBefore + 1, '干净路径连点只发一次探测')
+  await unmount()
+  console.log('PASS SettingsView：保存期间编辑保留、探测结果归属、重复探测去重')
+
+  /* ------------- 7. AutomationView：创建在途时关闭 / 重开表单（deferred） ------------- */
+  console.log('[7] AutomationView：创建在途时关闭表单并重开，迟到结果不越界')
+  let lateRows = [{ id: 'late-1', name: '既有自动化', prompt: '保持列表非空', workdir: '', scheduleMinutes: 60, enabled: false, output: 'issue', createdAt: 1, updatedAt: 1 }]
+  const lateCreated = []
+  let commitCreate = null
+  api.automations.list = async () => lateRows.map((item) => ({ ...item }))
+  api.automations.create = (input) => new Promise((resolve) => {
+    lateCreated.push(input)
+    commitCreate = async () => {
+      const item = { ...input, id: `late-${lateCreated.length + 1}`, createdAt: 1, updatedAt: 1 }
+      lateRows = [...lateRows, item]
+      resolve(item)
+    }
+  })
+  await mount(AutomationView)
+  const lateDialog = () => host.querySelector('.automation-dialog')
+  assert.equal(host.querySelectorAll('.automation-row').length, 1, '列表已加载')
+
+  await click(button('新建自动化'), '打开表单')
+  await fill(field('名称', lateDialog()).querySelector('input'), '在途创建')
+  await fill(field('提示词', lateDialog()).querySelector('textarea'), '第一次表单的草稿')
+  await click(button('创建', lateDialog()), '创建（deferred）')
+  assert.equal(lateCreated.length, 1, '创建已发起')
+  assert(button('创建中', lateDialog()), '当前表单显示「创建中…」')
+
+  // 在途时关闭表单（Escape 与遮罩都是真实路径），再开一张新表单并输入新草稿
+  await pressEscape()
+
+  assert.equal(lateDialog(), null, 'Escape 可关闭在途表单')
+  await click(button('新建自动化'), '重新打开表单')
+  await fill(field('名称', lateDialog()).querySelector('input'), '新草稿')
+  await fill(field('提示词', lateDialog()).querySelector('textarea'), '不应该被迟到的成功清掉')
+  assert(host.querySelector('[data-automation-create-pending]'), '提示上一次创建仍在进行中')
+
+  await act(async () => { commitCreate() })
+  await Promise.resolve()
+  await settle()
+  assert(lateDialog(), '迟到的创建成功不得关闭新表单')
+  assert.equal(field('名称', lateDialog()).querySelector('input').value, '新草稿', '新草稿名称保留')
+  assert.equal(field('提示词', lateDialog()).querySelector('textarea').value, '不应该被迟到的成功清掉', '新草稿提示词保留')
+  assert.equal(host.querySelectorAll('.automation-row').length, 2, '创建确实生效：列表仍刷新')
+  assert.equal(lastToast('success').text.includes('自动化已创建'), true, '成功提示照常给出')
+  await click(button('取消', lateDialog()), '关闭表单')
+
+  // 迟到的失败同样只提示，不写进换过会话的新表单
+  let commitFail = null
+  api.automations.create = (input) => new Promise((resolve, reject) => {
+    lateCreated.push(input)
+    commitFail = () => reject(new Error('late create rejected'))
+  })
+  await click(button('新建自动化'), '打开表单')
+  await fill(field('名称', lateDialog()).querySelector('input'), '会失败的在途创建')
+  await fill(field('提示词', lateDialog()).querySelector('textarea'), '失败草稿')
+  await click(button('创建', lateDialog()), '创建（将迟到失败）')
+  await click(lateDialog().parentElement, '点遮罩关闭在途表单')
+  await click(button('新建自动化'), '再次打开表单')
+  await act(async () => { commitFail() })
+  await Promise.resolve()
+  await settle()
+  assert.equal(lateDialog().querySelector('[data-automation-create-error]') === null, true, '迟到的失败不写进新表单')
+  assert.equal(lastToast('error').text.includes('late create rejected'), true, '迟到失败仍有错误提示')
+  assert.equal(field('名称', lateDialog()).querySelector('input').value, '', '新表单保持空表单复位')
+  await unmount()
+  console.log('PASS AutomationView：在途创建时关闭/重开表单，迟到的成功与失败都不越界')
 } finally {
   if (host.hasChildNodes()) await act(async () => reactRoot.render(null))
   process.off('unhandledRejection', onUnhandled)

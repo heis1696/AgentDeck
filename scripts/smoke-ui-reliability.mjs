@@ -26,7 +26,7 @@ window.agentdeck = emptyApi
 const outfile = path.join(root, 'out/smoke-ui-reliability.cjs')
 await build({
   stdin: {
-    contents: "import './scripts/fixtures/ui-visual-bridge'; export { act, createElement } from 'react'; export { createRoot } from 'react-dom/client'; export { AgentsView, canPersistList } from './src/renderer/src/components/AgentsView'; export { SettingsView, validateTuningValue } from './src/renderer/src/components/SettingsView'; export { UsageView } from './src/renderer/src/components/UsageView'; export { WorkspaceView } from './src/renderer/src/components/WorkspaceView';",
+    contents: "import './scripts/fixtures/ui-visual-bridge'; export { act, createElement, Fragment } from 'react'; export { createRoot } from 'react-dom/client'; export { AgentsView, canPersistList } from './src/renderer/src/components/AgentsView'; export { ConfirmHost } from './src/renderer/src/ui/Confirm'; export { SettingsView, validateTuningValue } from './src/renderer/src/components/SettingsView'; export { UsageView } from './src/renderer/src/components/UsageView'; export { WorkspaceView } from './src/renderer/src/components/WorkspaceView';",
     resolveDir: root,
     loader: 'tsx'
   },
@@ -39,7 +39,7 @@ await build({
   logLevel: 'silent'
 })
 
-const { act, createElement, createRoot, AgentsView, SettingsView, UsageView, WorkspaceView, canPersistList, validateTuningValue } = await import(pathToFileURL(outfile).href)
+const { act, createElement, Fragment, createRoot, AgentsView, ConfirmHost, SettingsView, UsageView, WorkspaceView, canPersistList, validateTuningValue } = await import(pathToFileURL(outfile).href)
 assert.equal(canPersistList('loading', [], false), false)
 assert.equal(canPersistList('error', [{ id: 'existing' }], false), false)
 assert.equal(canPersistList('ready', null, false), false)
@@ -60,7 +60,7 @@ process.on('unhandledRejection', onUnhandled)
 const host = document.getElementById('app')
 let reactRoot
 const mount = async (Component, props = {}) => {
-  await act(async () => { reactRoot = createRoot(host); reactRoot.render(createElement(Component, props)) })
+  await act(async () => { reactRoot = createRoot(host); reactRoot.render(createElement(Fragment, null, createElement(Component, props), createElement(ConfirmHost))) })
 }
 const unmount = async () => {
   await act(async () => { reactRoot.unmount() })
@@ -116,6 +116,7 @@ try {
   api.agents.save = async (list) => { saves.push(list); return list }
   const presetCard = [...host.querySelectorAll('.tm-card')].find((node) => node.querySelector('.tm-name')?.textContent === 'p1')
   await click(presetCard.querySelector('.tm-act-danger'))
+  await click(host.querySelector('.confirm-dialog .btn.danger'))
   assert.equal(saves.at(-1).length, existing.length + 1, 'removing a preset must not delete agents')
   assert.equal(saves.at(-1)[0].presetId, undefined)
   assert.equal(saves.at(-1)[1].presetId, 'p2', 'unrelated preset bindings survive')

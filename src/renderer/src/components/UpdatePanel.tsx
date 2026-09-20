@@ -31,6 +31,16 @@ function applicableChannels(state: UpdateStateSnapshot | null): string[] {
   return CHANNELS.filter((channel) => Boolean(state.available?.[channel]))
 }
 
+/**
+ * 快照自报的失败：phase=failed 或带 error 字段都算错误。
+ * 这类快照不能当成「没有可用更新」的结论——它只说明这次检查/应用失败了。
+ */
+function failureOf(state: UpdateStateSnapshot | null): string | null {
+  if (!state) return null
+  if (state.phase === 'failed') return state.error ?? '更新通道返回失败'
+  return state.error ?? null
+}
+
 function fmtBytes(n: number): string {
   if (!Number.isFinite(n) || n < 0) return '0 B'
   const units = ['B', 'KB', 'MB', 'GB']
@@ -48,6 +58,13 @@ function fmtBytes(n: number): string {
  * - 「开始更新」只在当前快照确实报了可更新通道时才可用，未检查/无更新时点不动；
  * - 检查完成且无可用更新时给明确结论，而不是静默无反应；
  * - 所有操作共用同一个 pending 闸门（ref 同步置位），连点不会重复触发 IPC。
+ *
+ * 复核（Batch B follow-up）：
+ * - 失焦保存与「检查更新」的保存走同一条串行队列，谁都不会绕过对方的在途写入；
+ *   检查提交的是点击那一刻的确切草稿，保存期间的新输入不被设置广播回写清掉；
+ * - available 为空只能说明「本次没发现可应用的更新」：updater 逐通道静默吞掉检查失败，
+ *   所以这里不再声称「已是最新」，显式 failed / error 快照按错误处理；
+ * - 显示地址一变，上一次检查的结论与「开始更新」一起失效，必须重新检查。
  */
 export function UpdatePanel() {
   const { settings, update } = useSettings()
@@ -56,9 +73,18 @@ export function UpdatePanel() {
   const [feedDraft, setFeedDraft] = useState('')
   const [feedError, setFeedError] = useState<string | null>(null)
   const [feedSaved, setFeedSaved] = useState(false)
-  // 「已是最新」只能在本轮真的查过之后说：available 为空既可能是没更新，也可能是没检查过
-  const [checked, setChecked] = useState(false)
+  const [checkError, setCheckError] = useState<string | null>(null)
+  // 本次会话里真的查过的地址；null = 面板内还没查过（不代表没有更新）
+  const [checkedFeed, setCheckedFeed] = useState<string | null>(null)
   const busyRef = useRef(false)
+  /** 最新草稿：检查在点击那一刻取值，不依赖可能过期的闭包 */
+  const draftRef = useRef('')
+  /** 已成功落盘的地址：相同地址不重复 IPC */
+  const writtenRef = useRef<string | null>(null)
+  /** 上一版已落盘地址：决定设置广播能不能覆盖本地草稿 */
+  const persistedRef = useRef<string | null>(null)
+  /** 串行保存队列：失焦保存与检查前保存排队执行，互不绕过 */
+  const saveQueue = useRef<Promise<boolean>>(Promise.resolve(true))
 
   useEffect(() => {
     let mounted = true
@@ -70,7 +96,16 @@ export function UpdatePanel() {
   }, [])
 
   useEffect(() => {
-    if (settings) setFeedDraft(settings.updateFeedUrl ?? '')
+    if (!settings) return
+    const next = settings.updateFeedUrl ?? ''
+    const previous = persistedRef.current
+    persistedRef.current = next
+    if (writtenRef.current === null) writtenRef.current = next
+    // 广播只覆盖「没有本地改动」的草稿：保存期间继续输入的内容不能被回写清掉
+    if (previous === null || draftRef.current.trim() === previous) {
+      draftRef.current = next
+      setFeedDraft(next)
+    }
   }, [settings?.updateFeedUrl])
 
   const percent = useMemo(() => {
@@ -82,11 +117,15 @@ export function UpdatePanel() {
 
   const savedFeed = settings.updateFeedUrl ?? ''
   const feedDirty = feedDraft.trim() !== savedFeed
+  const failure = failureOf(state)
   const pending = state ? ['checking', 'downloading', 'verifying', 'applying'].includes(state.phase) : false
   const disableOps = busy || pending
   const available = applicableChannels(state)
-  const canApply = available.length > 0 || state?.phase === 'staged'
-  const reported = checked || available.length > 0
+  // 当前快照对应的地址：本次会话查过就用查过的地址，否则视为与已落盘地址一致
+  const snapshotFeed = checkedFeed ?? savedFeed
+  const conclusionCurrent = snapshotFeed === feedDraft.trim()
+  const canApply = available.length > 0 ? conclusionCurrent : state?.phase === 'staged' && state?.channel === 'shell'
+  const staleConclusion = checkedFeed !== null && !conclusionCurrent
 
   /** 所有更新操作的共同闸门：ref 与 state 同置，连点只放行第一次 */
   const guard = async (op: () => Promise<void>) => {
@@ -103,12 +142,12 @@ export function UpdatePanel() {
     }
   }
 
-  /** 保存 feed 草稿；失败时保留输入并说明原因，返回是否已落盘 */
-  const saveFeed = async (): Promise<boolean> => {
-    const next = feedDraft.trim()
-    if (next === savedFeed) return true
+  /** 落盘一个确切地址；失败时保留输入并说明原因 */
+  const writeFeed = async (target: string): Promise<boolean> => {
+    if (writtenRef.current === target) return true
     try {
-      await update({ updateFeedUrl: next })
+      await update({ updateFeedUrl: target })
+      writtenRef.current = target
       setFeedError(null)
       setFeedSaved(true)
       return true
@@ -120,9 +159,16 @@ export function UpdatePanel() {
     }
   }
 
+  /** 串行保存：失焦保存与检查前保存共用一条队列，后到的等前一个写完再判断是否需要写 */
+  const saveFeed = (target: string): Promise<boolean> => {
+    const next = saveQueue.current.then(() => writeFeed(target), () => writeFeed(target))
+    saveQueue.current = next.then(() => true, () => false)
+    return next
+  }
+
   const commitFeed = () => {
-    if (busyRef.current) return
-    void saveFeed()
+    // 失焦保存不抢操作闸门，但一定排队：在途的其它写入先完成，且不会因此丢掉这次编辑
+    void saveFeed(draftRef.current.trim())
   }
 
   const run = async (op: () => Promise<unknown>, okMsg?: string) => {
@@ -138,14 +184,28 @@ export function UpdatePanel() {
 
   const checkNow = async () => {
     await guard(async () => {
-      // 检查必须用输入框里的地址：先落盘，保存失败就不发起检查
-      if (!(await saveFeed())) return
+      // 检查必须用点击那一刻的地址：先落盘，保存失败就不发起检查
+      const submitted = draftRef.current.trim()
+      if (!(await saveFeed(submitted))) return
+      setCheckError(null)
       const snapshot = await bridge.updates.check()
       setState(snapshot)
-      setChecked(true)
+      const reported = failureOf(snapshot)
+      if (reported) {
+        // 显式失败快照就是错误：既不能当「没有更新」，也不能留着旧结论继续可点
+        setCheckedFeed(null)
+        setCheckError(reported)
+        ui.toast.error(`检查更新失败：${reported}`)
+        return
+      }
+      setCheckedFeed(submitted)
       const next = applicableChannels(snapshot)
-      if (next.length === 0) ui.toast.success('检查完成：已是最新版本，没有可应用的更新。')
-      else ui.toast.success(`检查完成：可更新 ${next.map((channel) => `${CHANNEL_LABEL[channel as (typeof CHANNELS)[number]]} v${snapshot.available?.[channel as (typeof CHANNELS)[number]]}`).join(' · ')}`)
+      if (next.length === 0) {
+        // available 为空只证明「本次没发现可应用的更新」：逐通道失败会被 updater 静默吞掉
+        ui.toast.info('检查完成：本次未发现可应用的更新。')
+      } else {
+        ui.toast.success(`检查完成：可更新 ${next.map((channel) => `${CHANNEL_LABEL[channel as (typeof CHANNELS)[number]]} v${snapshot.available?.[channel as (typeof CHANNELS)[number]]}`).join(' · ')}`)
+      }
     })
   }
 
@@ -182,7 +242,8 @@ export function UpdatePanel() {
             </div>
           </div>
         )}
-        {state?.error && <p className="hint probe-fail">{state.error}</p>}
+        {failure && <p className="probe-fail" role="alert" data-update-error>{failure}</p>}
+        {checkError && <p className="probe-fail" role="alert" data-update-check-error>检查失败：{checkError}。可修正地址后重新检查。</p>}
         {available.length > 0 && (
           <div className="field">
             <span>可更新</span>
@@ -193,8 +254,11 @@ export function UpdatePanel() {
             </span>
           </div>
         )}
-        {reported && available.length === 0 && state?.phase === 'idle' && !state.error && (
-          <p className="hint" data-update-none>本机版本已是最新，没有可应用的更新。</p>
+        {staleConclusion && (
+          <p className="hint" data-update-stale>地址已改动：上一次检查的结论与「开始更新」已失效，请重新检查更新。</p>
+        )}
+        {checkedFeed !== null && conclusionCurrent && available.length === 0 && state?.phase === 'idle' && !failure && (
+          <p className="hint" data-update-none>本次检查未发现可应用的更新；单个通道的检查失败会被跳过且不在此上报，所以这不等于已确认最新。</p>
         )}
         {state?.channel === 'shell' && state?.phase === 'staged' && state.stagedVersion && (
           <p className="hint">壳更新 v{state.stagedVersion} 已下载并校验就绪。点击下方按钮确认替换应用本体并重启（任务运行中不可执行）。</p>
@@ -211,7 +275,7 @@ export function UpdatePanel() {
             <button
               className="btn"
               disabled={disableOps || !canApply}
-              title={canApply ? undefined : '先点「检查更新」，确认有可应用的更新后此按钮才可用。'}
+              title={canApply ? undefined : staleConclusion ? '地址已改动：重新检查更新后此按钮才可用。' : '先点「检查更新」，确认有可应用的更新后此按钮才可用。'}
               onClick={() => void run(() => bridge.updates.applyAll(), '已开始更新')}
             >
               <Download size={14} /> 开始更新
@@ -232,7 +296,7 @@ export function UpdatePanel() {
           <input
             value={feedDraft}
             placeholder="https://updates.example.com/agentdeck"
-            onChange={(e) => { setFeedDraft(e.target.value); setFeedSaved(false) }}
+            onChange={(e) => { draftRef.current = e.target.value; setFeedDraft(e.target.value); setFeedSaved(false) }}
             onBlur={commitFeed}
             onKeyDown={(e) => { if (isComposingKey(e.nativeEvent)) return; if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLInputElement).blur() } }}
           />

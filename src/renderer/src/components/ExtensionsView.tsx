@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Check,
   ChevronDown,
@@ -8,6 +8,7 @@ import {
   FolderOpen,
   Globe,
   Layers,
+  LoaderCircle,
   Package,
   Plus,
   Puzzle,
@@ -24,7 +25,7 @@ import { bridge, useSettings } from '../api'
 import { ui, isComposingKey } from '../ui/interaction-center'
 import { EmptyState } from '../ui/EmptyState'
 import { PageHeader } from '../ui/PageHeader'
-import { SkillsTab } from './SkillsView'
+import { SkillsTab, StaleBanner } from './SkillsView'
 import type {
   CatalogEntry,
   DiscoveredAsset,
@@ -70,12 +71,24 @@ const CLI_LABELS: Record<PluginInventoryItem['cli'], string> = { claude: 'Claude
 const CLI_ORDER: PluginInventoryItem['cli'][] = ['claude', 'zcode', 'codex']
 /** 插件 tab 页面 / 空态描述（EXTENSIONS-HUB §8.6 定位：盘点装卸 + 市场浏览） */
 const PLUGINS_DESC = '各 agent CLI 已安装插件的盘点与装卸；浏览市场安装新插件。'
+/** 选中的 tab 跨普通导航保留（离开扩展页再回来不重置）；与 workspace-dir 等一样走 localStorage */
+const EXT_TAB_KEY = 'agentdeck:extensions-tab'
+const EXT_TAB_IDS = TABS.map((item) => item.id)
+
+function readStoredTab(): ExtTabId {
+  try {
+    const saved = localStorage.getItem(EXT_TAB_KEY)
+    return EXT_TAB_IDS.includes(saved as ExtTabId) ? saved as ExtTabId : 'skills'
+  } catch {
+    return 'skills'
+  }
+}
 
 /** 扩展页：技能 / MCP / Hooks / 插件四 tab 的外壳（标题 + 共享目录链接 + tab 条）。
  *  EXTENSIONS-HUB §8.7：无独立仓库 tab——发现与已装同页，扩展源是发现区（技能 tab / 插件 tab）的数据层。 */
 export function ExtensionsView() {
   const { settings } = useSettings()
-  const [tab, setTab] = useState<ExtTabId>('skills')
+  const [tab, setTab] = useState<ExtTabId>(readStoredTab)
   const [root, setRoot] = useState('')
 
   // 共享目录解析路径（空设置时主进程回落到 ~/.agentdeck）
@@ -84,6 +97,16 @@ export function ExtensionsView() {
     void bridge.skills.list().then((data) => { if (alive) setRoot(data.root) }).catch(() => {})
     return () => { alive = false }
   }, [settings?.sharedDir])
+
+  /** 选中即记忆：普通导航（切走再切回）不重置到技能 tab，应用重启后也保持一致 */
+  const selectTab = (next: ExtTabId) => {
+    setTab(next)
+    try {
+      localStorage.setItem(EXT_TAB_KEY, next)
+    } catch {
+      /* 存储不可用（隐私模式 / 配额）时只在本次会话内保留 */
+    }
+  }
 
   return <div className="skills-view page-surface ext-view">
     {/* 共享目录路径是页头里的上下文/动作项，不再另起一套页头布局 */}
@@ -102,7 +125,7 @@ export function ExtensionsView() {
           role="tab"
           aria-selected={tab === item.id}
           className={`ext-tab ${tab === item.id ? 'active' : ''}`}
-          onClick={() => setTab(item.id)}
+          onClick={() => selectTab(item.id)}
         >
           <item.icon size={14} />
           <span>{item.label}</span>
@@ -151,24 +174,28 @@ function SkillDiscoverPanel({ onLibraryChanged }: { onLibraryChanged: () => void
   const [url, setUrl] = useState('')
   const [urlBusy, setUrlBusy] = useState(false)
   const [importing, setImporting] = useState<string | null>(null)
+  const requestRef = useRef(0)
 
-  /** listSkills（按源聚合技能）+ sources.list（补齐同步时间）；挂载 / 共享目录变更时静默刷新 */
+  /** listSkills（按源聚合技能）+ sources.list（补齐同步时间）；挂载 / 共享目录变更时刷新。
+   *  刷新失败保留上次成功的分组：陈旧数据仍然可读，只在横幅里说明并给重试。 */
   const load = useCallback(async () => {
+    const request = ++requestRef.current
     setLoading(true)
     setError('')
     try {
       const [listSkills, list] = await Promise.all([bridge.sources.listSkills(), bridge.sources.list()])
+      if (request !== requestRef.current) return
       setGroups(listSkills.groups)
       setSyncAts(Object.fromEntries(list.sources.map((source) => [source.id, source.lastSyncedAt])))
     } catch (e) {
-      setGroups(null)
-      setError(errText(e))
+      if (request === requestRef.current) setError(errText(e))
     } finally {
-      setLoading(false)
+      if (request === requestRef.current) setLoading(false)
     }
   }, [])
 
   useEffect(() => { void load() }, [settings?.sharedDir, load])
+  useEffect(() => () => { requestRef.current++ }, [])
 
   const allSkills = useMemo(() => groups?.flatMap((group) => group.skills) ?? [], [groups])
   const importable = useMemo(() => allSkills.filter((skill) => !skill.importedAs).length, [allSkills])
@@ -283,12 +310,19 @@ function SkillDiscoverPanel({ onLibraryChanged }: { onLibraryChanged: () => void
         {groups && groups.length > 0 && <span className="ext-asset-count" title="已发现 / 可导入">{importable} / {allSkills.length} 可导</span>}
       </div>
       {loading && groups === null ? <p className="hint">正在扫描各扩展源的技能资产…</p>
-        : error ? <p className="hint">发现技能读取失败：{error}</p>
-          : !groups || groups.length === 0
-            ? <p className="hint">还没有扩展源；可直接粘贴 URL 直装，或在插件 tab「+ 添加市场」中登记扩展源。</p>
-            : visibleGroups.length === 0
-              ? <p className="hint">没有匹配的技能。</p>
-              : <div className="ext-skill-groups">
+        : error && (groups === null || groups.length === 0) ? <EmptyState
+            compact
+            icon={Sparkles}
+            title="发现技能读取失败"
+            description={error}
+            action={<button className="btn" type="button" onClick={() => void load()} disabled={loading}><RefreshCw size={14} /> 重试</button>}
+          />
+          : <>{error && <StaleBanner marker="skill-discovery" label="显示上次成功的发现结果" error={error} onRetry={() => void load()} busy={loading} />}
+            {!groups || groups.length === 0
+              ? <p className="hint">还没有扩展源；可直接粘贴 URL 直装，或在插件 tab「+ 添加市场」中登记扩展源。</p>
+              : visibleGroups.length === 0
+                ? <p className="hint">没有匹配的技能。</p>
+                : <div className="ext-skill-groups">
                 {visibleGroups.map((group) => {
                   const groupImportable = group.skills.filter((skill) => !skill.importedAs).length
                   const allBusy = importing === `${group.source.id}:*`
@@ -327,6 +361,7 @@ function SkillDiscoverPanel({ onLibraryChanged }: { onLibraryChanged: () => void
                   </div>
                 })}
               </div>}
+          </>}
     </div>}
   </section>
 }
@@ -467,7 +502,8 @@ function emptyMcpDraft(): McpDraft {
   return { name: '', description: '', type: 'stdio', command: '', argsText: '', envText: '', url: '', headersText: '', originName: null }
 }
 
-/** MCP tab：共享目录服务器定义（stdio/http/sse）+ 三目标安装 chip。 */
+/** MCP tab：共享目录服务器定义（stdio/http/sse）+ 三目标安装 chip。
+ *  读状态与技能 tab 同构：加载中 / 首次失败 / 成功为空 / 陈旧四态；首次读不成功不写盘。 */
 function McpTab() {
   const { settings } = useSettings()
   const [servers, setServers] = useState<McpMeta[]>([])
@@ -476,19 +512,41 @@ function McpTab() {
   const [draft, setDraft] = useState<McpDraft | null>(null)
   const [query, setQuery] = useState('')
   const [busy, setBusy] = useState(false)
+  const [loaded, setLoaded] = useState(false)
+  const [listError, setListError] = useState<string | null>(null)
+  const [targetsLoaded, setTargetsLoaded] = useState(false)
+  const [targetsError, setTargetsError] = useState<string | null>(null)
+  const [reloading, setReloading] = useState(true)
+  const requestRef = useRef(0)
 
-  const loadList = useCallback(async () => {
-    const data = await bridge.mcp.list()
-    setServers(data.servers)
+  const refreshAll = useCallback(async () => {
+    const request = ++requestRef.current
+    setReloading(true)
+    const [listResult, targetResult] = await Promise.allSettled([bridge.mcp.list(), bridge.mcp.targets()])
+    if (request !== requestRef.current) return
+    if (listResult.status === 'fulfilled') {
+      setServers(listResult.value.servers)
+      setLoaded(true)
+      setListError(null)
+    } else {
+      setListError(errText(listResult.reason))
+    }
+    if (targetResult.status === 'fulfilled') {
+      setTargets(targetResult.value.targets)
+      setStates(targetResult.value.states)
+      setTargetsLoaded(true)
+      setTargetsError(null)
+    } else {
+      setTargetsError(errText(targetResult.reason))
+    }
+    setReloading(false)
   }, [])
-  const loadTargets = useCallback(async () => {
-    const data = await bridge.mcp.targets()
-    setTargets(data.targets)
-    setStates(data.states)
-  }, [])
-  const refreshAll = useCallback(() => Promise.all([loadList(), loadTargets()]), [loadList, loadTargets])
 
   useEffect(() => { void refreshAll() }, [settings?.sharedDir, refreshAll])
+  useEffect(() => () => { requestRef.current++ }, [])
+
+  /** 共享目录未知时写操作一律停用：写盘需要一个确定的目录 */
+  const writesBlocked = !settings || !loaded
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -503,10 +561,13 @@ function McpTab() {
     if (!def) { ui.toast.error(`服务器不存在: ${name}`); return }
     setDraft(mcpToDraft(def))
   }
-  const newServer = () => setDraft(emptyMcpDraft())
+  const newServer = () => {
+    if (writesBlocked) { ui.toast.error('共享目录未知，暂时不能新建 MCP 服务器。'); return }
+    setDraft(emptyMcpDraft())
+  }
 
   const save = async () => {
-    if (!draft || busy) return
+    if (!draft || busy || writesBlocked) return
     const name = draft.name.trim()
     if (!name) { ui.toast.error('服务器名不能为空'); return }
     if (draft.type === 'stdio' && !draft.command.trim()) { ui.toast.error('stdio 类型必须填写 command'); return }
@@ -529,6 +590,7 @@ function McpTab() {
   }
 
   const remove = async (name: string) => {
+    if (writesBlocked) { ui.toast.error('共享目录未知，暂时不能删除 MCP 服务器。'); return }
     if (!await ui.confirm({ title: `删除 MCP 服务器「${name}」？`, body: '共享目录中的定义文件会被删除；已安装到各 CLI 配置的键不受影响，可稍后卸载。', danger: true, confirmText: '删除' })) return
     try {
       await bridge.mcp.delete(name)
@@ -541,7 +603,7 @@ function McpTab() {
   }
 
   const toggleTarget = async (name: string, targetId: string) => {
-    if (busy) return
+    if (busy || writesBlocked) return
     setBusy(true)
     try {
       const state = states[name]?.[targetId] ?? 'missing'
@@ -550,7 +612,7 @@ function McpTab() {
         const result = await bridge.mcp.install(name, targetId)
         if (result.ok === false) ui.toast.info(result.error ?? '该目标不支持此服务器类型，已跳过')
       }
-      await loadTargets()
+      await refreshAll()
     } catch (e) {
       ui.toast.error('安装失败: ' + errText(e))
     } finally {
@@ -558,12 +620,27 @@ function McpTab() {
     }
   }
 
+  const retry = () => { void refreshAll() }
+
+  if (!loaded && reloading) {
+    return <EmptyState icon={LoaderCircle} title="MCP 服务器加载中" description="正在读取共享目录中的服务器定义。" />
+  }
+  // 读失败且列表为空：不声称「还没有服务器」——空结果来自上一次成功读取，不代表现在没有
+  if (listError && servers.length === 0 && !draft) {
+    return <EmptyState
+      icon={Server}
+      title="MCP 服务器读取失败"
+      description={`${listError}；共享目录位置未知或结果不可信，因此新建、保存与安装暂时不可用。`}
+      action={<button className="btn" type="button" onClick={retry}><RefreshCw size={14} /> 重试</button>}
+    />
+  }
+
   if (servers.length === 0 && !draft) {
     return <EmptyState
       icon={Server}
       title="还没有 MCP 服务器"
       description="MCP 服务器以 JSON 定义存放在共享目录，可一键安装到 Claude Code、ZCode、Codex 的用户级配置。"
-      action={<button className="btn primary" onClick={newServer}><Plus size={14} /> 新建 MCP 服务器</button>}
+      action={<button className="btn primary" onClick={newServer} disabled={writesBlocked}><Plus size={14} /> 新建 MCP 服务器</button>}
     />
   }
 
@@ -571,9 +648,12 @@ function McpTab() {
     <div className="ext-tab-toolbar">
       <span className="ext-tab-desc">共享目录中的 MCP 服务器定义；安装目标为各 CLI 的用户级配置（Claude / ZCode / Codex）。</span>
       <div className="skills-header-actions">
-        <button className="btn primary" onClick={newServer}><Plus size={14} /> 新建 MCP 服务器</button>
+        <button className="btn primary" onClick={newServer} disabled={writesBlocked}><Plus size={14} /> 新建 MCP 服务器</button>
       </div>
     </div>
+    {listError && <StaleBanner marker="mcp" label="显示上次成功的 MCP 列表" error={listError} onRetry={retry} busy={reloading} />}
+    {targetsError && <StaleBanner marker="mcp-targets" label={targetsLoaded ? '显示上次成功的安装状态' : '安装状态读取失败'} error={targetsError} onRetry={retry} busy={reloading} />}
+    {writesBlocked && <p className="hint" data-mcp-writes-blocked>共享目录未知：MCP 写操作（新建 / 保存 / 删除 / 安装）已停用，重试读取成功后再操作。</p>}
     <div className="skills-layout">
       <aside className="skills-side">
         <label className="market-search skills-search">
@@ -652,8 +732,8 @@ function McpTab() {
                 </div>
               )}
               <div className="skills-editor-actions">
-                <button className="btn primary" onClick={save} disabled={busy}>保存</button>
-                {draft.originName && <button className="btn danger" onClick={() => void remove(draft.originName!)}><Trash2 size={14} /> 删除</button>}
+                <button className="btn primary" onClick={save} disabled={busy || writesBlocked}>保存</button>
+                {draft.originName && <button className="btn danger" onClick={() => void remove(draft.originName!)} disabled={writesBlocked}><Trash2 size={14} /> 删除</button>}
               </div>
             </div>
             <div className="skill-targets">
@@ -663,11 +743,13 @@ function McpTab() {
               </div>
               {!draft.originName ? (
                 <p className="hint">先保存服务器，再安装到各 CLI 配置。</p>
+              ) : targets.length === 0 ? (
+                <p className="hint">{targetsLoaded ? '当前没有可安装的目标 CLI。' : '安装目标未知：读取失败，重试后再操作。'}</p>
               ) : (
                 <TargetChips
                   targets={targets}
                   states={draft.originName ? states[draft.originName] : undefined}
-                  busy={busy}
+                  busy={busy || writesBlocked}
                   onToggle={(targetId) => draft.originName && void toggleTarget(draft.originName, targetId)}
                 />
               )}
@@ -727,7 +809,8 @@ function emptyHookDraft(): HookDraft {
   return { name: '', description: '', body: '', groups: [{ event: 'PreToolUse', matcher: '', commands: '' }], originName: null }
 }
 
-/** Hooks tab：共享目录 hook 资产（HOOK.md + hook.json）+ claude/zcode 目标安装。 */
+/** Hooks tab：共享目录 hook 资产（HOOK.md + hook.json）+ claude/zcode 目标安装。
+ *  读状态与 MCP / 技能 tab 同构；首次读不成功不写盘。 */
 function HooksTab() {
   const { settings } = useSettings()
   const [hooks, setHooks] = useState<HookMeta[]>([])
@@ -736,19 +819,41 @@ function HooksTab() {
   const [draft, setDraft] = useState<HookDraft | null>(null)
   const [query, setQuery] = useState('')
   const [busy, setBusy] = useState(false)
+  const [loaded, setLoaded] = useState(false)
+  const [listError, setListError] = useState<string | null>(null)
+  const [targetsLoaded, setTargetsLoaded] = useState(false)
+  const [targetsError, setTargetsError] = useState<string | null>(null)
+  const [reloading, setReloading] = useState(true)
+  const requestRef = useRef(0)
 
-  const loadList = useCallback(async () => {
-    const data = await bridge.hooks.list()
-    setHooks(data.hooks)
+  const refreshAll = useCallback(async () => {
+    const request = ++requestRef.current
+    setReloading(true)
+    const [listResult, targetResult] = await Promise.allSettled([bridge.hooks.list(), bridge.hooks.targets()])
+    if (request !== requestRef.current) return
+    if (listResult.status === 'fulfilled') {
+      setHooks(listResult.value.hooks)
+      setLoaded(true)
+      setListError(null)
+    } else {
+      setListError(errText(listResult.reason))
+    }
+    if (targetResult.status === 'fulfilled') {
+      setTargets(targetResult.value.targets)
+      setStates(targetResult.value.states)
+      setTargetsLoaded(true)
+      setTargetsError(null)
+    } else {
+      setTargetsError(errText(targetResult.reason))
+    }
+    setReloading(false)
   }, [])
-  const loadTargets = useCallback(async () => {
-    const data = await bridge.hooks.targets()
-    setTargets(data.targets)
-    setStates(data.states)
-  }, [])
-  const refreshAll = useCallback(() => Promise.all([loadList(), loadTargets()]), [loadList, loadTargets])
 
   useEffect(() => { void refreshAll() }, [settings?.sharedDir, refreshAll])
+  useEffect(() => () => { requestRef.current++ }, [])
+
+  /** 共享目录未知时写操作一律停用 */
+  const writesBlocked = !settings || !loaded
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -767,10 +872,13 @@ function HooksTab() {
       ui.toast.error('读取 Hook 失败: ' + errText(e))
     }
   }
-  const newHook = () => setDraft(emptyHookDraft())
+  const newHook = () => {
+    if (writesBlocked) { ui.toast.error('共享目录未知，暂时不能新建 Hook。'); return }
+    setDraft(emptyHookDraft())
+  }
 
   const save = async () => {
-    if (!draft || busy) return
+    if (!draft || busy || writesBlocked) return
     const name = draft.name.trim()
     if (!name) { ui.toast.error('Hook 名不能为空'); return }
     setBusy(true)
@@ -792,6 +900,7 @@ function HooksTab() {
   }
 
   const remove = async (name: string) => {
+    if (writesBlocked) { ui.toast.error('共享目录未知，暂时不能删除 Hook。'); return }
     if (!await ui.confirm({ title: `删除 Hook「${name}」？`, body: '共享目录中的 hook 目录会被删除；已安装到各 CLI 配置的事件组不受影响，可稍后卸载。', danger: true, confirmText: '删除' })) return
     try {
       await bridge.hooks.delete(name)
@@ -804,13 +913,13 @@ function HooksTab() {
   }
 
   const toggleTarget = async (name: string, targetId: string) => {
-    if (busy) return
+    if (busy || writesBlocked) return
     setBusy(true)
     try {
       const state = states[name]?.[targetId] ?? 'missing'
       if (state === 'in-sync') await bridge.hooks.uninstall(name, targetId)
       else await bridge.hooks.install(name, targetId)
-      await loadTargets()
+      await refreshAll()
     } catch (e) {
       ui.toast.error('安装失败: ' + errText(e))
     } finally {
@@ -826,13 +935,27 @@ function HooksTab() {
   const removeGroup = (index: number) => draft && setDraft({ ...draft, groups: draft.groups.filter((_, i) => i !== index) })
 
   const hookCount = draft ? Object.keys(draftToEvents(draft)).length : 0
+  const retry = () => { void refreshAll() }
+
+  if (!loaded && reloading) {
+    return <EmptyState icon={LoaderCircle} title="Hook 资产加载中" description="正在读取共享目录中的 Hook 资产。" />
+  }
+  // 读失败且列表为空：不声称「还没有 Hook」——空结果来自上一次成功读取
+  if (listError && hooks.length === 0 && !draft) {
+    return <EmptyState
+      icon={Webhook}
+      title="Hook 资产读取失败"
+      description={`${listError}；共享目录位置未知或结果不可信，因此新建、保存与安装暂时不可用。`}
+      action={<button className="btn" type="button" onClick={retry}><RefreshCw size={14} /> 重试</button>}
+    />
+  }
 
   if (hooks.length === 0 && !draft) {
     return <EmptyState
       icon={Webhook}
       title="还没有 Hook 资产"
       description="Hook 以 HOOK.md（说明文档）+ hook.json（事件定义）存放在共享目录，可安装到 Claude Code / ZCode。"
-      action={<button className="btn primary" onClick={newHook}><Plus size={14} /> 新建 Hook</button>}
+      action={<button className="btn primary" onClick={newHook} disabled={writesBlocked}><Plus size={14} /> 新建 Hook</button>}
     />
   }
 
@@ -843,9 +966,12 @@ function HooksTab() {
     <div className="ext-tab-toolbar">
       <span className="ext-tab-desc">共享目录中的 Hook 资产；安装目标为 Claude Code / ZCode 的用户级配置（ZCode 会自动置 hooks.enabled）。</span>
       <div className="skills-header-actions">
-        <button className="btn primary" onClick={newHook}><Plus size={14} /> 新建 Hook</button>
+        <button className="btn primary" onClick={newHook} disabled={writesBlocked}><Plus size={14} /> 新建 Hook</button>
       </div>
     </div>
+    {listError && <StaleBanner marker="hooks" label="显示上次成功的 Hook 列表" error={listError} onRetry={retry} busy={reloading} />}
+    {targetsError && <StaleBanner marker="hook-targets" label={targetsLoaded ? '显示上次成功的安装状态' : '安装状态读取失败'} error={targetsError} onRetry={retry} busy={reloading} />}
+    {writesBlocked && <p className="hint" data-hooks-writes-blocked>共享目录未知：Hook 写操作（新建 / 保存 / 删除 / 安装）已停用，重试读取成功后再操作。</p>}
     <div className="skills-layout">
       <aside className="skills-side">
         <label className="market-search skills-search">
@@ -917,8 +1043,8 @@ function HooksTab() {
                 </div>
               ))}
               <div className="skills-editor-actions">
-                <button className="btn primary" onClick={save} disabled={busy}>保存</button>
-                {draft.originName && <button className="btn danger" onClick={() => void remove(draft.originName!)}><Trash2 size={14} /> 删除</button>}
+                <button className="btn primary" onClick={save} disabled={busy || writesBlocked}>保存</button>
+                {draft.originName && <button className="btn danger" onClick={() => void remove(draft.originName!)} disabled={writesBlocked}><Trash2 size={14} /> 删除</button>}
               </div>
             </div>
             <div className="skill-targets">
@@ -928,11 +1054,13 @@ function HooksTab() {
               </div>
               {!draft.originName ? (
                 <p className="hint">先保存 Hook，再安装到各 CLI 配置。</p>
+              ) : targets.length === 0 ? (
+                <p className="hint">{targetsLoaded ? '当前没有可安装的目标 CLI。' : '安装目标未知：读取失败，重试后再操作。'}</p>
               ) : (
                 <TargetChips
                   targets={targets}
                   states={draft.originName ? states[draft.originName] : undefined}
-                  busy={busy}
+                  busy={busy || writesBlocked}
                   onToggle={(targetId) => draft.originName && void toggleTarget(draft.originName, targetId)}
                 />
               )}
@@ -951,18 +1079,28 @@ function HooksTab() {
 function PluginsTab() {
   const [items, setItems] = useState<PluginInventoryItem[]>([])
   const [loading, setLoading] = useState(true)
+  const [loaded, setLoaded] = useState(false)
+  const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [installSpec, setInstallSpec] = useState('')
   const [marketplaceNames, setMarketplaceNames] = useState<string[]>([])
+  const requestRef = useRef(0)
 
+  /** 盘点失败保留上次成功的清单：装卸按钮只能基于已知的已装状态 */
   const load = useCallback(async () => {
+    const request = ++requestRef.current
+    setLoading(true)
     try {
       const data = await bridge.plugins.inventory()
+      if (request !== requestRef.current) return
       setItems(data.items)
+      setLoaded(true)
+      setError('')
     } catch (e) {
-      ui.toast.error('读取插件清单失败: ' + errText(e))
+      // 首次失败由整块错误态承担，不再额外弹 toast（同一次失败只说一次）
+      if (request === requestRef.current) setError(errText(e))
     } finally {
-      setLoading(false)
+      if (request === requestRef.current) setLoading(false)
     }
   }, [])
 
@@ -977,9 +1115,14 @@ function PluginsTab() {
   }, [])
 
   useEffect(() => { void load(); void loadMarketplaceNames() }, [load, loadMarketplaceNames])
+  useEffect(() => () => { requestRef.current++ }, [])
+
+  /** 清单未知（首次盘点没成功）时停用装卸：不知道装了什么就不能盲改 CLI 配置 */
+  const writesBlocked = !loaded
+  const retry = () => { void load() }
 
   const toggle = async (item: PluginInventoryItem) => {
-    if (item.cli !== 'claude' || !item.marketplace || busy) return
+    if (item.cli !== 'claude' || !item.marketplace || busy || writesBlocked) return
     setBusy(true)
     try {
       await bridge.plugins.setEnabled({ cli: 'claude', name: item.name, marketplace: item.marketplace, enabled: !item.enabled })
@@ -995,7 +1138,7 @@ function PluginsTab() {
   /** 安装 claude 插件（spec = plugin@marketplace，由官方 claude CLI 代跑）；成功后刷新盘点 */
   const installPlugin = async () => {
     const spec = installSpec.trim()
-    if (!spec || busy) return
+    if (!spec || busy || writesBlocked) return
     setBusy(true)
     try {
       const result = await bridge.plugins.install({ cli: 'claude', spec })
@@ -1016,7 +1159,7 @@ function PluginsTab() {
 
   /** 卸载 claude 插件（危险确认 → plugins.uninstall）；成功后刷新盘点 */
   const uninstall = async (item: PluginInventoryItem) => {
-    if (item.cli !== 'claude' || !item.marketplace || busy) return
+    if (item.cli !== 'claude' || !item.marketplace || busy || writesBlocked) return
     const spec = `${item.name}@${item.marketplace}`
     if (!await ui.confirm({
       title: `卸载插件「${spec}」？`,
@@ -1048,12 +1191,22 @@ function PluginsTab() {
     }
   }
 
-  if (loading) return <p className="hint">正在盘点各 CLI 插件…</p>
+  if (!loaded && loading) return <EmptyState icon={LoaderCircle} title="插件盘点中" description="正在盘点各 CLI 已安装的插件与市场。" />
+  if (!loaded && error) {
+    return <EmptyState
+      icon={Puzzle}
+      title="插件清单读取失败"
+      description={`${error}；已装状态未知，因此安装、启用与卸载暂时不可用。`}
+      action={<button className="btn" type="button" onClick={retry}><RefreshCw size={14} /> 重试</button>}
+    />
+  }
 
   return <div className="ext-plugins">
     <div className="ext-tab-toolbar">
       <span className="ext-tab-desc">{PLUGINS_DESC}</span>
     </div>
+    {error && <StaleBanner marker="plugins" label="显示上次成功的插件盘点" error={error} onRetry={retry} busy={loading} />}
+    {writesBlocked && <p className="hint" data-plugins-writes-blocked>插件清单未知：安装 / 启用 / 卸载已停用，重试盘点成功后再操作。</p>}
     <datalist id="ext-plugin-marketplaces">
       {marketplaceNames.map((name) => <option key={name} value={name} />)}
     </datalist>
@@ -1077,7 +1230,7 @@ function PluginsTab() {
                 placeholder="plugin@marketplace"
               />
             </label>
-            <button className="btn primary" disabled={busy || !installSpec.trim()} onClick={() => void installPlugin()}>
+            <button className="btn primary" disabled={busy || writesBlocked || !installSpec.trim()} onClick={() => void installPlugin()}>
               <Plus size={14} /> 安装插件
             </button>
           </div>
@@ -1101,7 +1254,7 @@ function PluginsTab() {
                       <button
                         type="button"
                         className={`toggle-control ${item.enabled ? 'on' : ''}`}
-                        disabled={busy}
+                        disabled={busy || writesBlocked}
                         title={item.enabled ? '点击停用' : '点击启用'}
                         onClick={() => void toggle(item)}
                       >
@@ -1111,7 +1264,7 @@ function PluginsTab() {
                     <button
                       type="button"
                       className="btn danger ext-plugin-remove"
-                      disabled={busy}
+                      disabled={busy || writesBlocked}
                       title={`通过 claude CLI 卸载 ${item.name}@${item.marketplace}`}
                       onClick={() => void uninstall(item)}
                     >
@@ -1139,63 +1292,76 @@ function PluginsTab() {
 
 /* ============================== 插件发现区 ============================== */
 
-/** 已注册市场浏览（§8.6 迁入发现区）：展开时才拉取 listRegistered，按市场分组渲染插件清单。 */
+/** 已注册市场浏览（§8.6 迁入发现区）：展开时才拉取 listRegistered，按市场分组渲染插件清单。
+ *  刷新失败保留上次成功的清单（已装态仍可读），只在横幅里说明并给重试。 */
 function MarketBrowse({ onInstalled }: { onInstalled: (marketplace: string, pluginName: string) => void }) {
   const [show, setShow] = useState(false)
   const [markets, setMarkets] = useState<RegisteredMarketplace[] | null>(null)
   const [loading, setLoading] = useState(false)
+  const [loaded, setLoaded] = useState(false)
   const [error, setError] = useState('')
 
-  /** 展开 / 收起（每次展开重新拉取，保证已装态新鲜；失败降级为区内提示） */
-  const toggle = async () => {
-    if (show) { setShow(false); return }
-    setShow(true)
+  const reload = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
       const data = await bridge.marketplaces.listRegistered()
       setMarkets(data.marketplaces)
+      setLoaded(true)
     } catch (e) {
-      setMarkets(null)
       setError(errText(e))
     } finally {
       setLoading(false)
     }
+  }, [])
+
+  /** 展开 / 收起（每次展开重新拉取，保证已装态新鲜；失败保留旧数据并给重试） */
+  const toggle = () => {
+    if (show) { setShow(false); return }
+    setShow(true)
+    void reload()
   }
 
   return <div className="ext-discover-browse">
     <div className="ext-browse-head">
-      <button className="btn" onClick={() => void toggle()}>
+      <button className="btn" onClick={toggle}>
         <Store size={14} /> {show ? '收起市场' : '浏览已注册市场'}
       </button>
       <span className="ext-tab-desc">从已注册市场（AgentDeck 源 + Claude / ZCode 市场缓存）浏览并安装插件</span>
     </div>
     {show && <div className="ext-market-browse">
-      {loading ? <p className="hint">正在读取已注册市场…</p>
-        : error ? <p className="hint">市场清单读取失败：{error}</p>
-          : !markets || markets.length === 0
-            ? <p className="hint">未发现已注册市场；可在「+ 添加市场」中登记扩展源、浏览并注册市场。</p>
-            : markets.map((market) => (
-              <section key={market.name} className="ext-market-group">
-                <div className="ext-market-head">
-                  <Store size={14} />
-                  <b>{market.name}</b>
-                  {market.clis.map((marketCli) => <span key={marketCli} className="ext-badge muted">{CLI_LABELS[marketCli]}</span>)}
-                  <span className="ext-badge muted">{market.plugins.length} 插件</span>
-                </div>
-                <MarketplacePluginPanel
-                  marketplaceName={market.name}
-                  plugins={market.plugins}
-                  canInstall={market.clis.includes('claude')}
-                  onInstalled={(pluginName) => {
-                    setMarkets((current) => current?.map((m) => m.name === market.name
-                      ? { ...m, plugins: m.plugins.map((plugin) => plugin.name === pluginName ? { ...plugin, installed: true } : plugin) }
-                      : m) ?? current)
-                    onInstalled(market.name, pluginName)
-                  }}
-                />
-              </section>
-            ))}
+      {error && !loaded ? <EmptyState
+        compact
+        icon={Store}
+        title="市场清单读取失败"
+        description={error}
+        action={<button className="btn" type="button" onClick={() => void reload()} disabled={loading}><RefreshCw size={14} /> 重试</button>}
+      />
+        : <>{error && <StaleBanner marker="market-browse" label="显示上次成功的市场清单" error={error} onRetry={() => void reload()} busy={loading} />}
+          {loading && !loaded ? <p className="hint">正在读取已注册市场…</p>
+            : !markets || markets.length === 0
+              ? <p className="hint">未发现已注册市场；可在「+ 添加市场」中登记扩展源、浏览并注册市场。</p>
+              : markets.map((market) => (
+                <section key={market.name} className="ext-market-group">
+                  <div className="ext-market-head">
+                    <Store size={14} />
+                    <b>{market.name}</b>
+                    {market.clis.map((marketCli) => <span key={marketCli} className="ext-badge muted">{CLI_LABELS[marketCli]}</span>)}
+                    <span className="ext-badge muted">{market.plugins.length} 插件</span>
+                  </div>
+                  <MarketplacePluginPanel
+                    marketplaceName={market.name}
+                    plugins={market.plugins}
+                    canInstall={market.clis.includes('claude')}
+                    onInstalled={(pluginName) => {
+                      setMarkets((current) => current?.map((m) => m.name === market.name
+                        ? { ...m, plugins: m.plugins.map((plugin) => plugin.name === pluginName ? { ...plugin, installed: true } : plugin) }
+                        : m) ?? current)
+                      onInstalled(market.name, pluginName)
+                    }}
+                  />
+                </section>
+              ))}</>}
     </div>}
   </div>
 }
@@ -1363,22 +1529,31 @@ function SourceManager() {
   const [browsingId, setBrowsingId] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [loaded, setLoaded] = useState(false)
+  const [loadError, setLoadError] = useState('')
   const [marketplaces, setMarketplaces] = useState<MarketplaceStatus | null>(null)
+  const requestRef = useRef(0)
   // 浏览展开态：资产工具条（搜索/kind）与插件清单展开项（单开）
   const [assetQuery, setAssetQuery] = useState('')
   const [assetKind, setAssetKind] = useState<'all' | 'skill' | 'marketplace'>('all')
   const [pluginPath, setPluginPath] = useState<string | null>(null)
   const [importingAll, setImportingAll] = useState(false)
 
+  /** 目录 / 已添加源读取：失败保留上次成功的数据，「精选目录为空」不能拿来冒充失败 */
   const load = useCallback(async () => {
+    const request = ++requestRef.current
+    setLoading(true)
     try {
       const [catalog, list] = await Promise.all([bridge.sources.catalog(), bridge.sources.list()])
+      if (request !== requestRef.current) return
       setEntries(catalog.entries)
       setSources(list.sources)
+      setLoaded(true)
+      setLoadError('')
     } catch (e) {
-      ui.toast.error('读取扩展源失败: ' + errText(e))
+      if (request === requestRef.current) setLoadError(errText(e))
     } finally {
-      setLoading(false)
+      if (request === requestRef.current) setLoading(false)
     }
   }, [])
 
@@ -1392,6 +1567,7 @@ function SourceManager() {
   }, [])
 
   useEffect(() => { void load(); void loadMarketplaceStatus() }, [load, loadMarketplaceStatus])
+  useEffect(() => () => { requestRef.current++ }, [])
 
   const addSource = async (ref: string, name?: string) => {
     const trimmed = ref.trim()
@@ -1567,34 +1743,43 @@ function SourceManager() {
   }
 
   return <div className="ext-sources">
-    <section className="ext-section">
-      <div className="section-heading">
-        <h3>精选目录</h3>
-        <span>内置常用扩展仓库，一键添加为扩展源</span>
-      </div>
-      {entries.length === 0 ? (
-        <p className="hint">{loading ? '正在读取精选目录…' : '精选目录为空。'}</p>
-      ) : (
-        <div className="ext-catalog-grid">
-          {entries.map((entry) => {
-            const added = sources.some((source) => source.ref === entry.repo)
-            return <div key={entry.id} className="ext-catalog-card">
-              <div className="ext-row-between">
-                <b>{entry.name}</b>
-                <span className="ext-badge muted">{CATEGORY_LABELS[entry.category] ?? entry.category}</span>
-              </div>
-              <p>{entry.description}</p>
-              <span className="ext-ref" title={entry.repo}>{entry.repo}</span>
-              <div className="ext-card-actions">
-                {added
-                  ? <button className="btn" disabled><Check size={14} /> 已添加</button>
-                  : <button className="btn" disabled={busy} onClick={() => void addSource(entry.repo, entry.name)}><Plus size={14} /> 添加</button>}
-              </div>
+    {loadError && !loaded ? <EmptyState
+      compact
+      icon={FolderGit2}
+      title="扩展源读取失败"
+      description={loadError}
+      action={<button className="btn" type="button" onClick={() => void load()} disabled={loading}><RefreshCw size={14} /> 重试</button>}
+    />
+      : <>
+        {loadError && <StaleBanner marker="extension-sources" label="显示上次成功的扩展源" error={loadError} onRetry={() => void load()} busy={loading} />}
+        <section className="ext-section">
+          <div className="section-heading">
+            <h3>精选目录</h3>
+            <span>内置常用扩展仓库，一键添加为扩展源</span>
+          </div>
+          {entries.length === 0 ? (
+            <p className="hint">{loading ? '正在读取精选目录…' : '精选目录为空。'}</p>
+          ) : (
+            <div className="ext-catalog-grid">
+              {entries.map((entry) => {
+                const added = sources.some((source) => source.ref === entry.repo)
+                return <div key={entry.id} className="ext-catalog-card">
+                  <div className="ext-row-between">
+                    <b>{entry.name}</b>
+                    <span className="ext-badge muted">{CATEGORY_LABELS[entry.category] ?? entry.category}</span>
+                  </div>
+                  <p>{entry.description}</p>
+                  <span className="ext-ref" title={entry.repo}>{entry.repo}</span>
+                  <div className="ext-card-actions">
+                    {added
+                      ? <button className="btn" disabled><Check size={14} /> 已添加</button>
+                      : <button className="btn" disabled={busy} onClick={() => void addSource(entry.repo, entry.name)}><Plus size={14} /> 添加</button>}
+                  </div>
+                </div>
+              })}
             </div>
-          })}
-        </div>
-      )}
-    </section>
+          )}
+        </section>
 
     <section className="ext-section">
       <div className="section-heading">
@@ -1738,5 +1923,6 @@ function SourceManager() {
         </div>
       )}
     </section>
+      </>}
   </div>
 }

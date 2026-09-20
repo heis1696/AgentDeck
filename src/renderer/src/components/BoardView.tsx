@@ -19,6 +19,7 @@ const DAY = 86_400_000
 const EXPIRING_TITLE = '超过 30 天且全部执行终结的 Issue 会被自动清理；未完成工作始终保留'
 /** 选中日期没有任何卡片时，列空态的统一提示 */
 export const BOARD_EMPTY_DAY_HINT = '这一天没有 Issue'
+export const BOARD_EMPTY_ALL_HINT = '还没有 Issue'
 const COLUMNS: { key: IssueStatus; label: string; icon: typeof Clock3 }[] = [
   { key: 'backlog', label: ISSUE_STATUS_LABELS.backlog, icon: ListTodo },
   { key: 'todo', label: ISSUE_STATUS_LABELS.todo, icon: Clock3 },
@@ -290,7 +291,7 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
         <span className="board-day-nav-caption">最后更新</span>
         <button type="button" className={`board-day-nav-all${selectedDay == null ? ' is-active' : ''}`} aria-pressed={selectedDay == null} title="显示保留窗内全部日期的 Issue" onClick={() => setSelectedDay(null)}>全部日期</button>
         <button type="button" className="board-day-nav-btn" aria-label="前一天" title="前一天" disabled={selectedDay == null} onClick={() => setSelectedDay((day) => day == null ? day : shiftBoardDay(day, -1, todayFloor))}><ChevronLeft size={14} /></button>
-        <span className="board-day-nav-label" aria-live="polite">{selectedDay == null ? '全部日期' : formatBoardDay(selectedDay, todayFloor)}</span>
+         {selectedDay != null && <span className="board-day-nav-label" aria-live="polite">{formatBoardDay(selectedDay, todayFloor)}</span>}
         <button type="button" className="board-day-nav-btn" aria-label="后一天" title="后一天" disabled={selectedDay == null || selectedDay >= todayFloor} onClick={() => setSelectedDay((day) => day == null ? day : shiftBoardDay(day, 1, todayFloor))}><ChevronRight size={14} /></button>
         <button type="button" className="board-day-nav-today" disabled={selectedDay === todayFloor} onClick={() => setSelectedDay(todayFloor)}>今天</button>
         <select className="board-day-nav-select" aria-label="按最后更新时间跳转日期" value={selectedDay == null ? 'all' : String(selectedDay)} onChange={(event) => setSelectedDay(event.target.value === 'all' ? null : Number(event.target.value))}>
@@ -304,7 +305,7 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
     {issuesError && <div className="data-state-banner data-state-stale" role="status"><CircleAlert size={14} /><span>{issuesLoaded ? '显示上次成功的 Issue 快照：' : '看板加载失败：'}{issuesError}</span><button className="btn" type="button" onClick={() => void refreshIssues()} disabled={loading}><RefreshCw size={13} className={loading ? 'spin' : ''} /> 重试</button></div>}
     <div className="board-day-head" data-day-key={selectedDay == null ? 'all' : boardDayKey(selectedDay)}>
       <span className="board-day-head-date">{selectedDay == null ? '最后更新：全部日期（30 天保留窗）' : `最后更新：${formatBoardDay(selectedDay, todayFloor)}`}</span>
-      <span className="board-day-head-count">{loading ? '正在读取最新状态…' : dayTotal > 0 ? `共 ${dayTotal} 个 Issue` : selectedDay == null ? '还没有 Issue' : BOARD_EMPTY_DAY_HINT}</span>
+      <span className="board-day-head-count">{loading ? '正在读取最新状态…' : dayTotal > 0 ? `共 ${dayTotal} 个 Issue` : selectedDay == null ? BOARD_EMPTY_ALL_HINT : BOARD_EMPTY_DAY_HINT}</span>
       {overAgeDay && <span className="board-expiring-badge" title={EXPIRING_TITLE}>将自动清理</span>}
     </div>
     <div className="board issue-board">{COLUMNS.map((column) => {
@@ -312,7 +313,7 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
       const orphans = dayOrphans.filter((node) => nodeStatus(node) === column.key && matches(node)).sort((a, b) => updatedAt(b) - updatedAt(a))
       return <section key={column.key} className={`board-col ${dropTarget === column.key ? 'is-drag-target' : ''}`} aria-label={column.label} onDragEnter={() => setDropTarget(column.key)} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move' }} onDragLeave={(event) => { if (event.currentTarget === event.target) setDropTarget(null) }} onDrop={(event) => { event.preventDefault(); const id = event.dataTransfer.getData('text/task-id'); if (id) void move(id, column.key); setDropTarget(null) }}>
         <div className="board-col-head"><span className={`dot board-col-dot board-col-dot-${column.key}`} /><column.icon size={14} aria-hidden="true" /><span className="board-col-title">{column.label}</span><span className="board-col-count">{items.length + orphans.length}</span></div>
-        <div className="board-col-body">{loading && !issues.length ? <div className="board-loading-state" aria-live="polite"><LoaderCircle size={17} className="spin" /><span>正在加载</span></div> : <>{items.map(renderCard)}{orphans.length > 0 && <section className="board-orphans"><h3 className="board-orphans-head">（无领队）<span>{orphans.length}</span></h3>{orphans.map(renderCard)}</section>}{!items.length && !orphans.length && <EmptyState compact title={!dayHasCards ? BOARD_EMPTY_DAY_HINT : filtering ? '无匹配' : '空'} />}</>}</div>
+        <div className="board-col-body">{loading && !issues.length ? <div className="board-loading-state" aria-live="polite"><LoaderCircle size={17} className="spin" /><span>正在加载</span></div> : <>{items.map(renderCard)}{orphans.length > 0 && <section className="board-orphans"><h3 className="board-orphans-head">（无领队）<span>{orphans.length}</span></h3>{orphans.map(renderCard)}</section>}{!items.length && !orphans.length && <EmptyState compact title={!dayHasCards ? (selectedDay == null ? BOARD_EMPTY_ALL_HINT : BOARD_EMPTY_DAY_HINT) : filtering ? '没有匹配的 Issue' : '空'} />}</>}</div>
         {draggingTask && dropTarget === column.key && <div className="board-drop-hint"><span>放置到</span><strong>{column.label}</strong></div>}
       </section>
     })}</div>

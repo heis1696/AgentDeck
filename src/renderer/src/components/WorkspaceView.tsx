@@ -386,13 +386,13 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
           <button
             className="btn"
             disabled={!canSubmit}
-            title="创建但不启动；之后在任务详情点「开始执行」"
+            title="创建任务但暂不启动；之后在任务详情点「开始执行」"
             onClick={() => void submit(false)}
           >
-            <Clock3 size={14} aria-hidden="true" /> 稍后
+            <Clock3 size={14} aria-hidden="true" /> 创建并稍后执行
           </button>
-          <button className="btn primary" disabled={!canSubmit} onClick={() => void submit(true)}>
-            {busy ? <><LoaderCircle size={14} className="spin" aria-hidden="true" /> 创建中…</> : <><ArrowUpRight size={14} aria-hidden="true" /> 开始执行</>}
+          <button className="btn primary" disabled={!canSubmit} onClick={() => void submit(true)} title="创建并立即开始执行">
+            {busy ? <><LoaderCircle size={14} className="spin" aria-hidden="true" /> 创建中…</> : <><ArrowUpRight size={14} aria-hidden="true" /> 创建并开始执行</>}
           </button>
         </div>
         {submitHint && <p className="hint workspace-mode-hint">{submitHint}</p>}

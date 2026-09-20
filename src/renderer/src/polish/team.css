@@ -18,9 +18,17 @@
   display: inline-flex; align-items: center; gap: 7px; margin: 0;
   font-size: var(--text-title-sm); font-weight: 600;
 }
+.tm-section-title { display: flex; align-items: baseline; gap: 12px; min-width: 0; flex: 1; }
 .tm-hicon { color: var(--text-faint); }
 .tm-hicon-accent { color: var(--accent); }
 .tm-section-desc { color: var(--text-faint); font-size: var(--text-caption); min-width: 0; }
+.tm-filter {
+  display: inline-flex; align-items: center; gap: 7px; flex: 0 1 260px; min-width: min(260px, 100%);
+  min-height: 30px; padding: 0 9px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--bg-inset); color: var(--text-faint);
+}
+.tm-filter:focus-within { border-color: var(--accent); box-shadow: var(--focus-halo); }
+.tm-filter input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font-size: var(--text-caption); }
 
 /* ---- 卡片网格：auto-fill 随容器流动 ---- */
 .tm-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(272px, 1fr)); gap: 12px; }
@@ -137,11 +145,15 @@
 .tm-badge { border: 1px solid color-mix(in srgb, var(--border) 72%, transparent); }
 .tm-note { margin-top: 12px; min-height: 34px; }
 .tm-empty { min-height: 82px; justify-content: flex-start; background: var(--bg-inset); }
+.tm-empty-filtered { flex-wrap: wrap; }
+.tm-empty-filtered .btn { margin-left: auto; }
 
 @container page (max-width: 560px) {
   .tm-section { margin-bottom: 24px; }
   .tm-section:first-of-type { padding-top: 16px; }
   .tm-section-head { align-items: flex-start; gap: 6px; }
+  .tm-section-title { align-items: flex-start; flex-direction: column; gap: 4px; }
+  .tm-filter { flex-basis: 100%; width: 100%; }
   .tm-card { padding: 14px; }
   .tm-card:hover { transform: none; }
 }

@@ -290,10 +290,22 @@ function AdvancedSection() {
  * 路径编辑契约（Batch B）：输入框是本地草稿，显式「保存路径」才写盘；
  * 脏值 / 保存中 / 保存失败三态都要看得见，失败时草稿原样保留；
  * 「检测路径可用性」先等这次保存落盘再探测——否则探测的是旧路径，反馈会骗人。
+ *
+ * 复核（Batch B follow-up）：
+ * - 保存串行排队：保存期间继续输入的新内容不会被设置广播回写清掉；
+ * - 探测结果绑定到「这次真正落盘的路径」，输入改动后结果标注为对应旧路径；
+ * - 干净路径下连点检测不会重复发探测（ref 同步置位，早于 re-render）。
  */
+type RuntimePaths = { zcode: string; node: string; dsh: string }
+
+/** 路径三元组的比较键：空串与未配置等价 */
+function pathsKey(paths: RuntimePaths): string {
+  return `${paths.zcode}\u0000${paths.node}\u0000${paths.dsh}`
+}
+
 function RuntimeSection() {
   const { settings, update, refresh, error } = useSettings()
-  const [probe, setProbe] = useState<{ ok: boolean; detail: string } | null>(null)
+  const [probe, setProbe] = useState<{ ok: boolean; detail: string; paths: string } | null>(null)
   const [probing, setProbing] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
@@ -301,14 +313,25 @@ function RuntimeSection() {
   const [zcodePath, setZcodePath] = useState('')
   const [nodePath, setNodePath] = useState('')
   const [dshPath, setDshPath] = useState('')
-  const saveRef = useRef(false)
+  /** 上一版已落盘路径：决定设置广播能不能覆盖某个字段的草稿 */
+  const persistedRef = useRef<RuntimePaths | null>(null)
+  /** 最近一次真正写盘的路径：相同路径不重复 IPC */
+  const writtenRef = useRef<RuntimePaths | null>(null)
+  /** 串行保存队列：显式保存与「检测」前保存排队执行 */
+  const saveQueue = useRef<Promise<boolean>>(Promise.resolve(true))
+  const pendingSaves = useRef(0)
+  const probingRef = useRef(false)
 
   useEffect(() => {
-    if (settings) {
-      setZcodePath(settings.zcodePath)
-      setNodePath(settings.nodePath)
-      setDshPath(settings.dshPath ?? '')
-    }
+    if (!settings) return
+    const next: RuntimePaths = { zcode: settings.zcodePath, node: settings.nodePath, dsh: settings.dshPath ?? '' }
+    const previous = persistedRef.current
+    persistedRef.current = next
+    if (writtenRef.current === null) writtenRef.current = next
+    // 广播只覆盖「没有本地改动」的字段：保存期间的新输入不被回写清掉
+    setZcodePath((current) => (previous === null || current === previous.zcode ? next.zcode : current))
+    setNodePath((current) => (previous === null || current === previous.node ? next.node : current))
+    setDshPath((current) => (previous === null || current === previous.dsh ? next.dsh : current))
   }, [settings?.zcodePath, settings?.nodePath, settings?.dshPath])
 
   // 生效值（已落盘）与草稿比对；settings 还没到时不算脏，避免刚挂载就报未保存
@@ -317,25 +340,39 @@ function RuntimeSection() {
     nodePath.trim() !== settings.nodePath ||
     dshPath.trim() !== (settings.dshPath ?? '')
   )
+  const draftPaths: RuntimePaths = { zcode: zcodePath.trim(), node: nodePath.trim(), dsh: dshPath.trim() }
 
-  const save = async (): Promise<boolean> => {
-    if (saveRef.current) return false
-    saveRef.current = true
-    setSaving(true)
-    setSaveError(null)
+  const writePaths = async (target: RuntimePaths): Promise<boolean> => {
+    if (writtenRef.current && pathsKey(writtenRef.current) === pathsKey(target)) return true
     try {
-      await update({ zcodePath: zcodePath.trim(), nodePath: nodePath.trim(), dshPath: dshPath.trim() })
+      await update({ zcodePath: target.zcode, nodePath: target.node, dshPath: target.dsh })
+      writtenRef.current = target
       setSavedAt(Date.now())
+      setSaveError(null)
       return true
     } catch (cause) {
       const detail = describe(cause)
       setSaveError(detail)
       ui.toast.error(`运行时路径保存失败：${detail}`)
       return false
-    } finally {
-      saveRef.current = false
-      setSaving(false)
     }
+  }
+
+  /** 保存提交的是调用那一刻的确切草稿；同一时刻只有一次写入在途 */
+  const savePaths = (target: RuntimePaths): Promise<boolean> => {
+    pendingSaves.current += 1
+    setSaving(true)
+    const run = async (): Promise<boolean> => {
+      try {
+        return await writePaths(target)
+      } finally {
+        pendingSaves.current -= 1
+        if (pendingSaves.current === 0) setSaving(false)
+      }
+    }
+    const next = saveQueue.current.then(run, run)
+    saveQueue.current = next.then(() => true, () => false)
+    return next
   }
 
   if (!settings && error) return <SettingsState loading={false} error={error} onRetry={() => { void refresh() }} />
@@ -343,17 +380,20 @@ function RuntimeSection() {
   if (!settings) return <EmptyState title="设置加载中" />
 
   const doProbe = async () => {
-    if (probing || saving) return
-    // 检测必须基于已保存的路径：脏值先落盘，保存失败就不检测（错误已就地展示）
-    if (dirty && !(await save())) return
+    if (probingRef.current) return
+    probingRef.current = true
     setProbing(true)
-    setProbe(null)
     try {
+      // 检测必须基于已保存的路径：脏值先落盘（排队等待在途保存），保存失败就不检测
+      if (dirty && !(await savePaths(draftPaths))) return
+      const target = pathsKey(writtenRef.current ?? draftPaths)
+      setProbe(null)
       const r = await bridge.settings.probe()
-      setProbe({ ok: r.ok, detail: r.detail })
+      setProbe({ ok: r.ok, detail: r.detail, paths: target })
     } catch (cause) {
-      setProbe({ ok: false, detail: '检测失败: ' + describe(cause) })
+      setProbe({ ok: false, detail: '检测失败: ' + describe(cause), paths: pathsKey(writtenRef.current ?? draftPaths) })
     } finally {
+      probingRef.current = false
       setProbing(false)
     }
   }
@@ -383,7 +423,7 @@ function RuntimeSection() {
           />
         </label>
         <div className="row">
-          <button className="btn primary" type="button" onClick={() => void save()} disabled={!dirty || saving}>
+          <button className="btn primary" type="button" onClick={() => void savePaths(draftPaths)} disabled={!dirty || saving}>
             {saving ? '保存中…' : '保存路径'}
           </button>
           <button className="btn" type="button" onClick={() => void doProbe()} disabled={probing || saving}>
@@ -393,9 +433,15 @@ function RuntimeSection() {
           {!saving && dirty && <span className="hint" data-paths-dirty>有未保存的修改；点「检测路径可用性」会先保存再探测。</span>}
           {!saving && !dirty && savedAt !== null && <span className="probe-ok" data-paths-saved>路径已保存，可检测。</span>}
           {probe && (
-            <span className={probe.ok ? 'probe-ok' : 'probe-fail'} data-paths-probe>
+            <span
+              className={probe.ok ? 'probe-ok' : 'probe-fail'}
+              data-paths-probe
+              data-paths-probe-stale={probe.paths === pathsKey(draftPaths) ? undefined : ''}
+              title={probe.paths === pathsKey(draftPaths) ? undefined : '该结果对应上次保存的路径'}
+            >
               {probe.ok ? '✓ ' : '✗ '}
               {probe.detail}
+              {probe.paths === pathsKey(draftPaths) ? '' : '（对应上次保存的路径；输入已改动，需重新检测）'}
             </span>
           )}
         </div>

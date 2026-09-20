@@ -1,5 +1,5 @@
 import { ArrowUpRight, ListTodo, X } from 'lucide-react'
-import type { ReactNode } from 'react'
+import { useMemo, type ReactNode } from 'react'
 import type { Task } from '../../../shared/types'
 import { useIssues } from '../api'
 import { isParkedQueued, PARKED_QUEUED_LABEL, TASK_STATUS_LABELS } from '../labels'
@@ -25,10 +25,25 @@ export function IssuesView({ tasks, tabs, onOpen, onClose, onBrowseAll, children
     const issue = issues.find((item) => item.taskId === id || item.id === task.issueId)
     return [{ id: task.id, status: task.status, title: issue?.title ?? task.title }]
   })
-  const recentRoots = [...tasks]
-    .filter((task) => !task.parentTaskId)
-    .sort((a, b) => Math.max(b.createdAt, b.startedAt ?? 0, b.endedAt ?? 0) - Math.max(a.createdAt, a.startedAt ?? 0, a.endedAt ?? 0))
-    .slice(0, 6)
+  const recentRoots = useMemo(() => {
+    const issueById = new Map(issues.map((issue) => [issue.id, issue]))
+    const issueByTask = new Map(issues.map((issue) => [issue.taskId, issue]))
+    const latest = new Map<string, Task>()
+    const executionAt = (task: Task) => task.endedAt ?? task.startedAt ?? task.createdAt
+    for (const task of tasks) {
+      if (task.parentTaskId) continue
+      const issue = issueByTask.get(task.id) ?? (task.issueId ? issueById.get(task.issueId) : undefined)
+      const key = task.issueId ?? issue?.id ?? `task:${task.id}`
+      const current = latest.get(key)
+      if (!current || executionAt(task) > executionAt(current) || (executionAt(task) === executionAt(current) && task.createdAt > current.createdAt)) {
+        latest.set(key, task)
+      }
+    }
+    return [...latest.entries()]
+      .sort(([, a], [, b]) => executionAt(b) - executionAt(a))
+      .slice(0, 6)
+      .map(([key, task]) => ({ task, title: issueById.get(key)?.title ?? issueByTask.get(task.id)?.title ?? task.title }))
+  }, [issues, tasks])
   return <div className="issues-page page-surface issue-home">
     <PageHeader title="Issue" icon={<ListTodo size={16} />} count={opened.length} />
     {opened.length > 0 && <div className="issue-open-strip">
@@ -46,21 +61,21 @@ export function IssuesView({ tasks, tabs, onOpen, onClose, onBrowseAll, children
       </div>
     </div>}
     <div className="issue-home-body">
-      {recentRoots.length > 0 && <section className="issue-recent" aria-label="最近任务">
+      {children}
+      {recentRoots.length > 0 && <section className="issue-recent" aria-label="按最近执行时间的任务">
         <div className="issue-recent-heading">
-          <div><strong>最近任务</strong><span>最近访问的根任务</span></div>
+          <div><strong>最近任务</strong><span>按最近执行时间 · 每个 Issue 一行</span></div>
           <button type="button" className="issue-recent-all" onClick={onBrowseAll}><span>查看全部任务</span><ArrowUpRight size={13} aria-hidden="true" /></button>
         </div>
         <div className="issue-recent-list" role="list">
-          {recentRoots.map((task) => <div className="issue-recent-task" role="listitem" key={task.id}>
+          {recentRoots.map(({ task, title }) => <div className="issue-recent-task" role="listitem" key={task.issueId ?? task.id}>
             <span className={`dot dot-${task.status}`} aria-hidden="true" />
-            <span className="issue-recent-title" title={task.title}>{task.title}</span>
+            <span className="issue-recent-title" title={title}>{title}</span>
             <span className={`issue-recent-status issue-recent-status-${task.status}`}>{isParkedQueued(task) ? PARKED_QUEUED_LABEL : TASK_STATUS_LABELS[task.status]}</span>
             <button type="button" className="issue-recent-open" onClick={() => onOpen(task.id)}>打开</button>
           </div>)}
         </div>
       </section>}
-      {children}
     </div>
   </div>
 }

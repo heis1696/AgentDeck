@@ -62,16 +62,23 @@ for (let i = 0; i < 25; i++) {
   const issue = bridge.store.issues.find((candidate) => candidate.taskId === task.id)
   if (issue) { issue.createdAt = stamp; issue.updatedAt = stamp; issue.identifier = `ISS-CATALOG-${i}` }
 }
+const historical = bridge.seedTask({ id: 'task-history', title: 'Historical execution', prompt: 'same issue, later execution', workdir: 'C:/workspace/history', status: 'done' })
+historical.issueId = 'iss_task-0'
+Object.assign(historical, { createdAt: now - 500, startedAt: now - 400, endedAt: now - 100 })
+bridge.store.issues = bridge.store.issues.filter((issue) => issue.taskId !== historical.id)
 bridge.store.agents = [
   { id: 'ag_forge', name: 'Forge Agent', backend: 'zcode', color: '#999' },
-  ...Array.from({ length: 20 }, (_, i) => ({ id: `agent-${i}`, name: `Long named execution Agent ${i}`, role: i === 0 ? '领队' : '执行者', backend: i % 2 ? 'codex' : 'zcode', model: `model-${i}`, color: '#3aa99f' }))
+  ...Array.from({ length: 20 }, (_, i) => ({ id: `agent-${i}`, name: `Long named execution Agent ${i}`, role: i === 0 ? '领队' : '执行者', backend: i % 2 ? 'codex' : 'zcode', model: `model-${i}`, color: '#3aa99f', ...(i === 0 ? { presetId: 'preset-1' } : {}) }))
 ]
+bridge.store.presets = [{ id: 'preset-1', name: 'Smoke preset', backend: 'zcode', baseURL: 'https://example.test', apiKey: 'smoke-key-1234', createdAt: now }]
 
 let appRoot = null
 ui.reset()
 ui.focusComposer()
 await act(async () => { appRoot = createRoot(container); appRoot.render(createElement(App)); await sleep(100) })
 assert.equal(all('.issue-recent-task').length, 6, 'Issue home keeps recent history compact')
+assert.equal(new Set(all('.issue-recent-task').map((row) => row.querySelector('.issue-recent-title')?.textContent)).size, 6, 'Issue home shows one row per Issue')
+assert.ok(!all('.issue-recent-title').some((title) => title.textContent === 'Historical execution'), 'historical execution does not create a duplicate Issue row')
 assert.ok(query('.issue-recent-all'), 'Issue home exposes all-task recovery')
 assert.equal(all('.agent-pick').length, 0, 'Agent roster is no longer an unbounded button grid')
 assert.ok(query('.agent-picker-trigger'), 'Issue composer has a compact Agent value')
@@ -107,8 +114,37 @@ await input(boardSearch, 'does-not-exist')
 assert.ok(query('.board-filter-reset'), 'filtered empty state exposes one-action recovery')
 await click(query('.board-filter-reset'))
 assert.equal(query('.issues-search input').value, '', 'reset clears search scope')
-assert.equal(all('.board-card').length, 25, 'reset restores the complete board catalog')
+assert.equal(all('.board-card').length, 25, 'reset restores the complete board catalog without duplicate Issue executions')
 
-console.log('WORKFLOW BATCH A SMOKE PASSED: full catalog search, parked-task open, compact recents, Agent picker, all-date board and filter recovery')
+await act(async () => { ui.navigate('agents'); await sleep(60) })
+const agentFilter = query('.tm-filter input')
+assert.ok(agentFilter, 'Agent management exposes a roster filter')
+await input(agentFilter, 'backend-that-does-not-exist')
+assert.ok(query('.tm-empty-filtered'), 'Agent filter distinguishes no matches from an empty roster')
+await input(agentFilter, 'codex')
+assert.ok(all('.tm-section:first-of-type .tm-card').every((card) => card.textContent.includes('codex')), 'Agent filter searches backend metadata')
+await input(agentFilter, '')
+const agentCard = all('.tm-section:first-of-type .tm-card').find((card) => card.textContent.includes('Long named execution Agent 1'))
+assert.ok(agentCard, 'long-named Agent remains reachable after clearing the filter')
+await click(agentCard.querySelector('.tm-act-danger'))
+assert.ok(query('.confirm-dialog'), 'Agent deletion requires confirmation')
+await click(query('.confirm-dialog .btn:not(.danger)'))
+assert.equal(bridge.calls.agentSave, 0, 'cancelling Agent deletion does not write')
+await click(agentCard.querySelector('.tm-act-danger'))
+await click(query('.confirm-dialog .btn.danger'))
+assert.equal(bridge.calls.agentSave, 1, 'confirmed Agent deletion writes once')
+
+const presetCard = all('.tm-section')[1].querySelector('.tm-card')
+assert.ok(presetCard, 'preset fixture is visible')
+await click(presetCard.querySelector('.tm-act-danger'))
+assert.match(query('.confirm-dialog').textContent, /1 个 Agent/, 'preset deletion names affected Agent count')
+await click(query('.confirm-dialog .btn:not(.danger)'))
+assert.equal(bridge.calls.presetSave, 0, 'cancelling preset deletion does not write')
+await click(presetCard.querySelector('.tm-act-danger'))
+await click(query('.confirm-dialog .btn.danger'))
+assert.equal(bridge.calls.presetSave, 1, 'confirmed preset deletion writes once')
+assert.equal(bridge.store.presets.length, 0, 'confirmed preset deletion removes the preset')
+
+console.log('WORKFLOW BATCH A SMOKE PASSED: full catalog search, parked-task open, deduped recents, Agent picker, all-date board, Agent filtering and deletion confirmations')
 await act(async () => appRoot.unmount())
 dom.window.close()

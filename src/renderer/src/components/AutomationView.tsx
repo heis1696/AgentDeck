@@ -27,6 +27,9 @@ const describe = (cause: unknown): string => (cause instanceof Error ? cause.mes
  * 交互契约（Batch B）：调度与执行语义不变（含顶部「待定」可用性说明）；
  * 变的是操作反馈——创建/启停/立即运行/删除都有 pending 闸门与捕获到的错误，
  * 删除先确认（取消不触碰 IPC），成功只收敛一次，失败时表单输入原样保留。
+ *
+ * 复核（Batch B follow-up）：创建在途时表单仍可被 Escape / 遮罩关闭并重新打开，
+ * 用「表单会话号」把迟到的成功限制在它自己的那次会话里——既不关掉新表单，也不动新草稿。
  */
 export function AutomationView() {
   const [items, setItems] = useState<Automation[]>([])
@@ -42,12 +45,15 @@ export function AutomationView() {
   const [scheduleMinutes, setScheduleMinutes] = useState(DEFAULT_SCHEDULE_MINUTES)
   const [output, setOutput] = useState<'issue' | 'run_only'>(DEFAULT_OUTPUT)
   const [creating, setCreating] = useState(false)
+  const [creatingSession, setCreatingSession] = useState(0)
   const [createError, setCreateError] = useState<string | null>(null)
   const [pendingIds, setPendingIds] = useState<readonly string[]>([])
   const creatingRef = useRef(false)
   const pendingRef = useRef(new Set<string>())
+  /** 表单会话号：每次打开/关闭 +1，用来识别「迟到的成功」属于哪一次表单 */
+  const formSeqRef = useRef(0)
   // 统一浮层：Escape 关闭 + Tab 焦点陷阱 + 焦点归还
-  const formLayerRef = useInteractionLayer<HTMLDivElement>({ open: formOpen, onClose: () => setFormOpen(false), kind: 'modal', name: 'automation-form', trap: true })
+  const formLayerRef = useInteractionLayer<HTMLDivElement>({ open: formOpen, onClose: () => closeForm(), kind: 'modal', name: 'automation-form', trap: true })
 
   const requestRef = useRef(0)
   const refresh = async () => {
@@ -72,6 +78,7 @@ export function AutomationView() {
   }, [])
   /** 打开新建表单：无论空表单还是模板，配置项一律显式复位（不继承上一次的草稿） */
   const openCreate = (template?: readonly [string, string, typeof GitBranch]) => {
+    formSeqRef.current += 1
     setName(template ? template[0] : '')
     setPrompt(template ? template[1] : '')
     setWorkdir('')
@@ -81,27 +88,36 @@ export function AutomationView() {
     setCreateError(null)
     setFormOpen(true)
   }
+  /** 关闭表单（取消 / Escape / 点遮罩）：会话号前进，在途创建的成功不再收敛到这里 */
+  const closeForm = () => {
+    formSeqRef.current += 1
+    setFormOpen(false)
+  }
   const create = async () => {
     if (creatingRef.current) return
     if (!name.trim() || !prompt.trim()) return
+    const session = formSeqRef.current
     creatingRef.current = true
     setCreating(true)
+    setCreatingSession(session)
     setCreateError(null)
     let created = false
     try {
       await bridge.automations.create({ name, prompt, workdir, agentId: agentId || undefined, scheduleMinutes: Math.max(1, scheduleMinutes), output, enabled: true })
       created = true
     } catch (cause) {
-      // 失败：表单保持打开、输入原样保留，用户改完可以直接重试
+      // 失败：表单保持打开、输入原样保留，用户改完可以直接重试；
+      // 迟到的失败只提示——表单已经换过会话时，不把上一次的失败写进新表单
       const detail = describe(cause)
-      setCreateError(detail)
+      if (formSeqRef.current === session) setCreateError(detail)
       ui.toast.error(`创建自动化失败：${detail}`)
     } finally {
       creatingRef.current = false
       setCreating(false)
     }
     if (!created) return
-    setFormOpen(false) // 成功只收敛一次
+    // 成功只收敛一次，且只收敛它自己那次表单会话：期间被关掉/重开的新表单不受影响
+    if (formSeqRef.current === session) setFormOpen(false)
     ui.toast.success('自动化已创建')
     await refresh()
   }
@@ -166,6 +182,6 @@ export function AutomationView() {
       {items.length > 0 && <section className="automation-section"><div className="section-heading"><h3>已配置的自动化</h3><span>{items.filter((item) => item.enabled).length} 个启用</span></div><div className="automation-list">{items.map((item) => { const pendingRow = pendingIds.includes(item.id); return <article className="automation-row" key={item.id}><div className="automation-row-main"><strong>{item.name}</strong><span>{item.prompt}</span><small><Clock3 size={12} /> 每 {item.scheduleMinutes} 分钟{item.nextRunAt ? ` · 下次 ${new Date(item.nextRunAt).toLocaleString()}` : ''}</small></div><button className={`toggle-control compact ${item.enabled ? 'on' : ''}`} disabled={pendingRow} onClick={() => void toggle(item)} aria-label={item.enabled ? '暂停自动化' : '启用自动化'}><span /></button><button className="icon-btn" title="立即运行" disabled={pendingRow} onClick={() => void runNow(item)}><Play size={14} /></button><button className="icon-btn danger-icon" title="删除自动化" disabled={pendingRow} onClick={() => void remove(item)}><Trash2 size={14} /></button></article> })}</div></section>}
       <section className="automation-section"><div className="section-heading"><h3>从模板开始</h3><span>选择后可再调整提示词。</span></div><div className="automation-grid">{templates.map(([title, body, Icon]) => <article className="automation-card" key={title}><div className="automation-card-icon"><Icon size={18} /></div><div><h4>{title}</h4><p>{body}</p><small><Clock3 size={12} /> 点击配置</small></div><button className="btn ghost" onClick={() => openCreate([title, body, Icon])}>使用模板</button></article>)}</div></section>
     </div>
-    {formOpen && <div className="overlay" ref={formLayerRef} onClick={(event) => event.target === event.currentTarget && setFormOpen(false)}><div className="dialog automation-dialog"><h2>新建自动化</h2><label className="field"><span>名称</span><input value={name} onChange={(event) => setName(event.target.value)} autoFocus /></label><label className="field"><span>提示词</span><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={5} /></label><label className="field"><span>工作目录</span><input value={workdir} onChange={(event) => setWorkdir(event.target.value)} placeholder="本地路径（可选）" /></label><label className="field"><span>执行 Agent</span><select value={agentId} onChange={(event) => setAgentId(event.target.value)}><option value="">默认（zcode · 无身份）</option>{BACKEND_IDS.filter((b) => agents.some((agent) => agent.backend === b && !isForgeAgent(agent))).map((b) => (<optgroup key={b} label={b}>{agents.filter((agent) => agent.backend === b && !isForgeAgent(agent)).map((agent) => <option key={agent.id} value={agent.id}>{agent.name}{agent.model ? `（${agent.model}）` : ''}</option>)}</optgroup>))}</select></label><div className="automation-form-grid"><label className="field"><span>间隔（分钟）</span><input type="number" min={1} value={scheduleMinutes} onChange={(event) => setScheduleMinutes(Number(event.target.value) || 1)} /></label><label className="field"><span>产出</span><select value={output} onChange={(event) => setOutput(event.target.value as 'issue' | 'run_only')}><option value="issue">创建 issue</option><option value="run_only">仅执行</option></select></label></div>{createError && <p className="probe-fail" role="alert" data-automation-create-error>创建失败：{createError}。填写内容仍保留，可直接重试。</p>}<div className="dialog-footer"><button className="btn" disabled={creating} onClick={() => setFormOpen(false)}>取消</button><button className="btn primary" disabled={!name.trim() || !prompt.trim() || creating} onClick={() => void create()}>{creating ? '创建中…' : '创建'}</button></div></div></div>}
+    {formOpen && <div className="overlay" ref={formLayerRef} onClick={(event) => event.target === event.currentTarget && closeForm()}><div className="dialog automation-dialog"><h2>新建自动化</h2><label className="field"><span>名称</span><input value={name} onChange={(event) => setName(event.target.value)} autoFocus /></label><label className="field"><span>提示词</span><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={5} /></label><label className="field"><span>工作目录</span><input value={workdir} onChange={(event) => setWorkdir(event.target.value)} placeholder="本地路径（可选）" /></label><label className="field"><span>执行 Agent</span><select value={agentId} onChange={(event) => setAgentId(event.target.value)}><option value="">默认（zcode · 无身份）</option>{BACKEND_IDS.filter((b) => agents.some((agent) => agent.backend === b && !isForgeAgent(agent))).map((b) => (<optgroup key={b} label={b}>{agents.filter((agent) => agent.backend === b && !isForgeAgent(agent)).map((agent) => <option key={agent.id} value={agent.id}>{agent.name}{agent.model ? `（${agent.model}）` : ''}</option>)}</optgroup>))}</select></label><div className="automation-form-grid"><label className="field"><span>间隔（分钟）</span><input type="number" min={1} value={scheduleMinutes} onChange={(event) => setScheduleMinutes(Number(event.target.value) || 1)} /></label><label className="field"><span>产出</span><select value={output} onChange={(event) => setOutput(event.target.value as 'issue' | 'run_only')}><option value="issue">创建 issue</option><option value="run_only">仅执行</option></select></label></div>{createError && <p className="probe-fail" role="alert" data-automation-create-error>创建失败：{createError}。填写内容仍保留，可直接重试。</p>}{creating && creatingSession !== formSeqRef.current && <p className="hint" data-automation-create-pending>上一次创建仍在进行中，完成后只会刷新列表，不会关闭或清空当前表单。</p>}<div className="dialog-footer"><button className="btn" disabled={creating} onClick={() => closeForm()}>取消</button><button className="btn primary" disabled={!name.trim() || !prompt.trim() || creating} onClick={() => void create()}>{creating && creatingSession === formSeqRef.current ? '创建中…' : '创建'}</button></div></div></div>}
   </div>
 }
