@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { Goal, Issue, IssueStatus, Task } from '../../../shared/types'
 import type { Meeting } from '../../../shared/meeting'
 import { bridge, fmtDuration } from '../api'
 import { ISSUE_STATUS_LABELS, TASK_STATUS_LABELS, isParkedQueued, PARKED_QUEUED_LABEL } from '../labels'
 import { taskService } from '../task-service'
-import { toast } from '../ui/Toasts'
+import { ui } from '../ui/interaction-center'
+import { useInteractionLayer } from '../hooks/useInteractionLayer'
 import { IssueIdChip } from '../ui/IssueIdChip'
 import { EmptyState } from '../ui/EmptyState'
 import { CheckCircle2, CircleAlert, CircleDot, Clock3, Ban, Eye, ListTodo, Search, ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react'
@@ -147,8 +148,11 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null)
   const [dropTarget, setDropTarget] = useState<IssueStatus | null>(null)
   const [starting, setStarting] = useState<string | null>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  // 统一浮层：卡片右键菜单的外点关闭 / 最上层 Escape（原 window click+keydown 监听已收敛）
+  useInteractionLayer<HTMLDivElement>({ open: menu !== null, onClose: () => setMenu(null), kind: 'popover', name: 'board-card-menu', closeOnOutside: true, autoFocus: false, layerRef: menuRef })
   useEffect(() => {
-    const refresh = () => void bridge.issues.list().then(setIssues).catch(() => toast.error('读取 Issue 失败'))
+    const refresh = () => void bridge.issues.list().then(setIssues).catch(() => ui.toast.error('读取 Issue 失败'))
     refresh()
     const off = bridge.issues.onUpdated(refresh)
     const offTasks = bridge.tasks.onDeleted(refresh)
@@ -162,13 +166,12 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
     return () => { off(); offTasks(); offGoals(); offGoalDeleted(); offMeetings(); offMeetingDeleted(); window.clearInterval(timer) }
   }, [])
   useEffect(() => {
+    if (!menu) return
+    // 窗口失焦收起（外点/Escape 已由统一交互层负责）
     const close = () => setMenu(null)
-    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') close() }
-    window.addEventListener('click', close)
     window.addEventListener('blur', close)
-    window.addEventListener('keydown', escape)
-    return () => { window.removeEventListener('click', close); window.removeEventListener('blur', close); window.removeEventListener('keydown', escape) }
-  }, [])
+    return () => window.removeEventListener('blur', close)
+  }, [menu])
   const byTask = useMemo(() => new Map(issues.map((issue) => [issue.taskId, issue])), [issues])
   const goalIssues = useMemo(() => new Set(goals.map((g) => g.issueId)), [goals])
   const meetingIssues = useMemo(() => new Set(meetings.map((m) => m.issueId)), [meetings])
@@ -197,16 +200,16 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
     if (!issue) return
     try {
       const result = await bridge.issues.update(issue.id, { status: next })
-      if (!result) toast.error('更新 Issue 失败')
-      else { setIssues((cur) => cur.map((item) => item.id === result.id ? result : item)); toast.success(`已移到「${ISSUE_STATUS_LABELS[next]}」`) }
-    } catch { toast.error('更新 Issue 失败') }
+      if (!result) ui.toast.error('更新 Issue 失败')
+      else { setIssues((cur) => cur.map((item) => item.id === result.id ? result : item)); ui.toast.success(`已移到「${ISSUE_STATUS_LABELS[next]}」`) }
+    } catch { ui.toast.error('更新 Issue 失败') }
   }
   const startTask = async (taskId: string) => {
     setStarting(taskId)
     try {
       const result = await taskService.start(taskId)
-      if (!result.ok) toast.error(result.error ?? '启动失败')
-    } catch { toast.error('启动失败') } finally { setStarting(null) }
+      if (!result.ok) ui.toast.error(result.error ?? '启动失败')
+    } catch { ui.toast.error('启动失败') } finally { setStarting(null) }
   }
   const toggle = (id: string) => setExpanded((current) => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next })
   /** 子单两行迷你卡：首行状态点+标题+状态文字/耗时，次行 backend 芯片+改动徽标（有 gitStat 才出现） */
@@ -285,6 +288,6 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
         <div className="board-col-body">{items.map(renderCard)}{orphans.length > 0 && <section className="board-orphans"><h3 className="board-orphans-head">（无领队）<span>{orphans.length}</span></h3>{orphans.map(renderCard)}</section>}{!items.length && !orphans.length && <EmptyState compact title={!dayHasCards ? BOARD_EMPTY_DAY_HINT : filtering ? '无匹配' : '空'} />}</div>
       </section>
     })}</div>
-    {menu && menuIssue && <div className="board-context-menu" role="menu" style={{ left: menu.x, top: menu.y }} onClick={(event) => event.stopPropagation()}><button role="menuitem" onClick={() => { setMenu(null); onOpen(menu.id) }}>打开 Issue</button><div className="board-context-separator" />{COLUMNS.filter((column) => column.key !== menuIssue.status).map((column) => <button key={column.key} role="menuitem" onClick={() => void move(menu.id, column.key)}>移到「{column.label}」</button>)}</div>}
+    {menu && menuIssue && <div className="board-context-menu" ref={menuRef} role="menu" style={{ left: menu.x, top: menu.y }} onClick={(event) => event.stopPropagation()}><button role="menuitem" onClick={() => { setMenu(null); onOpen(menu.id) }}>打开 Issue</button><div className="board-context-separator" />{COLUMNS.filter((column) => column.key !== menuIssue.status).map((column) => <button key={column.key} role="menuitem" onClick={() => void move(menu.id, column.key)}>移到「{column.label}」</button>)}</div>}
   </div>
 }

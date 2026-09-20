@@ -16,7 +16,7 @@
 
 .psh-header {
   flex-shrink: 0; z-index: 2;
-  padding: 0 clamp(18px, 2.4vw, 34px);
+  padding: 0 var(--space-5);
   min-height: 58px;
   border-bottom: 1px solid var(--border);
   background: color-mix(in srgb, var(--bg-raised) 72%, transparent);
@@ -30,25 +30,14 @@
 .psh-body {
   position: relative; flex: 1; min-height: 0;
   overflow-y: auto;
-  padding: 0 clamp(18px, 2.4vw, 34px) 20px;
+  padding: 0 var(--space-5) var(--space-5);
   container: page / inline-size;
 }
 .psh-body > * { position: relative; z-index: 1; }
 
-/* 氛围层：双极光 + 微点阵，向下渐隐；亮色自动减淡 */
-.psh-aurora {
-  position: absolute; z-index: 0; inset: 0 0 auto; height: 420px;
-  pointer-events: none;
-  background:
-    radial-gradient(820px 320px at 14% -10%, var(--accent-glow), transparent 63%),
-    radial-gradient(660px 280px at 86% -13%, color-mix(in srgb, var(--accent) 34%, transparent), transparent 66%),
-    radial-gradient(color-mix(in srgb, var(--accent) 28%, transparent) 1px, transparent 1.4px);
-  background-size: auto, auto, 26px 26px;
-  opacity: 0.88;
-  -webkit-mask-image: linear-gradient(180deg, #000 44%, transparent);
-  mask-image: linear-gradient(180deg, #000 44%, transparent);
-}
-html.light .psh-aurora { opacity: 0.42; }
+/* 氛围层已按 UI 统一规范移除（装饰极光/点阵/光晕）：
+   节点仍由 TSX 渲染，这里直接不显示，保持平面工作台。 */
+.psh-aurora { display: none; }
 
 /* 窄视口：页头两行化（标题行 + 操作行），操作按钮不挤标题。
    注意页头不在 .psh-body 容器内，这里只能用视口断点；

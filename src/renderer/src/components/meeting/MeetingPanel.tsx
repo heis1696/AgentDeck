@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { MessageSquare, Plus, Users } from 'lucide-react'
 import { bridge, type AgentInfo } from '../../api'
-import { toast } from '../../ui/Toasts'
+import { ui } from '../../ui/interaction-center'
 import { FloatWindow } from '../../ui/FloatWindow'
 import { captains } from './captains'
 import { isForgeAgent } from '../../../../shared/forge'
@@ -56,7 +56,7 @@ export function MeetingPanel({ issueId, open, onToggle, onMeeting }: {
     setBusy(true)
     try {
       const result = await action()
-      if (!result.ok) toast.error(result.error ?? '会议操作失败')
+      if (!result.ok) ui.toast.error(result.error ?? '会议操作失败')
       await refresh()
     } finally {
       setBusy(false)
@@ -64,7 +64,7 @@ export function MeetingPanel({ issueId, open, onToggle, onMeeting }: {
   }
   const create = async () => {
     if (!topic.trim() || !reporter || !critic || !designer || new Set([reporter, critic, designer]).size < 3) {
-      toast.error('请填写议题并选择三位不同队长')
+      ui.toast.error('请填写议题并选择三位不同队长')
       return
     }
     setBusy(true)
@@ -76,7 +76,7 @@ export function MeetingPanel({ issueId, open, onToggle, onMeeting }: {
       setTopic('')
       setNewMeeting(false)
       await run(() => bridge.meetings.start(meeting.id))
-    } catch (error) { toast.error(error instanceof Error ? error.message : '创建会议失败') }
+    } catch (error) { ui.toast.error(error instanceof Error ? error.message : '创建会议失败') }
   }
   const active = current ?? (newMeeting ? undefined : meetings[0])
 

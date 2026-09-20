@@ -1,5 +1,5 @@
 import { useState, type MouseEvent } from 'react'
-import { toast } from './Toasts'
+import { ui } from './interaction-center'
 
 /** Issue 原始 id（iss_xxx）小横条：调试定位用。点击复制到剪贴板；必须拦住冒泡，不能触发行/卡片的打开。 */
 export function IssueIdChip({ id }: { id: string }) {
@@ -8,7 +8,7 @@ export function IssueIdChip({ id }: { id: string }) {
     event.stopPropagation()
     void navigator.clipboard.writeText(id).then(() => {
       setCopied(true)
-      toast.success('已复制 Issue ID')
+      ui.toast.success('已复制 Issue ID')
       window.setTimeout(() => setCopied(false), 1400)
     })
   }

@@ -1,54 +1,14 @@
 /* ============================================================
    0.15.0 UI Polish Wave · foundation（领队专属文件）
-   职责：强调色收敛（lime → accent 家族）、品牌区、主按钮、
-   全局焦点环、选区等基础层统一。
-   约定：本文件在 styles.css/tokens.css 之后加载，只做
-   覆盖与别名桥接，不修改既有文件；组件级样式归属各自的
-   polish/*.css，不要写在这里。
+   职责：主 CTA、主按钮、品牌徽标、全局焦点环、选区等基础层统一。
+   约定：本文件在 styles.css/tokens.css 之后加载，只做覆盖与
+   别名桥接，不修改既有文件；组件级样式归属各自的 polish/*.css，
+   不要写在这里。
+   历史变量别名桥接（--signal、--brand、--teal、--surface 系、
+   --ink 系等）已统一收敛到 tokens.css，此处不再重复定义。
+   UI 统一规范：按钮平面化——无光晕投影、无 hover 位移，
+   反馈只用颜色/边框/亮度（120–180ms）。
    ============================================================ */
-
-/* ---- 旧 lime 代际的变量别名桥接 ----
-   历史层（styles.css 0.12/0.13 代际）引用了 --signal-strong /
-   --brand / --brand-ink（柠檬绿家族）。这里把它们指向 accent
-   家族，所有历史引用一次性安全收敛，无需改动历史层。 */
-:root {
-  --signal: var(--accent);
-  --signal-strong: var(--accent);
-  --brand: var(--accent);
-  --brand-ink: var(--accent-ink);
-}
-html.light {
-  --signal: var(--accent);
-  --signal-strong: var(--accent);
-  --brand: var(--accent);
-  --brand-ink: var(--accent-ink);
-}
-/* 0.13 代际的 teal 家族同样指向 accent 家族（品牌色单一来源；
-   --violet 是接力徽章的独立语义色，保留不桥接） */
-:root {
-  --teal: var(--accent);
-  --teal-soft: var(--accent-soft);
-  --teal-line: color-mix(in srgb, var(--accent) 42%, transparent);
-}
-html.light {
-  --teal: var(--accent);
-  --teal-soft: var(--accent-soft);
-  --teal-line: color-mix(in srgb, var(--accent) 36%, transparent);
-}
-/* 0.12 代际的墨色家族与表面四层：styles.css 只给了暗色值且 light 块
-   从未重映射（亮色下 .page-title 白字白底、.team-page 画布黑底割裂），
-   这里统一桥接到主题令牌 */
-html.light {
-  --ink-strong: var(--text);
-  --ink: var(--text);
-  --ink-muted: var(--text-dim);
-  --surface-0: #f3f7f7;
-  --surface-1: #ffffff;
-  --surface-2: #ffffff;
-  --surface-3: #ffffff;
-  --line-soft: rgba(23, 35, 42, 0.1);
-  --line-strong: rgba(23, 35, 42, 0.18);
-}
 
 /* ---- 主 CTA（新建任务）：唯一的 accent 电弧光 ---- */
 .new-task-btn,
@@ -56,17 +16,16 @@ html.light .new-task-btn {
   border: 1px solid transparent;
   background: var(--accent);
   color: var(--accent-ink);
-  font-weight: 650;
-  box-shadow: 0 4px 16px var(--accent-glow);
+  font-weight: 600;
+  box-shadow: none;
 }
 .new-task-btn:hover {
   background: var(--accent);
   color: var(--accent-ink);
   filter: brightness(1.06);
-  box-shadow: 0 6px 20px var(--accent-glow);
-  transform: translateY(-1px);
+  box-shadow: none;
 }
-.new-task-btn:active { transform: translateY(0); filter: brightness(0.97); }
+.new-task-btn:active { filter: brightness(0.97); }
 .new-task-btn kbd {
   margin-left: auto;
   border: none;
@@ -80,26 +39,25 @@ html.light .btn.primary {
   border-color: transparent;
   background: var(--accent);
   color: var(--accent-ink);
-  font-weight: 650;
-  box-shadow: 0 4px 14px var(--accent-glow);
+  font-weight: 600;
+  box-shadow: none;
 }
 .btn.primary:hover {
   background: var(--accent);
   border-color: transparent;
   color: var(--accent-ink);
   filter: brightness(1.06);
-  transform: translateY(-1px);
 }
-.btn.primary:active { transform: translateY(0); filter: brightness(0.97); }
-.btn.primary:disabled { opacity: 0.5; filter: none; transform: none; }
+.btn.primary:active { filter: brightness(0.97); }
+.btn.primary:disabled { opacity: 0.5; filter: none; }
 
 /* ---- 品牌徽标：accent 底 + 墨字，移除过期的硬编码版本角标 ---- */
 .brand-mark,
 html.light .brand-mark {
   background: var(--accent);
   color: var(--accent-ink);
-  font-weight: 800;
-  box-shadow: 0 2px 10px var(--accent-glow);
+  font-weight: 700;
+  box-shadow: none;
 }
 .workspace-title .brand-mark { background: var(--accent); color: var(--accent-ink); }
 .brand::after { display: none; }

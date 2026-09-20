@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useInteractionLayer } from '../hooks/useInteractionLayer'
 
 /** 下拉菜单项 */
 export interface MenuItem {
@@ -27,14 +28,12 @@ export function Menu({ items, value, onChange, trigger, align = 'left', width }:
   const rootRef = useRef<HTMLDivElement>(null)
   const current = items.find((i) => i.value === value)
 
+  // 统一浮层：外点关闭 / 最上层 Escape / 关闭后焦点归还（不再自挂 window mousedown）
+  useInteractionLayer<HTMLDivElement>({ open, onClose: () => setOpen(false), kind: 'popover', name: 'menu', closeOnOutside: true, autoFocus: false, layerRef: rootRef })
+
   useEffect(() => {
     if (!open) return
     setActive(Math.max(0, items.findIndex((i) => i.value === value)))
-    const onDown = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false)
-    }
-    window.addEventListener('mousedown', onDown)
-    return () => window.removeEventListener('mousedown', onDown)
   }, [open, items, value])
 
   const onKeyDown = (e: React.KeyboardEvent) => {
@@ -45,8 +44,7 @@ export function Menu({ items, value, onChange, trigger, align = 'left', width }:
       }
       return
     }
-    if (e.key === 'Escape') { e.preventDefault(); setOpen(false) }
-    else if (e.key === 'ArrowDown') { e.preventDefault(); setActive((a) => Math.min(items.length - 1, a + 1)) }
+    if (e.key === 'ArrowDown') { e.preventDefault(); setActive((a) => Math.min(items.length - 1, a + 1)) }
     else if (e.key === 'ArrowUp') { e.preventDefault(); setActive((a) => Math.max(0, a - 1)) }
     else if (e.key === 'Enter') {
       e.preventDefault()

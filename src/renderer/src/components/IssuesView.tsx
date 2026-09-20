@@ -10,7 +10,7 @@ import { useIssues } from '../api'
  */
 export function IssuesView({ tasks, tabs, onOpen, onClose, children }: {
   tasks: Task[]
-  tabs: string[]
+  tabs: readonly string[]
   onOpen: (taskId: string) => void
   onClose: (taskId: string) => void
   children: ReactNode

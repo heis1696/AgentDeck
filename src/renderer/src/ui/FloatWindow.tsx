@@ -1,5 +1,6 @@
 import { useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import { X } from 'lucide-react'
+import { useInteractionLayer } from '../hooks/useInteractionLayer'
 
 /**
  * 详情页浮窗：绝对定位于最近的有定位祖先（.detail）内，默认贴右上，
@@ -14,6 +15,8 @@ export function FloatWindow({ title, icon, onClose, width = 360, children }: {
 }) {
   const boxRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<{ startX: number; startY: number; baseX: number; baseY: number } | null>(null)
+  // 统一浮层：最上层 Escape 收起浮窗，关闭后焦点归还（浮窗不抢页面交互，故不设焦点陷阱）
+  useInteractionLayer<HTMLDivElement>({ open: true, onClose, kind: 'window', name: 'float-window', layerRef: boxRef })
   // null = 尚未拖过，走 CSS 默认贴右上；拖动后改用 left/top
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
 
