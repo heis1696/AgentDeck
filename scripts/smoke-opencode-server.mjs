@@ -22,7 +22,7 @@ const wireEvents = [
 
 const fakeFetch = async (input, init = {}) => {
   const url = new URL(input)
-  calls.push({ method: init.method ?? 'GET', path: url.pathname })
+  calls.push({ method: init.method ?? 'GET', path: url.pathname, body: init.body ? JSON.parse(init.body) : undefined })
   if (url.pathname === '/global/health') return new Response(JSON.stringify({ healthy: true, version: '1.14.46' }))
   if (url.pathname === '/session' && init.method === 'POST') return new Response(JSON.stringify({ id: 'ses-smoke' }))
   if (url.pathname === '/session/ses-smoke/prompt_async') {
@@ -70,3 +70,25 @@ if (!calls.some((call) => call.method === 'DELETE' && call.path === '/session/se
 if (!calls.some((call) => call.method === 'POST' && call.path.endsWith('/reply'))) throw new Error('permission reply endpoint was not called')
 if (!seenAfter.length || seenAfter.some((value) => value === null)) throw new Error('SSE after cursor was not supplied')
 console.log('✓ OpenCode server session, permission, event mapping, interrupt/close and SSE cursor')
+
+wireEvents[0].properties.options = [
+  { optionId: 'once', response: { decision: 'allow' } },
+  { optionId: 'always', response: { decision: 'always' } },
+  { optionId: 'reject', response: { decision: 'reject' } }
+]
+for (const [choice, expected] of [
+  [{ optionId: 'always', decision: 'deny' }, 'reject'],
+  [{ optionId: 'always', decision: 'allow' }, 'always'],
+  [{ optionId: 'once', decision: 'allow' }, 'once']
+]) {
+  const before = calls.length
+  const permissionSession = await createOpencodeServerBackend({ baseUrl: 'http://fake', fetch: fakeFetch }).start({
+    prompt: 'permission regression', workdir: 'D:/smoke', mode: 'build',
+    events: { onEvent() {}, onTurnEnd() {}, onPermission: async () => choice }
+  })
+  try {
+    const response = calls.slice(before).find((call) => call.path.endsWith('/reply'))
+    if (response?.body.reply !== expected) throw new Error(`permission ${JSON.stringify(choice)} returned ${response?.body.reply}, expected ${expected}`)
+  } finally { await permissionSession.close() }
+}
+console.log('PASS OpenCode denial overrides conflicting ids; explicit once/always options retain scope')

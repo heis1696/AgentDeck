@@ -93,12 +93,18 @@ const A_EVENTS = [
 ]
 
 let reactRoot = null
-async function mount() {
+async function mount(status = 'done', workers = []) {
   bridge.reset()
   resetTaskDrafts()
   window.localStorage.clear()
-  bridge.seedTask({ id: 'taskA', title: '任务A', prompt: 'A 的原始指令' })
+  bridge.seedTask({ id: 'taskA', title: '任务A', prompt: 'A 的原始指令', status })
   bridge.seedTask({ id: 'taskB', title: '任务B', prompt: '' })
+  workers.forEach((status, index) => {
+    const worker = bridge.seedTask({ id: `worker-${index}`, title: `Worker ${index}`, status })
+    worker.parentTaskId = 'taskA'
+    worker.workerIndex = index
+    worker.parked = status === 'queued' && index === 0
+  })
   bridge.setEvents('taskA', A_EVENTS)
   await act(async () => { reactRoot = createRoot(container); reactRoot.render(createElement(App)) })
   await act(async () => { await sleep(30) })
@@ -235,6 +241,31 @@ section('忙碌状态按任务隔离：A 在途时切到 B，B 不跟着禁用')
   await act(async () => { bridge.settleFollowUps({ ok: false, error: '追问失败（烟测）' }); await sleep(20) })
   ok(sendButton()?.disabled === false && followBox().value === 'B 的草稿', 'A 的失败响应不影响 B（B 的输入与按钮状态都不变）')
   ok(!container.textContent.includes('追问失败（烟测）') || !!byQuery('.toast'), '失败提示走全局 toast，不写进 B 的追问区')
+  await openTask('taskA')
+  ok(followBox().value === '会失败的消息', '拒绝追问后原任务仍保留完整草稿')
+  ok(!taskDraftSlot('taskA').history.includes('会失败的消息'), '未受理的追问不写入已发送历史')
+  await keyOn(followBox(), 'Enter')
+  await typeInto(followBox(), '发送期间的新草稿')
+  await act(async () => { bridge.settleFollowUps({ ok: true }); await sleep(20) })
+  ok(followBox().value === '发送期间的新草稿', '成功响应不会擦除在途期间的新编辑')
+  await unmount()
+}
+
+section('Follow-up guards and complete worker-result access')
+{
+  await mount('running', ['queued', 'queued', 'running'])
+  await openTask('taskA')
+  await typeInto(followBox(), '等待本轮结束后的追问')
+  ok(sendButton()?.disabled === true, 'Running task disables sending while keeping its draft editable')
+  await keyOn(followBox(), 'Enter')
+  ok(bridge.calls.followUp.length === 0 && followBox().value === '等待本轮结束后的追问', 'Enter cannot submit or discard a running-task draft')
+  const states = byQuery('.workers-live')?.textContent ?? ''
+  ok(states.includes('1 执行中') && states.includes('1 排队') && states.includes('1 等待启动'), 'Worker summary distinguishes running, queued and parked')
+  await unmount()
+  await mount('done', ['done', 'done', 'failed', 'cancelled', 'done'])
+  await openTask('taskA')
+  ok(container.querySelectorAll('.workers-pane > .workers-list .worker-card').length === 3, 'Finished worker preview stays compact')
+  ok(container.querySelectorAll('.workers-more .worker-card').length === 2, 'Every additional finished worker remains available in the disclosure')
   await unmount()
 }
 

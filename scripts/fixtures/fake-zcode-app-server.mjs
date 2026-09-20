@@ -12,9 +12,9 @@ let sendCount = 0
 
 const write = (obj) => process.stdout.write(`${JSON.stringify(obj)}\n`)
 
-function emitTerminal(sessionId) {
+function emitTerminal(text = '仿真回复文本') {
   // 流式增量 + 0.16.x 回合终态事实（无 response/usage 字段）
-  write({ method: 'session/event', params: { type: 'model.streaming', payload: { kind: 'text_delta', delta: '仿真回复文本' } } })
+  write({ method: 'session/event', params: { type: 'model.streaming', payload: { kind: 'text_delta', delta: text } } })
   write({
     method: 'session/event',
     params: {
@@ -28,6 +28,10 @@ rl.on('line', (line) => {
   let msg
   try { msg = JSON.parse(line) } catch { return }
   if (msg.id === undefined) return
+  if (scenario === 'permission-choice' && msg.id === 'permission-fixture' && !msg.method) {
+    emitTerminal(JSON.stringify(msg.result))
+    return
+  }
   switch (msg.method) {
     case 'session/create':
       write({ id: msg.id, result: { session: { sessionId: 'sess_fake_zcode' } } })
@@ -42,6 +46,13 @@ rl.on('line', (line) => {
       sendCount++
       if (scenario === 'send-ack-hang' && sendCount >= 2) return // 不 ack、不吐事件：模拟响应帧丢失
       write({ id: msg.id, result: {} })
+      if (scenario === 'permission-choice') {
+        write({ id: 'permission-fixture', method: 'interaction/requestPermission', params: {
+          toolName: 'Fixture', reason: 'Protocol regression', riskLevel: 'low',
+          options: JSON.parse(process.env.FAKE_PERMISSION_OPTIONS ?? '[]')
+        } })
+        break
+      }
       setTimeout(() => emitTerminal(), 20)
       break
     }

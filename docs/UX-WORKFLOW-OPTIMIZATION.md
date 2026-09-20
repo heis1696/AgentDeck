@@ -177,6 +177,87 @@ For independent worktrees, use the current committed implementation baseline.
 Do not undo `ac91c39` task/event isolation fixes. Register new test commands and
 refresh dependency graphs during lead integration to avoid shared-file edits.
 
+## Integration Review And Follow-up
+
+Batch A and B source was recovered from the shared worker checkout and
+integrated into main at `7e54ea5`. Both batches passed stage6, build, existing
+UI smoke, and their new behavior smoke on the combined tree. Earlier transient
+type errors no longer reproduce. This is integration, not final acceptance.
+
+The lead ran the real browser visual harness against isolated sample data:
+28 page/theme/size cases, 206 assertions, zero renderer exceptions. Four
+Issue-home content placement checks failed. Screenshots under the local ignored
+`gui-test-screenshots/workflow-integration/` show the 980x560 prompt pushed
+below the first viewport by six recent-task rows. Both batches require the
+following corrections before their review can pass.
+
+### A Follow-up Ownership
+
+Quick implementation teammate owns Batch A files plus
+`src/renderer/src/components/AgentsView.tsx` and scoped
+`src/renderer/src/polish/team.css` rules for the next management improvement.
+
+1. Keep the composer primary. Move recent tasks into the same scrolling flow
+   after the composer or use a compact disclosure that does not reserve six
+   rows above it. Remove the false "recently visited" description: the data is
+   currently sorted by execution timestamps, not visit time. Avoid multiple
+   rows for historical executions of the same Issue.
+2. Agent-picker keyboard navigation must keep the active option visible in
+   its scroll container, open on the currently selected Agent, and keep the
+   popup within the viewport at 980x560 and narrow sizes. Give the search
+   control correct combobox semantics. Preserve IME, Escape and focus return.
+3. Complete the agreed explicit creation labels and all-dates empty-state
+   distinctions. Reduce repeated date labels without hiding active scope.
+4. Agents management: add lightweight name/role/backend filtering, distinguish
+   no matches from no Agents, confirm Agent deletion, and confirm preset
+   deletion with the number of affected Agents. Guard model-list requests and
+   catch preset-id creation failures. Keep existing snapshot/write protection.
+5. Verify the picker with 20 long-named Agents and browser geometry, not only
+   DOM existence. Extend focused behavior smoke for these regression cases.
+
+### B Follow-up Ownership
+
+General teammate retains Batch B files and additionally owns
+`src/renderer/src/components/ExtensionsView.tsx` and
+`src/renderer/src/components/SkillsView.tsx`. No api.ts or backend edits.
+
+1. An empty `available` snapshot proves only "no available update discovered".
+   The updater silently catches individual channel check failures, so remove
+   the unsupported "latest version" claim. Treat explicit failed/error
+   snapshots as errors. Test error snapshots, not only thrown promises.
+2. Feed blur-save and check-save currently bypass each other's pending guards.
+   Serialize or coalesce them; preserve edits made while saving, and make a
+   check use the exact draft submitted for that check. Invalidate conclusions
+   and old update actions when the displayed feed changes. Deferred-promise
+   tests must reproduce actual blur followed immediately by check.
+3. Preserve runtime-path edits made during an earlier save; the settings
+   broadcast must not overwrite a newer draft. Scope probe results to the
+   saved paths and guard duplicate clean-path probes. Protect automation form
+   dismissal/reopening while a create is pending so a late success cannot
+   close a new form or discard an edited draft.
+4. Extensions and skills: distinguish loading, first error, successful empty,
+   and stale data for Skills/MCP/Hooks/plugins, with retry and blocked writes
+   when the required directory is unknown. Keep the selected extension tab
+   across ordinary navigation. Existing data must survive refresh failure.
+   Use existing hooks/bridge; no new plugin capability or installation policy.
+5. Extend focused management/extension smoke for these races and read states.
+
+### Lead Progress
+
+- Fixed oversized first-file diffs: preserve a partial file, complete supplied
+  file counts, and a truncation notice. Added actual rendered-markup tests for
+  oversized, exact-budget, and multi-file diffs.
+- Fixed ZCode permission response selection so mismatched ids and timeouts
+  cannot authorize an allow option; OpenCode transport also prioritizes denial
+  over a conflicting override. Protocol fixtures verify rejection and explicit
+  authorization scope without running a real agent.
+- Fixed follow-up submission: guard running/queued tasks, retain drafts until
+  accepted, preserve later edits, and record only accepted messages in history.
+  Complete worker results are reachable and queue/parked counts are distinct.
+- Remaining lead work: exact permission-option UI and response/error/lifetime
+  state, goal/meeting consequence and read states, usage snapshot consistency,
+  assistant settings reliability, final integration and visual acceptance.
+
 ## Acceptance
 
 - A user can find previous and active work, understand filter scope, and clear
@@ -208,4 +289,5 @@ refresh dependency graphs during lead integration to avoid shared-file edits.
   passed on `ac91c39`; the existing mixed static/dynamic git import warning
   remains. No new runtime behavior is included in this documentation commit.
 - Audit conclusions so far are based on source inspection, not a new GUI run.
-- No product implementation changes have been made in this phase.
+- At intake, no product implementation changes had been made; current progress
+  and outstanding review items are recorded in the integration section above.

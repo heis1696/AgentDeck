@@ -56,16 +56,16 @@ export function DiffView({ diff }: { diff: string }) {
   const files = useMemo(() => parseDiff(diff), [diff])
   let total = 0
   let truncated = false
-  const rendered = files.map((f) => {
-    if (truncated) return null
-    if (total + f.lines.length > MAX_RENDER_LINES) {
-      truncated = true
-      return null
-    }
-    total += f.lines.length
-    return f
-  })
-  const shown = rendered.filter(Boolean) as DiffFile[]
+  const shown: DiffFile[] = []
+  for (const file of files) {
+    const remaining = MAX_RENDER_LINES - total
+    if (remaining === 0) { truncated = true; break }
+    const lines = file.lines.slice(0, remaining)
+    // Preserve full-file counts even when only part of its contents is visible.
+    shown.push({ ...file, lines })
+    total += lines.length
+    if (lines.length < file.lines.length) { truncated = true; break }
+  }
 
   if (!shown.length) return <div className="list-empty">无改动</div>
   return (

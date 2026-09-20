@@ -44,6 +44,8 @@ npx dependency-cruiser src --include-only "^src" --output-type json  --no-config
 
 ## 数据基线
 
+- **工作流体验优化刷新（2026-09-20）**：`deps.mmd` / `deps.json` 已重新生成，为 179 个模块，包含 `AgentPicker` 与当前任务隔离实现。`npm run graph:deps` 使用 `ELECTRON_SKIP_BINARY_DOWNLOAD=1` 跳过无关 Electron 二进制下载；图谱生成及规模校验通过。
+
 - **UI 统一改造刷新（2026-09-20）**：当前 `deps.mmd` / `deps.json` 已经 `npm run graph:deps` 刷新，为 173 个模块；`interaction-center`、`interaction-layer` 与订阅/焦点 hook 已纳入。下方数字及 INVENTORY 主体仍保留原始盘点时的历史口径，当前依赖以机器图为准。
 
 - **commit `6b2f038`**（`chore(ship): 热更发布 0.22.0-hot.19 …`，生成图谱时 main 侧最新提交），快照取自检自该提交的干净 worktree。

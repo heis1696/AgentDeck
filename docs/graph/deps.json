@@ -5000,23 +5000,6 @@
           "valid": true
         },
         {
-          "module": "./task-service",
-          "moduleSystem": "es6",
-          "dynamic": false,
-          "exoticallyRequired": false,
-          "dependencyTypes": [
-            "local",
-            "import"
-          ],
-          "resolved": "src/renderer/src/task-service.ts",
-          "coreModule": false,
-          "followable": true,
-          "couldNotResolve": false,
-          "matchesDoNotFollow": false,
-          "circular": false,
-          "valid": true
-        },
-        {
           "module": "./ui/Confirm",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -5336,6 +5319,7 @@
         "src/renderer/src/ui/FloatWindow.tsx",
         "src/renderer/src/components/goal/GoalCreateDialog.tsx",
         "src/renderer/src/components/task/ActionMenu.tsx",
+        "src/renderer/src/components/AgentPicker.tsx",
         "src/renderer/src/ui/Confirm.tsx",
         "src/renderer/src/ui/Palette.tsx"
       ],
@@ -5417,6 +5401,7 @@
         "src/renderer/src/components/ExtensionsView.tsx",
         "src/renderer/src/components/SkillsView.tsx",
         "src/renderer/src/components/SettingsView.tsx",
+        "src/renderer/src/components/RuntimeView.tsx",
         "src/renderer/src/components/UpdatePanel.tsx",
         "src/renderer/src/components/UsageView.tsx"
       ],
@@ -5786,6 +5771,7 @@
       "dependents": [
         "src/renderer/src/App.tsx",
         "src/renderer/src/components/BoardView.tsx",
+        "src/renderer/src/components/IssuesView.tsx",
         "src/renderer/src/components/TabBar.tsx",
         "src/renderer/src/components/TaskDetail.tsx",
         "src/renderer/src/components/task/WorkerPane.tsx",
@@ -5817,7 +5803,6 @@
         }
       ],
       "dependents": [
-        "src/renderer/src/App.tsx",
         "src/renderer/src/components/BoardView.tsx",
         "src/renderer/src/components/TaskDetail.tsx"
       ],
@@ -6029,6 +6014,23 @@
           "valid": true
         },
         {
+          "module": "../labels",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/labels.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "../ui/PageHeader",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -6194,6 +6196,23 @@
             "import"
           ],
           "resolved": "src/renderer/src/api.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "../ui/EmptyState",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/EmptyState.tsx",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -7972,6 +7991,23 @@
           "valid": true
         },
         {
+          "module": "./AgentPicker",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/components/AgentPicker.tsx",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "./meeting/captains",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -7991,6 +8027,33 @@
       ],
       "dependents": [
         "src/renderer/src/App.tsx"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
+      "source": "src/renderer/src/components/AgentPicker.tsx",
+      "dependencies": [
+        {
+          "module": "../hooks/useInteractionLayer",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/hooks/useInteractionLayer.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
+      "dependents": [
+        "src/renderer/src/components/WorkspaceView.tsx"
       ],
       "orphan": false,
       "valid": true
@@ -8804,8 +8867,8 @@
     "info": 0,
     "ignore": 0,
     "advisedExitCode": 0,
-    "totalCruised": 178,
-    "totalDependenciesCruised": 398,
+    "totalCruised": 179,
+    "totalDependenciesCruised": 401,
     "optionsUsed": {
       "baseDir": "C:\\Projects\\AgentDeck",
       "combinedDependencies": false,

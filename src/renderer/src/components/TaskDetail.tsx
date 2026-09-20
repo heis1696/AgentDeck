@@ -18,7 +18,7 @@ import { FOLLOW_EPSILON, TurnTimeline } from './task/TurnTimeline'
 import { SkillMenu, buildMenuItems, parseSkillDirective, wrapSkillDirective, SKILL_MENU_LISTBOX_ID, skillMenuOptionId, type LocalCommandKey } from './task/SkillMenu'
 import { ActionMenu, type ActionMenuItem } from './task/ActionMenu'
 import { usePromptHistory } from '../hooks/usePromptHistory'
-import { useTaskDraftField, useTaskScopedState } from '../hooks/taskDrafts'
+import { taskDraftSlot, useTaskDraftField, useTaskScopedState } from '../hooks/taskDrafts'
 import { SideDock } from '../ui/SideDock'
 import { scrollElementTo } from '../ui/motion'
 import { useInteractionLayer } from '../hooks/useInteractionLayer'
@@ -106,6 +106,13 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   const workers = tasks.filter((item) => item.parentTaskId === task.id).sort((a, b) => (a.workerIndex ?? 0) - (b.workerIndex ?? 0))
   const activeWorkers = workers.filter((item) => item.status === 'running' || item.status === 'queued')
   const idleWorkers = workers.filter((item) => item.status !== 'running' && item.status !== 'queued')
+  const visibleWorkers = activeWorkers.length ? activeWorkers : idleWorkers.slice(0, 3)
+  const hiddenWorkers = activeWorkers.length ? idleWorkers : idleWorkers.slice(3)
+  const workerStateSummary = [
+    [workers.filter((worker) => worker.status === 'running').length, '执行中'],
+    [workers.filter((worker) => worker.status === 'queued' && !worker.parked).length, '排队'],
+    [workers.filter(isParkedQueued).length, '等待启动']
+  ].filter(([count]) => Number(count) > 0).map(([count, label]) => `${count} ${label}`).join(' · ')
   const parent = task.parentTaskId ? tasks.find((item) => item.id === task.parentTaskId) : null
   const relayPred = task.continuesFrom ? tasks.find((item) => item.id === task.continuesFrom) : null
   const relaySucc = tasks.find((item) => item.continuesFrom === task.id)
@@ -123,6 +130,10 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   const enabledTabs = TAB_ITEMS.filter((item) => item.key !== 'git' || !!task.gitDiff || !!task.gitStat).map((item) => item.key)
   const canDelete = task.status !== 'running' && task.status !== 'queued'
   const workdir = task.workdir
+
+  useLayoutEffect(() => {
+    if (followRef.current) autoGrow(followRef.current)
+  }, [task.id, followUp])
 
   useEffect(() => {
     if (!turnActive) return
@@ -310,20 +321,26 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   }
   const sendFollowUp = async (preset?: string, opts?: { relay?: boolean }) => {
     const raw = (preset ?? followUp).trim()
-    if (!raw || busy) return
+    if (!raw || taskDraftSlot(task.id).busy) return
     // 输入的 /goal /meeting 不下发：转成本地浮窗/创建流程
     const local = /^\/(goal|meeting)\b/.exec(raw)
     if (local) { openLocalCommand(local[1] as LocalCommandKey); return }
+    if (turnActive || task.status === 'queued') return
     // zcode 会话支持 Skill 工具：/技能名 开头的输入包装成显式技能指令再下发
     const directive = isZcode ? parseSkillDirective(raw, skills) : null
     const content = directive ? wrapSkillDirective(directive.skill, directive.rest) : raw
-    setBusy(true); setFollowUp('')
-    history.push(raw)
-    if (followRef.current) followRef.current.style.height = 'auto'
+    setBusy(true)
     try {
       // wait:false：IPC 在回合开跑即返回，busy 不锁整轮追问——否则「停止」会禁用到回合结束
       const result = await taskService.followUp(task.id, content, { ...opts, wait: false })
       if (!result.ok) ui.toast.error(result.error ?? '续聊失败')
+      else {
+        history.push(raw)
+        // A late acknowledgement cannot erase edits made while sending.
+        if (preset === undefined && taskDraftSlot(task.id).prompt === followUp) setFollowUp('')
+      }
+    } catch (cause) {
+      ui.toast.error(cause instanceof Error ? cause.message : '续聊失败')
     } finally {
       setBusy(false)
     }
@@ -401,7 +418,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
       <span className="run-rail-sep" aria-hidden="true">·</span>
       <span className="run-rail-item">{turns.length} 回合</span>
       {lastEventAt > 0 && <><span className="run-rail-sep" aria-hidden="true">·</span><span className="run-rail-item" aria-hidden="true">最近事件 {fmtTime(lastEventAt)}</span></>}
-      {activeWorkers.length > 0 && <><span className="run-rail-sep" aria-hidden="true">·</span><span className="run-rail-item is-squad" aria-hidden="true"><Users size={11} aria-hidden="true" /> 队员 {activeWorkers.length}/{workers.length} 执行中</span></>}
+      {activeWorkers.length > 0 && <><span className="run-rail-sep" aria-hidden="true">·</span><span className="run-rail-item is-squad" aria-hidden="true"><Users size={11} aria-hidden="true" /> 队员 {workerStateSummary}</span></>}
       <span className="run-rail-bar" aria-hidden="true"><i /></span>
     </div>}
 
@@ -411,9 +428,9 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
       {workers.length > 0 && <div className={`workers-pane${activeWorkers.length ? ' has-active' : ''}`}>
         <div className="workers-head">
           <span className="list-group-label"><Users size={12} aria-hidden="true" /> 队员 {workers.filter((worker) => worker.status === 'done').length}/{workers.length} 完成</span>
-          {activeWorkers.length > 0 && <span className="workers-live"><span className="dot dot-running" aria-hidden="true" />{activeWorkers.length} 执行中</span>}
+          {activeWorkers.length > 0 && <span className="workers-live">{workerStateSummary}</span>}
         </div>
-        <div className="workers-list">{(activeWorkers.length ? activeWorkers : idleWorkers.slice(0, 3)).map((worker) => <button key={worker.id} type="button" className={`worker-card status-${worker.status}${worker.status === 'cancelled' ? ' is-cancelled' : ''}`} onClick={() => openWorker(worker.id, worker.title)} title={`${worker.title}\n在右侧分页打开只读详情`}>
+        <div className="workers-list">{visibleWorkers.map((worker) => <button key={worker.id} type="button" className={`worker-card status-${worker.status}${worker.status === 'cancelled' ? ' is-cancelled' : ''}`} onClick={() => openWorker(worker.id, worker.title)} title={`${worker.title}\n在右侧分页打开只读详情`}>
           <span className={`dot dot-${worker.status}`} aria-hidden="true" />
           {worker.workerIndex != null && <span className="worker-index">#{worker.workerIndex + 1}</span>}
           <span className="worker-title">{worker.title}</span>
@@ -422,7 +439,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
           {worker.gitStat ? <span className="mini dim" title="有改动">· 有改动</span> : null}
           {worker.status === 'running' && <span className="worker-progress" aria-hidden="true" />}
         </button>)}</div>
-        {activeWorkers.length > 0 && idleWorkers.length > 0 && <details className="workers-more"><summary>另外 {idleWorkers.length} 个已结束队员</summary><div className="workers-list">{idleWorkers.map((worker) => <button key={worker.id} type="button" className={`worker-card status-${worker.status}${worker.status === 'cancelled' ? ' is-cancelled' : ''}`} onClick={() => openWorker(worker.id, worker.title)} title={`${worker.title}\n在右侧分页打开只读详情`}>
+        {hiddenWorkers.length > 0 && <details className="workers-more"><summary>另外 {hiddenWorkers.length} 个已结束队员</summary><div className="workers-list">{hiddenWorkers.map((worker) => <button key={worker.id} type="button" className={`worker-card status-${worker.status}${worker.status === 'cancelled' ? ' is-cancelled' : ''}`} onClick={() => openWorker(worker.id, worker.title)} title={`${worker.title}\n在右侧分页打开只读详情`}>
           <span className={`dot dot-${worker.status}`} aria-hidden="true" />
           {worker.workerIndex != null && <span className="worker-index">#{worker.workerIndex + 1}</span>}
           <span className="worker-title">{worker.title}</span>
@@ -522,11 +539,12 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
             if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendFollowUp(); setSkillMenuOpen(false) }
           }} />
         <button className="btn" disabled={busy || !!task.parentTaskId || (task.status !== 'done' && task.status !== 'failed')} title={task.parentTaskId ? '委派子任务不参与阶段接力' : '让本执行交出下一阶段简报，并在同一 Issue 上硬切新会话'} onClick={() => void sendFollowUp('执行下一阶段', { relay: true })}><Waypoints size={13} aria-hidden="true" /><span className="btn-text">接力下一阶段</span></button>
-        <button className="btn primary" disabled={busy || !followUp.trim()} onClick={() => { void sendFollowUp(); setSkillMenuOpen(false) }}>发送</button>
+        <button className="btn primary" disabled={busy || turnActive || !followUp.trim()} onClick={() => { void sendFollowUp(); setSkillMenuOpen(false) }}>发送</button>
         </div>
         <div className="followup-hint" id="followup-hint">
           <span><b>Enter</b> 发送</span><span><b>Shift+Enter</b> 换行</span><span><b>↑↓</b> 历史</span><span><b>/</b> 命令与技能</span>
           {!!task.parentTaskId && <span className="is-warn">子任务不参与阶段接力</span>}
+          {turnActive && <span className="is-warn">任务执行中，停止或完成后可发送</span>}
           {busy && <span className="is-live">正在发送…</span>}
           {skillMenuOpen && menuItems.length === 0 && <span className="is-warn">没有匹配的命令或技能</span>}
           {skillMenuOpen && menuItems.length > 0 && <span className="is-live">{menuItems.length} 项可选<ChevronDown size={11} aria-hidden="true" /></span>}

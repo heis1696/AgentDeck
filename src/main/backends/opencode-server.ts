@@ -148,7 +148,7 @@ export class OpencodeServerClient {
   }
   async permissionReply(requestId: string | number, decision: 'allow' | 'deny', directory = this.directory || process.cwd(), replyOverride?: 'once' | 'always' | 'reject'): Promise<void> {
     const id = encodeURIComponent(String(requestId))
-    const reply = replyOverride ?? (decision === 'allow' ? 'once' : 'reject')
+    const reply = decision === 'deny' ? 'reject' : replyOverride ?? 'once'
     try {
       await this.json(this.query(`/permission/${id}/reply`, directory), 'POST', { reply, message: decision === 'allow' ? 'Allowed by AgentDeck' : 'Denied by AgentDeck' })
     } catch (error) {

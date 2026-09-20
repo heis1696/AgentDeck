@@ -399,12 +399,12 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
             events
               .onPermission(req)
               .then((choice) => {
-                const chosen =
-                  options.find((o) => o.optionId === choice.optionId) ??
-                  options.find((o) => o.response.decision === choice.decision) ??
-                  options[0]
-                conn.respond(reqId, chosen?.response ?? { decision: 'deny' })
-                emit({ kind: 'status', text: `权限已${chosen?.response.decision === 'deny' ? '拒绝' : '放行'}: ${req.toolName}` })
+                // An option id must never override a denial, including broker timeouts.
+                const chosen = options.find((option) => option.response.decision === choice.decision
+                  && (choice.optionId === undefined || option.optionId === choice.optionId))
+                const response = chosen?.response ?? { decision: 'deny' }
+                conn.respond(reqId, response)
+                emit({ kind: 'status', text: `权限已${response.decision === 'deny' ? '拒绝' : '放行'}: ${req.toolName}` })
               })
               .catch(() => {
                 conn.respond(reqId, { decision: 'deny' })
