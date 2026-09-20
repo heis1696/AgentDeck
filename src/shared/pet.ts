@@ -445,19 +445,60 @@ export interface PetGenStartInput {
   /** OpenAI 兼容协议的模型名 */
   model: string
   params: PetGenParams
+  /** 角色描述（嵌入按态分表模板的 "the same {描述}"；原 stylePrompt 语义） */
   stylePrompt: string
+  /** 风格标签（可选，追加在模板 SAME 行之后，如 "kawaii chibi, thick outline"） */
+  styleTags?: string
   /** 状态 → 帧数表（白名单态，七态必需补齐 + eat 可选） */
   states: Record<string, number>
-  /** per-frame：逐帧生成（首帧作后续参考图）；sheet：单图网格切帧 */
-  mode: 'per-frame' | 'sheet'
-  /** sheet 模式的网格（cols*rows ≥ 总帧数） */
-  sheet?: { cols: number; rows: number }
+  /** sheets（默认）：按态分表洋红 sheet，idle 文生图 + 其余 edits 锚点图生图；per-frame：逐帧生成（保留可选） */
+  mode: 'per-frame' | 'sheets'
 }
 
-/** 生成进度（pet:gen-progress 推送） */
+/** 生成完成推送（pet:gen-done）：warnings 为 QC 未达标但按现状入包的 sheet 警告（不中断整包） */
+export interface PetGenDone {
+  packId: string
+  frameCount: number
+  warnings: string[]
+  /** 全程耗时 ms（设置窗结果提示用） */
+  elapsedMs: number
+}
+
+/** 生成进度（pet:gen-progress 推送；sheets 模式按 sheet 计数，per-frame 按帧计数） */
 export interface PetGenProgress {
   done: number
   total: number
-  /** 当前阶段文案（生成中/去背落位/切帧/落盘） */
+  /** 当前阶段文案（生成 idle sheet 1/8 / 生成 idle-0 / 质检 / 落盘） */
   stage: string
+}
+
+// —— 按态分表（sheets 模式）网格约定：复盘 docs/plan/pet-pack-ai-generation.md §4.1 ——
+
+/**
+ * 帧数 → sheet 网格换算（cols×rows ≥ 帧数，默认帧数精确还原 §4.1 默认表：
+ * idle 3→1×3、walk 4→2×2、fall/sleep/happy/think 2→1×2、dragged 1→1×1、eat 3→1×3；
+ * 帧数表改动时网格自动换算，偏向横向（images 通道 3:2 横版）。
+ */
+export function petSheetGridFor(frames: number): { cols: number; rows: number } {
+  const n = Math.max(1, Math.min(32, Math.round(frames)))
+  if (n <= 3) return { cols: n, rows: 1 }
+  if (n === 4) return { cols: 2, rows: 2 }
+  if (n <= 6) return { cols: 3, rows: 2 }
+  if (n <= 8) return { cols: 4, rows: 2 }
+  if (n <= 9) return { cols: 3, rows: 3 }
+  if (n <= 12) return { cols: 4, rows: 3 }
+  if (n <= 15) return { cols: 5, rows: 3 }
+  if (n <= 16) return { cols: 4, rows: 4 }
+  if (n <= 20) return { cols: 5, rows: 4 }
+  if (n <= 24) return { cols: 6, rows: 4 }
+  if (n <= 25) return { cols: 5, rows: 5 }
+  if (n <= 30) return { cols: 6, rows: 5 }
+  return { cols: 6, rows: 6 }
+}
+
+/** 网格比例 → images size（3:2 横 → 1536x1024；1:1 → 1024x1024；2:3 竖 → 1024x1536） */
+export function petSheetSizeForGrid(grid: { cols: number; rows: number }): string {
+  if (grid.cols > grid.rows) return '1536x1024'
+  if (grid.cols < grid.rows) return '1024x1536'
+  return '1024x1024'
 }

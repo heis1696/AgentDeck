@@ -1,19 +1,19 @@
 // 小助理设置窗页面：#/pet-settings hash 路由（独立 BrowserWindow，照 #/pet 先例复用 renderer 入口）。
 // 全量承载小助理设置（素材包/persona 三预设+宏/自主间隔/模型预设+模型名/当前状态）+
-// 「生成素材包」分区（pet:gen-* IPC：预设/模型/参数/网格/stylePrompt/帧数表/进度条）。
+// 「生成素材包」分区（pet:gen-* IPC：按态分表八表为默认——角色描述/风格标签/只读网格表随帧数联动/
+// 进度按 sheet 计/结果带耗时与 QC 警告；per-frame 保留为可选）。
 // 主程序设置的「常规」里只留开关与打开本窗的按钮（见 SettingsView 的 PetCard）。
 import { useEffect, useState } from 'react'
 import { bridge, usePetState, useSettings } from '../api'
 import { PET_PERSONA_PRESETS } from '../../../shared/pet-lines'
-import { PET_PRESET_NONE } from '../../../shared/pet'
+import { PET_PRESET_NONE, petSheetGridFor, petSheetSizeForGrid } from '../../../shared/pet'
 import type { PetGenStartInput } from '../../../shared/pet'
 import { Menu } from '../ui/Menu'
 import { ToastHost, toast } from '../ui/Toasts'
 
-/** 生成默认风格提示词（照 pet-pack.mjs 模板：实底浅灰背景 + 色度键去背） */
-const DEFAULT_STYLE_PROMPT =
-  'cute round jelly blob mascot, mint green body, thick soft outline, flat shading, chibi, full body centered, plain solid light gray background, single character, game sprite frame'
-/** 帧数表默认值（七态 + eat3，照 pet-pack.mjs 模板） */
+/** 生成默认角色描述（嵌入按态分表模板；背景/布局/铁律句由模板自带，描述只管角色本身） */
+const DEFAULT_DESCRIPTION = 'cute round jelly blob mascot, mint green body, thick soft outline, flat shading, chibi, full body'
+/** 帧数表默认值（八态照复盘 §4.1：idle3/walk4/fall2/dragged1/sleep2/happy2/think2/eat3） */
 const DEFAULT_FRAME_COUNTS: Record<string, number> = { idle: 3, walk: 4, fall: 2, dragged: 1, sleep: 2, happy: 2, think: 2, eat: 3 }
 const FRAME_STATE_LABELS: Array<{ id: string; label: string }> = [
   { id: 'idle', label: '待机' },
@@ -246,19 +246,18 @@ function ModelCard() {
   )
 }
 
-/** 生成素材包：走所选预设的 images 通道；完成即进素材包下拉 */
+/** 生成素材包：走所选预设的 images 通道；默认按态分表（每态一张洋红 sheet，锚点保一致性）；完成即进素材包下拉 */
 function GenCard() {
   const { state, refresh } = usePetState()
   const [packId, setPackId] = useState('my-pet')
   const [presetId, setPresetId] = useState<string | null>(null)
   const [model, setModel] = useState<string | null>(null)
   const [size, setSize] = useState('1024x1024')
-  const [quality, setQuality] = useState('')
+  const [quality, setQuality] = useState('medium') // 按态分表默认 medium（1k 单张 30–60s，控制在网关超时内）
   const [background, setBackground] = useState<'transparent' | 'opaque'>('transparent')
-  const [mode, setMode] = useState<'per-frame' | 'sheet'>('per-frame')
-  const [cols, setCols] = useState(4)
-  const [rows, setRows] = useState(2)
-  const [stylePrompt, setStylePrompt] = useState(DEFAULT_STYLE_PROMPT)
+  const [mode, setMode] = useState<'sheets' | 'per-frame'>('sheets')
+  const [description, setDescription] = useState(DEFAULT_DESCRIPTION)
+  const [styleTags, setStyleTags] = useState('')
   const [frameCounts, setFrameCounts] = useState<Record<string, number>>(DEFAULT_FRAME_COUNTS)
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState<{ done: number; total: number; stage: string } | null>(null)
@@ -266,11 +265,14 @@ function GenCard() {
 
   useEffect(() => {
     const offProgress = bridge.pet.onGenProgress((p) => setProgress(p))
-    const offDone = bridge.pet.onGenDone(({ packId: id, frameCount }) => {
+    const offDone = bridge.pet.onGenDone(({ packId: id, frameCount, warnings, elapsedMs }) => {
       setBusy(false)
       setProgress(null)
-      setResult(`✓ 已生成 ${frameCount} 帧 → 素材包「${id}」（已进上方素材包下拉）`)
-      toast.success('素材包生成完成')
+      const secs = Math.round((elapsedMs ?? 0) / 1000)
+      const warnTail = warnings?.length ? `；⚠ QC 警告 ${warnings.length} 条：${warnings.join('；')}` : ''
+      setResult(`✓ 已生成 ${frameCount} 帧 → 素材包「${id}」（耗时 ${secs}s${warnTail}）`)
+      if (warnings?.length) toast.success(`素材包生成完成（含 ${warnings.length} 条警告）`)
+      else toast.success('素材包生成完成')
       void refresh()
     })
     const offError = bridge.pet.onGenError(({ reason }) => {
@@ -289,6 +291,7 @@ function GenCard() {
   if (!state) return null
   const usablePresets = state.presets
   const effectivePresetId = presetId ?? (state.presetId && state.presetId !== PET_PRESET_NONE ? state.presetId : state.activePresetId)
+  const activeStates = FRAME_STATE_LABELS.filter(({ id }) => (frameCounts[id] ?? 0) > 0)
   const start = () => {
     const states: Record<string, number> = {}
     for (const { id } of FRAME_STATE_LABELS) {
@@ -300,13 +303,17 @@ function GenCard() {
       presetId: effectivePresetId,
       model: (model ?? state.model).trim(),
       params: { size, quality, n: 1, background },
-      stylePrompt: stylePrompt.trim(),
+      stylePrompt: description.trim(),
+      ...(mode === 'sheets' && styleTags.trim() ? { styleTags: styleTags.trim() } : {}),
       states,
-      mode,
-      ...(mode === 'sheet' ? { sheet: { cols: Math.max(1, cols), rows: Math.max(1, rows) } } : {})
+      mode
     }
     setBusy(true)
-    setProgress({ done: 0, total: Object.values(states).reduce((a, b) => a + b, 0), stage: '提交生成请求' })
+    setProgress(
+      mode === 'sheets'
+        ? { done: 0, total: activeStates.length, stage: '提交生成请求' }
+        : { done: 0, total: Object.values(states).reduce((a, b) => a + b, 0), stage: '提交生成请求' }
+    )
     setResult(null)
     void bridge.pet.genStart(input).then((res) => {
       if (!res.ok) {
@@ -321,7 +328,22 @@ function GenCard() {
   return (
     <section className="settings-card">
       <h3>生成素材包</h3>
-      <p className="hint">用上方模型预设的 images 接口（OpenAI 形状）现场生成一套素材包；透明背景走色度键去背，完成后自动出现在素材包下拉。apiKey 只在主进程使用，不落日志。</p>
+      <p className="hint">
+        用上方模型预设的 images 接口（OpenAI 形状）现场生成一套素材包。默认按态分表：每个状态一张洋红底 sheet，首张文生图、其余拿首张当锚点图生图保角色一致，生成后自动切帧去背进包。apiKey 只在主进程使用，不落日志。
+      </p>
+      <label className="field">
+        <span>模式</span>
+        <Menu
+          items={[{ value: 'sheets', label: '按态分表（推荐）', hint: '每态一张洋红 sheet，锚点保一致' }, { value: 'per-frame', label: '逐帧生成', hint: '首帧作参考图，慢且易漂移' }]}
+          value={mode}
+          onChange={(v) => setMode(v as 'sheets' | 'per-frame')}
+          trigger={(cur, open) => (
+            <button className="btn menu-trigger" type="button">
+              {cur?.label ?? '按态分表（推荐）'} <span className="menu-caret">{open ? '▴' : '▾'}</span>
+            </button>
+          )}
+        />
+      </label>
       <label className="field">
         <span>包 id（字母/数字/连字符；重名覆盖旧包）</span>
         <input type="text" value={packId} onChange={(e) => setPackId(e.target.value)} placeholder="my-pet" />
@@ -343,93 +365,86 @@ function GenCard() {
         <span>图像模型名（如 gpt-image-1；留空用上方模型名）</span>
         <input type="text" value={model ?? ''} onChange={(e) => setModel(e.target.value)} placeholder="留空 = 聊天模型名" />
       </label>
-      <div className="pet-gen-grid">
-        <label className="field">
-          <span>尺寸</span>
-          <Menu
-            items={[{ value: '512x512', label: '512×512' }, { value: '768x768', label: '768×768' }, { value: '1024x1024', label: '1024×1024' }]}
-            value={size}
-            onChange={setSize}
-            trigger={(cur, open) => (
-              <button className="btn menu-trigger" type="button">
-                {cur?.label ?? size} <span className="menu-caret">{open ? '▴' : '▾'}</span>
-              </button>
-            )}
-          />
-        </label>
-        <label className="field">
-          <span>质量</span>
-          <Menu
-            items={[{ value: '', label: '网关默认' }, { value: 'low', label: 'low' }, { value: 'medium', label: 'medium' }, { value: 'high', label: 'high' }]}
-            value={quality}
-            onChange={setQuality}
-            trigger={(cur, open) => (
-              <button className="btn menu-trigger" type="button">
-                {cur?.label ?? '网关默认'} <span className="menu-caret">{open ? '▴' : '▾'}</span>
-              </button>
-            )}
-          />
-        </label>
-        <label className="field">
-          <span>背景</span>
-          <Menu
-            items={[{ value: 'transparent', label: '透明（去背）' }, { value: 'opaque', label: '保留背景' }]}
-            value={background}
-            onChange={(v) => setBackground(v as 'transparent' | 'opaque')}
-            trigger={(cur, open) => (
-              <button className="btn menu-trigger" type="button">
-                {cur?.label ?? '透明'} <span className="menu-caret">{open ? '▴' : '▾'}</span>
-              </button>
-            )}
-          />
-        </label>
-        <label className="field">
-          <span>模式</span>
-          <Menu
-            items={[{ value: 'per-frame', label: '逐帧生成', hint: '首帧作参考图' }, { value: 'sheet', label: '整张切帧', hint: '单图按网格切' }]}
-            value={mode}
-            onChange={(v) => setMode(v as 'per-frame' | 'sheet')}
-            trigger={(cur, open) => (
-              <button className="btn menu-trigger" type="button">
-                {cur?.label ?? '逐帧生成'} <span className="menu-caret">{open ? '▴' : '▾'}</span>
-              </button>
-            )}
-          />
-        </label>
-        {mode === 'sheet' && (
-          <>
-            <label className="field">
-              <span>网格列数</span>
-              <input type="number" min={1} max={8} value={cols} onChange={(e) => setCols(Number(e.target.value) || 1)} />
-            </label>
-            <label className="field">
-              <span>网格行数</span>
-              <input type="number" min={1} max={8} value={rows} onChange={(e) => setRows(Number(e.target.value) || 1)} />
-            </label>
-          </>
-        )}
-      </div>
+      {mode === 'per-frame' && (
+        <div className="pet-gen-grid">
+          <label className="field">
+            <span>尺寸</span>
+            <Menu
+              items={[{ value: '512x512', label: '512×512' }, { value: '768x768', label: '768×768' }, { value: '1024x1024', label: '1024×1024' }]}
+              value={size}
+              onChange={setSize}
+              trigger={(cur, open) => (
+                <button className="btn menu-trigger" type="button">
+                  {cur?.label ?? size} <span className="menu-caret">{open ? '▴' : '▾'}</span>
+                </button>
+              )}
+            />
+          </label>
+          <label className="field">
+            <span>背景</span>
+            <Menu
+              items={[{ value: 'transparent', label: '透明（去背）' }, { value: 'opaque', label: '保留背景' }]}
+              value={background}
+              onChange={(v) => setBackground(v as 'transparent' | 'opaque')}
+              trigger={(cur, open) => (
+                <button className="btn menu-trigger" type="button">
+                  {cur?.label ?? '透明'} <span className="menu-caret">{open ? '▴' : '▾'}</span>
+                </button>
+              )}
+            />
+          </label>
+        </div>
+      )}
       <label className="field">
-        <span>风格提示词（英文效果更稳；透明背景请保留纯色背景描述）</span>
-        <textarea rows={4} value={stylePrompt} onChange={(e) => setStylePrompt(e.target.value)} />
+        <span>质量（按态分表默认 medium：单张控制在网关超时内）</span>
+        <Menu
+          items={[{ value: '', label: '网关默认（按态分表回落 medium）' }, { value: 'low', label: 'low' }, { value: 'medium', label: 'medium' }, { value: 'high', label: 'high' }]}
+          value={quality}
+          onChange={setQuality}
+          trigger={(cur, open) => (
+            <button className="btn menu-trigger" type="button">
+              {cur?.label ?? 'medium'} <span className="menu-caret">{open ? '▴' : '▾'}</span>
+            </button>
+          )}
+        />
       </label>
       <label className="field">
-        <span>帧数表（共 {totalFrames} 帧；sheet 模式网格需放得下）</span>
+        <span>角色描述（嵌入生成模板；英文效果更稳）</span>
+        <textarea rows={3} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="例如：cute round jelly blob mascot, mint green body, chibi" />
+      </label>
+      {mode === 'sheets' && (
+        <label className="field">
+          <span>风格标签（可选；追加在一致性约束之后，如 kawaii chibi, thick outline）</span>
+          <input type="text" value={styleTags} onChange={(e) => setStyleTags(e.target.value)} placeholder="留空 = 不加风格标签" />
+        </label>
+      )}
+      <label className="field">
+        <span>帧数表{mode === 'sheets' ? '（网格与逐格动作随帧数自动换算，共 ' : '（共 '}{totalFrames} 帧）</span>
         <div className="pet-gen-grid">
-          {FRAME_STATE_LABELS.map(({ id, label }) => (
-            <label className="field" key={id}>
-              <span>{label}</span>
-              <input
-                type="number"
-                min={id === 'eat' ? 0 : 1}
-                max={32}
-                value={frameCounts[id] ?? 0}
-                onChange={(e) => setFrameCounts((cur) => ({ ...cur, [id]: Number(e.target.value) || 0 }))}
-              />
-            </label>
-          ))}
+          {FRAME_STATE_LABELS.map(({ id, label }) => {
+            const count = Math.max(0, frameCounts[id] ?? 0)
+            const grid = petSheetGridFor(Math.max(1, count))
+            return (
+              <label className="field" key={id}>
+                <span>{label}</span>
+                <input
+                  type="number"
+                  min={id === 'eat' ? 0 : 1}
+                  max={32}
+                  value={count}
+                  onChange={(e) => setFrameCounts((cur) => ({ ...cur, [id]: Number(e.target.value) || 0 }))}
+                />
+                {mode === 'sheets' && count > 0 && (
+                  <span className="hint">
+                    {grid.rows}×{grid.cols} 网格 · {petSheetSizeForGrid(grid)}
+                  </span>
+                )}
+              </label>
+            )
+          })}
         </div>
       </label>
+      {mode === 'sheets' && <p className="hint">按态分表约束：洋红 #FF00FF 底、N 等分无框线、无文字、角色占格 80%+；成品帧 256px（rendering: smooth）。八张 sheet 约 6 分钟（单张 30–60s，504 自动退避重试），包约 1MB。</p>}
       <div className="row" style={{ gap: 6 }}>
         <button className="btn primary" type="button" disabled={busy || !effectivePresetId || totalFrames < 1} onClick={start}>
           {busy ? '生成中…' : '开始生成'}

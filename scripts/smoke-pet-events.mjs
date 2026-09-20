@@ -36,7 +36,7 @@ ok(parsePetWindowEvent({ type: 'open-settings' }) !== null, 'open-settings 解�
 ok(parsePetWindowEvent({ type: 'frobnicate' }) === null, '未知 type 丢弃')
 ok(parsePetWindowEvent(null) === null && parsePetWindowEvent('x') === null, '非对象丢弃')
 
-console.log('—— parsePetGenStartInput：生成入参白名单校验（C7）——')
+console.log('—— parsePetGenStartInput：生成入参白名单校验（C7 + 按态分表契约）——')
 const valid = {
   packId: 'my-pet',
   presetId: 'p1',
@@ -52,6 +52,7 @@ const valid = {
   if (r.ok) {
     ok(r.input.packId === 'my-pet' && r.input.params.size === '1024x1024', '字段透传')
     ok(r.input.params.background === 'transparent' && r.input.params.n === 1, 'params 归一化')
+    ok(r.input.mode === 'per-frame', 'per-frame 模式透传')
   }
   const bad = (mutate, needle) => {
     const cfg = JSON.parse(JSON.stringify(valid))
@@ -62,18 +63,22 @@ const valid = {
   ok(bad((c) => { c.packId = 'default' }, '保留名'), "packId=default 拒收")
   ok(bad((c) => { c.packId = 'bad id!' }, '非法'), 'packId 非法字符拒收')
   ok(bad((c) => { c.presetId = '' }, '预设'), '空 presetId 拒收')
-  ok(bad((c) => { c.stylePrompt = '  ' }, '风格提示词'), '空 stylePrompt 拒收')
+  ok(bad((c) => { c.stylePrompt = '  ' }, '角色描述'), '空 stylePrompt（角色描述）拒收')
   ok(bad((c) => { c.states = { dance: 3 } }, '白名单'), '帧数表白名单外状态拒收')
   ok(bad((c) => { c.states = { idle: 0 } }, '帧数'), '帧数 0 拒收')
   ok(bad((c) => { c.states = {} }, '至少'), '空帧数表拒收')
   ok(bad((c) => { c.states = { idle: 99 } }, '1–32'), '帧数越界拒收')
-  ok(bad((c) => { c.mode = 'sheet'; c.sheet = { cols: 1, rows: 2 } }, '放不下'), 'sheet 网格小于帧数拒收')
-  const sheet = JSON.parse(JSON.stringify(valid))
-  sheet.mode = 'sheet'
-  sheet.states = { idle: 1, walk: 1, fall: 1, dragged: 1, sleep: 1, happy: 1, think: 1 }
-  sheet.sheet = { cols: 4, rows: 2 }
-  const rs = parsePetGenStartInput(sheet)
-  ok(rs.ok === true && rs.input.sheet.cols === 4, 'sheet 模式网格合法放行')
+  const sheets = JSON.parse(JSON.stringify(valid))
+  delete sheets.mode
+  const rs = parsePetGenStartInput(sheets)
+  ok(rs.ok === true && rs.input.mode === 'sheets', '缺省 mode 落按态分表（sheets 默认）')
+  const legacy = JSON.parse(JSON.stringify(valid))
+  legacy.mode = 'sheet' // 热更错峰：旧渲染层发来的单张 sheet 模式（已删）落回 sheets
+  const rl = parsePetGenStartInput(legacy)
+  ok(rl.ok === true && rl.input.mode === 'sheets' && !('sheet' in rl.input), "旧 'sheet' 模式落回 sheets 且不产 sheet 字段")
+  const tagged = JSON.parse(JSON.stringify({ ...valid, mode: 'sheets', styleTags: '  kawaii chibi, thick outline  ' }))
+  const rt = parsePetGenStartInput(tagged)
+  ok(rt.ok === true && rt.input.styleTags === 'kawaii chibi, thick outline', 'styleTags 透传并去空白')
   const defaults = parsePetGenStartInput({ ...JSON.parse(JSON.stringify(valid)), params: {} })
   ok(defaults.ok === true && defaults.input.params.size === '1024x1024' && defaults.input.params.background === 'transparent', 'params 缺省走默认值')
   ok(parsePetGenStartInput(null).ok === false, 'null 入参拒收')
