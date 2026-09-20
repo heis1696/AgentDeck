@@ -2954,6 +2954,23 @@
       "source": "src/main/ipc/pet.ts",
       "dependencies": [
         {
+          "module": "../../shared/pet",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/shared/pet.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "../ipc-validation",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -2973,6 +2990,25 @@
       ],
       "dependents": [
         "src/main/ipc/register.ts"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
+      "source": "src/shared/pet.ts",
+      "dependencies": [],
+      "dependents": [
+        "src/main/ipc/pet.ts",
+        "src/main/pet/index.ts",
+        "src/main/pet/packs.ts",
+        "src/main/pet/pet-brain.ts",
+        "src/shared/pet-lines.ts",
+        "src/main/pet/pet-store.ts",
+        "src/main/pet/pet-gen.ts",
+        "src/main/pet/pack-image.ts",
+        "src/main/pet/pet-window.ts",
+        "src/renderer/src/pet/PetSettingsPage.tsx",
+        "src/renderer/src/pet/PetStage.tsx"
       ],
       "orphan": false,
       "valid": true
@@ -3420,6 +3456,23 @@
           "valid": true
         },
         {
+          "module": "./pet-gen",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/pet/pet-gen.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "./pet-llm",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -3429,6 +3482,23 @@
             "import"
           ],
           "resolved": "src/main/pet/pet-llm.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "./pet-settings-window",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/pet/pet-settings-window.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -3473,22 +3543,6 @@
       ],
       "dependents": [
         "src/main/index.ts"
-      ],
-      "orphan": false,
-      "valid": true
-    },
-    {
-      "source": "src/shared/pet.ts",
-      "dependencies": [],
-      "dependents": [
-        "src/main/pet/index.ts",
-        "src/main/pet/packs.ts",
-        "src/main/pet/pet-brain.ts",
-        "src/shared/pet-lines.ts",
-        "src/main/pet/pet-store.ts",
-        "src/main/pet/pet-window.ts",
-        "src/renderer/src/components/SettingsView.tsx",
-        "src/renderer/src/pet/PetStage.tsx"
       ],
       "orphan": false,
       "valid": true
@@ -3544,7 +3598,8 @@
         }
       ],
       "dependents": [
-        "src/main/pet/index.ts"
+        "src/main/pet/index.ts",
+        "src/main/pet/pet-gen.ts"
       ],
       "orphan": false,
       "valid": true
@@ -3702,7 +3757,7 @@
       ],
       "dependents": [
         "src/main/pet/pet-brain.ts",
-        "src/renderer/src/components/SettingsView.tsx",
+        "src/renderer/src/pet/PetSettingsPage.tsx",
         "src/renderer/src/pet/PetStage.tsx"
       ],
       "orphan": false,
@@ -3747,6 +3802,121 @@
       "valid": true
     },
     {
+      "source": "src/main/pet/pet-gen.ts",
+      "dependencies": [
+        {
+          "module": "../../shared/pet",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/shared/pet.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "./pack-image",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/pet/pack-image.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "./packs",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/pet/packs.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
+      "dependents": [
+        "src/main/pet/index.ts"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
+      "source": "src/main/pet/pack-image.ts",
+      "dependencies": [
+        {
+          "module": "../../shared/pet",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/shared/pet.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
+      "dependents": [
+        "src/main/pet/pet-gen.ts"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
+      "source": "src/main/pet/pet-settings-window.ts",
+      "dependencies": [
+        {
+          "module": "./pet-window",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/pet/pet-window.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
+      "dependents": [
+        "src/main/pet/index.ts"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
       "source": "src/main/pet/pet-window.ts",
       "dependencies": [
         {
@@ -3785,7 +3955,8 @@
         }
       ],
       "dependents": [
-        "src/main/pet/index.ts"
+        "src/main/pet/index.ts",
+        "src/main/pet/pet-settings-window.ts"
       ],
       "orphan": false,
       "valid": true
@@ -4761,6 +4932,23 @@
           "valid": true
         },
         {
+          "module": "./pet/PetSettingsPage",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/pet/PetSettingsPage.tsx",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "./pet/PetStage",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -4896,6 +5084,7 @@
         "src/renderer/src/components/task/ActivityTimeline.tsx",
         "src/renderer/src/components/UsageView.tsx",
         "src/renderer/src/components/WorkspaceView.tsx",
+        "src/renderer/src/pet/PetSettingsPage.tsx",
         "src/renderer/src/pet/PetStage.tsx"
       ],
       "orphan": false,
@@ -5002,7 +5191,8 @@
       "dependents": [
         "src/renderer/src/components/AgentsView.tsx",
         "src/renderer/src/components/SettingsView.tsx",
-        "src/renderer/src/components/goal/GoalCreateDialog.tsx"
+        "src/renderer/src/components/goal/GoalCreateDialog.tsx",
+        "src/renderer/src/pet/PetSettingsPage.tsx"
       ],
       "orphan": false,
       "valid": true
@@ -5024,7 +5214,8 @@
         "src/renderer/src/components/goal/GoalPanel.tsx",
         "src/renderer/src/components/goal/GoalCreateDialog.tsx",
         "src/renderer/src/components/meeting/MeetingPanel.tsx",
-        "src/renderer/src/components/WorkspaceView.tsx"
+        "src/renderer/src/components/WorkspaceView.tsx",
+        "src/renderer/src/pet/PetSettingsPage.tsx"
       ],
       "orphan": false,
       "valid": true
@@ -5519,40 +5710,6 @@
     {
       "source": "src/renderer/src/components/SettingsView.tsx",
       "dependencies": [
-        {
-          "module": "../../../shared/pet",
-          "moduleSystem": "es6",
-          "dynamic": false,
-          "exoticallyRequired": false,
-          "dependencyTypes": [
-            "local",
-            "import"
-          ],
-          "resolved": "src/shared/pet.ts",
-          "coreModule": false,
-          "followable": true,
-          "couldNotResolve": false,
-          "matchesDoNotFollow": false,
-          "circular": false,
-          "valid": true
-        },
-        {
-          "module": "../../../shared/pet-lines",
-          "moduleSystem": "es6",
-          "dynamic": false,
-          "exoticallyRequired": false,
-          "dependencyTypes": [
-            "local",
-            "import"
-          ],
-          "resolved": "src/shared/pet-lines.ts",
-          "coreModule": false,
-          "followable": true,
-          "couldNotResolve": false,
-          "matchesDoNotFollow": false,
-          "circular": false,
-          "valid": true
-        },
         {
           "module": "../api",
           "moduleSystem": "es6",
@@ -7073,6 +7230,101 @@
       "valid": true
     },
     {
+      "source": "src/renderer/src/pet/PetSettingsPage.tsx",
+      "dependencies": [
+        {
+          "module": "../../../shared/pet",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/shared/pet.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "../../../shared/pet-lines",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/shared/pet-lines.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "../api",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/api.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "../ui/Menu",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/Menu.tsx",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "../ui/Toasts",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/Toasts.tsx",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
+      "dependents": [
+        "src/renderer/src/App.tsx"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
       "source": "src/renderer/src/pet/PetStage.tsx",
       "dependencies": [
         {
@@ -7610,10 +7862,10 @@
     "warn": 0,
     "info": 0,
     "ignore": 0,
-    "totalCruised": 164,
-    "totalDependenciesCruised": 336,
+    "totalCruised": 168,
+    "totalDependenciesCruised": 348,
     "optionsUsed": {
-      "baseDir": "D:\\agentdeck\\.agentdeck-worktrees\\t_mu8bp1d0_4v1tjc_c8",
+      "baseDir": "D:\\agentdeck\\.agentdeck-worktrees\\t_mu8bp1d0_4v1tjc_c12",
       "combinedDependencies": false,
       "detectJSDocImports": false,
       "detectProcessBuiltinModuleCalls": false,

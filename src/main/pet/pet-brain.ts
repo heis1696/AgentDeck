@@ -180,7 +180,7 @@ export class PetBrainLoop {
     const preset = resolveActivePreset(config.presetId, this.deps.getPresets())
     const fallback = this.fallbackSay()
     if (!preset) {
-      this.record('fallback', '没有可用的 API 预设（设置 → API 预设先添加，或在桌宠卡片选择）')
+      this.record('fallback', '没有可用的 API 预设（设置 → API 预设先添加，或在小助理设置选择）')
       this.deps.store.appendChat({ role: 'pet', text: fallback.say })
       return fallback
     }
@@ -287,7 +287,7 @@ export class PetBrainLoop {
     const config = this.deps.store.get()
     const preset = resolveActivePreset(config.presetId, this.deps.getPresets())
     const fallback = this.fallbackSay()
-    if (!preset) return { source: 'fallback', say: fallback, error: '没有可用的 API 预设（设置 → API 预设先添加，或在桌宠卡片选择）' }
+    if (!preset) return { source: 'fallback', say: fallback, error: '没有可用的 API 预设（设置 → API 预设先添加，或在小助理设置选择）' }
     const history = config.chatHistory.slice(-HISTORY_CONTEXT_MAX)
     const messages: PetChatMessage[] = [
       { role: 'system', content: this.systemPrompt() },

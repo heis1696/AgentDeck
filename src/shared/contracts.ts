@@ -2,7 +2,7 @@ import type { AcceptanceCriterion, Automation, AppSettings, AnalyticsSummary, Co
 import type { SkillDetail, SkillMeta, SkillTarget, SyncState } from './skills'
 import type { AgentDraft, DraftResult, ExportResult, ImproveResult, ImportResult, EvaluateResult } from './forge'
 import type { Meeting, MeetingCreateInput } from './meeting'
-import type { PackAssets } from './pet'
+import type { PackAssets, PetGenProgress, PetGenStartInput } from './pet'
 import type { PetDragPosition, PetSayPayload, PetStateSnapshot, PetThrowVelocity, PetWindowEvent } from './pet'
 export type { MeetingCreateInput } from './meeting'
 import type {
@@ -329,7 +329,13 @@ export interface AgentDeckApi {
     setZoom: (zoom: number) => Promise<PetStateSnapshot | null>
     /** 投喂：好感/心情落 pet.json，返回新快照（吃动画由渲染层自播） */
     feed: (foodId: string) => Promise<PetStateSnapshot | null>
-    /** 渲染层 → 主进程：窗体移动/拖拽/聊天开合/交互上报（fire-and-forget） */
+    /** 打开/聚焦独立小助理设置窗（右键菜单「设置」与主程序设置页按钮共用） */
+    openSettingsWindow: () => Promise<void>
+    /** 应用内生成素材包：入参校验后异步跑管线，进度/完成/失败走推送 */
+    genStart: (input: PetGenStartInput) => Promise<{ ok: boolean; error?: string }>
+    /** 取消进行中的生成（当前帧完成后停下） */
+    genCancel: () => Promise<{ ok: boolean }>
+    /** 渲染层 → 主进程：窗体移动/拖拽/聊天与菜单开合/精灵悬停/交互上报（fire-and-forget） */
     windowEvent: (event: PetWindowEvent) => void
     /** 主进程 → 渲染层：脑台词推送（自主发言/聊天回复的气泡播报） */
     onSay: (cb: (say: PetSayPayload) => void) => () => void
@@ -341,8 +347,14 @@ export interface AgentDeckApi {
     onThrown: (cb: (velocity: PetThrowVelocity) => void) => () => void
     /** 主进程 → 渲染层：素材包已切换，重载帧资源 */
     onPackChanged: (cb: () => void) => () => void
-    /** 主进程 → 主窗：右键菜单「打开设置」聚焦设置页 */
-    onOpenSettings: (cb: () => void) => () => void
+    /** 主进程 → 渲染层：window blur 触发的菜单自动关闭（窗外点击/Alt-Tab） */
+    onMenuClosed: (cb: () => void) => () => void
+    /** 主进程 → 渲染层：素材包生成进度 */
+    onGenProgress: (cb: (progress: PetGenProgress) => void) => () => void
+    /** 主进程 → 渲染层：素材包生成完成（素材包下拉即见） */
+    onGenDone: (cb: (result: { packId: string; frameCount: number }) => void) => () => void
+    /** 主进程 → 渲染层：素材包生成失败（reason 不含 apiKey） */
+    onGenError: (cb: (result: { packId: string; reason: string }) => void) => () => void
   }
   skills: {
     list: () => Promise<{ root: string; skills: SkillMeta[] }>

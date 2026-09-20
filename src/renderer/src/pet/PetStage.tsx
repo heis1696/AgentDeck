@@ -1,9 +1,11 @@
-// 桌宠舞台：透明窗渲染层（主窗之外以 #/pet hash 路由进入）。
+// 小助理（桌宠）舞台：透明窗渲染层（主窗之外以 #/pet hash 路由进入）。
 // rAF 循环调 shared 纯函数推进状态机与物理；DOM 只做最小写——帧变化才换 src，
 // 位置由主进程移动窗体承载（渲染层不做 transform）。帧资源：内置包走
 // import.meta.glob（vite 管线），用户包走 IPC data URL。
-// D 期：右键菜单投喂（eat 态）与尺寸缩放（窗/精灵/命中区同缩放，主进程承载窗体尺寸）；
+// 右键菜单投喂（eat 态）与尺寸缩放（窗/精灵/命中区同缩放，主进程承载窗体尺寸）；
 // 好感/心情经 tuneTransitions 调制行为权重（不改素材包文件本身）；单击/抛掷上报累积好感。
+// 鼠标穿透渲染层权威：精灵 pointerenter/pointerleave → hover 事件（主进程据此收/放鼠标）；
+// 菜单/聊天开合上报主进程（开着时整窗收鼠标）；悬停 ~800ms 浮出状态栏（pointer-events:none）。
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { bridge, type PackAssets, type PetStateSnapshot } from '../api'
 import builtinManifestJson from './assets/default/pet.json'
@@ -30,6 +32,8 @@ const BUILTIN_PACK_ID = 'default'
 const BUBBLE_MS = 3000
 /** 拖拽判定阈值（px）：低于它是点击，超过它交给主进程拖窗 */
 const DRAG_THRESHOLD = 5
+/** 悬停状态栏延迟（ms）：避免扫过就闪 */
+const STATUS_HOVER_MS = 800
 
 // 内置包帧 URL 表（vite 资产管线产物；打包进 assets，开发态走 dev server）
 const builtinFrameUrls = import.meta.glob('./assets/default/*.png', { query: '?url', import: 'default', eager: true }) as Record<string, string>
@@ -88,6 +92,19 @@ export function PetStage() {
   const [zoom, setZoom] = useState(1)
   // 右键菜单（C 期）：自绘 DOM；pack/feed/zoom 子菜单
   const [menu, setMenu] = useState<{ x: number; y: number; sub: 'pack' | 'feed' | 'zoom' | null } | null>(null)
+  /** 精灵悬停态（穿透开关输入 + 状态栏前提） */
+  const [statusVisible, setStatusVisible] = useState(false)
+  const statusTimerRef = useRef<number | undefined>(undefined)
+  /** 菜单开合上报（渲染层权威）：主进程 menu 态驱动整窗收鼠标，window blur 时主进程回推 menu-closed */
+  const reportMenu = useCallback((open: boolean) => {
+    bridge.pet.windowEvent({ type: 'menu', open })
+  }, [])
+  const closeMenu = useCallback(() => {
+    setMenu((cur) => {
+      if (cur) reportMenu(false)
+      return null
+    })
+  }, [reportMenu])
 
   // pet-mode 隔离：透明窗背景不走主 UI 的画布底色
   useEffect(() => {
@@ -180,6 +197,8 @@ export function PetStage() {
       const packId = snapshotRef.current?.packId ?? BUILTIN_PACK_ID
       loadPack(packId)
     })
+    // 主进程 window blur（窗外点击/Alt-Tab）触发的菜单自动关闭
+    const offMenuClosed = bridge.pet.onMenuClosed(() => setMenu(null))
     // AI 脑自主发言（主进程 pet-brain）：气泡播报 + 动作动画 + 聊天记录留痕
     const offSay = bridge.pet.onSay((say) => {
       showBubble(say.text)
@@ -191,6 +210,7 @@ export function PetStage() {
       offDrag()
       offThrown()
       offPackChanged()
+      offMenuClosed()
       offSay()
     }
   }, [loadPack, applyBounds, retuneManifest])
@@ -227,7 +247,19 @@ export function PetStage() {
     return () => cancelAnimationFrame(raf)
   }, [])
 
-  // —— 指针交互：点击 / 拖拽（阈值 5px）/ 双击开聊天 ——
+  // —— 指针交互：点击 / 拖拽（阈值 5px）/ 双击开聊天 / 悬停穿透上报 + 状态栏 ——
+  /** 精灵悬停进出：穿透态（forward:true）下 enter/leave 可靠触发，主进程收到即收/放鼠标 */
+  const onSpriteEnter = () => {
+    bridge.pet.windowEvent({ type: 'hover', inside: true })
+    if (statusTimerRef.current) window.clearTimeout(statusTimerRef.current)
+    statusTimerRef.current = window.setTimeout(() => setStatusVisible(true), STATUS_HOVER_MS)
+  }
+  const onSpriteLeave = () => {
+    bridge.pet.windowEvent({ type: 'hover', inside: false })
+    if (statusTimerRef.current) window.clearTimeout(statusTimerRef.current)
+    statusTimerRef.current = undefined
+    setStatusVisible(false)
+  }
   const onPointerDown = (e: React.PointerEvent) => {
     pointerStartRef.current = { pointerId: e.pointerId, x: e.clientX, y: e.clientY }
     ;(e.currentTarget as Element).setPointerCapture(e.pointerId)
@@ -277,33 +309,33 @@ export function PetStage() {
   }, [menu, winSize.width, winSize.height])
   useEffect(() => {
     if (!menu) return
-    const dismiss = () => setMenu(null)
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') dismiss() }
-    window.addEventListener('pointerdown', dismiss)
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') closeMenu() }
+    window.addEventListener('pointerdown', closeMenu)
     window.addEventListener('keydown', onKey)
     return () => {
-      window.removeEventListener('pointerdown', dismiss)
+      window.removeEventListener('pointerdown', closeMenu)
       window.removeEventListener('keydown', onKey)
     }
-  }, [menu])
+  }, [menu, closeMenu])
   const onContextMenu = (e: React.MouseEvent) => {
     e.preventDefault()
     // 菜单弹在光标处并 clamp 进窗体（菜单约 190 高，往左上收）
     const x = Math.min(e.clientX, winSize.width - 150)
     const y = Math.min(e.clientY, winSize.height - 200)
     setMenu({ x: Math.max(x, 4), y: Math.max(y, 4), sub: null })
+    reportMenu(true)
   }
   const openSettingsFromMenu = () => {
-    setMenu(null)
+    closeMenu()
     bridge.pet.windowEvent({ type: 'open-settings' })
   }
   const hidePet = () => {
-    setMenu(null)
+    closeMenu()
     void bridge.pet.setEnabled(false)
   }
   /** 投喂：eat 态动画（素材包缺 eat 退回 happy）+ 本地零食台词 + 主进程落数值 */
   const feedPet = (foodId: string) => {
-    setMenu(null)
+    closeMenu()
     brainRef.current = createPetBrain(manifestRef.current.states.eat ? 'eat' : 'happy')
     showBubble(pickFoodLine(foodId))
     void bridge.pet.feed(foodId)
@@ -340,18 +372,42 @@ export function PetStage() {
 
   const sprite = petSpriteRect(winSize.width, winSize.height, petSpriteScale(zoom))
   const bubbleOffset = assetsRef.current.manifest.bubble.offset
+  const snapshot = snapshotRef.current
   return (
     <div className="pet-stage" onContextMenu={onContextMenu}>
       <div
         className={`pet-sprite ${dragging ? 'dragging' : ''}`}
         style={{ left: sprite.left, top: sprite.top, width: sprite.width, height: sprite.height }}
+        onPointerEnter={onSpriteEnter}
+        onPointerLeave={onSpriteLeave}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onDoubleClick={onDoubleClick}
       >
-        <img className="pet-sprite-img" src={frameSrc} draggable={false} alt="薄荷团子" />
+        <img className="pet-sprite-img" src={frameSrc} draggable={false} alt="小助理" />
       </div>
+      {snapshot && statusVisible && !chatOpen && !menu && (
+        <div className="pet-status-bar" style={{ left: sprite.left + sprite.width / 2, top: Math.max(4, sprite.top - 8) }}>
+          <div className="pet-status-row primary">
+            {snapshot.life ? `♥ ${snapshot.life.affection} · ${snapshot.life.tier}` : '♥ ——'}
+            {snapshot.life ? ` · 心情 ${snapshot.life.mood}（${snapshot.life.moodLabel}）` : ''}
+          </div>
+          <div className="pet-status-row">
+            {snapshot.brainStatus.source === 'llm' && 'AI 脑：走模型'}
+            {snapshot.brainStatus.source === 'fallback' && `AI 脑：兜底台词${snapshot.brainStatus.lastError ? `（${snapshot.brainStatus.lastError}）` : ''}`}
+            {snapshot.brainStatus.source === 'none' && 'AI 脑：尚未发言'}
+            {snapshot.brainStatus.silenced ? ' · 静默中' : ''}
+          </div>
+          <div className="pet-status-row">
+            {(() => {
+              const preset = snapshot.presets.find((item) => item.id === snapshot.activePresetId)
+              if (!preset) return '预设：未接 AI'
+              return `预设 ${preset.name} · 模型 ${snapshot.model || '网关默认'}`
+            })()}
+          </div>
+        </div>
+      )}
       {bubble && !chatOpen && (
         <div className="pet-bubble" style={{ left: sprite.left + bubbleOffset[0], top: sprite.top + bubbleOffset[1] }}>
           {bubble}
@@ -360,7 +416,7 @@ export function PetStage() {
       {chatOpen && (
         <div className="pet-chat">
           <div className="pet-chat-head">
-            <span>和团子聊聊</span>
+            <span>和小助理聊聊</span>
             <button className="pet-chat-close" onClick={closeChat} aria-label="关闭聊天">✕</button>
           </div>
           <div className="pet-chat-log">
@@ -383,7 +439,7 @@ export function PetStage() {
       )}
       {menu && (
         <div ref={menuRef} className="pet-menu" style={{ left: menu.x, top: menu.y }} onPointerDown={(e) => e.stopPropagation()}>
-          <button className="pet-menu-item" onClick={() => { setMenu(null); openChat() }}>聊天</button>
+          <button className="pet-menu-item" onClick={() => { closeMenu(); openChat() }}>聊天</button>
           <div className="pet-menu-sub">
             <button className="pet-menu-item" onClick={() => setMenu((cur) => (cur ? { ...cur, sub: cur.sub === 'feed' ? null : 'feed' } : cur))}>
               投喂 ▸
@@ -407,7 +463,7 @@ export function PetStage() {
                     key={step}
                     className="pet-menu-item"
                     onClick={() => {
-                      setMenu(null)
+                      closeMenu()
                       if (step !== zoom) void bridge.pet.setZoom(step)
                     }}
                   >
@@ -417,7 +473,7 @@ export function PetStage() {
               </div>
             )}
           </div>
-          <button className="pet-menu-item" onClick={openSettingsFromMenu}>打开设置</button>
+          <button className="pet-menu-item" onClick={openSettingsFromMenu}>设置</button>
           <div className="pet-menu-sub">
             <button className="pet-menu-item" onClick={() => setMenu((cur) => (cur ? { ...cur, sub: cur.sub === 'pack' ? null : 'pack' } : cur))}>
               切换素材包 ▸
@@ -429,7 +485,7 @@ export function PetStage() {
                     key={pack.id}
                     className="pet-menu-item"
                     onClick={() => {
-                      setMenu(null)
+                      closeMenu()
                       void bridge.pet.setPack(pack.id)
                     }}
                   >
@@ -440,7 +496,7 @@ export function PetStage() {
             )}
           </div>
           <div className="pet-menu-sep" />
-          <button className="pet-menu-item danger" onClick={hidePet}>隐藏桌宠</button>
+          <button className="pet-menu-item danger" onClick={hidePet}>隐藏小助理</button>
         </div>
       )}
     </div>

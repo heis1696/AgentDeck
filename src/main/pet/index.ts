@@ -1,10 +1,12 @@
-// PetController：桌宠域组装——配置存储 + 透明窗 + AI 脑 + 养成/事件联动。
+// PetController：小助理（桌宠）域组装——配置存储 + 透明窗 + 独立设置窗 + AI 脑 + 养成/事件联动 + 素材包生成。
 // initMain 幂等闸内挂载（照其他 controller 惯例）；IPC 域在 ipc/pet.ts 只做解析转发。
 // 养成数值公式全在 shared/pet-life（纯函数）：这里只做读取-套公式-落盘的编排。
 import { BrowserWindow, screen } from 'electron'
 import type { ApiPreset } from '../presets'
 import { PetStore } from './pet-store'
 import { PetWindowController } from './pet-window'
+import { PetSettingsWindowController } from './pet-settings-window'
+import { PetGenController } from './pet-gen'
 import { PetBrainLoop, resolveActivePreset, timeOfDay, type PetSay, type PetTaskHint } from './pet-brain'
 import { inferPresetProtocol } from './pet-llm'
 import { listPacks, readUserPackAssets } from './packs'
@@ -34,6 +36,10 @@ export class PetController {
   readonly store: PetStore
   readonly windows: PetWindowController
   readonly brain: PetBrainLoop
+  /** 独立小助理设置窗（#/pet-settings 路由） */
+  readonly settingsWindow: PetSettingsWindowController
+  /** 应用内素材包生成（pet:gen-* IPC 背后） */
+  readonly gen: PetGenController
   private pendingBounds: { x: number; y: number } | null = null
   private boundsFlushTimer: NodeJS.Timeout | undefined
   private lifeFlushTimer: NodeJS.Timeout | undefined
@@ -46,7 +52,23 @@ export class PetController {
     this.store = new PetStore(deps.userDataDir)
     this.windows = new PetWindowController({
       getWindow: () => deps.getMainWindow(),
-      getZoom: () => this.store.get().zoom
+      getZoom: () => this.store.get().zoom,
+      // 拖拽跨屏：宠物窗所在显示器变化 → 推新快照（workArea 换跟随所在屏，渲染层物理边界跟着换）
+      onDisplayChanged: () => this.notifyState()
+    })
+    this.settingsWindow = new PetSettingsWindowController(() => deps.getMainWindow())
+    this.gen = new PetGenController({
+      userDataDir: deps.userDataDir,
+      getPresets: deps.getPresets,
+      notify: (channel, payload) => {
+        this.broadcastAll(channel, payload)
+        if (channel === 'pet:gen-done') {
+          // 素材包下拉即见：推新快照（listPacks→scanUserPack 扫到新包）；正展示该包则顺手重载帧资源
+          const packId = (payload as { packId?: string } | null)?.packId
+          if (packId && this.store.get().packId === packId) this.windows.handlePetReload()
+          this.notifyState()
+        }
+      }
     })
     this.brain = new PetBrainLoop({
       store: this.store,
@@ -103,11 +125,19 @@ export class PetController {
       brainStatus: this.brain.status(),
       chatHistory: config.chatHistory,
       packs: listPacks(this.deps.userDataDir),
-      screen: { workArea: screen.getPrimaryDisplay().workArea },
+      // 物理边界跟随宠物窗所在显示器（跨屏拖动后拖拽跟随会推新快照）
+      screen: { workArea: this.currentWorkArea() },
       life: this.lifeSnapshot(config.affection, config.mood, fedToday),
       zoom: config.zoom,
       recentEvent: this.recentEvent
     }
+  }
+
+  /** 宠物窗当前所在显示器的工作区（窗未开回退主屏） */
+  private currentWorkArea(): { x: number; y: number; width: number; height: number } {
+    const win = this.windows.getWindow()
+    if (win) return screen.getDisplayMatching(win.getBounds()).workArea
+    return screen.getPrimaryDisplay().workArea
   }
 
   private lifeSnapshot(affection: number, mood: number, fedToday: number): PetLifeSnapshot {
@@ -268,7 +298,7 @@ export class PetController {
     return { text: reply.say, action: reply.action }
   }
 
-  /** 渲染层 → 主进程的窗体事件（移动/拖拽/聊天开合/交互上报） */
+  /** 渲染层 → 主进程的窗体事件（移动/拖拽/聊天开合/菜单开合/悬停/交互上报） */
   onWindowEvent(event: PetWindowEvent): void {
     if (event.type === 'move') {
       // 位置落盘节流：移动高频，写文件低频（退出/隐藏时补一次）
@@ -280,7 +310,17 @@ export class PetController {
     }
     if (event.type === 'drag-end') this.flushBounds()
     if (event.type === 'interact') this.bumpLife(event.kind, false)
+    if (event.type === 'open-settings') {
+      // 右键菜单「设置」：打开/聚焦独立小助理设置窗（主窗可能在托盘里也不影响）
+      this.openSettingsWindow()
+      return
+    }
     this.windows.handleEvent(event)
+  }
+
+  /** 打开或聚焦独立设置窗（右键菜单与主程序设置页按钮共用） */
+  openSettingsWindow(): void {
+    this.settingsWindow.open()
   }
 
   private flushBounds(): void {
@@ -291,12 +331,20 @@ export class PetController {
     this.pendingBounds = null
   }
 
-  /** 快照广播：主窗设置卡片与宠物窗同步（照 settings:updated 惯例） */
+  /** 快照广播：主窗设置卡片、宠物窗与独立设置窗同步（照 settings:updated 惯例） */
   notifyState(): PetStateSnapshot {
     const snapshot = this.getState()
     this.deps.getMainWindow()?.webContents.send('pet:state', snapshot)
     this.windows.broadcast('pet:state', snapshot)
+    this.settingsWindow.getWindow()?.webContents.send('pet:state', snapshot)
     return snapshot
+  }
+
+  /** 广播到所有相关窗（主窗 + 宠物窗 + 设置窗）：生成进度/完成/失败用 */
+  private broadcastAll(channel: string, payload: unknown): void {
+    this.deps.getMainWindow()?.webContents.send(channel, payload)
+    this.windows.broadcast(channel, payload)
+    this.settingsWindow.getWindow()?.webContents.send(channel, payload)
   }
 
   /** 默认窗位置（渲染层 fallback 用）：主窗右下工作区内 */
@@ -319,5 +367,6 @@ export class PetController {
     this.store.flush()
     this.flushBounds()
     this.windows.close()
+    this.settingsWindow.close()
   }
 }

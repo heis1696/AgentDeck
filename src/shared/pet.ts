@@ -319,9 +319,13 @@ export type PetWindowEvent =
   | { type: 'drag-start'; offsetX: number; offsetY: number }
   | { type: 'drag-end' }
   | { type: 'chat'; open: boolean }
+  /** 右键菜单开合：开着时整窗收鼠标（渲染层权威，主进程不再轮询光标） */
+  | { type: 'menu'; open: boolean }
+  /** 精灵悬停进出（穿透态 forward:true 下 enter/leave 可靠触发）：主进程据此收/放鼠标 */
+  | { type: 'hover'; inside: boolean }
   /** 交互上报（单击/抛掷）：主进程据此累积好感与心情 */
   | { type: 'interact'; kind: PetInteractionKind }
-  /** 右键菜单「打开设置」：聚焦主窗并跳设置页（C 期） */
+  /** 右键菜单「设置」：主进程打开/聚焦独立小助理设置窗 */
   | { type: 'open-settings' }
 
 /** 主进程 → 渲染层：拖拽中的窗体权威位置（拖拽期间渲染层物理挂起） */
@@ -405,7 +409,7 @@ export interface PetStateSnapshot {
   brainStatus: { source: 'llm' | 'fallback' | 'none'; lastError: string; silenced: boolean }
   chatHistory: PetChatMessage[]
   packs: PetPackInfo[]
-  /** 渲染层物理换算工作区（主进程 screen.getPrimaryDisplay().workArea） */
+  /** 渲染层物理换算工作区（宠物窗当前所在显示器 screen.getDisplayMatching(...).workArea，跨屏拖动后主进程推送更新） */
   screen?: { workArea: { x: number; y: number; width: number; height: number } }
   /** 亲密度/心情（D 期起有值；旧快照消费方按可选读取） */
   life?: PetLifeSnapshot
@@ -413,4 +417,41 @@ export interface PetStateSnapshot {
   zoom: number
   /** 最近一次看板事件文案（{recent_event} 宏与设置卡片同源） */
   recentEvent: string
+}
+
+// —— 应用内素材包生成（pet:gen-* IPC 契约；走 API 预设的 images 通道）——
+
+/** 生成参数（OpenAI images 形状的子集；size 形如 '1024x1024'） */
+export interface PetGenParams {
+  size: string
+  /** '' = 网关默认；high/medium/low 透传 */
+  quality: string
+  /** 每次请求张数（取第一张） */
+  n: number
+  background: 'transparent' | 'opaque'
+}
+
+/** 生成入参：presetId 复用 ApiPreset（apiKey 只在主进程，绝不落日志/落盘） */
+export interface PetGenStartInput {
+  /** 目标包 id（userData/pets/<packId>/；'default' 保留名拒收，重名覆盖） */
+  packId: string
+  presetId: string
+  /** OpenAI 兼容协议的模型名 */
+  model: string
+  params: PetGenParams
+  stylePrompt: string
+  /** 状态 → 帧数表（白名单态，七态必需补齐 + eat 可选） */
+  states: Record<string, number>
+  /** per-frame：逐帧生成（首帧作后续参考图）；sheet：单图网格切帧 */
+  mode: 'per-frame' | 'sheet'
+  /** sheet 模式的网格（cols*rows ≥ 总帧数） */
+  sheet?: { cols: number; rows: number }
+}
+
+/** 生成进度（pet:gen-progress 推送） */
+export interface PetGenProgress {
+  done: number
+  total: number
+  /** 当前阶段文案（生成中/去背落位/切帧/落盘） */
+  stage: string
 }

@@ -25,7 +25,7 @@ import type {
   SkillsShEntry
 } from '../shared/extensions'
 import type { AgentDeckApi, AgentInfo, AgentModelCatalog, FileDiffResult, GoalCheckpointInput, GoalCreateInput, MeetingCreateInput, PermissionRequest, PresetInfo, SidecarSnapshot, TaskCreateInput, UpdateChannel, UpdateStateSnapshot } from '../shared/contracts'
-import type { PackAssets, PetDragPosition, PetSayPayload, PetStateSnapshot, PetThrowVelocity, PetWindowEvent } from '../shared/pet'
+import type { PackAssets, PetDragPosition, PetGenProgress, PetGenStartInput, PetSayPayload, PetStateSnapshot, PetThrowVelocity, PetWindowEvent } from '../shared/pet'
 
 const api: AgentDeckApi = {
   worktrees: {
@@ -216,6 +216,9 @@ const api: AgentDeckApi = {
     setPreset: (presetId: string, model?: string): Promise<PetStateSnapshot | null> => ipcRenderer.invoke('pet:set-preset', presetId, model),
     setZoom: (zoom: number): Promise<PetStateSnapshot | null> => ipcRenderer.invoke('pet:set-zoom', zoom),
     feed: (foodId: string): Promise<PetStateSnapshot | null> => ipcRenderer.invoke('pet:feed', foodId),
+    openSettingsWindow: (): Promise<void> => ipcRenderer.invoke('pet:open-settings-window'),
+    genStart: (input: PetGenStartInput): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('pet:gen-start', input),
+    genCancel: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('pet:gen-cancel'),
     windowEvent: (event: PetWindowEvent): void => ipcRenderer.send('pet:window-event', event),
     onSay: (cb: (say: PetSayPayload) => void) => {
       const h = (_e: unknown, say: PetSayPayload) => cb(say)
@@ -242,10 +245,25 @@ const api: AgentDeckApi = {
       ipcRenderer.on('pet:pack-changed', h)
       return () => ipcRenderer.removeListener('pet:pack-changed', h)
     },
-    onOpenSettings: (cb: () => void) => {
+    onMenuClosed: (cb: () => void) => {
       const h = () => cb()
-      ipcRenderer.on('pet:open-settings', h)
-      return () => ipcRenderer.removeListener('pet:open-settings', h)
+      ipcRenderer.on('pet:menu-closed', h)
+      return () => ipcRenderer.removeListener('pet:menu-closed', h)
+    },
+    onGenProgress: (cb: (progress: PetGenProgress) => void) => {
+      const h = (_e: unknown, progress: PetGenProgress) => cb(progress)
+      ipcRenderer.on('pet:gen-progress', h)
+      return () => ipcRenderer.removeListener('pet:gen-progress', h)
+    },
+    onGenDone: (cb: (result: { packId: string; frameCount: number }) => void) => {
+      const h = (_e: unknown, result: { packId: string; frameCount: number }) => cb(result)
+      ipcRenderer.on('pet:gen-done', h)
+      return () => ipcRenderer.removeListener('pet:gen-done', h)
+    },
+    onGenError: (cb: (result: { packId: string; reason: string }) => void) => {
+      const h = (_e: unknown, result: { packId: string; reason: string }) => cb(result)
+      ipcRenderer.on('pet:gen-error', h)
+      return () => ipcRenderer.removeListener('pet:gen-error', h)
     }
   },
   updates: {

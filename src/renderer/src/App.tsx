@@ -18,6 +18,7 @@ import { ToastHost, toast } from './ui/Toasts'
 import { ConfirmHost } from './ui/Confirm'
 import { Palette, type PaletteCommand } from './ui/Palette'
 import { PetStage } from './pet/PetStage'
+import { PetSettingsPage } from './pet/PetSettingsPage'
 import type { Task } from '../../shared/types'
 
 type View = 'issues' | 'detail' | 'usage' | 'settings' | 'automation' | 'skills' | 'board' | 'agents'
@@ -26,10 +27,11 @@ const MAX_TABS = 8
 const MAX_RECENT_WORKSPACES = 8
 
 export function App() {
-  // 桌宠透明窗复用同一 renderer 入口：#/pet hash 直接渲染舞台，不挂主 UI
+  // 小助理（桌宠）复用同一 renderer 入口的两个 hash 路由：#/pet 透明舞台、#/pet-settings 独立设置窗。
   //（hash 每窗固定，早退在所有 hook 之前，不违反 hooks 规则）
   // 兼容 #/pet（dev 拼接与新版 loadFile '/pet'）与 #pet（旧主进程 loadFile 'pet'——热更错峰期防主 UI 误入宠物窗）
   if (/^#\/?pet$/.test(window.location.hash)) return <PetStage />
+  if (/^#\/?pet-settings$/.test(window.location.hash)) return <PetSettingsPage />
   const { tasks } = useTasks()
   const { settings, update } = useSettings()
   const [view, setView] = useState<View>('board')
@@ -104,8 +106,6 @@ export function App() {
   }, [tasks])
   useEffect(() => bridge.tasks.onDeleted((id) => closeTab(id)), [tabs, activeId])
   useEffect(() => bridge.tasks.onFocusTask((id) => openTask(id)), [])
-  // 桌宠右键菜单「打开设置」：主窗被派发到设置页（常规分区）
-  useEffect(() => bridge.pet.onOpenSettings(() => openSettings('general')), [])
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       const mod = event.ctrlKey || event.metaKey
