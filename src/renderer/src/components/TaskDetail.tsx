@@ -18,6 +18,7 @@ import { FOLLOW_EPSILON, TurnTimeline } from './task/TurnTimeline'
 import { SkillMenu, buildMenuItems, parseSkillDirective, wrapSkillDirective, SKILL_MENU_LISTBOX_ID, skillMenuOptionId, type LocalCommandKey } from './task/SkillMenu'
 import { ActionMenu, type ActionMenuItem } from './task/ActionMenu'
 import { usePromptHistory } from '../hooks/usePromptHistory'
+import { useTaskDraftField, useTaskScopedState } from '../hooks/taskDrafts'
 import { SideDock } from '../ui/SideDock'
 import { scrollElementTo } from '../ui/motion'
 import { useInteractionLayer } from '../hooks/useInteractionLayer'
@@ -50,18 +51,21 @@ const WORKFLOW_OPTIONS: Array<{ value: IssueStatus; label: string }> = [
  */
 export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[]; onSelect: (id: string) => void }) {
   const [tab, setTab] = useState<Tab>('activity')
-  const [followUp, setFollowUp] = useState('')
-  const [busy, setBusy] = useState(false)
+  // 追问草稿与 busy 按任务分槽（会话内保留，不做持久化）：切任务立即换成新任务自己的值，
+  // A→B→A 取回 A 的草稿；写入带任务归属，迟到的响应不会改到新任务的界面上。
+  const [followUp, setFollowUp] = useTaskDraftField(task.id, 'prompt')
+  const [busy, setBusy] = useTaskDraftField(task.id, 'busy')
   const [now, setNow] = useState(() => Date.now())
-  const [editingTitle, setEditingTitle] = useState(false)
-  const [titleDraft, setTitleDraft] = useState('')
-  const [activeNav, setActiveNav] = useState(-1)
-  const [following, setFollowing] = useState(true)
-  const [infoOpen, setInfoOpen] = useState(false)
-  // 目标/会议浮窗：同一时刻至多开一个；goal/meeting 数据由面板上报（驱动 header 状态芯片）
-  const [float, setFloat] = useState<'goal' | 'meeting' | null>(null)
-  const [goal, setGoal] = useState<Goal | null>(null)
-  const [meeting, setMeeting] = useState<Meeting | null>(null)
+  // 就地重命名会话：随任务切换作废（不许把 A 的编辑框/草稿挂到 B 的标题上）
+  const [titleEdit, setTitleEdit] = useTaskScopedState<{ draft: string } | null>(task.id, null)
+  const [activeNav, setActiveNav] = useTaskScopedState(task.id, -1)
+  const [following, setFollowing] = useTaskScopedState(task.id, true)
+  const [infoOpen, setInfoOpen] = useTaskScopedState(task.id, false)
+  // 目标/会议浮窗：同一时刻至多开一个；goal/meeting 数据由面板上报（驱动 header 状态芯片）。
+  // 芯片数据也按任务分槽：面板是**异步**上报的，只用 effect 清会先画出上一个任务的芯片。
+  const [float, setFloat] = useTaskScopedState<'goal' | 'meeting' | null>(task.id, null)
+  const [goal, setGoal] = useTaskScopedState<Goal | null>(task.id, null)
+  const [meeting, setMeeting] = useTaskScopedState<Meeting | null>(task.id, null)
   const logRef = useRef<HTMLDivElement>(null)
   /** 贴底跟随（审查项 2）：同步判定用 ref（事件回调里立刻可读），渲染用 following state */
   const stickRef = useRef(true)
@@ -69,7 +73,10 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   const infoRef = useRef<HTMLDivElement>(null)
   const infoPopRef = useRef<HTMLDivElement>(null)
   const titleEditBtnRef = useRef<HTMLButtonElement>(null)
-  const editingTitleRef = useRef(false)
+  /** 重命名会话归属：正在编辑的任务 id（null = 没有会话）。切任务后残留的 Enter/blur 据此作废 */
+  const titleSessionRef = useRef<string | null>(null)
+  const editingTitle = !!titleEdit
+  const titleDraft = titleEdit?.draft ?? ''
   const navFrameRef = useRef(0)
   const tabRefs = useRef(new Map<Tab, HTMLButtonElement>())
   const { events, permission, refreshEvents, answerPermission } = useTaskEvents(task.id)
@@ -78,8 +85,8 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   const history = usePromptHistory(task.id)
   const [skills, setSkills] = useState<SkillMeta[]>([])
   const skillsLoadedRef = useRef(false)
-  const [skillMenuOpen, setSkillMenuOpen] = useState(false)
-  const [skillIndex, setSkillIndex] = useState(0)
+  const [skillMenuOpen, setSkillMenuOpen] = useTaskScopedState(task.id, false)
+  const [skillIndex, setSkillIndex] = useTaskScopedState(task.id, 0)
   const isZcode = task.backend === 'zcode'
   const skillQuery = followUp.startsWith('/') ? followUp.slice(1).split(/\s/)[0] ?? '' : ''
   const menuItems = useMemo(() => buildMenuItems(skills, skillQuery, isZcode), [skills, skillQuery, isZcode])
@@ -122,6 +129,15 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     const timer = window.setInterval(() => setNow(Date.now()), 1000)
     return () => window.clearInterval(timer)
   }, [task.id, turnActive])
+
+  // 跨任务隔离收尾：切任务即作废重命名会话令牌（ref 表达不了「按任务作用域」，故在此显式清），
+  // 并把贴底跟随复位到新任务的末尾。其余瞬态会话（ℹ 弹层、命令菜单、目标/会议浮窗与芯片、
+  // 日志高亮、重命名编辑框）由 useTaskScopedState 在渲染期结算，本帧就已经是初始值；
+  // 追问草稿/历史/busy 走 per-task 槽，必须跨任务保留，不在这里清（清了就退回「重挂载丢草稿」的错解）。
+  useEffect(() => {
+    titleSessionRef.current = null
+    stickRef.current = true
+  }, [task.id])
 
   // ℹ 弹层：统一浮层（外点收起 + 最上层 Escape），原 window mousedown 监听已收敛
   useInteractionLayer<HTMLDivElement>({ open: infoOpen, onClose: () => setInfoOpen(false), kind: 'popover', name: 'task-info', closeOnOutside: true, autoFocus: false, layerRef: infoRef })
@@ -262,8 +278,8 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     const copy = await taskService.duplicate(task)
     if (copy) onSelect(copy.id)
   }
-  const beginTitleEdit = () => { setTitleDraft(task.title); editingTitleRef.current = true; setEditingTitle(true) }
-  const cancelTitleEdit = () => { editingTitleRef.current = false; setEditingTitle(false) }
+  const beginTitleEdit = () => { titleSessionRef.current = task.id; setTitleEdit({ draft: task.title }) }
+  const cancelTitleEdit = () => { titleSessionRef.current = null; setTitleEdit(null) }
   // 就地重命名也是「浮层」：Escape 由统一交互层消费（最上层），关闭后焦点回到重命名按钮。
   // 编辑框把触发按钮**替换**掉了，所以显式给出归还目标（restoreFocusRef）。
   const titleEditRef = useInteractionLayer<HTMLInputElement>({
@@ -274,10 +290,13 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     restoreFocusRef: titleEditBtnRef
   })
   const saveTitle = async () => {
-    if (!editingTitleRef.current) return
-    editingTitleRef.current = false
-    setEditingTitle(false)
-    const title = titleDraft.trim()
+    // 重命名会话只在它开始的那个任务上结算：切走任务后残留的 Enter/blur（含输入框随切换卸载时的
+    // 失焦）一律作废，既不提交 A 的草稿，也不会改到 B 的标题上。
+    const owner = titleSessionRef.current
+    if (!owner || owner !== task.id) return
+    titleSessionRef.current = null
+    const title = (titleEdit?.draft ?? '').trim()
+    setTitleEdit(null)
     if (!title || title === task.title) return
     const next = await taskService.rename(task.id, title)
     if (next) ui.toast.success('标题已更新')
@@ -350,7 +369,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   >
     <div className="detail-left">
     <PageHeader
-      title={editingTitle ? <input ref={titleEditRef} className="title-edit-input" value={titleDraft} autoFocus onChange={(event) => setTitleDraft(event.target.value)} onKeyDown={(event) => { if (isComposingKey(event.nativeEvent)) return; if (event.key === 'Enter') { event.preventDefault(); void saveTitle() } }} onBlur={() => void saveTitle()} /> : <><span className="task-title-text" title={task.title}>{task.title}</span><button ref={titleEditBtnRef} className="title-edit" type="button" title="重命名" onClick={beginTitleEdit}><Pencil size={13} aria-hidden="true" /></button></>}
+      title={editingTitle ? <input ref={titleEditRef} className="title-edit-input" value={titleDraft} autoFocus onChange={(event) => setTitleEdit({ draft: event.target.value })} onKeyDown={(event) => { if (isComposingKey(event.nativeEvent)) return; if (event.key === 'Enter') { event.preventDefault(); void saveTitle() } }} onBlur={() => void saveTitle()} /> : <><span className="task-title-text" title={task.title}>{task.title}</span><button ref={titleEditBtnRef} className="title-edit" type="button" title="重命名" onClick={beginTitleEdit}><Pencil size={13} aria-hidden="true" /></button></>}
       metadata={<div className="detail-meta">
         <span className="meta-group meta-identity"><span className="detail-eyebrow">{parent ? '队员任务' : '工作任务'}</span>{parent && <a className="mini link" role="button" tabIndex={0} onClick={() => onSelect(parent.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(parent.id) } }}>↩ 领队任务: {parent.title}</a>}{workers.length > 0 && <button type="button" className="badge badge-squad link-badge" title="在右侧分页打开子任务" onClick={() => { const target = workers.find((item) => item.status === 'running') ?? workers[0]; if (target) openWorker(target.id, target.title) }}>⚡ 子任务 {workers.filter((worker) => worker.status === 'done').length}/{workers.length}</button>}</span>
         <IssueIdChip id={issueId} />
@@ -517,10 +536,14 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     </div>
     </div>
     <SideDock key={task.id} taskId={task.id} tasks={tasks} onOpen={onSelect} />
-    {/* 目标/会议浮窗（队员任务不挂）：面板常驻挂载以持续上报状态，浮窗本体仅 open 时渲染 */}
+    {/* 目标/会议浮窗（队员任务不挂）：面板常驻挂载以持续上报状态，浮窗本体仅 open 时渲染。
+        key={issueId}：面板数据按 Issue 归属，而面板是**异步**读数据、且 onGoal/onMeeting 每次
+        渲染都换引用（它的上报 effect 因此每次都会跑）——切任务时旧面板会先把上一个 Issue 的目标/会议
+        再上报一次。按 Issue 重挂面板从源头断掉这条串味：新面板从空状态起步，只上报自己 Issue 的数据。
+        这里没有用户草稿可丢（追问草稿在 TaskDetail 的 per-task 槽里，TaskDetail 本身刻意不挂 key）。 */}
     {!task.parentTaskId && <>
-      <GoalPanel task={task} issueId={issueId} open={float === 'goal'} onToggle={(next) => setFloat((cur) => (next ? 'goal' : cur === 'goal' ? null : cur))} onGoal={setGoal} />
-      <MeetingPanel issueId={issueId} open={float === 'meeting'} onToggle={(next) => setFloat((cur) => (next ? 'meeting' : cur === 'meeting' ? null : cur))} onMeeting={setMeeting} />
+      <GoalPanel key={`goal:${issueId}`} task={task} issueId={issueId} open={float === 'goal'} onToggle={(next) => setFloat((cur) => (next ? 'goal' : cur === 'goal' ? null : cur))} onGoal={setGoal} />
+      <MeetingPanel key={`meeting:${issueId}`} issueId={issueId} open={float === 'meeting'} onToggle={(next) => setFloat((cur) => (next ? 'meeting' : cur === 'meeting' ? null : cur))} onMeeting={setMeeting} />
     </>}
   </div>
 }

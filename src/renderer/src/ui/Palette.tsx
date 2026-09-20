@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useInteractionLayer } from '../hooks/useInteractionLayer'
 import { isComposingKey } from './interaction-center'
 
@@ -44,20 +44,30 @@ export function Palette({ open, onClose, commands, placeholder }: PaletteProps) 
   const [active, setActive] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
+  const listId = useId()
   // 统一浮层：Escape 由交互层接管（最上层），打开时聚焦输入框，关闭后焦点归还
   const layerRef = useInteractionLayer<HTMLDivElement>({ open, onClose, kind: 'modal', name: 'palette', trap: true, initialFocusRef: inputRef })
 
   const results = useMemo(() => {
     const scored = commands
       .map((c) => {
-        const s = Math.min(fuzzyScore(query, c.label), c.keywords ? fuzzyScore(query, c.keywords) : Infinity)
+        const scores = [fuzzyScore(query, c.label), c.keywords ? fuzzyScore(query, c.keywords) : -1].filter((score) => score >= 0)
+        const s = scores.length ? Math.min(...scores) : -1
         return { c, s }
       })
       .filter((x) => x.s >= 0)
       .sort((a, b) => a.s - b.s)
       .slice(0, 12)
-    return scored.map((x) => x.c)
+    // Grouping changes visual order; keyboard indices must follow that same order.
+    const groups = new Map<string, PaletteCommand[]>()
+    for (const { c } of scored) {
+      const group = groups.get(c.group) ?? []
+      group.push(c)
+      groups.set(c.group, group)
+    }
+    return [...groups.values()].flat()
   }, [commands, query])
+  const activeIndex = results.length ? Math.max(0, Math.min(active, results.length - 1)) : -1
 
   useEffect(() => {
     if (open) {
@@ -67,6 +77,17 @@ export function Palette({ open, onClose, commands, placeholder }: PaletteProps) 
   }, [open])
 
   useEffect(() => setActive(0), [query])
+
+  useEffect(() => {
+    if (!open || activeIndex < 0) return
+    const list = listRef.current
+    const item = list?.querySelector<HTMLElement>('.palette-item.active')
+    if (!list || !item) return
+    const bounds = list.getBoundingClientRect()
+    const target = item.getBoundingClientRect()
+    if (target.top < bounds.top) list.scrollTop += target.top - bounds.top
+    else if (target.bottom > bounds.bottom) list.scrollTop += target.bottom - bounds.bottom
+  }, [open, activeIndex, results])
 
   if (!open) return null
 
@@ -81,9 +102,9 @@ export function Palette({ open, onClose, commands, placeholder }: PaletteProps) 
   const onKeyDown = (e: React.KeyboardEvent) => {
     // IME 组合中（isComposing / keyCode 229）：Enter 是上屏、↑↓ 是选候选，一律不抢
     if (isComposingKey(e.nativeEvent)) return
-    if (e.key === 'ArrowDown') { e.preventDefault(); setActive((a) => Math.min(results.length - 1, a + 1)) }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); setActive((a) => Math.max(0, a - 1)) }
-    else if (e.key === 'Enter') { e.preventDefault(); runAt(active) }
+    if (e.key === 'ArrowDown') { e.preventDefault(); if (results.length) setActive(Math.min(results.length - 1, activeIndex + 1)) }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); if (results.length) setActive(Math.max(0, activeIndex - 1)) }
+    else if (e.key === 'Enter') { e.preventDefault(); runAt(activeIndex) }
   }
 
   // 按分组分区渲染（保持 results 的排序）
@@ -96,23 +117,34 @@ export function Palette({ open, onClose, commands, placeholder }: PaletteProps) 
 
   return (
     <div className="overlay palette-overlay" ref={layerRef} onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="palette" onKeyDown={onKeyDown}>
+      <div className="palette" role="dialog" aria-modal="true" aria-label="命令面板" onKeyDown={onKeyDown}>
         <input
           ref={inputRef}
           className="palette-input"
+          role="combobox"
+          aria-label="搜索命令"
+          aria-expanded="true"
+          aria-autocomplete="list"
+          aria-controls={listId}
+          aria-activedescendant={activeIndex >= 0 ? `${listId}-option-${activeIndex}` : undefined}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder={placeholder ?? '搜索任务、跳转页面、执行操作…'}
           spellCheck={false}
         />
-        <div className="palette-list" ref={listRef}>
+        <div className="palette-list" ref={listRef} id={listId} role="listbox" aria-label="命令">
           {sections.map((sec) => (
-            <div key={sec.group}>
+            <div key={sec.group} role="group" aria-label={sec.group}>
               <div className="palette-group">{sec.group}</div>
               {sec.items.map(({ c, i }) => (
                 <button
                   key={c.id}
-                  className={`palette-item ${i === active ? 'active' : ''}`}
+                  type="button"
+                  role="option"
+                  id={`${listId}-option-${i}`}
+                  aria-selected={i === activeIndex}
+                  tabIndex={-1}
+                  className={`palette-item ${i === activeIndex ? 'active' : ''}`}
                   onMouseEnter={() => setActive(i)}
                   onClick={() => runAt(i)}
                 >

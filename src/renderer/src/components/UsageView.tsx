@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Activity, AlertTriangle, CheckCircle2, Coins, Gauge, RefreshCw, Server, Timer, Users, Wallet } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Activity, AlertTriangle, CheckCircle2, CircleAlert, Coins, Gauge, RefreshCw, Server, Timer, Users, Wallet } from 'lucide-react'
 import { bridge, fmtDuration, fmtTokens } from '../api'
 import { PageHeader } from '../ui/PageHeader'
+import { EmptyState } from '../ui/EmptyState'
 import type { AnalyticsSummary, UsageAggregate } from '../../../shared/types'
 
 const empty: UsageAggregate = { runs: 0, completed: 0, failed: 0, cancelled: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0, durationMs: 0 }
@@ -148,10 +149,32 @@ function TrendChart({ buckets, peak }: { buckets: TrendBucket[]; peak: number })
 export function UsageView() {
   const [summary, setSummary] = useState<AnalyticsSummary | null>(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [range, setRange] = useState<Range>('7d')
   const since = useMemo(() => range === 'all' ? undefined : Date.now() - (range === '7d' ? 7 : 30) * 86_400_000, [range])
-  const refresh = async () => { setLoading(true); try { setSummary(await bridge.analytics.summary({ since })) } finally { setLoading(false) } }
-  useEffect(() => { void refresh(); const off = bridge.tasks.onUpdated(() => void refresh()); return off }, [since])
+  const requestSeq = useRef(0)
+  const refresh = useCallback(async () => {
+    const request = ++requestSeq.current
+    setLoading(true)
+    try {
+      const next = await bridge.analytics.summary({ since })
+      if (request !== requestSeq.current) return
+      setSummary(next)
+      setError(null)
+    } catch (cause) {
+      if (request === requestSeq.current) setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      if (request === requestSeq.current) setLoading(false)
+    }
+  }, [since])
+  useEffect(() => {
+    void refresh()
+    const off = bridge.tasks.onUpdated(() => { void refresh() })
+    return () => {
+      requestSeq.current++
+      off()
+    }
+  }, [refresh])
 
   const total = summary?.totals ?? empty
   const tokens = total.inputTokens + total.outputTokens
@@ -163,6 +186,14 @@ export function UsageView() {
   const backendTotal = Math.max(1, (summary?.byBackend ?? []).reduce((sum, row) => sum + row.inputTokens + row.outputTokens, 0))
   const agentTokenMax = Math.max(1, ...(summary?.byAgent ?? []).map((row) => row.inputTokens + row.outputTokens))
 
+  if (!summary && (loading || error)) {
+    return <div className="psh-page">
+      <PageHeader title="用量" icon={<Gauge size={16} />} actions={<button className="btn" type="button" onClick={() => void refresh()} disabled={loading}><RefreshCw size={14} className={loading ? 'spin' : ''} /> 重试</button>} />
+      <div className="psh-body">
+        <EmptyState icon={loading ? Gauge : CircleAlert} title={loading ? '统计加载中' : '统计加载失败'} description={loading ? '正在读取用量数据。' : error ?? '无法读取用量数据。'} action={!loading ? <button className="btn" type="button" onClick={() => void refresh()}><RefreshCw size={14} /> 重试</button> : undefined} />
+      </div>
+    </div>
+  }
   return <div className="psh-page">
     {/* 唯一主标题：KPI 数值走 us-stat-figure，不会被页题排版接管 */}
     <PageHeader
@@ -177,6 +208,8 @@ export function UsageView() {
       </div>}
     />
     <div className="psh-body">
+      {error && summary && <div className="data-state-banner data-state-stale" role="status"><CircleAlert size={14} /><span>显示上次成功的统计快照：{error}</span><button className="btn" type="button" onClick={() => void refresh()} disabled={loading}><RefreshCw size={13} className={loading ? 'spin' : ''} /> 重试</button></div>}
+      {summary && total.runs === 0 && <div className="data-state-banner data-state-empty" role="status"><Gauge size={14} /><span>当前时间范围没有用量记录。</span></div>}
       {loading && !summary ? <div className="empty"><Gauge size={32} /><span>统计加载中…</span></div> : <>
         <section className="us-hero">
           <div className="us-stats">

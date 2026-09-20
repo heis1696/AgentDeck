@@ -31,7 +31,7 @@ export interface InteractionLayerOptions<T extends HTMLElement = HTMLElement> {
 function focusableWithin(root: HTMLElement | null): HTMLElement[] {
   if (!root) return []
   return [...root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)]
-    .filter((node) => !node.hasAttribute('disabled') && node.getAttribute('aria-hidden') !== 'true' && node.getClientRects().length > 0)
+    .filter((node) => node.tabIndex >= 0 && !node.hasAttribute('disabled') && node.getAttribute('aria-hidden') !== 'true' && node.getClientRects().length > 0)
 }
 
 const isElement = (node: unknown): node is HTMLElement => node instanceof HTMLElement

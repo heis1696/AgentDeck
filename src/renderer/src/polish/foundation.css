@@ -257,3 +257,52 @@ html.light .brand-mark {
     scroll-behavior: auto !important;
   }
 }
+
+/* Async data states share one compact treatment across page surfaces. */
+.data-state-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin: 10px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  color: var(--text-dim);
+  font-size: var(--text-caption);
+}
+.data-state-banner > span { min-width: 0; flex: 1; }
+.data-state-banner .btn { flex: none; min-height: 28px; padding: 0 9px; }
+.data-state-stale { border-color: color-mix(in srgb, var(--status-queued) 42%, var(--border)); }
+.data-state-stale > svg { color: var(--status-queued); }
+.data-state-empty { color: var(--text-faint); }
+html:root .field .field-error {
+  display: block;
+  margin-top: 5px;
+  color: var(--status-failed);
+  font-size: var(--text-micro);
+  line-height: var(--leading-normal);
+}
+.meeting-selects > .field-error,
+.settings-card .field > .field-error { grid-column: 1 / -1; }
+html:root .field input[aria-invalid='true'],
+html:root .field textarea[aria-invalid='true'],
+html:root .field select[aria-invalid='true'] {
+  border-color: var(--status-failed);
+  box-shadow: 0 0 0 2px var(--status-failed-bg);
+}
+.workspace-agent-loading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-size: var(--text-caption);
+}
+.workspace-agent-loading > span { min-width: 0; flex: 1; }
+.workspace-agent-loading .btn { min-height: 28px; padding: 0 9px; }
+.workspace-agent-error { border-color: color-mix(in srgb, var(--status-failed) 42%, var(--border)); color: var(--status-failed); }

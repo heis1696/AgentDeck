@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowUpRight, ChevronDown, ChevronRight, Clock3, FolderOpen, ListTodo, LoaderCircle, MessagesSquare, Target, Zap } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ArrowUpRight, ChevronDown, ChevronRight, Clock3, FolderOpen, ListTodo, LoaderCircle, MessagesSquare, RefreshCw, Target, Zap } from 'lucide-react'
 import { bridge, getTaskWhenReady, type AgentInfo } from '../api'
 import { isComposingKey, ui } from '../ui/interaction-center'
 import { useInteractionSelector } from '../hooks/useInteraction'
@@ -82,11 +82,18 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
   const [designer, setDesigner] = useState(draft.designer)
   const [agents, setAgents] = useState<AgentInfo[]>([])
   const [agentsLoading, setAgentsLoading] = useState(true)
+  const [agentsError, setAgentsError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const promptRef = useRef<HTMLTextAreaElement>(null)
+  const agentRequestRef = useRef(0)
 
-  useEffect(() => {
-    bridge.agents.list().then((list) => {
+  const loadAgents = useCallback(async () => {
+    const request = ++agentRequestRef.current
+    setAgentsLoading(true)
+    setAgentsError(null)
+    try {
+      const list = await bridge.agents.list()
+      if (request !== agentRequestRef.current) return
       setAgents(list)
       if (list.length && !draft.agentId) {
         // 默认执行者跳过锻造师（专职生成 Agent，不接任务）
@@ -94,8 +101,17 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
         draft.agentId = first.id
         setAgentId(first.id)
       }
-    }).catch(() => setAgents([])).finally(() => setAgentsLoading(false))
+    } catch (cause) {
+      if (request === agentRequestRef.current) setAgentsError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      if (request === agentRequestRef.current) setAgentsLoading(false)
+    }
   }, [])
+
+  useEffect(() => {
+    void loadAgents()
+    return () => { agentRequestRef.current++ }
+  }, [loadAgents])
 
   // 会议型三队长预填：取前三位合格队长（不足三位留空，由校验提示兜底）
   const eligibleCaptains = useMemo(() => captains(agents), [agents])
@@ -140,8 +156,11 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
   const completionConditions = lines(completion)
   const captainIds = [reporter, critic, designer]
   const captainsReady = eligibleCaptains.length >= 3 && captainIds.every(Boolean) && new Set(captainIds).size === 3
+  const completionInvalid = kind === 'goal' && completionConditions.length === 0
+  const captainsInvalid = kind === 'meeting' && !captainsReady
   /** 类型级校验：任务恒过；目标需 ≥1 条完成条件；会议需 ≥3 位合格队长且互不重复 */
-  const kindValid = kind === 'task' || (kind === 'goal' ? completionConditions.length > 0 : captainsReady)
+  const directoryBlocked = agentsLoading || !!agentsError
+  const kindValid = !directoryBlocked && (kind === 'task' || (kind === 'goal' ? !completionInvalid : !captainsInvalid))
   const submitHint = kind === 'goal'
     ? (completionConditions.length === 0 ? '目标模式至少需要一条完成条件（每行一条，逐条可验证）才能提交' : '')
     : kind === 'meeting'
@@ -263,6 +282,11 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
         </div>
         {kind !== 'meeting' && (agentsLoading ? (
           <div className="workspace-agent-loading" aria-live="polite"><LoaderCircle size={14} className="spin" /> 正在加载 Agent…</div>
+        ) : agentsError ? (
+          <div className="workspace-agent-loading workspace-agent-error" role="alert">
+            <span>Agent 加载失败：{agentsError}</span>
+            <button className="btn" type="button" onClick={() => void loadAgents()}><RefreshCw size={13} /> 重试</button>
+          </div>
         ) : agents.length > 0 ? (
           <div className="field">
             <span>执行 Agent{isLeader ? '（领队可按需拆分任务）' : ''}</span>
@@ -294,10 +318,13 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
               <span>完成条件 *（每行一条，逐条可验证）</span>
               <textarea
                 value={completion}
+                aria-invalid={completionInvalid ? 'true' : undefined}
+                aria-describedby={completionInvalid ? 'goal-completion-error' : undefined}
                 rows={3}
                 placeholder={'每条一行，如：\n所有示例可编译\n接口签名与 src 一致'}
                 onChange={(e) => setCompletion(e.target.value)}
               />
+              {completionInvalid && <span id="goal-completion-error" className="field-error" role="alert">至少填写一条完成条件，每行一条。</span>}
             </label>
             <label className="field">
               <span>停止条件（每行一条，命中即暂停等你决策）</span>
@@ -315,23 +342,33 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
             <p className="hint workspace-mode-hint">开启后 agent 在此 Issue 内逐轮自评推进，直到完成条件全部达成或触发护栏。</p>
           </div>
         )}
+        {kind === 'meeting' && agentsLoading && (
+          <div className="workspace-agent-loading" aria-live="polite"><LoaderCircle size={14} className="spin" /> 正在加载队长列表…</div>
+        )}
+        {kind === 'meeting' && agentsError && (
+          <div className="workspace-agent-loading workspace-agent-error" role="alert">
+            <span>队长列表加载失败：{agentsError}</span>
+            <button className="btn" type="button" onClick={() => void loadAgents()}><RefreshCw size={13} /> 重试</button>
+          </div>
+        )}
         {kind === 'meeting' && (
           <div className="workspace-mode-fields">
             <div className="field">
               <span>三队长（汇报 / 质疑 / 答辩，不得重复）</span>
               <div className="meeting-selects">
+                {captainsInvalid && <span id="meeting-captains-error" className="field-error" role="alert">{eligibleCaptains.length < 3 ? '至少需要三位可用队长。' : '请选择三位不同的队长。'}</span>}
                 <label>汇报
-                  <select value={reporter} onChange={(e) => setReporter(e.target.value)}>
+                  <select value={reporter} aria-invalid={captainsInvalid ? 'true' : undefined} aria-describedby={captainsInvalid ? 'meeting-captains-error' : undefined} onChange={(e) => setReporter(e.target.value)}>
                     {captainOptions(reporter).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
                   </select>
                 </label>
                 <label>质疑
-                  <select value={critic} onChange={(e) => setCritic(e.target.value)}>
+                  <select value={critic} aria-invalid={captainsInvalid ? 'true' : undefined} aria-describedby={captainsInvalid ? 'meeting-captains-error' : undefined} onChange={(e) => setCritic(e.target.value)}>
                     {captainOptions(critic).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
                   </select>
                 </label>
                 <label>答辩
-                  <select value={designer} onChange={(e) => setDesigner(e.target.value)}>
+                  <select value={designer} aria-invalid={captainsInvalid ? 'true' : undefined} aria-describedby={captainsInvalid ? 'meeting-captains-error' : undefined} onChange={(e) => setDesigner(e.target.value)}>
                     {captainOptions(designer).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
                   </select>
                 </label>

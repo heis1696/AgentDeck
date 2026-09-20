@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Goal, Issue, IssueStatus, Task } from '../../../shared/types'
 import type { Meeting } from '../../../shared/meeting'
 import { bridge, fmtDuration } from '../api'
@@ -8,7 +8,7 @@ import { ui } from '../ui/interaction-center'
 import { useInteractionLayer } from '../hooks/useInteractionLayer'
 import { IssueIdChip } from '../ui/IssueIdChip'
 import { EmptyState } from '../ui/EmptyState'
-import { Ban, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, CircleDot, Clock3, Eye, ListTodo, LoaderCircle, Search, X } from 'lucide-react'
+import { Ban, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, CircleDot, Clock3, Eye, ListTodo, LoaderCircle, RefreshCw, Search, X } from 'lucide-react'
 
 type Scope = 'all' | 'mine' | 'agents'
 type CardKind = 'normal' | 'delegate' | 'handoff' | 'goal' | 'meeting'
@@ -138,6 +138,8 @@ function descendants(node: BoardNode): BoardNode[] { return node.children.flatMa
 export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: string) => void }) {
   const [issues, setIssues] = useState<Issue[]>([])
   const [loading, setLoading] = useState(true)
+  const [issuesLoaded, setIssuesLoaded] = useState(false)
+  const [issuesError, setIssuesError] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [scope, setScope] = useState<Scope>('all')
   const [status, setStatus] = useState<IssueStatus | 'all'>('all')
@@ -151,13 +153,28 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
   const [draggingTask, setDraggingTask] = useState<string | null>(null)
   const [starting, setStarting] = useState<string | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
+  const issuesRequestRef = useRef(0)
   // 统一浮层：卡片右键菜单的外点关闭 / 最上层 Escape（原 window click+keydown 监听已收敛）
   useInteractionLayer<HTMLDivElement>({ open: menu !== null, onClose: () => setMenu(null), kind: 'popover', name: 'board-card-menu', closeOnOutside: true, autoFocus: false, layerRef: menuRef })
+  const refreshIssues = useCallback(async () => {
+    const request = ++issuesRequestRef.current
+    setLoading(true)
+    try {
+      const next = await bridge.issues.list()
+      if (request !== issuesRequestRef.current) return
+      setIssues(next)
+      setIssuesLoaded(true)
+      setIssuesError(null)
+    } catch (cause) {
+      if (request === issuesRequestRef.current) setIssuesError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      if (request === issuesRequestRef.current) setLoading(false)
+    }
+  }, [])
   useEffect(() => {
-    const refresh = () => void bridge.issues.list().then(setIssues).catch(() => ui.toast.error('读取 Issue 失败')).finally(() => setLoading(false))
-    refresh()
-    const off = bridge.issues.onUpdated(refresh)
-    const offTasks = bridge.tasks.onDeleted(refresh)
+    void refreshIssues()
+    const off = bridge.issues.onUpdated(() => { void refreshIssues() })
+    const offTasks = bridge.tasks.onDeleted(() => { void refreshIssues() })
     const offGoals = bridge.goals.onUpdated((goal) => setGoals((cur) => cur.some((g) => g.id === goal.id) ? cur.map((g) => g.id === goal.id ? goal : g) : [...cur, goal]))
     const offGoalDeleted = bridge.goals.onDeleted((id) => setGoals((cur) => cur.filter((g) => g.id !== id)))
     void bridge.goals.list().then(setGoals).catch(() => {})
@@ -165,8 +182,8 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
     const offMeetingDeleted = bridge.meetings.onDeleted((id) => setMeetings((cur) => cur.filter((m) => m.id !== id)))
     void bridge.meetings.list().then(setMeetings).catch(() => {})
     const timer = window.setInterval(() => setNow(Date.now()), 30_000)
-    return () => { off(); offTasks(); offGoals(); offGoalDeleted(); offMeetings(); offMeetingDeleted(); window.clearInterval(timer) }
-  }, [])
+    return () => { issuesRequestRef.current++; off(); offTasks(); offGoals(); offGoalDeleted(); offMeetings(); offMeetingDeleted(); window.clearInterval(timer) }
+  }, [refreshIssues])
   useEffect(() => {
     if (!menu) return
     // 窗口失焦收起（外点/Escape 已由统一交互层负责）
@@ -281,6 +298,7 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
       </div>
       <span className="board-retention-note" title="仅清理超过30天、全部执行终结且无活跃目标/会议绑定的 Issue；未完成工作始终保留">终态保留 30 天</span>
     </div>
+    {issuesError && <div className="data-state-banner data-state-stale" role="status"><CircleAlert size={14} /><span>{issuesLoaded ? '显示上次成功的 Issue 快照：' : '看板加载失败：'}{issuesError}</span><button className="btn" type="button" onClick={() => void refreshIssues()} disabled={loading}><RefreshCw size={13} className={loading ? 'spin' : ''} /> 重试</button></div>}
     <div className="board-day-head" data-day-key={selectedDay == null ? 'all' : boardDayKey(selectedDay)}>
       <span className="board-day-head-date">{selectedDay == null ? '全部日期（30 天保留窗）' : formatBoardDay(selectedDay, todayFloor)}</span>
       <span className="board-day-head-count">{loading ? '正在读取最新状态…' : dayTotal > 0 ? `共 ${dayTotal} 个 Issue` : selectedDay == null ? '还没有 Issue' : BOARD_EMPTY_DAY_HINT}</span>

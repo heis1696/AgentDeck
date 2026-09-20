@@ -1,15 +1,22 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { bridge, type AgentInfo as Agent, type AgentModelCatalog, type ApiPresetInfo as Preset, type AgentDraft, type ImproveOutcome, type EvaluateOutcome } from '../api'
 import { Users, KeyRound, Sparkles, X, RefreshCw, Network, Download, Upload } from 'lucide-react'
 import { useInteractionLayer } from '../hooks/useInteractionLayer'
 import { ui, isComposingKey } from '../ui/interaction-center'
 import { Menu } from '../ui/Menu'
 import { PageHeader } from '../ui/PageHeader'
+import { EmptyState } from '../ui/EmptyState'
 import { BACKEND_IDS } from '../../../shared/types'
 import { isForgeAgent } from '../../../shared/forge'
 
 /** v1 支持预设注入执行的平台：zcode（runtimeModel）/ claude（spawn env） */
 const PRESET_BACKENDS = ['zcode', 'claude']
+
+export type ListLoadState = 'loading' | 'ready' | 'error'
+
+export function canPersistList<T>(state: ListLoadState, list: T[] | null, refreshing = false): list is T[] {
+  return state === 'ready' && !refreshing && list !== null
+}
 
 /** Agent 管理页（顶级 tab）：Agent 身份 + API 预设（连接档案）两个分区。
  *  预设按平台存多套（cc-switch 式），但零全局切换——agent 引用预设后，
@@ -17,6 +24,20 @@ const PRESET_BACKENDS = ['zcode', 'claude']
 export function AgentsView() {
   const [agents, setAgents] = useState<Agent[]>([])
   const [presets, setPresets] = useState<Preset[]>([])
+  const [agentsLoadState, setAgentsLoadState] = useState<ListLoadState>('loading')
+  const [presetsLoadState, setPresetsLoadState] = useState<ListLoadState>('loading')
+  const [agentsError, setAgentsError] = useState<string | null>(null)
+  const [presetsError, setPresetsError] = useState<string | null>(null)
+  const [agentsRefreshing, setAgentsRefreshing] = useState(true)
+  const [presetsRefreshing, setPresetsRefreshing] = useState(true)
+  const [agentsSaving, setAgentsSaving] = useState(false)
+  const [presetsSaving, setPresetsSaving] = useState(false)
+  const agentsSavingRef = useRef(false)
+  const presetsSavingRef = useRef(false)
+  const agentsSnapshotRef = useRef<Agent[] | null>(null)
+  const presetsSnapshotRef = useRef<Preset[] | null>(null)
+  const agentsRequestRef = useRef(0)
+  const presetsRequestRef = useRef(0)
   const [editing, setEditing] = useState<Agent | null>(null)
   const [editingPreset, setEditingPreset] = useState<Preset | null>(null)
   /** 模型目录：选了预设 → 从预设在线拉取；否则用平台目录（zcode）/ 预设 */
@@ -49,9 +70,53 @@ export function AgentsView() {
   const improveLayerRef = useInteractionLayer<HTMLDivElement>({ open: improveOpen, onClose: () => { if (!improving) setImproveOpen(false) }, kind: 'modal', name: 'agent-improve', trap: true })
   const editingLayerRef = useInteractionLayer<HTMLDivElement>({ open: editing !== null, onClose: () => setEditing(null), kind: 'modal', name: 'agent-editor', trap: true })
 
+  const loadAgents = async () => {
+    const request = ++agentsRequestRef.current
+    setAgentsRefreshing(true)
+    setAgentsError(null)
+    if (agentsSnapshotRef.current === null) setAgentsLoadState('loading')
+    try {
+      const next = await bridge.agents.list()
+      if (request !== agentsRequestRef.current) return
+      agentsSnapshotRef.current = next
+      setAgents(next)
+      setAgentsLoadState('ready')
+    } catch (cause) {
+      if (request !== agentsRequestRef.current) return
+      setAgentsLoadState(agentsSnapshotRef.current === null ? 'error' : 'ready')
+      setAgentsError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      if (request === agentsRequestRef.current) setAgentsRefreshing(false)
+    }
+  }
+
+  const loadPresets = async () => {
+    const request = ++presetsRequestRef.current
+    setPresetsRefreshing(true)
+    setPresetsError(null)
+    if (presetsSnapshotRef.current === null) setPresetsLoadState('loading')
+    try {
+      const next = await bridge.presets.list()
+      if (request !== presetsRequestRef.current) return
+      presetsSnapshotRef.current = next
+      setPresets(next)
+      setPresetsLoadState('ready')
+    } catch (cause) {
+      if (request !== presetsRequestRef.current) return
+      setPresetsLoadState(presetsSnapshotRef.current === null ? 'error' : 'ready')
+      setPresetsError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      if (request === presetsRequestRef.current) setPresetsRefreshing(false)
+    }
+  }
+
   useEffect(() => {
-    bridge.agents.list().then(setAgents)
-    bridge.presets.list().then(setPresets)
+    void loadAgents()
+    void loadPresets()
+    return () => {
+      agentsRequestRef.current++
+      presetsRequestRef.current++
+    }
   }, [])
 
   const refreshCatalog = (backend: string, presetId?: string) => {
@@ -73,25 +138,70 @@ export function AgentsView() {
     source.then((c) => { setCatalog(c); ui.toast.success(`获取到 ${c.models.length} 个模型`) }).catch((e) => ui.toast.error('获取模型失败: ' + (e instanceof Error ? e.message : String(e)))).finally(() => setFetching(false))
   }
 
-  const saveAgents_ = async (list: Agent[]) => {
-    setAgents(await bridge.agents.save(list))
+  const canWriteAgents = canPersistList(agentsLoadState, agentsSnapshotRef.current, agentsRefreshing) && !agentsError && !agentsSaving
+  const canWritePresets = canPersistList(presetsLoadState, presetsSnapshotRef.current, presetsRefreshing) && !presetsError && !presetsSaving
+  const saveAgents_ = async (change: (current: Agent[]) => Agent[]) => {
+    const current = agentsSnapshotRef.current
+    if (!canWriteAgents || !current || agentsSavingRef.current) {
+      ui.toast.error('Agent 列表尚未成功加载，暂不能保存')
+      return false
+    }
+    agentsSavingRef.current = true
+    setAgentsSaving(true)
+    try {
+      const saved = await bridge.agents.save(change(current))
+      agentsSnapshotRef.current = saved
+      setAgents(saved)
+      setAgentsLoadState('ready')
+      setAgentsError(null)
+      return true
+    } catch (cause) {
+      ui.toast.error('Agent 保存失败：' + (cause instanceof Error ? cause.message : String(cause)))
+      return false
+    } finally {
+      agentsSavingRef.current = false
+      setAgentsSaving(false)
+    }
   }
-  const savePresets_ = async (list: Preset[]) => {
-    setPresets(await bridge.presets.save(list))
+  const savePresets_ = async (change: (current: Preset[]) => Preset[]) => {
+    const current = presetsSnapshotRef.current
+    if (!canWritePresets || !current || presetsSavingRef.current) {
+      ui.toast.error('预设列表尚未成功加载，暂不能保存')
+      return false
+    }
+    presetsSavingRef.current = true
+    setPresetsSaving(true)
+    try {
+      const saved = await bridge.presets.save(change(current))
+      presetsSnapshotRef.current = saved
+      setPresets(saved)
+      setPresetsLoadState('ready')
+      setPresetsError(null)
+      return true
+    } catch (cause) {
+      ui.toast.error('预设保存失败：' + (cause instanceof Error ? cause.message : String(cause)))
+      return false
+    } finally {
+      presetsSavingRef.current = false
+      setPresetsSaving(false)
+    }
   }
   const update = (a: Agent, patch: Partial<Agent>) => {
     setEditing({ ...a, ...patch })
   }
-  const commit = () => {
+  const commit = async () => {
     if (!editing) return
-    const exists = agents.some((a) => a.id === editing.id)
-    saveAgents_(exists ? agents.map((a) => (a.id === editing.id ? editing : a)) : [...agents, editing])
-    setEditing(null)
+    const saved = await saveAgents_((current) => {
+      const exists = current.some((a) => a.id === editing.id)
+      return exists ? current.map((a) => (a.id === editing.id ? editing : a)) : [...current, editing]
+    })
+    if (saved) setEditing(null)
   }
-  const remove = (id: string) => saveAgents_(agents.filter((a) => a.id !== id))
+  const remove = (id: string) => void saveAgents_((current) => current.filter((a) => a.id !== id))
   const add = () =>
-    setEditing({ id: `ag_${Date.now().toString(36)}`, name: '', backend: 'zcode', color: '#4f8cff', note: '', role: '', systemPrompt: '', subordinates: [], model: '', presetId: '' })
+    canWriteAgents && setEditing({ id: `ag_${Date.now().toString(36)}`, name: '', backend: 'zcode', color: '#4f8cff', note: '', role: '', systemPrompt: '', subordinates: [], model: '', presetId: '' })
   const openDraft = () => {
+    if (!canWriteAgents) return
     setDraftText('')
     setDraftQuestions([])
     setDraftAnswers([])
@@ -131,6 +241,10 @@ export function AgentsView() {
   /** 确认页勾选的字段填入新建表单，未勾选用空默认（color 回落主题蓝）；backend/预设/可驱使仍人工配置 */
   const applyDraft = () => {
     if (!draftResult) return
+    if (!canWriteAgents) {
+      ui.toast.error('Agent 列表尚未成功加载，暂不能保存')
+      return
+    }
     const d = draftResult
     setEditing({
       id: `ag_${Date.now().toString(36)}`,
@@ -148,6 +262,7 @@ export function AgentsView() {
     ui.toast.success('草稿已填入——请检查后保存')
   }
   const openImprove = (a: Agent) => {
+    if (!canWriteAgents) return
     setImproveTarget(a)
     setImproveText('')
     setImproveOutcome(null)
@@ -180,7 +295,7 @@ export function AgentsView() {
     }
   }
   /** 勾选的改动写回该 agent 并直接保存（入口在卡片上，不经编辑表单） */
-  const applyImprove = () => {
+  const applyImprove = async () => {
     if (!improveTarget || !improveOutcome) return
     const d = improveOutcome.draft
     const patch: Partial<Agent> = {}
@@ -190,12 +305,14 @@ export function AgentsView() {
     if (improvePicked.note) patch.note = d.note ?? ''
     if (improvePicked.color) patch.color = d.color
     if (improvePicked.model) patch.model = d.model ?? ''
-    void saveAgents_(agents.map((a) => (a.id === improveTarget.id ? { ...a, ...patch } : a)))
+    const saved = await saveAgents_((current) => current.map((a) => (a.id === improveTarget.id ? { ...a, ...patch } : a)))
+    if (!saved) return
     setImproveOpen(false)
     ui.toast.success(`已改进「${improveTarget.name}」并保存`)
   }
   /** 导入 subagent .md：解析为草稿后走既有确认视图（backend 等仍人工配置） */
   const importMd = async () => {
+    if (!canWriteAgents) return
     const result = await bridge.agents.importMd()
     if (!result.ok) {
       if (result.error !== '已取消导入') ui.toast.error('导入失败：' + result.error)
@@ -235,19 +352,29 @@ export function AgentsView() {
     }
   }
   const addPreset = async () => {
+    if (!canWritePresets) {
+      ui.toast.error('预设列表尚未成功加载，暂不能保存')
+      return
+    }
     const id = await bridge.presets.newId()
     setEditingPreset({ id, name: '', backend: 'zcode', baseURL: '', apiKey: '', note: '', createdAt: Date.now() })
   }
-  const commitPreset = () => {
+  const commitPreset = async () => {
     if (!editingPreset) return
-    const exists = presets.some((p) => p.id === editingPreset.id)
-    savePresets_(exists ? presets.map((p) => (p.id === editingPreset.id ? editingPreset : p)) : [...presets, editingPreset])
-    setEditingPreset(null)
+    const saved = await savePresets_((current) => {
+      const exists = current.some((p) => p.id === editingPreset.id)
+      return exists ? current.map((p) => (p.id === editingPreset.id ? editingPreset : p)) : [...current, editingPreset]
+    })
+    if (saved) setEditingPreset(null)
   }
-  const removePreset = (id: string) => {
-    // 清掉引用该预设的 agent，避免悬空 presetId
-    saveAgents_(agents.filter((a) => a.presetId !== id).map((a) => ({ ...a, presetId: undefined })))
-    savePresets_(presets.filter((p) => p.id !== id))
+  const removePreset = async (id: string) => {
+    if (!canWriteAgents || !canWritePresets) {
+      ui.toast.error('Agent 和预设列表尚未成功加载，暂不能保存')
+      return
+    }
+    // Detach only this preset; retain agents and their unrelated preset bindings.
+    const agentsSaved = await saveAgents_((current) => current.map((a) => a.presetId === id ? { ...a, presetId: undefined } : a))
+    if (agentsSaved) await savePresets_((current) => current.filter((p) => p.id !== id))
   }
   const testPreset = (p: Preset) => {
     ui.toast.info(`正在从 ${p.name} 拉取模型…`)
@@ -273,10 +400,10 @@ export function AgentsView() {
 
   const actions = (
     <>
-      <button className="btn" onClick={addPreset}><KeyRound size={14} /> 新建 API 预设</button>
-      <button className="btn" onClick={() => void importMd()}><Upload size={14} /> 导入 .md</button>
-      <button className="btn" onClick={openDraft}>✦ 从描述生成</button>
-      <button className="btn primary" onClick={add}>＋ 新建 Agent</button>
+      <button className="btn" onClick={addPreset} disabled={!canWritePresets}><KeyRound size={14} /> 新建 API 预设</button>
+      <button className="btn" onClick={() => void importMd()} disabled={!canWriteAgents}><Upload size={14} /> 导入 .md</button>
+      <button className="btn" onClick={openDraft} disabled={!canWriteAgents}>✦ 从描述生成</button>
+      <button className="btn primary" onClick={add} disabled={!canWriteAgents}>＋ 新建 Agent</button>
     </>
   )
 
@@ -287,8 +414,11 @@ export function AgentsView() {
         <span className="tm-section-desc">按平台存多套连接（baseURL / 密钥）；Agent 选取后在它的会话里生效，不改全局配置。zcode / claude 支持注入执行。</span>
       </div>
       <div className="tm-grid">
+        {presetsLoadState === 'loading' && <EmptyState compact icon={KeyRound} title="预设加载中" description="正在读取 API 预设。" />}
+        {presetsLoadState === 'error' && presetsSnapshotRef.current === null && <EmptyState compact icon={KeyRound} title="预设加载失败" description={presetsError ?? '无法读取 API 预设。'} action={<button className="btn" type="button" onClick={() => void loadPresets()}><RefreshCw size={13} /> 重试</button>} />}
+        {presetsError && presetsSnapshotRef.current !== null && <div className="data-state-banner data-state-stale" role="status"><RefreshCw size={13} /><span>预设显示上次成功快照：{presetsError}</span><button className="btn" type="button" onClick={() => void loadPresets()} disabled={presetsRefreshing}><RefreshCw size={12} className={presetsRefreshing ? 'spin' : ''} /> 重试</button></div>}
         {presets.map((p) => (
-          <div key={p.id} className="tm-card" role="button" tabIndex={0} onClick={() => setEditingPreset(p)} onKeyDown={(e) => { if (isComposingKey(e.nativeEvent)) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setEditingPreset(p) } }}>
+          <div key={p.id} className="tm-card" role="button" aria-disabled={!canWritePresets} tabIndex={canWritePresets ? 0 : -1} onClick={() => { if (canWritePresets) setEditingPreset(p) }} onKeyDown={(e) => { if (isComposingKey(e.nativeEvent) || !canWritePresets) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setEditingPreset(p) } }}>
             <div className="tm-card-top">
               <div className="agent-avatar tm-avatar-preset"><KeyRound size={16} /></div>
               <div className="tm-id">
@@ -297,7 +427,7 @@ export function AgentsView() {
               </div>
               <div className="tm-acts">
                 <button className="tm-act" title="拉取模型列表" onClick={(e) => { e.stopPropagation(); testPreset(p) }}><RefreshCw size={13} /></button>
-                <button className="tm-act tm-act-danger" title="删除" onClick={(e) => { e.stopPropagation(); removePreset(p.id) }}><X size={13} /></button>
+                <button className="tm-act tm-act-danger" title="删除" disabled={!canWriteAgents || !canWritePresets} onClick={(e) => { e.stopPropagation(); void removePreset(p.id) }}><X size={13} /></button>
               </div>
             </div>
             <div className="tm-badges">
@@ -306,7 +436,7 @@ export function AgentsView() {
             <p className="tm-note tm-note-mono">{p.baseURL}<br />密钥 ••••{p.apiKey.slice(-4)}</p>
           </div>
         ))}
-        {presets.length === 0 && (
+        {presetsLoadState === 'ready' && presets.length === 0 && (
           <div className="tm-empty">
             <KeyRound size={20} />
             <span>还没有预设——新建一个，或留空让 Agent 走平台默认连接。</span>
@@ -324,10 +454,13 @@ export function AgentsView() {
           <span className="tm-section-desc">勾选「可驱使」的 Agent 成为领队：对话中可自行派发子任务，最多三层。</span>
         </div>
         <div className="tm-grid">
+          {agentsLoadState === 'loading' && <EmptyState compact icon={Users} title="Agent 加载中" description="正在读取队伍列表。" />}
+          {agentsLoadState === 'error' && agentsSnapshotRef.current === null && <EmptyState compact icon={Users} title="Agent 加载失败" description={agentsError ?? '无法读取 Agent 列表。'} action={<button className="btn" type="button" onClick={() => void loadAgents()}><RefreshCw size={13} /> 重试</button>} />}
+          {agentsError && agentsSnapshotRef.current !== null && <div className="data-state-banner data-state-stale" role="status"><RefreshCw size={13} /><span>Agent 列表显示上次成功快照：{agentsError}</span><button className="btn" type="button" onClick={() => void loadAgents()} disabled={agentsRefreshing}><RefreshCw size={12} className={agentsRefreshing ? 'spin' : ''} /> 重试</button></div>}
           {agents.map((a) => {
             const preset = presets.find((p) => p.id === a.presetId)
             return (
-              <div key={a.id} className="tm-card" role="button" tabIndex={0} onClick={() => setEditing(a)} onKeyDown={(e) => { if (isComposingKey(e.nativeEvent)) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setEditing(a) } }}>
+              <div key={a.id} className="tm-card" role="button" aria-disabled={!canWriteAgents} tabIndex={canWriteAgents ? 0 : -1} onClick={() => { if (canWriteAgents) setEditing(a) }} onKeyDown={(e) => { if (isComposingKey(e.nativeEvent) || !canWriteAgents) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setEditing(a) } }}>
                 <div className="tm-card-top">
                   <div className="agent-avatar" style={{ background: a.color }}>{a.name.slice(0, 1)}</div>
                   <div className="tm-id">
@@ -336,8 +469,8 @@ export function AgentsView() {
                   </div>
                   <div className="tm-acts">
                     {!isForgeAgent(a) && <button className="tm-act" title="导出为 .md（Claude subagent 格式）" onClick={(e) => { e.stopPropagation(); void exportMd(a) }}><Download size={13} /></button>}
-                    {!isForgeAgent(a) && <button className="tm-act" title="用锻造师改进提示词" onClick={(e) => { e.stopPropagation(); openImprove(a) }}><Sparkles size={13} /></button>}
-                    <button className="tm-act tm-act-danger" title="删除" onClick={(e) => { e.stopPropagation(); remove(a.id) }}><X size={13} /></button>
+                    {!isForgeAgent(a) && <button className="tm-act" title="用锻造师改进提示词" disabled={!canWriteAgents} onClick={(e) => { e.stopPropagation(); openImprove(a) }}><Sparkles size={13} /></button>}
+                    <button className="tm-act tm-act-danger" title="删除" disabled={!canWriteAgents} onClick={(e) => { e.stopPropagation(); remove(a.id) }}><X size={13} /></button>
                   </div>
                 </div>
                 <div className="tm-badges">
@@ -355,7 +488,7 @@ export function AgentsView() {
               </div>
             )
           })}
-          {agents.length === 0 && (
+          {agentsLoadState === 'ready' && agents.length === 0 && (
             <div className="tm-empty">
               <Users size={20} />
               <span>还没有 Agent——从描述生成一个，或手动新建。</span>
@@ -398,7 +531,7 @@ export function AgentsView() {
             <label className="field"><span>备注</span><input value={editingPreset.note ?? ''} onChange={(e) => setEditingPreset({ ...editingPreset, note: e.target.value })} /></label>
             <div className="dialog-footer">
               <span className="hint">只存本机（userData/api-presets.json）；保存后可用列表里的 ↻ 测试拉取</span>
-              <button className="btn primary" onClick={commitPreset} disabled={!editingPreset.name.trim() || !editingPreset.baseURL.trim() || !editingPreset.apiKey.trim()}>保存</button>
+              <button className="btn primary" onClick={commitPreset} disabled={!canWritePresets || !editingPreset.name.trim() || !editingPreset.baseURL.trim() || !editingPreset.apiKey.trim()}>保存</button>
             </div>
           </div>
         </div>
@@ -492,7 +625,7 @@ export function AgentsView() {
                   <span className="hint">将填入 {draftPickCount}/6 个字段——按钮单击即取消/恢复，取消的字段进表单后留空可手改</span>
                   <button className="btn" onClick={() => void runEvaluate()} disabled={evaluating}>{evaluating ? '评测中…' : '评测路由'}</button>
                   {!draftFromImport && <button className="btn" onClick={() => setDraftStage('input')}>重新生成</button>}
-                  <button className="btn primary" onClick={applyDraft}>{draftPickCount === 1 ? '只填入名字' : '填入表单'}</button>
+                  <button className="btn primary" onClick={applyDraft} disabled={!canWriteAgents}>{draftPickCount === 1 ? '只填入名字' : '填入表单'}</button>
                 </div>
               </>
             )}
@@ -546,7 +679,7 @@ export function AgentsView() {
                 <div className="dialog-footer">
                   <button className="btn" onClick={() => setImproveOutcome(null)}>再提一轮反馈</button>
                   <button className="btn" onClick={() => setImproveOpen(false)}>放弃</button>
-                  <button className="btn primary" onClick={applyImprove} disabled={improveDiff.length === 0}>应用勾选改动并保存</button>
+                  <button className="btn primary" onClick={applyImprove} disabled={!canWriteAgents || improveDiff.length === 0}>应用勾选改动并保存</button>
                 </div>
               </>
             )}
@@ -674,7 +807,7 @@ export function AgentsView() {
             </label>
             <div className="dialog-footer">
               <span className="hint">重名会自动加后缀（委派按名字匹配）；预设须搭配模型使用</span>
-              <button className="btn primary" onClick={commit} disabled={!editing.name.trim()}>保存</button>
+              <button className="btn primary" onClick={commit} disabled={!canWriteAgents || !editing.name.trim()}>保存</button>
             </div>
           </div>
         </div>
@@ -684,7 +817,7 @@ export function AgentsView() {
 
   return (
     <div className="psh-page">
-      <PageHeader title="Agent" icon={<Users size={16} />} count={agents.length} actions={actions} />
+      <PageHeader title="Agent" icon={<Users size={16} />} count={agentsLoadState === 'ready' ? agents.length : undefined} actions={actions} />
       <div className="psh-body">
         {sections}
       </div>

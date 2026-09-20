@@ -105,15 +105,55 @@ export function useIssues() {
 
 export function useSettings() {
   const [settings, setSettings] = useState<AppSettings | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const requestSeq = useRef(0)
+  const refresh = useCallback(async () => {
+    const seq = ++requestSeq.current
+    setLoading(true)
+    try {
+      const next = await bridge.settings.get()
+      if (seq !== requestSeq.current) return null
+      setSettings(next)
+      setError(null)
+      return next
+    } catch (cause) {
+      if (seq === requestSeq.current) setError(cause instanceof Error ? cause.message : String(cause))
+      return null
+    } finally {
+      if (seq === requestSeq.current) setLoading(false)
+    }
+  }, [])
   useEffect(() => {
-    bridge.settings.get().then(setSettings)
+    void refresh()
     // 订阅广播：App 与设置页各持一份实例，任何一处更新都要同步到全部实例（主题切换等）
-    return bridge.settings.onUpdated(setSettings)
-  }, [])
+    const off = bridge.settings.onUpdated((next) => {
+      ++requestSeq.current
+      setSettings(next)
+      setError(null)
+      setLoading(false)
+    })
+    return () => {
+      requestSeq.current++
+      off()
+    }
+  }, [refresh])
   const update = useCallback(async (patch: Partial<AppSettings>) => {
-    setSettings(await bridge.settings.set(patch))
+    const seq = ++requestSeq.current
+    try {
+      const next = await bridge.settings.set(patch)
+      if (seq === requestSeq.current) {
+        setSettings(next)
+        setError(null)
+        setLoading(false)
+      }
+      return next
+    } catch (cause) {
+      if (seq === requestSeq.current) setError(cause instanceof Error ? cause.message : String(cause))
+      throw cause
+    }
   }, [])
-  return { settings, update }
+  return { settings, update, refresh, loading, error }
 }
 
 /** 桌宠状态快照 + 实时广播订阅（设置卡片用） */

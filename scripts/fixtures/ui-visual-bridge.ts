@@ -38,8 +38,8 @@ const aggregate = { runs: 32, completed: 29, failed: 2, cancelled: 1, inputToken
 api.analytics.summary = async () => ({
   until: now, generatedAt: now, totals: aggregate,
   byDay: Array.from({ length: 7 }, (_, i) => ({ ...aggregate, date: new Date(now - (6 - i) * 86400000).toLocaleDateString('en-CA'), runs: 3 + i, inputTokens: 9000 + i * 4200, outputTokens: 2400 + i * 1300, failed: i === 3 ? 1 : 0 })),
-  byBackend: ['zcode', 'codex', 'claude'].map((backend, i) => ({ ...aggregate, backend, runs: 12 - i * 3, inputTokens: 70000 - i * 14000, outputTokens: 22000 - i * 5000 })),
-  byAgent: mock.store.agents.map((agent, i) => ({ ...aggregate, agentId: agent.id, agentName: agent.name, backend: agent.backend, runs: 10 - i * 2 })),
+  byBackend: ['zcode', 'codex', 'claude'].map((backend, i) => ({ ...aggregate, key: backend, label: backend, runs: 12 - i * 3, inputTokens: 70000 - i * 14000, outputTokens: 22000 - i * 5000 })),
+  byAgent: mock.store.agents.map((agent, i) => ({ ...aggregate, key: agent.id, label: agent.name, runs: 10 - i * 2 })),
   errors: []
 })
 api.automations.list = async () => [{ id: 'daily', name: '每日提交摘要', prompt: '整理最近提交中的重要变更与待处理事项。', workdir: 'C:\\Projects\\AgentDeck', scheduleMinutes: 1440, enabled: false, output: 'issue', createdAt: now, updatedAt: now }]

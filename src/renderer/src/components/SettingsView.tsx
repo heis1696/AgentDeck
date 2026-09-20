@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useState } from 'react'
 import type { AppSettings } from '../../../shared/types'
 import { bridge, usePetState, useSettings } from '../api'
-import { Settings } from 'lucide-react'
+import { LoaderCircle, RefreshCw, Settings } from 'lucide-react'
 import { Menu } from '../ui/Menu'
 import { PageHeader } from '../ui/PageHeader'
 import { EmptyState } from '../ui/EmptyState'
@@ -53,8 +53,20 @@ export function SettingsView({ section, onSection }: { section: string; onSectio
 }
 
 /** 常规：外观 + 执行 + 通知 */
+function SettingsState({ loading, error, onRetry }: { loading: boolean; error: string | null; onRetry: () => void }) {
+  return (
+    <EmptyState
+      icon={loading ? LoaderCircle : Settings}
+      title={loading ? '设置加载中' : '设置加载失败'}
+      description={loading ? '正在读取本地设置。' : (error ?? '无法读取本地设置。')}
+      action={!loading ? <button className="btn" type="button" onClick={onRetry}><RefreshCw size={14} /> 重试</button> : undefined}
+    />
+  )
+}
+
 function GeneralSection() {
-  const { settings, update } = useSettings()
+  const { settings, update, refresh, error } = useSettings()
+  if (!settings && error) return <SettingsState loading={false} error={error} onRetry={() => { void refresh() }} />
   if (!settings) return <EmptyState title="设置加载中" />
   return (
     <div className="settings-stack">
@@ -122,6 +134,14 @@ function GeneralSection() {
 }
 
 /** 数字调优项：本地草稿 + 失焦/回车提交（避免每次击键写盘）；越界或非法输入回落当前生效值 */
+export function validateTuningValue(raw: string, min: number, max: number): string | null {
+  if (!raw.trim()) return '请输入数值。'
+  const next = Number(raw)
+  if (!Number.isFinite(next) || !Number.isInteger(next)) return '请输入整数。'
+  if (next < min || next > max) return `请输入 ${min} 到 ${max} 之间的整数。`
+  return null
+}
+
 function TuningNumber({ label, value, min, max, unit, hint, onCommit }: {
   label: string
   value: number
@@ -132,30 +152,43 @@ function TuningNumber({ label, value, min, max, unit, hint, onCommit }: {
   onCommit: (v: number) => void
 }) {
   const [draft, setDraft] = useState(String(value))
+  const [error, setError] = useState<string | null>(null)
   useEffect(() => { setDraft(String(value)) }, [value])
   const commit = () => {
+    const validation = validateTuningValue(draft, min, max)
+    setError(validation)
+    if (validation) return
     const next = Number(draft)
-    if (!Number.isInteger(next) || next < min || next > max) { setDraft(String(value)); return }
     if (next === value) return
     onCommit(next)
   }
+  const fieldId = useId()
   return (
     <label className="field">
       <span>{label}{unit ? `（${unit}）` : ''}</span>
       <input
+        id={fieldId}
         type="number" min={min} max={max} step={1} value={draft}
-        onChange={(e) => setDraft(e.target.value)}
+        aria-invalid={error ? 'true' : undefined}
+        aria-describedby={error ? `${fieldId}-error` : hint ? `${fieldId}-hint` : undefined}
+        onChange={(e) => {
+          const next = e.target.value
+          setDraft(next)
+          setError(validateTuningValue(next, min, max))
+        }}
         onBlur={commit}
         onKeyDown={(e) => { if (isComposingKey(e.nativeEvent)) return; if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLInputElement).blur() } }}
       />
-      {hint && <span className="hint">{hint}</span>}
+      {error && <span id={`${fieldId}-error`} className="field-error" role="alert">{error}</span>}
+      {hint && <span id={`${fieldId}-hint`} className="hint">{hint}</span>}
     </label>
   )
 }
 
 /** 调优：把散在主进程的运行参数暴露出来；保持默认 = 出厂行为，改小/改大用于调试 */
 function AdvancedSection() {
-  const { settings, update } = useSettings()
+  const { settings, update, refresh, error } = useSettings()
+  if (!settings && error) return <SettingsState loading={false} error={error} onRetry={() => { void refresh() }} />
   if (!settings) return <EmptyState title="设置加载中" />
   const num = (v: number | undefined, d: number) => v ?? d
   const save = (patch: Partial<AppSettings>) => {
@@ -244,7 +277,7 @@ function AdvancedSection() {
 
 /** 运行时：后端路径配置 + provider 健康（原独立 Runtimes 页并入） */
 function RuntimeSection() {
-  const { settings, update } = useSettings()
+  const { settings, update, refresh, error } = useSettings()
   const [probe, setProbe] = useState<{ ok: boolean; detail: string } | null>(null)
   const [probing, setProbing] = useState(false)
   const [zcodePath, setZcodePath] = useState('')
@@ -258,6 +291,7 @@ function RuntimeSection() {
       setDshPath(settings.dshPath ?? '')
     }
   }, [settings?.zcodePath, settings?.nodePath, settings?.dshPath])
+  if (!settings && error) return <SettingsState loading={false} error={error} onRetry={() => { void refresh() }} />
 
   if (!settings) return <EmptyState title="设置加载中" />
 
@@ -318,7 +352,7 @@ function RuntimeSection() {
 
 /** 存储说明 */
 function StorageSection() {
-  const { settings } = useSettings()
+  const { settings, refresh, error } = useSettings()
   const [sharedRoot, setSharedRoot] = useState('')
 
   // 渲染层只读展示解析后的实际路径（settings.sharedDir 为空 = 主进程默认 ~/.agentdeck）
@@ -327,6 +361,9 @@ function StorageSection() {
     bridge.skills.list().then((r) => { if (alive) setSharedRoot(r.root) }).catch(() => {})
     return () => { alive = false }
   }, [settings?.sharedDir])
+
+  if (!settings && error) return <SettingsState loading={false} error={error} onRetry={() => { void refresh() }} />
+  if (!settings) return <EmptyState title="设置加载中" icon={LoaderCircle} />
 
   const changeSharedDir = async () => {
     const dir = await bridge.pickDir()

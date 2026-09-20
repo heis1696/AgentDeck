@@ -5214,6 +5214,23 @@
           "valid": true
         },
         {
+          "module": "../ui/EmptyState",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/EmptyState.tsx",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "../ui/interaction-center",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -5391,6 +5408,22 @@
       "valid": true
     },
     {
+      "source": "src/renderer/src/ui/EmptyState.tsx",
+      "dependencies": [],
+      "dependents": [
+        "src/renderer/src/components/AgentsView.tsx",
+        "src/renderer/src/components/AutomationView.tsx",
+        "src/renderer/src/components/BoardView.tsx",
+        "src/renderer/src/components/ExtensionsView.tsx",
+        "src/renderer/src/components/SkillsView.tsx",
+        "src/renderer/src/components/SettingsView.tsx",
+        "src/renderer/src/components/UpdatePanel.tsx",
+        "src/renderer/src/components/UsageView.tsx"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
       "source": "src/renderer/src/ui/Menu.tsx",
       "dependencies": [
         {
@@ -5553,6 +5586,23 @@
             "import"
           ],
           "resolved": "src/renderer/src/hooks/useInteractionLayer.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "../ui/EmptyState",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/EmptyState.tsx",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -5770,19 +5820,6 @@
         "src/renderer/src/App.tsx",
         "src/renderer/src/components/BoardView.tsx",
         "src/renderer/src/components/TaskDetail.tsx"
-      ],
-      "orphan": false,
-      "valid": true
-    },
-    {
-      "source": "src/renderer/src/ui/EmptyState.tsx",
-      "dependencies": [],
-      "dependents": [
-        "src/renderer/src/components/BoardView.tsx",
-        "src/renderer/src/components/ExtensionsView.tsx",
-        "src/renderer/src/components/SkillsView.tsx",
-        "src/renderer/src/components/SettingsView.tsx",
-        "src/renderer/src/components/UpdatePanel.tsx"
       ],
       "orphan": false,
       "valid": true
@@ -6314,6 +6351,23 @@
           "valid": true
         },
         {
+          "module": "../hooks/taskDrafts",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/hooks/taskDrafts.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "../hooks/turnModel",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -6695,6 +6749,16 @@
       "valid": true
     },
     {
+      "source": "src/renderer/src/hooks/taskDrafts.ts",
+      "dependencies": [],
+      "dependents": [
+        "src/renderer/src/components/TaskDetail.tsx",
+        "src/renderer/src/hooks/usePromptHistory.ts"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
       "source": "src/renderer/src/hooks/turnModel.ts",
       "dependencies": [],
       "dependents": [
@@ -6734,7 +6798,25 @@
     },
     {
       "source": "src/renderer/src/hooks/usePromptHistory.ts",
-      "dependencies": [],
+      "dependencies": [
+        {
+          "module": "./taskDrafts",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/hooks/taskDrafts.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
       "dependents": [
         "src/renderer/src/components/TaskDetail.tsx"
       ],
@@ -7778,6 +7860,23 @@
           "valid": true
         },
         {
+          "module": "../ui/EmptyState",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/EmptyState.tsx",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "../ui/PageHeader",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -8704,8 +8803,9 @@
     "warn": 0,
     "info": 0,
     "ignore": 0,
-    "totalCruised": 177,
-    "totalDependenciesCruised": 393,
+    "advisedExitCode": 0,
+    "totalCruised": 178,
+    "totalDependenciesCruised": 398,
     "optionsUsed": {
       "baseDir": "C:\\Projects\\AgentDeck",
       "combinedDependencies": false,
@@ -8729,7 +8829,7 @@
       "args": "src"
     },
     "environment": {
-      "version": "18.3.1",
+      "version": "18.4.0",
       "nodeVersionSupported": "^22||^24||>=26",
       "nodeVersionFound": "v24.12.0",
       "osVersionFound": "x64 win32@10.0.26200",

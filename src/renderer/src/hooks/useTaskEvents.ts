@@ -9,6 +9,16 @@ export { mergeTaskEvents } from './eventMerge'
 export function useTaskEvents(taskId: string) {
   const [events, setEvents] = useState<TaskEvent[]>([])
   const [permission, setPermission] = useState<PermissionRequest | null>(null)
+  // 任务隔离：TaskDetail 是同一个实例在任务之间复用，events 又是**跨 await 落地**的。
+  // 没有这段结算，切到任务 B 的那一帧会先用 A 的事件（与 B 的 prompt 一起喂给 turnModel）
+  // 渲染出 A 的对话，直到 B 的快照回来才被换掉。这里在渲染期直接清空：
+  // 任务已变 → 本帧就是空快照（快照请求本身另有 requestRef 序号判废，迟到的旧响应不会落地）。
+  const [scope, setScope] = useState(taskId)
+  if (scope !== taskId) {
+    setScope(taskId)
+    setEvents([])
+    setPermission(null)
+  }
   const mountedRef = useRef(false)
   const requestRef = useRef(0)
   const loadingRef = useRef(0)

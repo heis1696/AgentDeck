@@ -2,6 +2,7 @@
 import { build } from 'esbuild'
 import { pathToFileURL } from 'node:url'
 import path from 'node:path'
+import assert from 'node:assert/strict'
 
 const root = path.resolve(import.meta.dirname, '..')
 const outfile = path.join(root, 'out', 'smoke-turn-model.cjs')
@@ -33,6 +34,41 @@ const event = (seq, kind, text, data) => ({ seq, ts: seq, kind, ...(text === und
 
 const merged = mergeTaskEvents([event(2, 'text', 'old'), event(1, 'user', 'first')], [event(2, 'text', 'new'), event(3, 'final', 'done')])
 ok(merged.map((item) => item.seq).join(',') === '1,2,3' && merged[1].text === 'new', 'live events replace duplicate seq and remain ordered')
+
+const mergeReference = (current, incoming) => {
+  if (!incoming.length) return current
+  const bySeq = new Map()
+  for (const item of [...current, ...incoming]) bySeq.set(item.seq, item)
+  return [...bySeq.values()].sort((a, b) => a.seq - b.seq)
+}
+const mergeCases = [
+  [[], [event(3, 'text', 'a')]],
+  [[event(1, 'text', 'a')], []],
+  [[event(1, 'text', 'a')], [event(2, 'text', 'b'), event(3, 'text', 'c')]],
+  [[event(1, 'text', 'a'), event(3, 'text', 'c')], [event(2, 'text', 'b')]],
+  [[event(1, 'text', 'a'), event(3, 'text', 'c')], [event(3, 'text', 'new')]],
+  [[event(1, 'text', 'a'), event(3, 'text', 'c')], [event(0, 'user', 'start'), event(3, 'final', 'replacement')]],
+  [[event(2, 'text', 'a'), event(1, 'text', 'b'), event(2, 'text', 'c')], [event(2, 'text', 'd'), event(0, 'user', 'start'), event(2, 'final', 'last')]]
+]
+let seed = 1729
+const random = (limit) => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed % limit }
+for (let i = 0; i < 300; i++) {
+  let current = Array.from({ length: random(80) }, (_, n) => event(random(100), 'text', `current-${n}`))
+  let incoming = Array.from({ length: random(25) }, (_, n) => event(random(100), 'text', `incoming-${n}`))
+  if (i % 3) current = mergeReference([], current)
+  if (i % 2) incoming = mergeReference([], incoming)
+  mergeCases.push([current, incoming])
+}
+for (const [current, incoming] of mergeCases) {
+  const before = structuredClone([current, incoming])
+  Object.freeze(current)
+  Object.freeze(incoming)
+  const result = mergeTaskEvents(current, incoming)
+  assert.deepEqual(result, mergeReference(current, incoming))
+  assert.deepEqual([current, incoming], before)
+  if (!incoming.length) assert.equal(result, current)
+}
+ok(true, `${mergeCases.length} differential merges preserve ordering, replacement and input immutability`)
 
 const turns = buildTurns([
   event(1, 'user', '首轮任务'),

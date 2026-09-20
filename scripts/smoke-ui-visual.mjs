@@ -158,6 +158,59 @@ if (process.argv.includes('--serve')) {
     const longTitle = await page.locator('.task-title-text').evaluate((el) => { const r = el.getBoundingClientRect(); return r.right <= innerWidth && el.scrollWidth <= el.clientWidth + 1 })
     check(longTitle, 'Long task title wraps without clipping or horizontal overflow')
     await page.screenshot({ path: path.join(shots, '980-dark-long-title.png') })
+
+    await page.evaluate(() => {
+      window.__restoreAgentList = window.agentdeck.agents.list
+      window.agentdeck.agents.list = async () => { throw new Error('Fixture connection unavailable') }
+      window.__visual.ui.navigate('agents')
+    })
+    await page.getByText('Agent 加载失败', { exact: true }).waitFor()
+    check(await page.locator('.view-header-actions .primary').isDisabled(), 'Agent read failure disables creation')
+    check(await page.locator('.view-header-count').count() === 0, 'Unknown Agent count is absent, not zero')
+    await page.screenshot({ path: path.join(shots, '980-dark-agent-error.png') })
+    await page.evaluate(() => { window.agentdeck.agents.list = window.__restoreAgentList })
+    await page.getByRole('button', { name: '重试', exact: true }).click()
+    await page.locator('.tm-card').first().waitFor()
+    check(await page.locator('.view-header-actions .primary').isEnabled(), 'Agent retry restores writable state')
+
+    await page.evaluate(() => window.__visual.ui.openSettings('advanced'))
+    const tuning = page.locator('input[type=number]').first()
+    await tuning.fill('0')
+    await tuning.blur()
+    check(await tuning.inputValue() === '0' && await tuning.getAttribute('aria-invalid') === 'true', 'Invalid tuning draft remains visible with ARIA feedback')
+    const errorColors = await tuning.evaluate((input) => {
+      const message = document.getElementById(input.getAttribute('aria-describedby'))
+      const probe = document.createElement('i')
+      probe.style.color = 'var(--status-failed)'
+      document.body.append(probe)
+      const expected = getComputedStyle(probe).color
+      probe.remove()
+      return { text: getComputedStyle(message).color === expected, border: getComputedStyle(input).borderTopColor === expected }
+    })
+    check(errorColors.text, 'Field errors use the semantic error text color')
+    check(errorColors.border, 'Invalid fields retain their error border under page styles')
+    await page.screenshot({ path: path.join(shots, '980-dark-tuning-error.png') })
+    await tuning.fill('12')
+    await tuning.blur()
+    check(await tuning.getAttribute('aria-invalid') === null, 'Corrected tuning clears field error')
+
+    await page.evaluate(() => window.__visual.ui.navigate('issues'))
+    await page.locator('.workspace-types button').nth(1).click()
+    check(await page.locator('#goal-completion-error').isVisible(), 'Goal completion feedback is beside the field')
+    await page.screenshot({ path: path.join(shots, '980-dark-goal-error.png') })
+
+    await page.evaluate(() => window.__visual.ui.palette.open())
+    await page.locator('.palette-input').waitFor()
+    for (let i = 0; i < 11; i++) await page.keyboard.press('ArrowDown')
+    const palette = await page.locator('.palette-item.active').evaluate((el) => {
+      const row = el.getBoundingClientRect()
+      const list = el.closest('.palette-list').getBoundingClientRect()
+      const input = document.querySelector('.palette-input')
+      return { visible: row.top >= list.top - 1 && row.bottom <= list.bottom + 1, focused: document.activeElement === input, linked: input.getAttribute('aria-activedescendant') === el.id }
+    })
+    check(palette.visible && palette.focused && palette.linked, 'Palette keyboard selection stays visible, focused through the input and linked by ARIA')
+    await page.screenshot({ path: path.join(shots, '980-dark-palette.png') })
+    await page.keyboard.press('Escape')
     await fs.writeFile(path.join(shots, 'metrics.json'), JSON.stringify({ metrics, checks, errors }, null, 2))
     const ordered = pages.flatMap(([view]) => images.filter((item) => item.width === 1440 && item.view === view))
     const cells = await Promise.all(ordered.map(async (item) => `<figure><figcaption>${item.theme} / ${item.view}</figcaption><img src="data:image/png;base64,${(await fs.readFile(path.join(shots, item.name))).toString('base64')}"></figure>`))
