@@ -106,12 +106,7 @@ const pressKey = (key, modifiers = {}) => act(async () => {
 })
 /** 打开新建表单（Issue 主页）并提交「稍后」创建 */
 async function composeLater(prompt, kind = 'task') {
-<<<<<<< HEAD
   await act(async () => { ui.focusComposer(); await sleep(30) })
-=======
-  ui.focusComposer()
-  await act(async () => { await sleep(30) })
->>>>>>> agentdeck/t_mu945949_u3ri8e_c8
   if (kind !== 'task') {
     const tab = [...container.querySelectorAll('[role="tab"]')].find((node) => node.textContent.includes(kind === 'goal' ? '目标模式' : '团队会议'))
     await click(tab)
@@ -139,7 +134,6 @@ section('普通任务「稍后」创建：目录刷到可见后再进详情（�
   await unmount()
 }
 
-<<<<<<< HEAD
 section('新建后刷新尚在途时等待目录，首次刷新失败不清空待决导航')
 {
   await mount()
@@ -162,8 +156,6 @@ section('新建后刷新尚在途时等待目录，首次刷新失败不清空�
   await unmount()
 }
 
-=======
->>>>>>> agentdeck/t_mu945949_u3ri8e_c8
 section('刷新响应乱序：挂载时发出的旧列表快照延迟落地，不抹掉新任务')
 {
   bridge.reset()
@@ -234,12 +226,7 @@ section('目录始终缺失的任务：乐观页签被下一份目录收掉，�
 section('快捷键：菜单（popover）不封锁 Ctrl+N，命令面板（模态）打开时避让')
 {
   await mount()
-<<<<<<< HEAD
   await act(async () => { ui.focusComposer(); await sleep(30) })
-=======
-  ui.focusComposer()
-  await act(async () => { await sleep(30) })
->>>>>>> agentdeck/t_mu945949_u3ri8e_c8
   const prompt = byQuery('.workspace-prompt')
   await click(byQuery('.workspace-switcher')) // 打开工作区切换菜单（popover 层）
   await act(async () => { await sleep(20) })
@@ -251,23 +238,13 @@ section('快捷键：菜单（popover）不封锁 Ctrl+N，命令面板（模态
   await pressKey('Escape')
   await act(async () => { await sleep(20) })
   ok(!byQuery('.ws-menu'), 'Escape 关闭菜单')
-<<<<<<< HEAD
   await act(async () => { ui.palette.open(); await sleep(30) })
-=======
-  ui.palette.open()
-  await act(async () => { await sleep(30) })
->>>>>>> agentdeck/t_mu945949_u3ri8e_c8
   ok(!!byQuery('.palette'), '命令面板已打开（模态层）')
   const tickInPalette = ui.getState().composerTick
   await pressKey('n', { ctrlKey: true })
   ok(ui.getState().composerTick === tickInPalette, '模态打开：Ctrl+N 让路（composerTick 不动）')
   ok(active() !== prompt && !!byQuery('.palette input') && active() === byQuery('.palette input'), '焦点仍在面板输入框')
-<<<<<<< HEAD
   await act(async () => { ui.palette.close(); await sleep(20) })
-=======
-  ui.palette.close()
-  await act(async () => { await sleep(20) })
->>>>>>> agentdeck/t_mu945949_u3ri8e_c8
   await pressKey('n', { ctrlKey: true })
   ok(ui.getState().composerTick === tickInPalette + 1, '面板关闭后 Ctrl+N 恢复')
   await unmount()
