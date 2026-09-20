@@ -1,4 +1,4 @@
-import type { Task } from '../shared/types'
+import type { Task, TaskGitSnapshot } from '../shared/types'
 import type { TaskStore } from './store'
 import { snapshotGitAfter } from './git'
 import { aggregateUsage } from './usage'
@@ -8,7 +8,7 @@ export class TaskFinalizer {
   constructor(
     private readonly store: TaskStore,
     private readonly pushTask: (taskId: string) => void,
-    private readonly snapshot = snapshotGitAfter
+    private readonly snapshot: (workdir: string) => Promise<{ diff: string; stat: string; snapshot?: TaskGitSnapshot }> = snapshotGitAfter
   ) {}
 
   async finalizeDone(taskId: string, directResult?: string) {
@@ -23,7 +23,7 @@ export class TaskFinalizer {
     const runId = task.runId
     const phaseIndex = task.phaseIndex
     const startedAt = task.startedAt
-    const { diff, stat } = await this.snapshot(task.workdir)
+    const captured = await this.snapshot(task.workdir)
     const current = this.store.get(taskId)
     // Snapshotting is asynchronous. A follow-up can start the next Run while
     // the old Run is waiting for git, so never let the old snapshot finalize it.
@@ -35,8 +35,27 @@ export class TaskFinalizer {
       this.pushTask(taskId)
       return
     }
+    const previous = current.gitSnapshot
+    // Integration diffs describe another branch. Keep only a proven same-run
+    // integration snapshot when the final working-tree capture is clean.
+    const keepIntegration = captured.snapshot?.state === 'clean'
+      && previous?.scope === 'integration'
+      && previous.runId === runId && previous.phaseIndex === phaseIndex && previous.startedAt === startedAt
+    const gitFields: Pick<Task, 'gitDiff' | 'gitStat' | 'gitSnapshot'> = keepIntegration
+      ? { gitDiff: current.gitDiff, gitStat: current.gitStat, gitSnapshot: previous }
+      : {
+          gitDiff: captured.diff,
+          gitStat: captured.stat,
+          gitSnapshot: {
+            ...(captured.snapshot ?? {
+              state: captured.diff.trim() || captured.stat.trim() ? 'available' : 'unavailable',
+              scope: 'workspace', capturedAt: Date.now()
+            }),
+            runId, phaseIndex, startedAt
+          }
+        }
     if (!current || !canTransition(current.status, 'done', 'runner')) {
-      if (current) this.store.update(taskId, { result, gitDiff: diff || current.gitDiff, gitStat: stat || current.gitStat, usage: aggregateUsage(events) })
+      if (current) this.store.update(taskId, { result, ...gitFields, usage: aggregateUsage(events) })
       this.pushTask(taskId)
       return
     }
@@ -44,8 +63,7 @@ export class TaskFinalizer {
       status: 'done',
       endedAt: Date.now(),
       result,
-      gitDiff: diff || current.gitDiff,
-      gitStat: stat || current.gitStat,
+      ...gitFields,
       usage: aggregateUsage(events)
     })
     this.pushTask(taskId)

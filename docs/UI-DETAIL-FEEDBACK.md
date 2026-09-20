@@ -39,8 +39,9 @@ and disabled Git access, and outdated settings controls with oversized hit areas
   round number; `roundsUsed` is the leader's aggregate, not a child-round key.
   Do not guess rounds from child ordering or parse localized status prose.
   Unavailable/ambiguous historical boundaries need an explicitly unclassified
-  group so records remain reachable. Do not change backend execution metadata
-  or scheduling in this feedback batch.
+  group so records remain reachable. Do not change scheduling or invent worker
+  round metadata. Git collection provenance is the narrowly scoped exception
+  described in Review Corrections below.
 - Each round distinguishes active/queued/parked work from ended work; done,
   failed and cancelled all belong to ended. Status transitions update counts
   and categories without losing records or changing the user's open task.
@@ -175,3 +176,34 @@ detail surfaces have already been applied before delegation.
   verified separately, including the 180px bubble-scroll assertion.
 - Dependency graphs are refreshed to 183 modules. The remaining step is an
   independent read-only review of these completed UI changes and their tests.
+
+## Review Corrections
+
+- The independent review identified that the old collector conflated command
+  failure/non-Git directories with clean results, and finalization used truthy
+  fallback to preserve an earlier diff. A display-only fix cannot make that
+  distinction reliable, so this batch now includes Git collection provenance.
+- `Task.gitSnapshot` records clean/available/unavailable/error, capture time,
+  workspace/integration scope, truncation, and run/phase/start association.
+  The task-index field list preserves it across restart. Existing collector
+  diff/stat fields and the finalizer's injected legacy collector API remain
+  compatible; empty legacy data cannot certify a clean repository.
+- The workspace collector checks command outcomes and includes staged,
+  unstaged and untracked changes. The integration collector also records
+  failures explicitly. No branch creation, merge, cleanup or task scheduling
+  policy is changed. A current-run integration snapshot survives a clean
+  workspace capture; an old-run snapshot cannot substitute for this run.
+- The Git view hides snapshots associated with another execution and marks
+  legacy nonempty snapshots as historical with unknown execution provenance.
+  Clean now means no uncommitted/untracked workspace changes at capture time,
+  or no integration-branch difference against its baseline, depending on scope.
+- `npm run smoke:git-snapshot` exercises a real temporary repository through
+  collection, finalization, persistence/reload and GitSummary rendering. It
+  covers first-run clean, dirty-to-clean rerun, staged/unborn-HEAD changes,
+  untracked files, corrupt-index command errors, non-Git/missing directories,
+  same-run integration preservation and delayed old-run finalization. It is
+  also registered under `smoke:git-errors`, already part of `smoke:all`.
+- Still pending: worker creation-clock rollback must become unclassified;
+  actual detail tabs and worker-window lifecycle need the requested keyboard
+  coverage; Settings must test Escape with the menu actually open plus arrow
+  opening/navigation. These are separate from the Git correction.

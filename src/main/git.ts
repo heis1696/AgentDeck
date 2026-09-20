@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import type { FileDiffErrorCode, FileDiffResult } from '../shared/contracts'
-import type { WorktreeCleanupStatus, WorktreeInfo } from '../shared/types'
+import type { TaskGitSnapshot, WorktreeCleanupStatus, WorktreeInfo } from '../shared/types'
 
 export interface GitCommandResult {
   ok: boolean
@@ -77,28 +77,51 @@ export async function branchExists(workdir: string, name: string): Promise<boole
   return (await git(workdir, ['rev-parse', '--verify', '--quiet', name])).trim() !== ''
 }
 
-export async function snapshotGitAfter(
-  workdir: string
-): Promise<{ diff: string; stat: string }> {
-  if (!workdir) return { diff: '', stat: '' }
-  const isRepo = await isGitRepo(workdir)
-  if (!isRepo) return { diff: '', stat: '' }
-  const [stat, diff] = await Promise.all([
-    git(workdir, ['diff', '--stat']),
-    git(workdir, ['diff'])
-  ])
-  const untracked = await git(workdir, ['ls-files', '--others', '--exclude-standard'])
-  const untrackedBlock = untracked
-    ? '\n# 未跟踪文件:\n' + untracked
-        .split('\n')
-        .filter(Boolean)
-        .map((f) => `+ ${f}`)
-        .join('\n')
-    : ''
+export interface GitSnapshotResult {
+  diff: string
+  stat: string
+  snapshot: TaskGitSnapshot
+}
+
+function snapshotFailure(scope: TaskGitSnapshot['scope'], state: 'error' | 'unavailable', reason: string): GitSnapshotResult {
+  return { diff: '', stat: '', snapshot: { scope, state, reason, capturedAt: Date.now() } }
+}
+
+function snapshotSuccess(scope: TaskGitSnapshot['scope'], diff: string, stat: string): GitSnapshotResult {
   return {
-    diff: (diff + untrackedBlock).trim().slice(0, 200_000),
-    stat: (stat.trim() + (untracked ? `\n未跟踪: ${untracked.split('\n').filter(Boolean).length} 个文件` : '')).trim()
+    diff: diff.slice(0, 200_000),
+    stat: stat.slice(0, 10_000),
+    snapshot: {
+      scope, state: diff.trim() || stat.trim() ? 'available' : 'clean', capturedAt: Date.now(),
+      truncated: diff.length > 200_000 || stat.length > 10_000
+    }
   }
+}
+
+export async function snapshotGitAfter(workdir: string): Promise<GitSnapshotResult> {
+  if (!workdir) return snapshotFailure('workspace', 'unavailable', '此任务未绑定工作目录。')
+  const repo = await runGit(workdir, ['rev-parse', '--is-inside-work-tree'])
+  if (!repo.ok) {
+    return /not a git repository/i.test(repo.stderr)
+      ? snapshotFailure('workspace', 'unavailable', '工作目录不是 Git 仓库。')
+      : snapshotFailure('workspace', 'error', gitError(repo))
+  }
+  if (repo.stdout.trim() !== 'true') return snapshotFailure('workspace', 'unavailable', '工作目录不是 Git 工作区。')
+  // Include both index and working-tree changes, including an unborn HEAD.
+  const [diff, stat, stagedDiff, stagedStat, untracked] = await Promise.all([
+    runGit(workdir, ['diff', '--no-ext-diff', '--no-textconv']),
+    runGit(workdir, ['diff', '--no-ext-diff', '--no-textconv', '--stat']),
+    runGit(workdir, ['diff', '--cached', '--no-ext-diff', '--no-textconv']),
+    runGit(workdir, ['diff', '--cached', '--no-ext-diff', '--no-textconv', '--stat']),
+    runGit(workdir, ['ls-files', '--others', '--exclude-standard', '-z'])
+  ])
+  const failed = [diff, stat, stagedDiff, stagedStat, untracked].find((result) => !result.ok)
+  if (failed) return snapshotFailure('workspace', 'error', gitError(failed))
+  const paths = untracked.stdout.split('\0').filter(Boolean)
+  const untrackedBlock = paths.length ? '# 未跟踪文件:\n' + paths.map((file) => `+ ${JSON.stringify(file)}`).join('\n') : ''
+  return snapshotSuccess('workspace',
+    [diff.stdout.trim(), stagedDiff.stdout.trim(), untrackedBlock].filter(Boolean).join('\n'),
+    [stat.stdout.trim(), stagedStat.stdout.trim(), paths.length ? `未跟踪: ${paths.length} 个文件` : ''].filter(Boolean).join('\n'))
 }
 
 // ---- 单文件未提交 diff（编辑详情：渲染层右侧只读代码分页） ----
@@ -448,12 +471,13 @@ export async function branchDiffSummary(
   repoDir: string,
   baseBranch: string,
   integrationBranch: string
-): Promise<{ diff: string; stat: string }> {
+): Promise<GitSnapshotResult> {
   const [stat, diff] = await Promise.all([
-    git(repoDir, ['diff', '--stat', `${baseBranch}...${integrationBranch}`]),
-    git(repoDir, ['diff', `${baseBranch}...${integrationBranch}`])
+    runGit(repoDir, ['diff', '--no-ext-diff', '--no-textconv', '--stat', `${baseBranch}...${integrationBranch}`]),
+    runGit(repoDir, ['diff', '--no-ext-diff', '--no-textconv', `${baseBranch}...${integrationBranch}`])
   ])
-  return { diff: diff.slice(0, 200_000), stat: stat.trim().slice(0, 10_000) }
+  const failed = [stat, diff].find((result) => !result.ok)
+  return failed ? snapshotFailure('integration', 'error', gitError(failed)) : snapshotSuccess('integration', diff.stdout, stat.stdout.trim())
 }
 
 function metadataForPath(repoDir: string, wtDir: string) {

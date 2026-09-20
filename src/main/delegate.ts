@@ -572,6 +572,7 @@ export async function runDelegationLoop(
   let integrationBranch = ''
   let gitDiff = ''
   let gitStat = ''
+  let gitSnapshot: Task['gitSnapshot']
   if (hasRepo && task.workdir && baseBranch && allChildren.length) {
     integrationBranch = `agentdeck/task-${taskId}`
     let allOk = true
@@ -659,14 +660,16 @@ export async function runDelegationLoop(
       if (!active()) return abandoned()
       gitDiff = sum.diff
       gitStat = sum.stat
+      gitSnapshot = sum.snapshot
       integrationNote = `改动已合入集成分支 ${integrationBranch}（基线 ${baseBranch}，${mergedCount} 个子任务），确认后可自行 merge`
       note(`集成完成 → ${integrationBranch}`)
     } else if (allOk) {
       // 没有任何子任务产生可合并改动（可能都改在了主目录或无改动）
-      const dirty = await import('./git').then((g) => g.snapshotGitAfter(task.workdir)).catch(() => ({ diff: '', stat: '' }))
+      const dirty = await import('./git').then((g) => g.snapshotGitAfter(task.workdir))
       if (!active()) return abandoned()
       gitDiff = dirty.diff || ""
       gitStat = dirty.stat || ""
+      gitSnapshot = dirty.snapshot
       integrationNote = '子任务无独立分支改动；领队若自己改了文件，改动保留在主目录工作区（未提交）'
     } else {
       // 一次性告知：失败原因只进时间线事件（收件箱/看板等错误面亦可散见），
@@ -680,6 +683,7 @@ export async function runDelegationLoop(
     ...(integrationBranch ? { integration: { branch: integrationBranch, note: integrationNote } } : {}),
     gitDiff: gitDiff || undefined,
     gitStat: gitStat || undefined,
+    gitSnapshot: gitSnapshot ? { ...gitSnapshot, runId, phaseIndex: task.phaseIndex, startedAt: task.startedAt } : undefined,
     roundsUsed: round
   } as Partial<Task>)
   pushTask(taskId)

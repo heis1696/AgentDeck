@@ -54,7 +54,7 @@ const patch = 'diff --git a/test.ts b/test.ts\n--- a/test.ts\n+++ b/test.ts\n@@ 
 for (const [status, extra, expected] of [
   ['running', {}, 'executing'], ['queued', { parked: true }, 'executing'], ['done', {}, 'unavailable'],
   ['done', { gitDiff: null, gitStat: null }, 'unavailable'],
-  ['done', { gitDiff: '', gitStat: '' }, 'clean'], ['done', { gitDiff: patch }, 'available'],
+  ['done', { gitDiff: '', gitStat: '' }, 'unavailable'], ['done', { gitDiff: patch }, 'available'],
   ['running', { gitDiff: patch }, 'available'], ['done', { gitStat: 'test.ts | 1 +' }, 'available']
 ]) {
   const page = new JSDOM(renderToStaticMarkup(createElement(GitSummary, { task: task('git', 1000, status, extra) })))

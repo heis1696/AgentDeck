@@ -344,6 +344,18 @@ export interface TaskUsage {
   turns: number
 }
 
+/** Provenance of a recorded Git snapshot; absent on legacy tasks. */
+export interface TaskGitSnapshot {
+  state: 'clean' | 'available' | 'unavailable' | 'error'
+  scope: 'workspace' | 'integration'
+  capturedAt: number
+  runId?: string
+  phaseIndex?: number
+  startedAt?: number
+  reason?: string
+  truncated?: boolean
+}
+
 export interface Task {
   id: string
   title: string
@@ -409,6 +421,7 @@ export interface Task {
   /** 完成时抓取的 git 改动 */
   gitDiff?: string
   gitStat?: string
+  gitSnapshot?: TaskGitSnapshot
   /** 完成时聚合的累计用量 */
   usage?: TaskUsage
   /** 事件条数（详情按需加载） */

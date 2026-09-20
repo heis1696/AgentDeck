@@ -23,7 +23,7 @@ const TASK_INDEX_FIELDS = [
   'suppressIssue', 'runId', 'goalId', 'phaseIndex', 'parentTaskId', 'workerIndex', 'integration', 'status',
   'createdAt', 'startedAt', 'endedAt', 'result', 'error', 'failure', 'attempt',
   'roundsUsed', 'handoff', 'continuesFrom', 'parked', 'backgroundRunning', 'titleAuto', 'sessionId',
-  'gitDiff', 'gitStat', 'usage', 'eventCount', 'unavailableReason', 'worktree', 'workVersion', 'dedupeKey'
+  'gitDiff', 'gitStat', 'gitSnapshot', 'usage', 'eventCount', 'unavailableReason', 'worktree', 'workVersion', 'dedupeKey'
 ] as const
 
 function isRecord(value: unknown): value is Record<string, unknown> {
