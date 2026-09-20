@@ -9,7 +9,7 @@ import type { AppSettings } from '../../shared/types'
 import { DEFAULT_FEED_BASE } from './trust'
 import { channelRoot, clearPointer, pointerFilePath, readPointer, writePointerAtomic, type HotChannel } from './pointer'
 import { compareSemver, sha256File, verifyManifest, type HotManifestPayload } from './verifier'
-import { resolveHotState } from './resolve'
+import { resolveHotState, type HotResolution } from './resolve'
 import { downloadArtifact, fetchManifest } from './feed'
 import { extractZipStore } from './zip'
 import { placeUnlockedFiles, rollbackShell, spawnSwapHelper, stageShellZip } from './shell'
@@ -34,6 +34,16 @@ export interface UpdaterDeps {
 }
 
 const GC_KEEP_VERSIONS = 3
+
+class StaleUpdateError extends Error {
+  constructor(version: string, active: string) {
+    super(`拒绝降级：${version} 不高于当前版本 ${active}`)
+    this.name = 'StaleUpdateError'
+  }
+}
+
+type StageOptions = { relaunch?: boolean; loadRenderer?: boolean }
+type StageResult = 'applied' | 'staged' | 'noop'
 
 /** 版本目录名过滤：排除指针/留证/staging/隔离物 */
 const isVersionDir = (name: string) =>
@@ -81,11 +91,13 @@ export class HotUpdater {
     this.busy = true
     try {
       this.emit({ phase: 'checking', channel: null, error: undefined })
+      const hot = this.currentHotState()
       // 三通道串行各拉一次定点 manifest（验签失败按该通道无更新处理，不置 failed）
       for (const channel of ['payload', 'renderer', 'shell'] as const) {
         try {
-          this.feedVersions[channel] = (await this.verifyFeedManifest(channel)).version
+          this.feedVersions[channel] = (await this.verifyFeedManifest(channel, hot)).version
         } catch {
+          delete this.feedVersions[channel]
           /* 静默：check 失败不打扰（§1.2 启动静默检查语义） */
         }
       }
@@ -120,7 +132,7 @@ export class HotUpdater {
   }
 
   /**
-   * 一键更新（UI「开始更新」）：renderer→payload 顺序应用（payload 有空闲门控，
+   * 一键更新（UI「开始更新」）：payload→renderer 顺序应用，全部处理后只重启一次（payload 有空闲门控，
    * 非空闲挂起为 staged 由退出时补应用），shell 只做 staging——确认动作（§9.3 半自动）
    * 仍由用户显式 apply('shell') 触发。单次持锁串行，与手动 apply 互斥。
    */
@@ -130,25 +142,60 @@ export class HotUpdater {
     try {
       let applied = 0
       let firstError: string | null = null
-      // 载荷优先：P6 全量自带渲染层，且先把新版比较器/下载逻辑落地（旧版客户端的渲染层门禁
-      // 误判只有靠载荷更新解开）；单通道失败不阻断其余通道
-      for (const channel of ['payload', 'renderer'] as const) {
-        if (!this.availableFor(channel)) continue
+      let stagedPayload = false
+      let l1Version: string | undefined
+
+      // L1 must be effective before its dependent renderer manifest is checked again.
+      if (this.availableFor('payload')) {
         try {
-          await this.stageAndFlip(channel)
-          applied++
+          const result = await this.stageAndFlip('payload', { relaunch: false })
+          if (result === 'applied') {
+            applied++
+            l1Version = this.currentHotState().payload?.version
+          } else if (result === 'staged') {
+            stagedPayload = true
+          }
         } catch (error) {
-          firstError ??= error instanceof Error ? error.message : String(error)
+          if (!(error instanceof StaleUpdateError)) {
+            firstError ??= error instanceof Error ? error.message : String(error)
+          }
         }
       }
+
+      // A staged L1 is not effective yet; do not stage or load an L2 that needs it.
+      if (!stagedPayload) {
+        try {
+          const l1Applied = l1Version !== undefined
+          if (l1Applied || this.availableFor('renderer')) {
+            const result = await this.stageAndFlip('renderer', {
+              relaunch: false,
+              loadRenderer: !l1Applied
+            })
+            if (result === 'applied') applied++
+          }
+        } catch (error) {
+          // A feed can disappear or roll back between check and apply. It must not
+          // turn into a downgrade or prevent an already-applied L1 from restarting.
+          if (!(error instanceof StaleUpdateError)) {
+            firstError ??= error instanceof Error ? error.message : String(error)
+          }
+        }
+      }
+
       if (this.availableFor('shell') && !this.stagedShell) {
         try {
           await this.applyShell()
           applied++
         } catch (error) {
-          firstError ??= error instanceof Error ? error.message : String(error)
+          if (!(error instanceof StaleUpdateError)) {
+            firstError ??= error instanceof Error ? error.message : String(error)
+          }
         }
       }
+
+      // L1 is the only channel that requires a process restart. Keep it last and
+      // invoke it once after both channel decisions are complete.
+      if (l1Version) this.deps.relaunchForUpdate(l1Version)
       if (firstError && applied === 0) return { ok: false, error: firstError }
       return { ok: true }
     } finally {
@@ -157,27 +204,21 @@ export class HotUpdater {
   }
 
   /** feed 上有比本地当前更新的版本则返回该版本号（available 快照与 applyAll 编排共用） */
-  private availableFor(channel: UpdateChannel): string | undefined {
+  private availableFor(channel: UpdateChannel, hot = this.currentHotState()): string | undefined {
     const feed = this.feedVersions[channel]
     if (!feed) return undefined
-    const active = channel === 'shell' ? this.deps.getShellVersion() : this.activeVersionFor(channel)
+    const active = channel === 'shell' ? this.deps.getShellVersion() : this.activeVersionFor(channel, hot)
     if (feed === active) return undefined
     // 只把「严格高于当前」当可更新：壳通道版本串与基座不同但内容相同时不诱导 314MB 空下载；
     // 服务端 manifest 被回滚（降级）也不当更新报
     return compareSemver(feed, active) === 1 ? feed : undefined
   }
 
-  private activeVersionFor(channel: 'renderer' | 'payload'): string {
+  private activeVersionFor(channel: 'renderer' | 'payload', hot = this.currentHotState()): string {
     const shellVersion = this.shellVersion()
-    const hot = resolveHotState(this.deps.getUserDataDir(), shellVersion)
     if (channel === 'payload') return hot.payload?.version ?? shellVersion
-    // P6：载荷生效时其自带渲染层即当前渲染层（L2 指针已被清，feed 渲染层只与载荷版本比）
-    if (hot.payload) return hot.payload.version
-    try {
-      return readPointer(this.deps.getUserDataDir(), 'renderer')?.version ?? shellVersion
-    } catch {
-      return shellVersion
-    }
+    // 独立 L2 生效时与 L2 比较；否则载荷自带界面随 L1 生效。
+    return hot.rendererVersion ?? hot.payload?.version ?? shellVersion
   }
 
   async rollback(channel: UpdateChannel): Promise<{ ok: boolean; error?: string }> {
@@ -213,8 +254,10 @@ export class HotUpdater {
       const target = candidates[0]
       if (!target) return { ok: false, error: '没有可回退的历史版本（保留窗口内无其他版本）' }
       const manifestPath = path.join(root, target.name, 'manifest.json')
-      const verdict = verifyManifest(manifestPath, channel, this.currentGates())
+      const hot = this.currentHotState()
+      const verdict = verifyManifest(manifestPath, channel, this.currentGates(hot))
       if (!verdict.ok) return { ok: false, error: `历史版本校验失败：${verdict.reason}` }
+      if (channel === 'renderer') this.assertRendererVersion(verdict.manifest, hot)
       this.flipPointer(channel, target.name, verdict.manifest)
       return { ok: true }
     } catch (error) {
@@ -254,10 +297,13 @@ export class HotUpdater {
     this.staged = null
     const userData = this.deps.getUserDataDir()
     const manifestPath = path.join(channelRoot(userData, 'payload'), version, 'manifest.json')
-    const verdict = verifyManifest(manifestPath, 'payload', this.currentGates())
+    const hot = this.currentHotState()
+    const verdict = verifyManifest(manifestPath, 'payload', this.currentGates(hot))
     if (!verdict.ok) return
+    if (verdict.manifest.version !== version) return
+    if (this.assertUpgrade('payload', verdict.manifest.version, hot) !== 1) return
+    // flipPointer owns the single relaunch; before-quit continues its existing shutdown.
     this.flipPointer('payload', version, verdict.manifest)
-    this.deps.relaunchForUpdate(version)
   }
 
   // ---------- 内部 ----------
@@ -267,10 +313,14 @@ export class HotUpdater {
     return custom || DEFAULT_FEED_BASE
   }
 
-  /** 生效主进程版本（载荷 manifest.version 优先，否则壳版本）——L2 门禁基准（§2.2 规则 6） */
-  private currentGates(): { mainVersion: string; shellVersion: string } {
+  private currentHotState(): HotResolution {
     const shellVersion = this.shellVersion()
-    const hot = resolveHotState(this.deps.getUserDataDir(), shellVersion)
+    return resolveHotState(this.deps.getUserDataDir(), shellVersion)
+  }
+
+  /** 生效主进程版本（载荷 manifest.version 优先，否则壳版本）——L2 门禁基准（§2.2 规则 6） */
+  private currentGates(hot = this.currentHotState()): { mainVersion: string; shellVersion: string } {
+    const shellVersion = this.shellVersion()
     return { mainVersion: hot.payload?.version ?? shellVersion, shellVersion }
   }
 
@@ -278,14 +328,33 @@ export class HotUpdater {
     return this.deps.getShellVersion()
   }
 
-  private async verifyFeedManifest(channel: UpdateChannel): Promise<HotManifestPayload> {
-    const { manifestBytes, payload } = await fetchManifest(this.feedBase(), channel)
+  private assertRendererVersion(manifest: HotManifestPayload, hot: HotResolution): void {
+    const baseline = hot.payload?.version ?? this.shellVersion()
+    if (typeof manifest.version !== 'string' || compareSemver(manifest.version, baseline) !== 1) {
+      throw new Error('渲染层版本不高于当前主进程自带版本，无需单独应用')
+    }
+  }
+
+  private assertUpgrade(channel: HotChannel, version: string, hot: HotResolution): number {
+    const active = this.activeVersionFor(channel, hot)
+    if (typeof version !== 'string') throw new Error('manifest version 必须为版本字符串')
+    const order = compareSemver(version, active)
+    if (order === null) throw new Error(`manifest version 无法比较：${version}`)
+    return order
+  }
+
+  private async verifyFeedManifest(channel: UpdateChannel, hot = this.currentHotState()): Promise<HotManifestPayload> {
+    const { manifestBytes } = await fetchManifest(this.feedBase(), channel)
+    return this.verifyManifestBytes(channel, manifestBytes, hot)
+  }
+
+  private verifyManifestBytes(channel: UpdateChannel, manifestBytes: Buffer, hot: HotResolution): HotManifestPayload {
     const tmpDir = channel === 'shell' ? path.join(this.deps.getUserDataDir(), 'hot-shell') : channelRoot(this.deps.getUserDataDir(), channel)
     const tmp = path.join(tmpDir, `.latest-${channel}.json`)
     fs.mkdirSync(path.dirname(tmp), { recursive: true })
     fs.writeFileSync(tmp, manifestBytes)
     try {
-      const verdict = verifyManifest(tmp, channel, this.currentGates())
+      const verdict = verifyManifest(tmp, channel, this.currentGates(hot))
       if (!verdict.ok) throw new Error(`feed manifest 校验失败：${verdict.reason}`)
       return verdict.manifest
     } finally {
@@ -296,10 +365,23 @@ export class HotUpdater {
   }
 
   /** staging 全流程 + 指针翻转（§5.1；下载中断/校验失败/目标已存在各分支均现网零触碰） */
-  private async stageAndFlip(channel: HotChannel): Promise<void> {
+  private async stageAndFlip(channel: HotChannel, options: StageOptions = {}): Promise<StageResult> {
     const userData = this.deps.getUserDataDir()
+    const hot = this.currentHotState()
+    const { manifestBytes } = await fetchManifest(this.feedBase(), channel)
+    const payload = this.verifyManifestBytes(channel, manifestBytes, hot)
+    this.feedVersions[channel] = payload.version
+    const order = this.assertUpgrade(channel, payload.version, hot)
+    if (order < 0) {
+      const error = new StaleUpdateError(payload.version, this.activeVersionFor(channel, hot))
+      this.emit({ phase: 'idle', channel: null, error: undefined })
+      throw error
+    }
+    if (order === 0) {
+      this.emit({ phase: 'idle', channel: null, error: undefined })
+      return 'noop'
+    }
     this.emit({ phase: 'downloading', channel, error: undefined })
-    const { manifestBytes, payload } = await fetchManifest(this.feedBase(), channel)
     const artifact = payload.artifact
     if (!artifact || !artifact.name || !artifact.sha256) throw new Error('feed manifest 缺 artifact（zip 产物清单）')
     const staging = path.join(channelRoot(userData, channel), `.staging-${Date.now()}`)
@@ -324,8 +406,17 @@ export class HotUpdater {
         }
       }
       fs.writeFileSync(path.join(extracted, 'manifest.json'), manifestBytes)
-      const verdict = verifyManifest(path.join(extracted, 'manifest.json'), channel, this.currentGates())
+      const currentHot = this.currentHotState()
+      const verdict = verifyManifest(path.join(extracted, 'manifest.json'), channel, this.currentGates(currentHot))
       if (!verdict.ok) throw new Error(`staging manifest 校验失败：${verdict.reason}`)
+      // Downloads can outlive a pointer change; recheck against the latest verified state.
+      const currentOrder = this.assertUpgrade(channel, verdict.manifest.version, currentHot)
+      if (currentOrder < 0) throw new StaleUpdateError(verdict.manifest.version, this.activeVersionFor(channel, currentHot))
+      if (currentOrder === 0) {
+        fs.rmSync(staging, { recursive: true, force: true })
+        this.emit({ phase: 'idle', channel: null, error: undefined })
+        return 'noop'
+      }
       // rename 成版本目录（同卷原子；目标已存在 = 版本已装，直接复用）
       const targetDir = path.join(channelRoot(userData, channel), payload.version)
       if (fs.existsSync(targetDir)) {
@@ -338,14 +429,17 @@ export class HotUpdater {
       if (channel === 'payload' && !this.deps.isMainIdle()) {
         this.staged = { version: payload.version }
         this.emit({ phase: 'staged', channel, stagedVersion: payload.version })
-        return
+        return 'staged'
       }
-      this.flipPointer(channel, payload.version, payload)
+      this.flipPointer(channel, payload.version, payload, options)
+      return 'applied'
     } catch (error) {
       try {
         fs.rmSync(staging, { recursive: true, force: true })
       } catch { /* 清理失败不放大错误 */ }
-      this.emit({ phase: 'failed', channel, error: error instanceof Error ? error.message : String(error) })
+      this.emit(error instanceof StaleUpdateError
+        ? { phase: 'idle', channel: null, error: undefined }
+        : { phase: 'failed', channel, error: error instanceof Error ? error.message : String(error) })
       throw error
     }
   }
@@ -380,6 +474,9 @@ export class HotUpdater {
       return { ok: true }
     }
     const payload = await this.verifyFeedManifest('shell')
+    const shellOrder = compareSemver(payload.version, this.deps.getShellVersion())
+    if (shellOrder === null) throw new Error(`manifest version 无法比较：${payload.version}`)
+    if (shellOrder < 0) throw new StaleUpdateError(payload.version, this.deps.getShellVersion())
     if (!payload.artifact?.name) throw new Error('feed manifest 缺 artifact（壳 zip 清单）')
     if (payload.version === this.deps.getShellVersion()) return { ok: true } // 已是最新
     this.emit({ phase: 'downloading', channel: 'shell', error: undefined })
@@ -418,7 +515,7 @@ export class HotUpdater {
   }
 
   /** 指针翻转 + 通道专属后动作（renderer=loadFile 新路径； payload=清 L2 指针+relaunch，P6） */
-  private flipPointer(channel: HotChannel, version: string, manifest: HotManifestPayload): void {
+  private flipPointer(channel: HotChannel, version: string, manifest: HotManifestPayload, options: StageOptions = {}): void {
     const userData = this.deps.getUserDataDir()
     this.emit({ phase: 'applying', channel, stagedVersion: undefined })
     writePointerAtomic(pointerFilePath(userData, channel), {
@@ -432,14 +529,15 @@ export class HotUpdater {
     })
     if (channel === 'renderer') {
       const indexHtml = path.join(channelRoot(userData, channel), version, 'out', 'renderer', 'index.html')
-      this.deps.getWindow()?.loadFile(indexHtml)
+      if (options.loadRenderer !== false) this.deps.getWindow()?.loadFile(indexHtml)
       this.gc(channel, version)
-      this.emit({ phase: 'idle', channel: null, error: undefined })
+      if (options.loadRenderer !== false) this.emit({ phase: 'idle', channel: null, error: undefined })
     } else {
       // 全量 > 增量（P6）：载荷自带渲染层接管，重置 L2 指针后干净重启
+      this.staged = null
       clearPointer(userData, 'renderer', 'superseded')
       this.gc(channel, version)
-      this.deps.relaunchForUpdate(manifest.version)
+      if (options.relaunch !== false) this.deps.relaunchForUpdate(manifest.version)
     }
   }
 
@@ -462,18 +560,11 @@ export class HotUpdater {
 
   private computeSnapshot(): UpdateStateSnapshot {
     const shellVersion = this.shellVersion()
-    const userData = this.deps.getUserDataDir()
-    const hot = resolveHotState(userData, shellVersion)
-    let activeRendererVersion: string | undefined
-    if (hot.reason === 'renderer') {
-      try {
-        const pointer = readPointer(userData, 'renderer')
-        if (pointer) activeRendererVersion = pointer.version
-      } catch { /* 诊断字段，失败即缺省 */ }
-    }
+    const hot = this.currentHotState()
+    const activeRendererVersion = hot.rendererVersion
     const available: { renderer?: string; payload?: string; shell?: string } = {}
     for (const channel of ['renderer', 'payload', 'shell'] as const) {
-      const v = this.availableFor(channel)
+      const v = this.availableFor(channel, hot)
       if (v) available[channel] = v
     }
     return {

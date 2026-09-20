@@ -1,10 +1,12 @@
 // 解析单源（设计 §4.1 / P3）：bootstrap（L1 载荷级）与 index.ts（L2 渲染层级）共用。
 // 执行 §2.2 规则 4-6 全链校验（规则 1-3 在 pointer.readPointer 内）；本模块只读不写——
 // 改名留证 / 隔离等状态处置由调用方（bootstrap §3.3）执行。
+// 文件系统异常（版本目录/清单缺失、清单是目录、权限不足读不出）一律归一为通道级拒绝并只标诊断，
+// 绝不向调用方抛裸错误：调用方（index.ts:207 / bootstrap.ts:80）没有兜底，一层的坏状态不能拖垮另一层。
 import fs from 'node:fs'
 import path from 'node:path'
 import { PayloadRejected, PointerInvalid, readPointer, type HotChannel, type HotPointer } from './pointer'
-import { sha256File, verifyManifest, type HotManifestPayload, type ManifestGate } from './verifier'
+import { compareSemver, sha256File, verifyManifest, type HotManifestPayload, type ManifestGate } from './verifier'
 
 export interface HotPayloadInfo {
   /** 生效载荷版本目录绝对路径 */
@@ -17,6 +19,8 @@ export interface HotPayloadInfo {
 export interface HotResolution {
   /** 实际可用的渲染层入口绝对路径；null = 用 asar 内置路径 */
   rendererIndexHtml: string | null
+  /** Active standalone L2 renderer version; absent when the payload renderer is active. */
+  rendererVersion?: string
   /** 生效载荷信息；null = 无载荷（主进程就是 asar 内置） */
   payload: HotPayloadInfo | null
   /**
@@ -37,35 +41,55 @@ export function resolveHotState(userDataDir: string, shellVersion: string, opts?
 
   const gate: ManifestGate = { mainVersion: shellVersion, shellVersion }
   let fallbackReason: string | null = null
+  let payload: { version: string; dir: string; entry: string; rendererIndexHtml: string | null } | null = null
 
-  // 第 1 层：L1 载荷指针（§4.1 顺序 2）。载荷自带渲染层接管，L2 指针按 P6 此时不应存在，忽略不读。
+  // 第 1 层：L1 决定主进程和自带界面；后续独立发布的新版 L2 可在此基础上覆盖界面。
   try {
     const found = resolveChannel(userDataDir, 'payload', gate)
     if (found) {
       const entry = path.join(found.versionDir, 'out', 'main', 'index.js')
       if (!fs.existsSync(entry)) throw new PayloadRejected('entry-missing')
       const rendererIndexHtml = path.join(found.versionDir, 'out', 'renderer', 'index.html')
-      return {
-        rendererIndexHtml: fs.existsSync(rendererIndexHtml) ? rendererIndexHtml : null,
-        payload: { dir: found.versionDir, version: found.manifest.version, entry },
-        reason: 'payload'
+      payload = {
+        dir: found.versionDir,
+        version: found.manifest.version,
+        entry,
+        rendererIndexHtml: fs.existsSync(rendererIndexHtml) ? rendererIndexHtml : null
       }
     }
   } catch (error) {
-    fallbackReason = rejection(error).reason
+    fallbackReason = rejectionReason(error)
   }
 
-  // 第 2 层：L2 渲染层指针（§4.1 顺序 3）。此分支下主进程为内置（或未生效载荷），门禁主版本 = 壳版本。
+  // 第 2 层：L2 只覆盖渲染层；有效 L1 主进程继续保留，门禁基准为生效主进程版本。
+  const effectiveMainVersion = payload?.version ?? shellVersion
+  const rendererGate: ManifestGate = { mainVersion: effectiveMainVersion, shellVersion }
   try {
-    const found = resolveChannel(userDataDir, 'renderer', gate)
+    const found = resolveChannel(userDataDir, 'renderer', rendererGate)
     if (found) {
+      if (typeof found.manifest.version !== 'string' || compareSemver(found.manifest.version, effectiveMainVersion) !== 1) {
+        throw new PayloadRejected('renderer-version-not-newer')
+      }
       const rendererIndexHtml = path.join(found.versionDir, 'out', 'renderer', 'index.html')
       if (!fs.existsSync(rendererIndexHtml)) throw new PayloadRejected('renderer-entry-missing')
-      return { rendererIndexHtml, payload: null, reason: 'renderer' }
+      return {
+        rendererIndexHtml,
+        rendererVersion: found.manifest.version,
+        payload: payload ? { dir: payload.dir, version: payload.version, entry: payload.entry } : null,
+        reason: 'renderer'
+      }
     }
   } catch (error) {
-    // L1 已失败时保留 L1 的诊断（更接近根因），否则记录 L2 的
-    if (!fallbackReason) fallbackReason = rejection(error).reason
+    // L2 失败不能影响有效 L1；L1 失败时保留更接近根因的诊断。
+    if (!fallbackReason) fallbackReason = rejectionReason(error)
+  }
+
+  if (payload) {
+    return {
+      rendererIndexHtml: payload.rendererIndexHtml,
+      payload: { dir: payload.dir, version: payload.version, entry: payload.entry },
+      reason: 'payload'
+    }
   }
 
   return { rendererIndexHtml: null, payload: null, reason: fallbackReason ?? 'no-pointer' }
@@ -80,21 +104,42 @@ function resolveChannel(
   const pointer = readPointer(userDataDir, channel)
   if (!pointer) return null
   const versionDir = path.join(userDataDir, pointer.dir)
-  if (!fs.existsSync(versionDir)) throw new PointerInvalid('version-dir-missing')
+  const dirState = statVersionDir(versionDir)
+  if (dirState !== 'dir') throw new PointerInvalid(`version-dir-${dirState}`)
   const manifestPath = path.join(versionDir, 'manifest.json')
-  if (!fs.existsSync(manifestPath)) throw new PayloadRejected('manifest-missing')
-  if (sha256File(manifestPath) !== pointer.manifestSha256) throw new PayloadRejected('manifest-sha-mismatch')
+  if (readManifestSha256(manifestPath) !== pointer.manifestSha256) throw new PayloadRejected('manifest-sha-mismatch')
   const verdict = verifyManifest(manifestPath, channel, gate)
   if (!verdict.ok) throw new PayloadRejected(verdict.reason)
   return { pointer, versionDir, manifest: verdict.manifest }
 }
 
-function rejection(error: unknown): HotResolution {
-  if (error instanceof PointerInvalid) {
-    return { rendererIndexHtml: null, payload: null, reason: `pointer-invalid:${error.detail}` }
+/** 版本目录可用性：缺失 / 路径不是目录 / 读不到（EACCES 等）都只让本通道回退，不外抛 fs 异常。 */
+function statVersionDir(versionDir: string): 'dir' | 'missing' | 'unreadable' {
+  try {
+    return fs.statSync(versionDir).isDirectory() ? 'dir' : 'missing'
+  } catch (error) {
+    return fsErrorCode(error) === 'ENOENT' ? 'missing' : 'unreadable'
   }
-  if (error instanceof PayloadRejected) {
-    return { rendererIndexHtml: null, payload: null, reason: `payload-rejected:${error.rejectReason}` }
+}
+
+/** 规则 4 读盘：缺失 → manifest-missing；是目录 / 不可读 → manifest-unreadable（EISDIR/EACCES/ELOOP 等同归一）。 */
+function readManifestSha256(manifestPath: string): string {
+  try {
+    return sha256File(manifestPath)
+  } catch (error) {
+    throw new PayloadRejected(fsErrorCode(error) === 'ENOENT' ? 'manifest-missing' : 'manifest-unreadable')
   }
-  throw error
+}
+
+function fsErrorCode(error: unknown): string {
+  const code = (error as NodeJS.ErrnoException | null)?.code
+  return typeof code === 'string' ? code : ''
+}
+
+/** 归一失败诊断：只归类不外抛（未知异常也给可排障的 code）——任一层失败都不得成为解析单源的出口。 */
+function rejectionReason(error: unknown): string {
+  if (error instanceof PointerInvalid) return `pointer-invalid:${error.detail}`
+  if (error instanceof PayloadRejected) return `payload-rejected:${error.rejectReason}`
+  const code = fsErrorCode(error)
+  return `payload-rejected:${code ? code.toLowerCase() : 'unexpected'}`
 }
