@@ -38,7 +38,11 @@ export interface DraftBridge {
   /** tasks.list 全局延迟（ms）；listScript 优先 */
   listDelayMs: number
   /** 按调用次序脚本化的 tasks.list 响应（shift 消费；snapshot 缺省取当时 store 快照）；用尽后回退全局延迟 */
+<<<<<<< HEAD
   listScript: Array<{ snapshot?: Task[]; delayMs?: number; error?: string }>
+=======
+  listScript: Array<{ snapshot?: Task[]; delayMs?: number }>
+>>>>>>> agentdeck/t_mu945949_u3ri8e_c8
   seedTask(seed: DraftBridgeTaskSeed): Task
   /** 模拟 issues:create 的主进程侧：同步注册，只广播 issues:updated */
   createDraftIssue(input: DraftIssueCreateInput): { task: Task; issue: Issue }
@@ -72,7 +76,11 @@ const store = {
 
 const calls = { list: 0, get: 0 }
 let listDelayMs = 0
+<<<<<<< HEAD
 const listScript: Array<{ snapshot?: Task[]; delayMs?: number; error?: string }> = []
+=======
+const listScript: Array<{ snapshot?: Task[]; delayMs?: number }> = []
+>>>>>>> agentdeck/t_mu945949_u3ri8e_c8
 
 const emitIssue = (task: Task) => {
   const issue = store.issues.find((candidate) => candidate.taskId === task.id) ?? null
@@ -185,7 +193,11 @@ const api = {
       const scripted = listScript.shift()
       const payload = snapshot(scripted?.snapshot)
       const delay = scripted?.delayMs ?? listDelayMs
+<<<<<<< HEAD
       return new Promise<Task[]>((resolve, reject) => setTimeout(() => scripted?.error ? reject(new Error(scripted.error)) : resolve(payload), delay))
+=======
+      return new Promise<Task[]>((resolve) => setTimeout(() => resolve(payload), delay))
+>>>>>>> agentdeck/t_mu945949_u3ri8e_c8
     },
     get: (id: string) => {
       calls.get++
