@@ -1,0 +1,101 @@
+/* Shared page header contract. Keep this stylesheet scoped to PageHeader. */
+header.view-header[data-page-header] {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex: 0 0 auto;
+  min-height: 72px;
+  padding: var(--space-4) 24px;
+  border-bottom: 1px solid var(--border);
+  background-color: var(--bg-raised);
+  color: var(--text);
+  position: relative;
+}
+header.view-header[data-page-header] > .view-header-main {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+header.view-header[data-page-header] .view-header-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 0 1 auto;
+  min-width: 0;
+}
+header.view-header[data-page-header] .view-header-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  color: var(--accent);
+}
+header.view-header[data-page-header] .view-header-icon svg { width: 16px; height: 16px; }
+header.view-header[data-page-header] .view-header-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--text-page-title);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-page-title);
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+header.view-header[data-page-header] .view-header-count {
+  flex: 0 0 auto;
+  min-width: 20px;
+  color: var(--text-dim);
+  font: var(--weight-medium) var(--text-caption)/var(--leading-tight) var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+header.view-header[data-page-header] .view-header-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-dim);
+  font-size: var(--text-caption);
+  line-height: var(--leading-normal);
+  white-space: nowrap;
+}
+header.view-header[data-page-header] .view-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+  min-width: 0;
+}
+header.view-header[data-page-header] .view-header-actions > * { flex: 0 0 auto; }
+header.view-header[data-page-header] .view-header-actions .btn,
+header.view-header[data-page-header] .view-header-actions .command-trigger { min-height: var(--control-md); }
+
+/* The main container owns header wrapping; title geometry stays unchanged. */
+@container main (max-width: 600px) {
+  header.view-header[data-page-header] {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+  header.view-header[data-page-header] > .view-header-main { flex: 1 1 100%; }
+  header.view-header[data-page-header] .view-header-actions {
+    flex: 1 1 100%;
+    justify-content: flex-start;
+  }
+}
+@container main (max-width: 760px) {
+  header.view-header[data-page-header] { padding-left: 16px; padding-right: 16px; }
+}
+@container main (max-width: 520px) {
+  header.view-header[data-page-header] > .view-header-main {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+  header.view-header[data-page-header] .view-header-meta { width: 100%; }
+  header.view-header[data-page-header] .view-header-actions { flex-wrap: wrap; }
+}

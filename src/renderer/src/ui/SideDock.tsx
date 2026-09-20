@@ -1,7 +1,15 @@
 /**
- * SideDock v4（交互中心化）：右侧分页容器仍是**常规布局列**——
+ * SideDock v5（交互中心化 + 键盘可达）：右侧分页容器仍是**常规布局列**——
  * 挂在 .detail 行布局末位，与左侧主内容共分界面宽度；分割线拖动只在此区域内重新分配。
  * 窗口最小宽度由主进程 minWidth 兜底。tab 导航为顶部横向标签条；宽度 320–720px，localStorage 记忆。
+ *
+ * 与 v4 的区别（纯呈现层，契约不变）：
+ * - 页签条上方加一行极窄的标题檐（页签数 + 全部关闭），分割线支持键盘微调
+ *   （←/→ 16px、Shift 64px、Home/End 到上下限、双击复位）；
+ * - 页签显示内容摘要：file 项带 +/- 统计，task 项带实时状态点；
+ * - 激活页签滚入视野（窄窗 + 多页签时页面切换不再「消失」）：按**整行**（含关闭按钮）滚页签条自身，
+ *   焦点切换一律 preventScroll——堆叠布局下父级 .detail 的 scrollTop 必须原地不动；
+ * - 分页面板内容与关闭语义完全沿用 v4。
  *
  * 与 v3 的区别：分页状态（items/activeId）不再由组件自持，也不再走 window CustomEvent——
  * 全部存在 ui/interaction-center 的 dock 桶里，**按根任务隔离**、跨挂载保留：
@@ -11,8 +19,8 @@
  * file 项 payload：事件参数快照（DockEditMetadata）+ 可选 git 权威 diff（diff/additions/deletions/diffNote）。
  * items 清空 → 整体卸载，主内容自动占回全宽。
  */
-import { useCallback, useId, useRef, useState } from 'react'
-import { FileCode2, ListTodo, X } from 'lucide-react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { FileCode2, ListTodo, X, XCircle } from 'lucide-react'
 import type { Task } from '../../../shared/types'
 import { CodeViewer } from './CodeViewer'
 import { WorkerPane } from '../components/task/WorkerPane'
@@ -24,6 +32,9 @@ export type { DockEditMetadata, DockFileDiff, DockItem } from './interaction-cen
 const DOCK_WIDTH_KEY = 'agentdeck:dock-width'
 const DOCK_MIN = 320
 const DOCK_MAX = 720
+const DOCK_DEFAULT = 480
+const DOCK_STEP = 16
+const DOCK_STEP_LARGE = 64
 
 /** 兼容转发：打开/更新分页项（返回打开请求标识，供异步回写校验） */
 export function openDockItem(item: DockItem): DockHandle {
@@ -43,7 +54,7 @@ export function SideDock({ taskId, tasks, onOpen }: { taskId: string; tasks: Tas
 
   const [width, setWidth] = useState(() => {
     const saved = Number(localStorage.getItem(DOCK_WIDTH_KEY))
-    return Number.isFinite(saved) && saved >= DOCK_MIN && saved <= DOCK_MAX ? saved : 480
+    return Number.isFinite(saved) && saved >= DOCK_MIN && saved <= DOCK_MAX ? saved : DOCK_DEFAULT
   })
   const stripRef = useRef<HTMLDivElement>(null)
   // 页签按钮按 id 登记：键盘切换靠它把焦点带到新激活页签。
@@ -52,6 +63,12 @@ export function SideDock({ taskId, tasks, onOpen }: { taskId: string; tasks: Tas
   const tabRefs = useRef(new Map<string, HTMLButtonElement>())
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null)
   const prefix = useId()
+
+  const applyWidth = useCallback((next: number) => {
+    const clamped = Math.min(DOCK_MAX, Math.max(DOCK_MIN, Math.round(next)))
+    setWidth(clamped)
+    localStorage.setItem(DOCK_WIDTH_KEY, String(clamped))
+  }, [])
 
   // 分割线只重新分配本行内宽度：向左拖=分栏变宽（主内容让空白），向右拖=分栏收窄
   const onSplitterDown = useCallback((event: React.PointerEvent) => {
@@ -73,9 +90,10 @@ export function SideDock({ taskId, tasks, onOpen }: { taskId: string; tasks: Tas
   }, [])
 
   const active = items.find((item) => item.id === activeId)
-  if (!active) return null
-  const activeIndex = items.indexOf(active)
-  const focusTab = (id: string) => tabRefs.current.get(id)?.focus()
+  const activeIndex = items.findIndex((item) => item.id === activeId)
+  // preventScroll：焦点自己会把最近的滚动祖先（堆叠布局下就是 .detail）拉进视野，
+  // 任务头部会跟着跳动——滚动的唯一出口是下面那段「只滚页签条」的 effect。
+  const focusTab = (id: string) => tabRefs.current.get(id)?.focus({ preventScroll: true })
   const activate = (index: number) => {
     const item = items[index]
     if (!item) return
@@ -92,11 +110,67 @@ export function SideDock({ taskId, tasks, onOpen }: { taskId: string; tasks: Tas
     ui.dock.close(item.id, { rootId })
     if (next) focusTab(next.id)
   }
+
+  // Only scroll the tab strip; scrolling ancestors hides the task header in stacked layouts.
+  // 按**整行**（.dock-tab-row：页签 + 关闭按钮）判定，并按页签条的内容盒对齐——
+  // 只把 .dock-tab 滚进视野会把关闭按钮留在条外（边界审查）。列宽变化后同样要重新对齐。
+  useEffect(() => {
+    if (!activeId) return
+    const tab = tabRefs.current.get(activeId)
+    const strip = tab?.closest<HTMLElement>('.dock-tabs')
+    const row = tab?.closest<HTMLElement>('.dock-tab-row') ?? tab
+    if (!row || !strip) return
+    const style = getComputedStyle(strip)
+    const bounds = strip.getBoundingClientRect()
+    const item = row.getBoundingClientRect()
+    const viewLeft = bounds.left + (parseFloat(style.paddingLeft) || 0)
+    const viewRight = bounds.right - (parseFloat(style.paddingRight) || 0)
+    if (item.left < viewLeft) strip.scrollLeft += item.left - viewLeft
+    else if (item.right > viewRight) strip.scrollLeft += item.right - viewRight
+  }, [activeId, items.length, width])
+
+  if (!active) return null
+  const taskOf = (id: string) => tasks.find((item) => item.id === id)
   return <aside className="side-dock" aria-label="子任务与文件预览" style={{ width }}>
-    <div ref={stripRef} className="dock-splitter" role="separator" aria-orientation="vertical" aria-label="拖动调整分页宽度" title="拖动调整分页宽度" onPointerDown={onSplitterDown} onPointerMove={onSplitterMove} onPointerUp={onSplitterUp} onPointerCancel={onSplitterUp} />
+    <div
+      ref={stripRef}
+      className="dock-splitter"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="拖动调整分页宽度"
+      aria-valuenow={width}
+      aria-valuemin={DOCK_MIN}
+      aria-valuemax={DOCK_MAX}
+      tabIndex={0}
+      title="拖动调整分页宽度（←/→ 微调 · Shift 加速 · Home/End 到上下限 · 双击复位）"
+      onPointerDown={onSplitterDown}
+      onPointerMove={onSplitterMove}
+      onPointerUp={onSplitterUp}
+      onPointerCancel={onSplitterUp}
+      onDoubleClick={() => applyWidth(DOCK_DEFAULT)}
+      onKeyDown={(event) => {
+        if (isComposingKey(event.nativeEvent)) return
+        const step = event.shiftKey ? DOCK_STEP_LARGE : DOCK_STEP
+        if (event.key === 'ArrowLeft') { event.preventDefault(); applyWidth(width + step) }
+        else if (event.key === 'ArrowRight') { event.preventDefault(); applyWidth(width - step) }
+        else if (event.key === 'Home') { event.preventDefault(); applyWidth(DOCK_MAX) }
+        else if (event.key === 'End') { event.preventDefault(); applyWidth(DOCK_MIN) }
+        else if (event.key === 'Enter') { event.preventDefault(); applyWidth(DOCK_DEFAULT) }
+      }}
+    />
     <div className="dock-body">
+      <div className="dock-head">
+        <span className="dock-head-title">右侧分页</span>
+        <span className="dock-head-count" title={`${items.length} 个分页`}>{items.length}</span>
+        <button type="button" className="dock-head-action" title="关闭全部分页" aria-label="关闭全部分页" onClick={() => { items.forEach((item) => ui.dock.close(item.id, { rootId })) }}><XCircle size={12} aria-hidden="true" /><span>全部关闭</span></button>
+      </div>
       <div className="dock-tabs" role="tablist" aria-label="右侧分页" aria-orientation="horizontal">
-        {items.map((item, index) => <div className={`dock-tab-row${item.id === active.id ? ' is-active' : ''}`} key={item.id}>
+        {items.map((item, index) => {
+          const filePayload = item.kind === 'file' ? item.payload : null
+          const worker = item.kind === 'task' ? taskOf(item.payload.taskId) : undefined
+          const additions = filePayload?.additions ?? 0
+          const deletions = filePayload?.deletions ?? 0
+          return <div className={`dock-tab-row${item.id === active.id ? ' is-active' : ''}`} key={item.id}>
           <button type="button" role="tab" id={`${prefix}-tab-${index}`} aria-controls={`${prefix}-panel`} aria-selected={item.id === active.id} tabIndex={item.id === active.id ? 0 : -1} title={item.kind === 'file' ? item.payload.file : item.title} className="dock-tab" ref={(node) => { if (node) tabRefs.current.set(item.id, node); else tabRefs.current.delete(item.id) }} onClick={() => activate(index)} onKeyDown={(event) => {
             if (isComposingKey(event.nativeEvent)) return
             if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') { event.preventDefault(); activate((index + (event.key === 'ArrowRight' ? 1 : -1) + items.length) % items.length) }
@@ -105,11 +179,13 @@ export function SideDock({ taskId, tasks, onOpen }: { taskId: string; tasks: Tas
           }}>
             {item.kind === 'file' ? <FileCode2 size={14} aria-hidden="true" /> : <ListTodo size={14} aria-hidden="true" />}
             <span className="dock-tab-title">{item.title}</span>
+            {!!filePayload && (additions > 0 || deletions > 0) && <span className="dock-tab-stats" aria-hidden="true">{additions > 0 && <span className="edit-added">+{additions}</span>}{deletions > 0 && <span className="edit-deleted">-{deletions}</span>}</span>}
+            {worker && <span className={`dot dot-${worker.status}`} aria-hidden="true" />}
           </button>
           <button type="button" className="dock-tab-close" aria-label={`关闭 ${item.title}`} title="关闭分页" onClick={() => ui.dock.close(item.id, { rootId })}><X size={12} aria-hidden="true" /></button>
-        </div>)}
+        </div>})}
       </div>
-      <div className="dock-panel" role="tabpanel" id={`${prefix}-panel`} aria-labelledby={`${prefix}-tab-${activeIndex}`}>
+      <div className="dock-panel" role="tabpanel" id={`${prefix}-panel`} aria-labelledby={`${prefix}-tab-${activeIndex < 0 ? 0 : activeIndex}`}>
         {active.kind === 'file'
           ? <CodeViewer key={active.id} {...active.payload} />
           : <WorkerPane key={active.payload.taskId} taskId={active.payload.taskId} tasks={tasks} onOpen={onOpen} />}

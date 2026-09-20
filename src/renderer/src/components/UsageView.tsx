@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Activity, AlertTriangle, CheckCircle2, Coins, Gauge, RefreshCw, Server, Timer, Users, Wallet } from 'lucide-react'
 import { bridge, fmtDuration, fmtTokens } from '../api'
+import { PageHeader } from '../ui/PageHeader'
 import type { AnalyticsSummary, UsageAggregate } from '../../../shared/types'
 
 const empty: UsageAggregate = { runs: 0, completed: 0, failed: 0, cancelled: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0, durationMs: 0 }
@@ -163,18 +164,19 @@ export function UsageView() {
   const agentTokenMax = Math.max(1, ...(summary?.byAgent ?? []).map((row) => row.inputTokens + row.outputTokens))
 
   return <div className="psh-page">
-    <header className="page-header-bar psh-header">
-      <div className="page-title-row"><Gauge size={16} className="page-icon" /><h2 className="page-title">用量与错误</h2><span className="page-desc">token、成本、运行时长与失败情况的聚合统计。</span></div>
-      <div className="us-controls">
+    {/* 唯一主标题：KPI 数值走 us-stat-figure，不会被页题排版接管 */}
+    <PageHeader
+      title="用量"
+      icon={<Gauge size={16} />}
+      actions={<div className="us-controls">
         <div className="us-seg" role="tablist">
           {([['7d', '近 7 天'], ['30d', '近 30 天'], ['all', '全部']] as const).map(([value, label]) =>
             <button key={value} role="tab" aria-selected={range === value} className={range === value ? 'active' : ''} onClick={() => setRange(value)}>{label}</button>)}
         </div>
         <button className="btn" onClick={() => void refresh()} disabled={loading}><RefreshCw size={14} className={loading ? 'spin' : ''} /> 刷新</button>
-      </div>
-    </header>
+      </div>}
+    />
     <div className="psh-body">
-      <div className="psh-aurora" aria-hidden />
       {loading && !summary ? <div className="empty"><Gauge size={32} /><span>统计加载中…</span></div> : <>
         <section className="us-hero">
           <div className="us-stats">

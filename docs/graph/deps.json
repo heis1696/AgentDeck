@@ -4725,13 +4725,6 @@
       "valid": true
     },
     {
-      "source": "src/renderer/out/renderer/assets/index-DHUaLCg5.js",
-      "dependencies": [],
-      "dependents": [],
-      "orphan": true,
-      "valid": true
-    },
-    {
       "source": "src/renderer/src/App.tsx",
       "dependencies": [
         {
@@ -5058,6 +5051,23 @@
           "valid": true
         },
         {
+          "module": "./ui/PageHeader",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/PageHeader.tsx",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "./ui/Palette",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -5123,6 +5133,7 @@
         "src/renderer/src/components/meeting/MeetingCard.tsx",
         "src/renderer/src/components/meeting/MeetingPanel.tsx",
         "src/renderer/src/components/task/ActivityTimeline.tsx",
+        "src/renderer/src/components/task/PermissionPrompt.tsx",
         "src/renderer/src/components/UsageView.tsx",
         "src/renderer/src/components/WorkspaceView.tsx",
         "src/renderer/src/pet/PetSettingsPage.tsx",
@@ -5235,6 +5246,23 @@
           "matchesDoNotFollow": false,
           "circular": false,
           "valid": true
+        },
+        {
+          "module": "../ui/PageHeader",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/PageHeader.tsx",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
         }
       ],
       "dependents": [
@@ -5290,6 +5318,7 @@
         "src/renderer/src/components/TaskDetail.tsx",
         "src/renderer/src/ui/FloatWindow.tsx",
         "src/renderer/src/components/goal/GoalCreateDialog.tsx",
+        "src/renderer/src/components/task/ActionMenu.tsx",
         "src/renderer/src/ui/Confirm.tsx",
         "src/renderer/src/ui/Palette.tsx"
       ],
@@ -5329,16 +5358,20 @@
         "src/renderer/src/components/SkillsView.tsx",
         "src/renderer/src/components/SettingsView.tsx",
         "src/renderer/src/components/UpdatePanel.tsx",
+        "src/renderer/src/components/TabBar.tsx",
         "src/renderer/src/components/TaskDetail.tsx",
         "src/renderer/src/ui/SideDock.tsx",
         "src/renderer/src/components/task/TurnTimeline.tsx",
         "src/renderer/src/hooks/useInteraction.ts",
         "src/renderer/src/ui/CodeViewer.tsx",
         "src/renderer/src/components/goal/GoalPanel.tsx",
+        "src/renderer/src/ui/FloatWindow.tsx",
         "src/renderer/src/components/goal/GoalCreateDialog.tsx",
         "src/renderer/src/components/meeting/MeetingCard.tsx",
         "src/renderer/src/components/meeting/MeetingPanel.tsx",
+        "src/renderer/src/components/task/ActionMenu.tsx",
         "src/renderer/src/components/task/ActivityTimeline.tsx",
+        "src/renderer/src/components/task/GitSummary.tsx",
         "src/renderer/src/components/WorkspaceView.tsx",
         "src/renderer/src/ui/Toasts.tsx",
         "src/renderer/src/ui/Confirm.tsx",
@@ -5400,6 +5433,58 @@
         "src/renderer/src/components/SettingsView.tsx",
         "src/renderer/src/components/goal/GoalCreateDialog.tsx",
         "src/renderer/src/pet/PetSettingsPage.tsx"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
+      "source": "src/renderer/src/ui/PageHeader.tsx",
+      "dependencies": [
+        {
+          "module": "../polish/page-header.css",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/polish/page-header.css",
+          "coreModule": false,
+          "followable": false,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
+      "dependents": [
+        "src/renderer/src/App.tsx",
+        "src/renderer/src/components/AgentsView.tsx",
+        "src/renderer/src/components/AutomationView.tsx",
+        "src/renderer/src/components/ExtensionsView.tsx",
+        "src/renderer/src/components/IssuesView.tsx",
+        "src/renderer/src/components/SettingsView.tsx",
+        "src/renderer/src/components/RuntimeView.tsx",
+        "src/renderer/src/components/TaskDetail.tsx",
+        "src/renderer/src/components/UsageView.tsx"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
+      "source": "src/renderer/src/polish/page-header.css",
+      "followable": false,
+      "coreModule": false,
+      "couldNotResolve": false,
+      "matchesDoNotFollow": false,
+      "dependencyTypes": [
+        "local",
+        "import"
+      ],
+      "dependencies": [],
+      "dependents": [
+        "src/renderer/src/ui/PageHeader.tsx"
       ],
       "orphan": false,
       "valid": true
@@ -5485,6 +5570,23 @@
             "import"
           ],
           "resolved": "src/renderer/src/ui/interaction-center.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "../ui/PageHeader",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/PageHeader.tsx",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -5634,6 +5736,7 @@
       "dependents": [
         "src/renderer/src/App.tsx",
         "src/renderer/src/components/BoardView.tsx",
+        "src/renderer/src/components/TabBar.tsx",
         "src/renderer/src/components/TaskDetail.tsx",
         "src/renderer/src/components/task/WorkerPane.tsx",
         "src/renderer/src/components/task/TurnTimeline.tsx",
@@ -5767,6 +5870,23 @@
           "valid": true
         },
         {
+          "module": "../ui/PageHeader",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/PageHeader.tsx",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "./SkillsView",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -5870,6 +5990,23 @@
           "matchesDoNotFollow": false,
           "circular": false,
           "valid": true
+        },
+        {
+          "module": "../ui/PageHeader",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/PageHeader.tsx",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
         }
       ],
       "dependents": [
@@ -5950,6 +6087,23 @@
           "valid": true
         },
         {
+          "module": "../ui/PageHeader",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/PageHeader.tsx",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "./RuntimeView",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -6003,6 +6157,23 @@
             "import"
           ],
           "resolved": "src/renderer/src/api.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "../ui/PageHeader",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/PageHeader.tsx",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -6080,7 +6251,42 @@
     },
     {
       "source": "src/renderer/src/components/TabBar.tsx",
-      "dependencies": [],
+      "dependencies": [
+        {
+          "module": "../labels",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/labels.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "../ui/interaction-center",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
       "dependents": [
         "src/renderer/src/App.tsx"
       ],
@@ -6261,6 +6467,40 @@
           "valid": true
         },
         {
+          "module": "../ui/motion",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/motion.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "../ui/PageHeader",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/PageHeader.tsx",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "../ui/SideDock",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -6338,6 +6578,23 @@
             "import"
           ],
           "resolved": "src/renderer/src/components/meeting/MeetingPanel.tsx",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "./task/ActionMenu",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/components/task/ActionMenu.tsx",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -6539,6 +6796,17 @@
       "valid": true
     },
     {
+      "source": "src/renderer/src/ui/motion.ts",
+      "dependencies": [],
+      "dependents": [
+        "src/renderer/src/components/TaskDetail.tsx",
+        "src/renderer/src/components/task/WorkerPane.tsx",
+        "src/renderer/src/ui/CodeViewer.tsx"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
       "source": "src/renderer/src/ui/SideDock.tsx",
       "dependencies": [
         {
@@ -6680,6 +6948,23 @@
             "import"
           ],
           "resolved": "src/renderer/src/labels.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "../../ui/motion",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/motion.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -6868,6 +7153,23 @@
           "matchesDoNotFollow": false,
           "circular": false,
           "valid": true
+        },
+        {
+          "module": "./motion",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/motion.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
         }
       ],
       "dependents": [
@@ -6984,6 +7286,23 @@
             "import"
           ],
           "resolved": "src/renderer/src/hooks/useInteractionLayer.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "./interaction-center",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -7245,6 +7564,50 @@
       "valid": true
     },
     {
+      "source": "src/renderer/src/components/task/ActionMenu.tsx",
+      "dependencies": [
+        {
+          "module": "../../hooks/useInteractionLayer",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/hooks/useInteractionLayer.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "../../ui/interaction-center",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
+      "dependents": [
+        "src/renderer/src/components/TaskDetail.tsx"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
       "source": "src/renderer/src/components/task/ActivityTimeline.tsx",
       "dependencies": [
         {
@@ -7309,6 +7672,23 @@
       "source": "src/renderer/src/components/task/GitSummary.tsx",
       "dependencies": [
         {
+          "module": "../../ui/interaction-center",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "../DiffView",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -7343,7 +7723,25 @@
     },
     {
       "source": "src/renderer/src/components/task/PermissionPrompt.tsx",
-      "dependencies": [],
+      "dependencies": [
+        {
+          "module": "../../api",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/api.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
       "dependents": [
         "src/renderer/src/components/TaskDetail.tsx"
       ],
@@ -7372,6 +7770,23 @@
             "import"
           ],
           "resolved": "src/renderer/src/api.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "../ui/PageHeader",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/PageHeader.tsx",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -7961,6 +8376,23 @@
           "valid": true
         },
         {
+          "module": "./polish/operations.css",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/polish/operations.css",
+          "coreModule": false,
+          "followable": false,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "./polish/page-shell.css",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -8136,6 +8568,23 @@
       "valid": true
     },
     {
+      "source": "src/renderer/src/polish/operations.css",
+      "followable": false,
+      "coreModule": false,
+      "couldNotResolve": false,
+      "matchesDoNotFollow": false,
+      "dependencyTypes": [
+        "local",
+        "import"
+      ],
+      "dependencies": [],
+      "dependents": [
+        "src/renderer/src/main.tsx"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
       "source": "src/renderer/src/polish/page-shell.css",
       "followable": false,
       "coreModule": false,
@@ -8255,10 +8704,10 @@
     "warn": 0,
     "info": 0,
     "ignore": 0,
-    "totalCruised": 173,
-    "totalDependenciesCruised": 371,
+    "totalCruised": 177,
+    "totalDependenciesCruised": 393,
     "optionsUsed": {
-      "baseDir": "D:\\agentdeck",
+      "baseDir": "C:\\Projects\\AgentDeck",
       "combinedDependencies": false,
       "detectJSDocImports": false,
       "detectProcessBuiltinModuleCalls": false,
@@ -8282,7 +8731,7 @@
     "environment": {
       "version": "18.3.1",
       "nodeVersionSupported": "^22||^24||>=26",
-      "nodeVersionFound": "v22.23.2",
+      "nodeVersionFound": "v24.12.0",
       "osVersionFound": "x64 win32@10.0.26200",
       "transpilersFound": [
         {

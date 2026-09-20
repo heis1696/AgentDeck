@@ -13,6 +13,9 @@
 //      视觉 z 跟随层序，模态开着时指针与焦点都到不了它下面，模态自身与「浮在模态之上」的嵌套菜单照常可用；
 //  10. 真实 IME 组合（compositionstart/update/end + isComposing / keyCode 229）：
 //      Palette、Menu、TaskDetail 的重命名与追问框/技能菜单都不在组合中抢 Enter/Escape/↑↓。
+//  11. 审查项 1~6：跨任务校正不可用页签（+ 焦点接回）、流式自动滚动受「贴底跟随」控制、
+//      顶部页签关闭后焦点跟随实际 activeId、CodeViewer 在 diff 中按新旧文件绝对行号跳转、
+//      追问框 combobox ↔ listbox 的 aria 关系与选项 Tab 序列、显式平滑滚动尊重 prefers-reduced-motion。
 //
 // 依赖：npm install 安装的开发依赖 jsdom。运行：npm run smoke:ui。
 import { build } from 'esbuild'
@@ -53,6 +56,35 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true
 window.Element.prototype.getClientRects = function () { return [{ x: 0, y: 0, width: 120, height: 20, top: 0, left: 0, right: 120, bottom: 20 }] }
 // jsdom 也没实现 scrollIntoView（真实菜单高亮滚动用）：桩成空操作，生产代码不改
 window.Element.prototype.scrollIntoView = function () {}
+// jsdom 没有 ResizeObserver（回合索引用它量轨道高度）：桩成空观察者，生产代码不改
+class ResizeObserverStub { observe() {} unobserve() {} disconnect() {} }
+window.ResizeObserver = ResizeObserverStub
+globalThis.ResizeObserver = ResizeObserverStub
+/**
+ * jsdom 没有 Element.scrollTo：桩成「记录 + 落到 scrollTop」，用于断言显式滚动用的 behavior
+ * （审查项 6：prefers-reduced-motion: reduce 时必须从 'smooth' 降级为 'auto'）。
+ */
+const scrollCalls = []
+const lastScroll = () => scrollCalls[scrollCalls.length - 1]
+window.Element.prototype.scrollTo = function (options) {
+  scrollCalls.push({ target: this, top: options?.top, behavior: options?.behavior })
+  if (typeof options?.top === 'number') this.scrollTop = options.top
+}
+/**
+ * matchMedia 桩（jsdom 未实现）：App/主题代码与 motion.ts 都读它。
+ * 只有 prefers-reduced-motion 查询受 reducedMotion 开关影响，其余恒 false。
+ */
+let reducedMotion = false
+window.matchMedia = (query) => ({
+  matches: query.includes('prefers-reduced-motion') ? reducedMotion : false,
+  media: query,
+  onchange: null,
+  addEventListener() {},
+  removeEventListener() {},
+  addListener() {},
+  removeListener() {},
+  dispatchEvent: () => false
+})
 
 /* ------------------------------------------------- 渲染层 bridge 桩（真实 TaskDetail） */
 
@@ -101,7 +133,9 @@ await build({
 const {
   act, createElement, StrictMode, createRoot,
   NewAgentScenario, NestedModalScenario, MenuInModalScenario, UnmountScenario, ConfirmScenario, PaletteScenario, InlineEditScenario, SideDockScenario,
-  OverlapStackScenario, TaskDetailScenario, stackHits, resetStackHits, paletteRuns, interactionLayers,
+  OverlapStackScenario, TaskDetailScenario, TaskDetail, TabBarScenario, makeTask, CodeViewer, parseUnifiedDiff, findDiffRowIndex,
+  prefersReducedMotion, scrollBehavior,
+  stackHits, resetStackHits, paletteRuns, interactionLayers,
   ui, resetOutsideFocusHistory
 } = await import(pathToFileURL(outfile).href)
 
@@ -161,6 +195,31 @@ const setValue = (element, value) => act(async () => {
   const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), 'value')?.set
   setter.call(element, value)
   element.dispatchEvent(new window.Event('input', { bubbles: true }))
+})
+/** 下拉选择：React 的 select onChange 走 change 事件 */
+const setSelect = (element, value) => act(async () => {
+  const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), 'value')?.set
+  setter.call(element, value)
+  element.dispatchEvent(new window.Event('change', { bubbles: true }))
+})
+/** 表单提交（跳转行号走 onSubmit） */
+const submit = (form) => act(async () => { form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })) })
+/** 等定时器/requestAnimationFrame 结算（生产代码里滚动高亮按帧节流、跳转在 rAF 里滚动） */
+const settle = (ms = 32) => act(async () => { await new Promise((resolve) => setTimeout(resolve, ms)) })
+/** 模拟用户滚动：改 scrollTop 后派发真实 scroll（React 的 onScroll 挂在元素自身） */
+const scrollTo = (element, top) => act(async () => {
+  element.scrollTop = top
+  element.dispatchEvent(new window.Event('scroll'))
+})
+/** 给无排版环境造几何：让被测元素表现为「可滚动的长内容」 */
+const setGeometry = (element, { scrollHeight, clientHeight }) => {
+  Object.defineProperty(element, 'scrollHeight', { configurable: true, get: () => scrollHeight })
+  Object.defineProperty(element, 'clientHeight', { configurable: true, get: () => clientHeight })
+}
+/** 从 bridge 桩里取出最近一次 tasks.onEvent 订阅回调，像主进程那样推事件（流式回归用） */
+const emitTaskEvent = (taskId, event) => act(async () => {
+  const subscription = bridgeCalls.calls.filter((call) => call.path === 'tasks.onEvent').at(-1)
+  subscription?.args[0]?.(taskId, event)
 })
 
 /* ------------------------------------------------- 1. 关键缺陷：模态 autoFocus */
@@ -482,6 +541,207 @@ section('IME：真实组合事件下 Palette / Menu / 重命名 / 追问技能�
   await setValue(composer, '继续修一下')
   await keyOn(composer, 'Enter')
   ok(followUpCalls() === 1, '非组合 Enter 正常发送追问（followUp 桥调用 1 次）')
+  await unmount()
+}
+
+/* ------------------------------------------- 9. 审查项 1：跨任务校正不可用页签 */
+
+section('审查项 1：跨任务校正不可用页签（Git 页签随任务消失 + 焦点接回）')
+{
+  const withGit = makeTask({ id: 'with-git', title: '有改动', status: 'done', gitStat: 'src/app.ts | 3 +++', gitDiff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,1 +1,2 @@\n ctx\n+added' })
+  const noGit = makeTask({ id: 'no-git', title: '无改动', status: 'done' })
+  const tab = (key) => container.querySelector(`#detail-tab-${key}`)
+  const panel = () => container.querySelector('#detail-tabpanel')
+
+  await render(createElement(TaskDetail, { task: withGit, tasks: [withGit, noGit], onSelect: () => {} }))
+  ok(!tab('git').disabled, '任务有 Git 改动：Git 页签可用')
+  await focus(tab('git'))
+  await click(tab('git'))
+  ok(tab('git').getAttribute('aria-selected') === 'true' && panel().getAttribute('aria-labelledby') === 'detail-tab-git', '切到 Git 页签（面板指向它）')
+
+  await rerender(createElement(TaskDetail, { task: noGit, tasks: [withGit, noGit], onSelect: () => {} }))
+  ok(tab('git').disabled, '切到无改动任务：Git 页签变为不可用')
+  ok(tab('activity').getAttribute('aria-selected') === 'true' && panel().getAttribute('aria-labelledby') === 'detail-tab-activity', '停在不可用页签的视图被校正回首个可用页签（不再空白面板 + 无 active 页签）')
+  ok(tab('git').getAttribute('aria-selected') === 'false' && tab('git').tabIndex === -1, '不可用页签退出选中态与 Tab 序列')
+  ok(active() === tab('activity'), `焦点跟着校正后的页签走，没掉给 body（实测 ${nameOf(active())}）`)
+  await unmount()
+}
+
+/* ------------------------------------- 10. 审查项 2 / 6：贴底跟随 + 动效偏好 */
+
+section('审查项 2 / 6：流式自动滚动受「贴底跟随」控制，显式滚动尊重 prefers-reduced-motion')
+{
+  const task = makeTask({ id: 'stream', title: '流式任务', status: 'done', prompt: '跑起来', sessionId: 'sess-stream' })
+  await render(createElement(TaskDetail, { task, tasks: [task], onSelect: () => {} }))
+  await click(container.querySelector('#detail-tab-log'))
+  const log = container.querySelector('.log.chat')
+  ok(!!log, '执行记录时间线挂载')
+  // jsdom 没有排版：显式造出「可滚动的长日志」几何（scroller = .log 自身）
+  setGeometry(log, { scrollHeight: 1000, clientHeight: 400 })
+  const latest = () => container.querySelector('.chat-latest')
+
+  await emitTaskEvent('stream', { seq: 1, ts: Date.now(), kind: 'text', text: '第一段流式内容' })
+  await scrollTo(log, 600) // 贴底（600 = 1000 - 400）
+  ok(!latest(), '在底部时不显示「回到最新」')
+
+  await emitTaskEvent('stream', { seq: 2, ts: Date.now(), kind: 'text', text: '更多内容' })
+  ok(log.scrollTop === 1000, `贴底时新事件自动跟随到末尾（scrollTop=${log.scrollTop}）`)
+
+  await scrollTo(log, 100) // 用户滚上去读旧内容
+  ok(!!latest(), '离开底部后浮出「回到最新」')
+  await emitTaskEvent('stream', { seq: 3, ts: Date.now(), kind: 'text', text: '还在流式' })
+  ok(log.scrollTop === 100, `读旧内容时流式新事件不抢滚动位置（scrollTop=${log.scrollTop}）`)
+  ok(!!latest(), '不跟随状态保持（按钮仍在）')
+
+  // 审查项 6：同一个「回到最新」，减弱动效时必须是即时跳转
+  reducedMotion = true
+  ok(prefersReducedMotion() === true && scrollBehavior() === 'auto', 'motion 助手读到系统「减弱动态效果」')
+  await click(latest())
+  await settle()
+  ok(lastScroll().behavior === 'auto' && log.scrollTop === 1000, `reduce 时「回到最新」即时跳转（behavior=${lastScroll().behavior}）`)
+  ok(!latest(), '回到末尾后跟随状态恢复、按钮收起')
+
+  reducedMotion = false
+  ok(prefersReducedMotion() === false && scrollBehavior() === 'smooth', '未开启减弱动效时回到 smooth')
+  await scrollTo(log, 100)
+  await click(latest())
+  await settle()
+  ok(lastScroll().behavior === 'smooth' && log.scrollTop === 1000, `默认「回到最新」平滑滚动（behavior=${lastScroll().behavior}）`)
+  await unmount()
+}
+
+/* ------------------------------------------- 11. 审查项 3：顶部页签关闭后的焦点 */
+
+section('审查项 3：关闭顶部页签后焦点跟随宿主结算的实际 activeId')
+{
+  ui.reset()
+  ui.setTasks([
+    { id: 't1', title: '任务一', status: 'done' },
+    { id: 't2', title: '任务二', status: 'done' },
+    { id: 't3', title: '任务三', status: 'done' }
+  ])
+  ui.openTask('t1')
+  ui.openTask('t2')
+  ui.openTask('t3')
+  await render(createElement(TabBarScenario))
+  const tabEl = (id) => container.querySelector(`[data-tab-id="${id}"]`)
+  const closeBtn = (id) => tabEl(id)?.querySelector('.tab-close')
+  ok(ui.getState().tabs.join() === 't1,t2,t3' && ui.getState().activeId === 't3', '三个页签都打开，激活的是第三个')
+
+  // 关闭**非激活**的首个页签：activeId 不变（旧实现按「右邻」把焦点丢给 t2）
+  await focus(closeBtn('t1'))
+  await click(closeBtn('t1'))
+  ok(ui.getState().tabs.join() === 't2,t3' && ui.getState().activeId === 't3', '关掉非激活页签：宿主 activeId 仍是 t3')
+  ok(active() === tabEl('t3'), `焦点跟随实际 activeId=t3，而不是被关项的邻位（实测 ${nameOf(active())}）`)
+
+  // 关闭**激活**页签：宿主把激活项落到最后一个剩余页签
+  await focus(closeBtn('t3'))
+  await click(closeBtn('t3'))
+  ok(ui.getState().tabs.join() === 't2' && ui.getState().activeId === 't2', '关掉激活页签：activeId 落到仅剩的 t2')
+  ok(active() === tabEl('t2'), `焦点同样跟随结算后的 activeId（实测 ${nameOf(active())}）`)
+
+  // Delete 键路径（焦点在页签上）
+  await act(async () => { ui.openTask('t1') })
+  await focus(tabEl('t2'))
+  await key('Delete', tabEl('t2'))
+  ok(!tabEl('t2') && ui.getState().activeId === 't1', 'Delete 关页签：宿主激活项落到 t1')
+  ok(active() === tabEl('t1'), `Delete 关页签后焦点跟随实际 activeId（实测 ${nameOf(active())}）`)
+  await unmount()
+  ui.reset()
+}
+
+/* --------------------------------- 12. 审查项 4 / 6：diff 按新旧文件绝对行号跳转 */
+
+section('审查项 4 / 6：CodeViewer 在 diff 中按新旧文件绝对行号跳转（滚动同样守动效偏好）')
+{
+  const diff = [
+    'diff --git a/src/app.ts b/src/app.ts',
+    'index 1111111..2222222 100644',
+    '--- a/src/app.ts',
+    '+++ b/src/app.ts',
+    '@@ -10,4 +10,5 @@',
+    ' ctx10',
+    '-old11',
+    '+new11',
+    '+new12',
+    ' ctx12',
+    '@@ -41,2 +41,2 @@',
+    ' ctx41',
+    '-old42',
+    '+new42'
+  ].join('\n')
+  const rows = parseUnifiedDiff(diff)
+  ok(rows.length === 10 && rows[0].kind === 'hunk', `diff 行模型：10 行（实测 ${rows.length}）`)
+  ok(findDiffRowIndex(rows, 42, 'new') === 9 && findDiffRowIndex(rows, 42, 'old') === 8, '同一行号在新/旧两侧落到不同行（删除行的 number 是旧文件行号）')
+  ok(findDiffRowIndex(rows, 41, 'new') === 7 && findDiffRowIndex(rows, 41, 'old') === 7, 'hunk 头不参与行号命中（第 41 行落在真实内容行上）')
+  ok(findDiffRowIndex(rows, 100, 'new') === -1, '不在 diff 范围内的绝对行号无命中')
+
+  await render(createElement(CodeViewer, { file: 'src/app.ts', diff }))
+  await settle()
+  const input = () => container.querySelector('.code-goto input')
+  const side = () => container.querySelector('.code-goto-side')
+  const jumped = () => container.querySelector('.code-line.is-jump')
+  const jumpText = () => jumped()?.querySelector('code')?.textContent
+  const jump = async (line) => { await setValue(input(), String(line)); await submit(container.querySelector('.code-goto')); await settle() }
+
+  ok(!!side(), 'diff 模式出现「新文件 / 旧文件」行号侧选择器')
+  await jump(100)
+  ok(!jumped(), 'diff 外的绝对行号不误跳（旧实现会拿行下标当行号乱跳）')
+
+  reducedMotion = true
+  await jump(42)
+  ok(jumped()?.getAttribute('data-code-line') === '9' && jumpText() === 'new42', `新文件第 42 行 → 行下标 9（实测 ${jumped()?.getAttribute('data-code-line')} / ${jumpText()}）`)
+  ok(lastScroll().behavior === 'auto', `reduce 时跳转滚动即时（behavior=${lastScroll().behavior}）`)
+
+  reducedMotion = false
+  await setSelect(side(), 'old')
+  ok(input().getAttribute('aria-label') === '跳转到旧文件行', '切到旧文件侧：跳转输入的 aria-label 同步')
+  await jump(42)
+  ok(jumped()?.getAttribute('data-code-line') === '8' && jumpText() === 'old42', `旧文件第 42 行 → 行下标 8（实测 ${jumped()?.getAttribute('data-code-line')} / ${jumpText()}）`)
+  ok(lastScroll().behavior === 'smooth', `默认跳转滚动仍是平滑（behavior=${lastScroll().behavior}）`)
+
+  await setSelect(side(), 'new')
+  await jump(41)
+  ok(jumped()?.getAttribute('data-code-line') === '7' && jumpText() === 'ctx41', `新文件第 41 行 → 跨 hunk 断号仍命中上下文行（实测 ${jumped()?.getAttribute('data-code-line')} / ${jumpText()}）`)
+  // 非 diff 模式：不出现侧选择器，跳转仍是「行号 = 行下标 + 1」的老语义
+  await rerender(createElement(CodeViewer, { file: 'a.txt', content: 'one\ntwo\nthree\nfour\n' }))
+  await settle()
+  ok(!side(), '非 diff 模式不渲染行号侧选择器')
+  await jump(3)
+  ok(jumped()?.getAttribute('data-code-line') === '2' && jumpText() === 'three', 'content 模式跳第 3 行 → 行下标 2')
+  await unmount()
+}
+
+/* ------------------------------- 13. 审查项 5：textarea/listbox 的 aria 与 Tab 序列 */
+
+section('审查项 5：追问框（combobox）↔ 技能 listbox 的 aria 关系与选项 Tab 序列')
+{
+  await render(createElement(TaskDetailScenario))
+  const composer = container.querySelector('.followup textarea')
+  const listbox = () => container.querySelector('#skill-menu-listbox')
+  const options = () => [...container.querySelectorAll('.skill-menu [role="option"]')]
+  const selectedOption = () => container.querySelector('.skill-menu [role="option"][aria-selected="true"]')
+  ok(!!composer, '追问框渲染出来')
+  ok(composer.getAttribute('role') === 'combobox' && composer.getAttribute('aria-haspopup') === 'listbox' && composer.getAttribute('aria-autocomplete') === 'list',
+    '追问框是 combobox（aria-haspopup=listbox / aria-autocomplete=list）')
+  ok(composer.getAttribute('aria-expanded') === 'false' && !composer.hasAttribute('aria-controls') && !composer.hasAttribute('aria-activedescendant'),
+    '菜单未开：aria-expanded=false，且不留下悬空的 aria-controls / aria-activedescendant')
+
+  await focus(composer)
+  await setValue(composer, '/')
+  ok(composer.getAttribute('aria-expanded') === 'true', '输入 / 后 aria-expanded=true')
+  ok(composer.getAttribute('aria-controls') === 'skill-menu-listbox' && listbox()?.getAttribute('role') === 'listbox', 'aria-controls 指向真实存在的 listbox')
+  ok(composer.getAttribute('aria-activedescendant') === 'skill-menu-opt-0' && !!container.querySelector('#skill-menu-opt-0'), 'aria-activedescendant 指向真实存在的当前项')
+  ok(selectedOption()?.id === 'skill-menu-opt-0', '当前项同时带 aria-selected=true（视觉高亮与 aria 同源）')
+  ok(options().length >= 2 && options().every((option) => option.tabIndex === -1), `选项都不在 Tab 序列里（${options().length} 项 tabIndex=-1）`)
+
+  await keyOn(composer, 'ArrowDown')
+  ok(composer.getAttribute('aria-activedescendant') === 'skill-menu-opt-1' && selectedOption()?.id === 'skill-menu-opt-1', '↓ 后 aria-activedescendant 与 aria-selected 同步移动')
+  ok(active() === composer, `焦点始终留在输入框（选项只是被指认，不被聚焦，实测 ${nameOf(active())}）`)
+
+  await keyOn(composer, 'Escape')
+  ok(composer.getAttribute('aria-expanded') === 'false' && !composer.hasAttribute('aria-controls') && !composer.hasAttribute('aria-activedescendant') && !listbox(),
+    'Escape 关闭后 aria 关系收回（没有指向已卸载 listbox 的悬空引用）')
   await unmount()
 }
 

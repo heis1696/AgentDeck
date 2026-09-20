@@ -4,6 +4,7 @@ import { bridge, type AgentInfo } from '../api'
 import { BACKEND_IDS, type Automation } from '../../../shared/types'
 import { isForgeAgent } from '../../../shared/forge'
 import { ui } from '../ui/interaction-center'
+import { PageHeader } from '../ui/PageHeader'
 import { useInteractionLayer } from '../hooks/useInteractionLayer'
 
 const templates = [
@@ -35,9 +36,16 @@ export function AutomationView() {
   const remove = async (item: Automation) => { await bridge.automations.delete(item.id); await refresh() }
 
   return <div className="automation-view page-surface">
-    <header className="page-header-bar"><div className="detail-title-wrap"><div className="page-title-row"><AlarmClock size={16} className="page-icon" /><h2 className="page-title">自动化</h2><span className="badge" title="功能待重新设计，已知问题：工作目录留空时 Agent 会在临时目录空跑；「仅执行」模式的结果界面上不可见；无运行历史与重叠保护。">待定</span><span className="page-count">{items.length}</span><span className="page-desc">按本地计划重复执行的工作。</span></div></div><button className="btn primary" onClick={() => openCreate()}><Plus size={14} /> 新建自动化</button></header>
+    {/* 唯一主标题 + 可用性警示（待定徽标 title 里是完整已知问题）+ 调度操作 */}
+    <PageHeader
+      title="自动化"
+      icon={<AlarmClock size={16} />}
+      count={items.length}
+      metadata={<span className="badge" title="功能待重新设计，已知问题：工作目录留空时 Agent 会在临时目录空跑；「仅执行」模式的结果界面上不可见；无运行历史与重叠保护。">待定</span>}
+      actions={<button className="btn primary" onClick={() => openCreate()}><Plus size={14} /> 新建自动化</button>}
+    />
     <div className="page-content automation-content">
-      <section className="automation-hero"><div><h1>让重复的工作自动运转</h1><p>每次运行都会生成一个可追踪的任务，带独立的执行历史。功能待重新设计，暂不建议依赖（见页题「待定」说明）。</p></div></section>
+      <p className="hint">功能待重新设计，暂不建议依赖——已知问题见标题旁「待定」说明。</p>
       {items.length > 0 && <section className="automation-section"><div className="section-heading"><h3>已配置的自动化</h3><span>{items.filter((item) => item.enabled).length} 个启用</span></div><div className="automation-list">{items.map((item) => <article className="automation-row" key={item.id}><div className="automation-row-main"><strong>{item.name}</strong><span>{item.prompt}</span><small><Clock3 size={12} /> 每 {item.scheduleMinutes} 分钟{item.nextRunAt ? ` · 下次 ${new Date(item.nextRunAt).toLocaleString()}` : ''}</small></div><button className={`toggle-control compact ${item.enabled ? 'on' : ''}`} onClick={() => void toggle(item)} aria-label={item.enabled ? '暂停自动化' : '启用自动化'}><span /></button><button className="icon-btn" title="立即运行" onClick={() => void runNow(item)}><Play size={14} /></button><button className="icon-btn danger-icon" title="删除自动化" onClick={() => void remove(item)}><Trash2 size={14} /></button></article>)}</div></section>}
       <section className="automation-section"><div className="section-heading"><h3>从模板开始</h3><span>选择后可再调整提示词。</span></div><div className="automation-grid">{templates.map(([title, body, Icon]) => <article className="automation-card" key={title}><div className="automation-card-icon"><Icon size={18} /></div><div><h4>{title}</h4><p>{body}</p><small><Clock3 size={12} /> 点击配置</small></div><button className="btn ghost" onClick={() => openCreate([title, body, Icon])}>使用模板</button></article>)}</div></section>
     </div>

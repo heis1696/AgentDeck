@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Activity, CheckCircle2, Cpu, RefreshCw, Server, XCircle } from 'lucide-react'
 import { bridge, type AgentInfo } from '../api'
+import { PageHeader } from '../ui/PageHeader'
 import type { RuntimeSnapshot } from '../../../shared/types'
 
 /** 运行时健康页；0.14 起作为设置分区嵌入（embedded 时不再渲染整页外壳） */
@@ -41,7 +42,8 @@ export function RuntimeView({ embedded = false }: { embedded?: boolean }) {
     )
   }
   return <div className="settings runtime-page">
-    <header className="page-header-bar"><div className="page-title-row"><Server size={16} className="page-icon" /><h2 className="page-title">运行时</h2><span className="page-count">{healthy}/{snapshots.length || agents.length}</span><span className="page-desc">AgentDeck 可调用的本地执行后端。</span></div>{checkButton}</header>
+    {/* 独立运行时页才用共享页头；embedded 分支保持设置卡片里的 h3，不产生第二个 h1 */}
+    <PageHeader title="运行时" icon={<Server size={16} />} count={`${healthy}/${snapshots.length || agents.length}`} actions={checkButton} />
     {body}
   </div>
 }

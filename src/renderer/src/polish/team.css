@@ -9,7 +9,7 @@
 
 /* ---- 分区标题 ---- */
 .tm-section { margin: 0 0 26px; }
-.tm-section:first-of-type { padding-top: clamp(18px, 2.2vw, 28px); }
+.tm-section:first-of-type { padding-top: var(--space-6); }
 .tm-section-head {
   display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
   margin: 0 0 14px;
@@ -104,4 +104,48 @@
 /* ---- 降低动画强度 ---- */
 @media (prefers-reduced-motion: reduce) {
   .tm-card { animation: none; }
+}
+
+/* Team cards: quiet hierarchy, clear actions, stable narrow layouts. */
+.tm-section { margin-bottom: 32px; }
+.tm-section-head { align-items: center; margin-bottom: 12px; }
+.tm-section-head h3 { letter-spacing: 0; }
+.tm-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap: 14px; }
+.tm-card {
+  position: relative;
+  padding: 16px;
+  border-color: color-mix(in srgb, var(--border) 86%, transparent);
+  background: color-mix(in srgb, var(--bg-raised) 92%, var(--bg));
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--text) 3%, transparent);
+  transition: border-color var(--duration-base) var(--ease-in-out), background var(--duration-base) var(--ease-in-out), transform var(--duration-quick) var(--ease-out);
+}
+.tm-card::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 2px;
+  background: transparent;
+  transition: background var(--duration-base) var(--ease-in-out);
+}
+.tm-card:hover { background: var(--bg-hover); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); transform: translateY(-1px); }
+.tm-card:hover::before, .tm-card:focus-visible::before { background: var(--accent); }
+.tm-card:focus-visible { outline: none; box-shadow: var(--focus-halo); }
+.tm-card .agent-avatar { width: 42px; height: 42px; }
+.tm-acts { opacity: 1; }
+.tm-act { width: 28px; height: 28px; }
+.tm-badges { gap: 5px; margin-top: 14px; }
+.tm-badge { border: 1px solid color-mix(in srgb, var(--border) 72%, transparent); }
+.tm-note { margin-top: 12px; min-height: 34px; }
+.tm-empty { min-height: 82px; justify-content: flex-start; background: var(--bg-inset); }
+
+@container page (max-width: 560px) {
+  .tm-section { margin-bottom: 24px; }
+  .tm-section:first-of-type { padding-top: 16px; }
+  .tm-section-head { align-items: flex-start; gap: 6px; }
+  .tm-card { padding: 14px; }
+  .tm-card:hover { transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tm-card { transition: none; }
 }

@@ -16,6 +16,7 @@ import { ListTodo, Kanban, Gauge, Settings, Search, Plus, Command, FolderOpen, C
 import { ToastHost } from './ui/Toasts'
 import { ConfirmHost } from './ui/Confirm'
 import { Palette, type PaletteCommand } from './ui/Palette'
+import { PageHeader } from './ui/PageHeader'
 import { ui, rootTabsOf, type UiView } from './ui/interaction-center'
 import { useInteractionSelector } from './hooks/useInteraction'
 import { useInteractionLayer } from './hooks/useInteractionLayer'
@@ -155,25 +156,26 @@ export function App() {
     })
   ], [tasks, settings?.theme])
 
-  return <div className="app">
+  return <div className="app" data-view={view}>
     <ToastHost /><ConfirmHost /><Palette open={paletteOpen} onClose={() => ui.palette.close()} commands={commands} />
     <aside className="sidebar">
-      <div className="brand" aria-label="AgentDeck"><span className="brand-mark">A</span><span className="brand-name">AgentDeck</span><span className="brand-status" title="本地工作区已连接" /></div>
+      <div className="brand" aria-label="AgentDeck"><span className="brand-mark">A</span><span className="brand-name">AgentDeck</span><span className="brand-status" aria-hidden="true" title="本地工作区已连接" /></div>
       <WorkspaceSwitcher dir={workspaceDir} recent={recentWorkspaces} onChoose={chooseWorkspace} onPick={pickWorkspace} />
-      <button className="new-task-btn" onClick={goWorkspace}><Plus size={15} /> 新建任务 <kbd>Ctrl+N</kbd></button>
+      <button className="new-task-btn" type="button" onClick={goWorkspace} title="新建任务（Ctrl+N）"><Plus size={15} /> 新建任务 <kbd>Ctrl+N</kbd></button>
+      {/* title 兼作图标轨（≤560px）下的悬浮说明：窄侧栏里 .nav-label 视觉隐藏但仍在可访问树中 */}
       <nav className="nav" aria-label="主导航">
-        <button className={view === 'issues' || view === 'detail' ? 'active' : ''} onClick={navIssues} title="新建及已打开的 Issue"><ListTodo /><span className="nav-label">Issue</span></button>
-        <button className={view === 'board' ? 'active' : ''} onClick={() => nav('board')}><Kanban /><span className="nav-label">看板</span></button>
-        <button className={view === 'agents' ? 'active' : ''} onClick={() => nav('agents')}><Users /><span className="nav-label">Agent</span></button>
-        <button className={view === 'automation' ? 'active' : ''} onClick={() => nav('automation')}><AlarmClock /><span className="nav-label">自动化</span></button>
-        <button className={view === 'skills' ? 'active' : ''} onClick={() => nav('skills')}><Layers /><span className="nav-label">扩展</span></button>
-        <button className={view === 'usage' ? 'active' : ''} onClick={() => nav('usage')}><Gauge /><span className="nav-label">用量</span></button>
-        <button className={view === 'settings' ? 'active' : ''} onClick={() => openSettings()}><Settings /><span className="nav-label">设置</span></button>
+        <button className={view === 'issues' || view === 'detail' ? 'active' : ''} aria-current={view === 'issues' || view === 'detail' ? 'page' : undefined} onClick={navIssues} title="新建及已打开的 Issue"><ListTodo /><span className="nav-label">Issue</span></button>
+        <button className={view === 'board' ? 'active' : ''} aria-current={view === 'board' ? 'page' : undefined} onClick={() => nav('board')} title="看板"><Kanban /><span className="nav-label">看板</span></button>
+        <button className={view === 'agents' ? 'active' : ''} aria-current={view === 'agents' ? 'page' : undefined} onClick={() => nav('agents')} title="Agent 管理"><Users /><span className="nav-label">Agent</span></button>
+        <button className={view === 'automation' ? 'active' : ''} aria-current={view === 'automation' ? 'page' : undefined} onClick={() => nav('automation')} title="自动化"><AlarmClock /><span className="nav-label">自动化</span></button>
+        <button className={view === 'skills' ? 'active' : ''} aria-current={view === 'skills' ? 'page' : undefined} onClick={() => nav('skills')} title="扩展"><Layers /><span className="nav-label">扩展</span></button>
+        <button className={view === 'usage' ? 'active' : ''} aria-current={view === 'usage' ? 'page' : undefined} onClick={() => nav('usage')} title="用量"><Gauge /><span className="nav-label">用量</span></button>
+        <button className={view === 'settings' ? 'active' : ''} aria-current={view === 'settings' ? 'page' : undefined} onClick={() => openSettings()} title="设置"><Settings /><span className="nav-label">设置</span></button>
       </nav>
-      <div className="sidebar-footer"><span className="connection-dot" /> 本地引擎就绪</div>
+      <div className="sidebar-footer"><span className="connection-dot" aria-hidden="true" /> 本地引擎就绪</div>
     </aside>
     <main className="main">
-      {view === 'agents' ? <AgentsView /> : view === 'automation' ? <AutomationView /> : view === 'skills' ? <ExtensionsView /> : view === 'settings' ? <SettingsView section={settingsSection} onSection={(section) => ui.openSettings(section)} /> : view === 'usage' ? <UsageView /> : view === 'board' ? <Page title="看板" count={tasks.length}><BoardView tasks={tasks} onOpen={openTask} /></Page> : view === 'detail' && selected ? <div className="tasks-column detail-page"><Chrome title={selected.title} onBack={() => ui.navigate('issues')} />{rootTabs.length > 0 && <TabBar tabs={rootTabs} tasks={tasks} activeId={activeId} onSelect={openTask} onClose={(id) => ui.closeTab(id)} />}<TaskDetail task={selected} tasks={tasks} onSelect={openTask} /></div> : <IssuesView tasks={tasks} tabs={tabs} onOpen={openTask} onClose={(id) => ui.closeTab(id)}><WorkspaceView onCreated={(task) => openCreatedTask(task.id)} workspaceDir={workspaceDir} onPickWorkspace={pickWorkspace} /></IssuesView>}
+      {view === 'agents' ? <AgentsView /> : view === 'automation' ? <AutomationView /> : view === 'skills' ? <ExtensionsView /> : view === 'settings' ? <SettingsView section={settingsSection} onSection={(section) => ui.openSettings(section)} /> : view === 'usage' ? <UsageView /> : view === 'board' ? <div className="tasks-column"><PageHeader title="看板" icon={<Kanban size={16} />} count={tasks.length} actions={<button className="command-trigger" type="button" onClick={() => ui.palette.open()} title="搜索任务（Ctrl+K）" aria-label="搜索任务" aria-keyshortcuts="Control+K Meta+K"><Search size={14} /> 搜索任务 <kbd><Command size={10} /> K</kbd></button>} /><BoardView tasks={tasks} onOpen={openTask} /></div> : view === 'detail' && selected ? <div className="tasks-column detail-page"><Chrome title={selected.title} onBack={() => ui.navigate('issues')} />{rootTabs.length > 0 && <TabBar tabs={rootTabs} tasks={tasks} activeId={activeId} onSelect={openTask} onClose={(id) => ui.closeTab(id)} />}<TaskDetail task={selected} tasks={tasks} onSelect={openTask} /></div> : <IssuesView tasks={tasks} tabs={tabs} onOpen={openTask} onClose={(id) => ui.closeTab(id)}><WorkspaceView onCreated={(task) => openCreatedTask(task.id)} workspaceDir={workspaceDir} onPickWorkspace={pickWorkspace} /></IssuesView>}
     </main>
   </div>
 }
@@ -187,7 +189,7 @@ function WorkspaceSwitcher({ dir, recent, onChoose, onPick }: { dir: string; rec
   const name = (d: string) => d.split(/[\\/]/).filter(Boolean).pop() ?? d
   return (
     <div className="ws-switch" ref={rootRef}>
-      <button className="workspace-switcher" type="button" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+      <button className="workspace-switcher" type="button" aria-haspopup="menu" aria-expanded={open} title={dir || '选择工作区'} onClick={() => setOpen((value) => !value)}>
         <span className="workspace-glyph"><FolderOpen size={14} /></span>
         <span><b>{dir ? name(dir) : '选择工作区'}</b><small>{dir || '新任务将默认在此目录执行'}</small></span>
         <ChevronDown size={14} className={`workspace-caret ${open ? 'flip' : ''}`} />
@@ -197,14 +199,14 @@ function WorkspaceSwitcher({ dir, recent, onChoose, onPick }: { dir: string; rec
           <div className="ws-menu-label">最近工作区</div>
           {recent.length === 0 && <div className="ws-menu-empty">还没有记录，先选一个目录</div>}
           {recent.map((d) => (
-            <button key={d} className={`ws-menu-item ${d === dir ? 'current' : ''}`} role="menuitem" title={d} onClick={() => { onChoose(d); setOpen(false) }}>
+            <button key={d} className={`ws-menu-item ${d === dir ? 'current' : ''}`} role="menuitem" type="button" aria-current={d === dir ? 'true' : undefined} title={d} onClick={() => { onChoose(d); setOpen(false) }}>
               <FolderOpen size={13} />
               <span className="ws-menu-name">{name(d) || d}</span>
               <small className="ws-menu-path">{d}</small>
             </button>
           ))}
           <div className="ws-menu-sep" />
-          <button className="ws-menu-item" role="menuitem" onClick={() => { onPick(); setOpen(false) }}>
+          <button className="ws-menu-item" role="menuitem" type="button" onClick={() => { onPick(); setOpen(false) }}>
             <Plus size={13} />
             <span className="ws-menu-name">选择其他目录…</span>
           </button>
@@ -214,5 +216,10 @@ function WorkspaceSwitcher({ dir, recent, onChoose, onPick }: { dir: string; rec
   )
 }
 
-function Chrome({ title, onBack }: { title: string; onBack: () => void }) { return <div className="workspace-topbar"><div className="breadcrumb"><span>个人工作区</span><i>/</i><strong>{title}</strong></div><button className="icon-btn" onClick={onBack} title="返回任务列表"><ListTodo size={16} /></button></div> }
-function Page({ title, count, children }: { title: string; count: number; children: React.ReactNode }) { return <div className="tasks-column"><div className="workspace-topbar"><div className="breadcrumb"><span>个人工作区</span><i>/</i><strong>{title}</strong></div><div className="topbar-actions"><button className="command-trigger" onClick={() => ui.palette.open()}><Search size={14} /> 搜索任务 <kbd><Command size={10} /> K</kbd></button></div></div><div className="tasks-toolbar"><div className="toolbar-title"><span className="toolbar-kicker">{title}</span><span className="toolbar-count">{count}</span></div></div>{children}</div> }
+/** 详情页顶栏：返回 + 面包屑（从属上下文；主标题由 TaskDetail 的共享页头承担，不在这里重复大标题） */
+function Chrome({ title, onBack }: { title: string; onBack: () => void }) {
+  return <div className="workspace-topbar">
+    <div className="breadcrumb"><span>个人工作区</span><i>/</i><strong>{title}</strong></div>
+    <div className="topbar-actions"><button className="icon-btn" type="button" onClick={onBack} title="返回任务列表" aria-label="返回任务列表"><ListTodo size={16} /></button></div>
+  </div>
+}

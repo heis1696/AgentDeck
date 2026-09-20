@@ -1,47 +1,550 @@
 /* ============================================================
-   通用页面壳（page shell）
-   用量页 / Agent 页共用的骨架：常驻页头 + 独立滚动内容区 +
-   顶部极光氛围层。psh- 前缀；容器查询宿主在 .psh-body 上——
-   注意 container 属性自带 layout containment，会把 fixed 后代
-   变成相对容器定位，因此弹窗（.overlay）必须挂在 .psh-body
-   之外、.psh-page 直下。
+   应用壳层 + 通用页面壳（shell）
+   两块职责合并在本文件，因为它们是同一套「檐口节奏」：
+   A. 应用壳：侧栏（品牌行 / 工作区切换器 / 导航 / 页脚）、主区顶栏
+      与次级工具条、页面壳页头。几何全部取 tokens.css 的 --sidebar-*、
+      --topbar-*、--toolbar-*、--page-gutter；本文件不写字面量尺寸。
+   B. 通用页面壳（.psh-*）：用量页 / Agent 页共用的骨架——常驻页头 +
+      独立滚动内容区。容器查询宿主在 .psh-body 上，注意 container 属性
+      自带 layout containment，会把 fixed 后代变成相对容器定位，因此弹窗
+      （.overlay）必须挂在 .psh-body 之外、.psh-page 直下。
+   响应式阶梯（本文件是壳层断点的唯一权威）：
+     ≤1100 窄桌面：侧栏收窄一档（与 dock.css 的 1100 同级）
+     ≤900  页头两行化（页头不在容器查询宿主内，只能用视口断点）
+     ≤760  紧凑：页沟槽 16→12，顶栏/工具条降一档高度
+     ≤560  图标轨：侧栏只剩图标，顶栏只留图标按钮
+   本文件在 styles.css / tokens.css / foundation.css 之后加载，同特异度
+   以后者胜，因此这些规则即壳层的最终值。
+   ============================================================ */
+
+/* ============================================================
+   A. 应用壳
+   ============================================================ */
+
+.app { display: flex; height: 100vh; min-height: 0; background: var(--app-shell); }
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--app-shell);
+  container-type: inline-size;
+  container-name: main;
+}
+
+/* Canvas treatment and shared page gutters belong to the application shell. */
+main.main { background: var(--bg); }
+.main > :is(.page-surface, .psh-page, .tasks-column, .settings-page) {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--bg), transparent 80%, var(--bg)),
+    linear-gradient(to right, var(--canvas-grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--canvas-grid) 1px, transparent 1px),
+    linear-gradient(135deg, transparent 49.7%, var(--canvas-route) 49.7% 50%, transparent 50%);
+  background-size: 100% 460px, 32px 32px, 32px 32px, 256px 256px;
+}
+.main .page-content,
+.main .psh-body,
+.main .ext-tabs,
+.main .runtime-page > .runtime-content,
+.main .issue-open-strip {
+  width: 100%;
+  padding-left: 24px;
+  padding-right: 24px;
+}
+.main .ext-tabs {
+  margin-left: 0;
+  margin-right: 0;
+}
+.main .runtime-page > .runtime-content {
+  max-width: none;
+  margin-left: 0;
+  margin-right: 0;
+}
+.main .psh-body { background: transparent; }
+
+/* ---- 侧栏 ---- */
+.sidebar {
+  flex: 0 0 auto;
+  width: var(--sidebar-w);
+  min-width: var(--sidebar-w);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-raised);
+  border-right: 1px solid var(--border);
+  color: var(--text);
+}
+
+/* 品牌行：与主区顶栏同高，形成一条连续的檐口 */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+  min-height: var(--brand-h);
+  padding: 0 var(--sidebar-gutter);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--text-body);
+  font-weight: var(--weight-bold);
+  letter-spacing: 0;
+}
+.brand-mark {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: var(--text-label);
+  font-weight: var(--weight-bold);
+}
+.brand-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: var(--text-body);
+  font-weight: var(--weight-bold);
+  letter-spacing: 0;
+}
+/* 状态点只用颜色 + 光晕表达「已连接」，文本说明在侧栏页脚 */
+.brand-status {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  margin-left: auto;
+  border-radius: 50%;
+  background: var(--status-done);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--status-done) 14%, transparent);
+}
+
+/* ---- 工作区切换器 ---- */
+.ws-switch { position: relative; margin: var(--space-3) var(--sidebar-gutter) var(--space-2); }
+.workspace-switcher {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: var(--switch-h);
+  margin: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-inset);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--duration-base) var(--ease-in-out), border-color var(--duration-base) var(--ease-in-out);
+}
+.workspace-switcher:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+.workspace-switcher[aria-expanded='true'] { background: var(--bg-hover); border-color: var(--accent); }
+.workspace-switcher > span:nth-child(2) { display: flex; flex: 1; flex-direction: column; gap: 1px; min-width: 0; }
+.workspace-switcher b {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: var(--text-caption);
+  font-weight: var(--weight-semibold);
+}
+.workspace-switcher small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 0;
+  color: var(--text-faint);
+  font-size: var(--text-micro);
+}
+.workspace-glyph {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font: var(--weight-bold) var(--text-micro) var(--font-mono);
+}
+.workspace-caret {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  transition: transform var(--duration-base) var(--ease-in-out);
+}
+.workspace-caret.flip { transform: rotate(180deg); }
+
+/* 最近工作区下拉 */
+.ws-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 60;
+  max-height: min(360px, 52vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--space-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-overlay);
+  box-shadow: var(--menu-shadow);
+}
+.ws-menu-label {
+  padding: var(--space-2) var(--space-2) var(--space-1);
+  color: var(--text-faint);
+  font-size: var(--text-micro);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0;
+}
+.ws-menu-empty { padding: var(--space-3) var(--space-2); color: var(--text-faint); font-size: var(--text-caption); }
+.ws-menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: 34px;
+  padding: 6px var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--text-caption);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--duration-base) var(--ease-in-out);
+}
+.ws-menu-item:hover { background: var(--bg-hover); }
+.ws-menu-item svg { flex: 0 0 auto; color: var(--text-faint); }
+.ws-menu-name { font-weight: var(--weight-semibold); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-menu-path {
+  margin-left: auto;
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-faint);
+  font: var(--text-micro) var(--font-mono);
+}
+/* 当前项：色块 + 左缘条 + 强调图标，不靠单一颜色 */
+.ws-menu-item.current { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
+.ws-menu-item.current svg { color: var(--accent); }
+.ws-menu-sep { height: 1px; margin: var(--space-1); background: var(--border-subtle); }
+
+/* ---- 主 CTA 位置（配色归 foundation.css，这里只管壳层几何）---- */
+.new-task-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  flex: 0 0 auto;
+  min-height: var(--control-lg);
+  margin: 0 var(--sidebar-gutter) var(--space-3);
+  padding: 0 var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  font-size: var(--text-label);
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
+  transition: background var(--duration-base) var(--ease-in-out);
+}
+
+/* ---- 侧栏导航 ---- */
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 0 0 auto;
+  padding: var(--space-2) var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.nav button {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  min-height: var(--nav-item-h);
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--text-label);
+  font-weight: var(--weight-medium);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--duration-base) var(--ease-in-out), color var(--duration-base) var(--ease-in-out);
+}
+.nav button:hover { background: var(--bg-hover); color: var(--text); }
+/* 激活态：底色 + 左缘条 + 字重 + 图标染色（四重信号，不只靠颜色）*/
+.nav button.active,
+.nav button[aria-current='page'] {
+  background: var(--accent-soft);
+  color: var(--text);
+  font-weight: var(--weight-semibold);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.nav button.active svg,
+.nav button[aria-current='page'] svg { color: var(--accent); }
+.nav button svg { flex: 0 0 auto; width: 16px; height: 16px; opacity: 1; color: currentColor; }
+.nav-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nav-count {
+  flex: 0 0 auto;
+  margin-left: auto;
+  min-width: 18px;
+  padding: 1px 5px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font: var(--weight-semibold) var(--text-micro)/var(--leading-tight) var(--font-mono);
+  text-align: center;
+}
+
+/* ---- 侧栏页脚：唯一说明「本地引擎就绪」的地方 ---- */
+.sidebar-footer {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 0 0 auto;
+  margin-top: auto;
+  padding: var(--space-3) var(--sidebar-gutter);
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-faint);
+  font-size: var(--text-micro);
+}
+.connection-dot { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%; background: var(--status-done); }
+
+/* ---- 主区顶栏 ---- */
+.workspace-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex: 0 0 auto;
+  min-height: var(--topbar-h);
+  padding: 0 var(--page-gutter);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raised);
+}
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: var(--text-caption);
+}
+.breadcrumb > span:first-child { flex: 0 0 auto; }
+.breadcrumb strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-weight: var(--weight-semibold);
+}
+.breadcrumb i { flex: 0 0 auto; color: var(--text-faint); font-style: normal; }
+.topbar-actions { display: flex; flex: 0 0 auto; align-items: center; gap: var(--space-2); }
+
+/* 顶栏控件：搜索触发 + 图标按钮同一套面/线/悬停 */
+.command-trigger,
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--control-sm);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background var(--duration-base) var(--ease-in-out), border-color var(--duration-base) var(--ease-in-out), color var(--duration-base) var(--ease-in-out);
+}
+.command-trigger { gap: 7px; padding: 0 10px; font-size: var(--text-caption); }
+.icon-btn { width: var(--control-sm); padding: 0; }
+.command-trigger:hover,
+.icon-btn:hover { border-color: var(--border-strong); background: var(--bg-hover); color: var(--text); }
+.icon-btn:hover { color: var(--accent); }
+.command-trigger kbd {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: var(--space-2);
+  padding: 2px 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  background: var(--bg-raised);
+  color: var(--text-faint);
+  font: var(--weight-medium) var(--text-micro)/var(--leading-none) var(--font-mono);
+}
+
+/* ---- 次级工具条（页头下的计数/视图切换）---- */
+.tasks-toolbar {
+  min-height: var(--toolbar-h);
+  padding: 0 var(--page-gutter);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+.tasks-toolbar::before { display: none; }
+.toolbar-title { display: flex; align-items: baseline; gap: var(--space-2); margin-right: auto; }
+.toolbar-kicker { color: var(--text); font-size: var(--text-body); font-weight: var(--weight-semibold); }
+.toolbar-count {
+  color: var(--text-faint);
+  font: var(--weight-medium) var(--text-micro)/var(--leading-none) var(--font-mono);
+}
+
+/* ---- 页面页头（设置/扩展/自动化等页共用同一条檐口）---- */
+.page-header-bar {
+  /* 基础层钉死 height: 48px，这里改回由 min-height 决定：页头可随内容/断点两行化 */
+  height: auto;
+  min-height: var(--topbar-h);
+  padding: 0 var(--page-gutter);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raised);
+}
+.page-title-row { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.page-title {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: var(--text-title-sm);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-tight);
+}
+.page-count {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font: var(--weight-medium) var(--text-caption)/var(--leading-none) var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.page-desc {
+  min-width: 0;
+  margin-left: var(--space-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+  font-size: var(--text-caption);
+}
+.page-icon { flex: 0 0 auto; color: var(--accent); }
+.page-actions { display: flex; flex: none; align-items: center; gap: var(--space-2); }
+/* 页头动作按钮统一到标准控件高（md），与顶栏的 sm 图标控件区分层级 */
+.psh-actions .btn,
+.page-actions .btn { min-height: var(--control-md); }
+
+/* ============================================================
+   B. 通用页面壳（.psh-*）
    ============================================================ */
 
 .psh-page {
   flex: 1; min-height: 0;
   display: flex; flex-direction: column;
   padding: 0; overflow: hidden;
-  background: var(--surface-0);
+  background: var(--bg);
 }
 
+/* 常驻页头：与 .workspace-topbar / .page-header-bar 同高同沟槽 */
 .psh-header {
   flex-shrink: 0; z-index: 2;
-  padding: 0 var(--space-5);
-  min-height: 58px;
+  min-height: var(--topbar-h);
+  padding: 0 var(--page-gutter);
   border-bottom: 1px solid var(--border);
-  background: color-mix(in srgb, var(--bg-raised) 72%, transparent);
+  background: var(--bg-raised);
 }
 .psh-header .page-title-row { flex: 1 1 0; min-width: 0; }
 .psh-header .page-title { flex: none; }
 .psh-header .page-count { flex: none; }
 .psh-header .page-desc { flex: 1 1 0; min-width: 20px; }
-.psh-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+.psh-actions { display: flex; align-items: center; gap: var(--space-2); flex: none; }
 
 .psh-body {
   position: relative; flex: 1; min-height: 0;
   overflow-y: auto;
-  padding: 0 var(--space-5) var(--space-5);
+  padding: 0 var(--page-gutter) var(--space-5);
   container: page / inline-size;
 }
 .psh-body > * { position: relative; z-index: 1; }
 
-/* 氛围层已按 UI 统一规范移除（装饰极光/点阵/光晕）：
-   节点仍由 TSX 渲染，这里直接不显示，保持平面工作台。 */
-.psh-aurora { display: none; }
+/* ============================================================
+   C. 响应式阶梯
+   ============================================================ */
 
-/* 窄视口：页头两行化（标题行 + 操作行），操作按钮不挤标题。
-   注意页头不在 .psh-body 容器内，这里只能用视口断点；
-   侧栏 252px + 页边距下，视口 900px 约对应内容 620px。 */
-@media (max-width: 900px) {
-  .psh-header { flex-wrap: wrap; padding-top: 8px; padding-bottom: 8px; }
+/* ≤1100 窄桌面：侧栏收窄一档（与 dock.css 的 1100 同级，一次只动一件事）*/
+@media (max-width: 1100px) {
+  :root { --sidebar-w: var(--sidebar-w-compact); }
+}
+
+/* ≤900 页头两行化（标题行 + 操作行）：操作按钮不再挤标题。
+   页头不在 .psh-body 容器内，只能走视口断点。 */
+@container main (max-width: 900px) {
+  .psh-header { flex-wrap: wrap; padding-top: var(--space-2); padding-bottom: var(--space-2); }
+}
+
+/* ≤760 紧凑：页沟槽 16→12，顶栏/工具条/品牌行一起降一档高度（保持同一条檐口）*/
+@media (max-width: 760px) {
+  :root {
+    --page-gutter: var(--page-gutter-compact);
+    --topbar-h: var(--topbar-h-compact);
+    --toolbar-h: var(--toolbar-h-compact);
+    --brand-h: var(--topbar-h-compact);
+  }
+}
+@container main (max-width: 760px) {
+  .workspace-topbar,
+  .tasks-toolbar,
+  .page-header-bar,
+  .psh-header { padding-left: 16px; padding-right: 16px; }
+  .main .page-content,
+  .main .psh-body,
+  .main .ext-tabs,
+  .main .runtime-page > .runtime-content,
+  .main .issue-open-strip { padding-left: 16px; padding-right: 16px; }
+  .topbar-actions { gap: var(--space-1); }
+}
+
+/* ≤560 图标轨：侧栏只剩图标（--sidebar-w-rail），顶栏只留图标按钮。
+   导航文字改为「视觉隐藏」而不是 display:none——图标轨下按钮仍需可访问名。 */
+@media (max-width: 560px) {
+  :root { --sidebar-w: var(--sidebar-w-rail); --sidebar-gutter: 8px; --nav-item-h: var(--nav-item-h-compact); }
+  .brand { justify-content: center; padding: 0; }
+  .brand-name, .brand-status, .ws-switch, .sidebar-footer { display: none; }
+  .new-task-btn {
+    width: var(--control-lg);
+    min-height: var(--control-lg);
+    margin: var(--space-3) auto var(--space-4);
+    padding: 0;
+    font-size: 0;
+  }
+  .new-task-btn kbd { display: none; }
+  .nav { padding: var(--space-2) var(--space-1) var(--space-3); }
+  .nav button { justify-content: center; gap: 0; padding: 0; }
+  .nav-count { display: none; }
+  .nav-label {
+    display: block;
+    position: absolute;
+    width: 1px; height: 1px;
+    margin: -1px; padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
+}
+@container main (max-width: 560px) {
+  .command-trigger { width: var(--control-sm); padding: 0; font-size: 0; }
+  .command-trigger kbd { display: none; }
+  .breadcrumb > span:first-child, .breadcrumb i { display: none; }
+  .page-desc { display: none; }
 }

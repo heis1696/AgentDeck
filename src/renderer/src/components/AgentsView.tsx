@@ -4,6 +4,7 @@ import { Users, KeyRound, Sparkles, X, RefreshCw, Network, Download, Upload } fr
 import { useInteractionLayer } from '../hooks/useInteractionLayer'
 import { ui, isComposingKey } from '../ui/interaction-center'
 import { Menu } from '../ui/Menu'
+import { PageHeader } from '../ui/PageHeader'
 import { BACKEND_IDS } from '../../../shared/types'
 import { isForgeAgent } from '../../../shared/forge'
 
@@ -271,12 +272,12 @@ export function AgentsView() {
   const backendPresets = presets.filter((p) => p.backend === editing?.backend)
 
   const actions = (
-    <div className="psh-actions">
+    <>
       <button className="btn" onClick={addPreset}><KeyRound size={14} /> 新建 API 预设</button>
       <button className="btn" onClick={() => void importMd()}><Upload size={14} /> 导入 .md</button>
       <button className="btn" onClick={openDraft}>✦ 从描述生成</button>
       <button className="btn primary" onClick={add}>＋ 新建 Agent</button>
-    </div>
+    </>
   )
 
   const presetSection = (
@@ -683,17 +684,8 @@ export function AgentsView() {
 
   return (
     <div className="psh-page">
-      <header className="page-header-bar psh-header">
-        <div className="page-title-row">
-          <Users size={16} className="page-icon" />
-          <h2 className="page-title">Agent</h2>
-          {agents.length > 0 && <span className="page-count">{agents.length}</span>}
-          <span className="page-desc">同一平台可建多个 Agent，各自钉死 API 预设与模型；勾选可驱使名单的 Agent 成为领队。</span>
-        </div>
-        {actions}
-      </header>
+      <PageHeader title="Agent" icon={<Users size={16} />} count={agents.length} actions={actions} />
       <div className="psh-body">
-        <div className="psh-aurora" aria-hidden />
         {sections}
       </div>
       {dialogs}

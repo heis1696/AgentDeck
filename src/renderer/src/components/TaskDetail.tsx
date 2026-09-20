@@ -1,19 +1,25 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { FolderOpen, Info, Pencil, Waypoints } from 'lucide-react'
-import { bridge, fmtDuration, fmtTokens } from '../api'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import {
+  ChevronDown, Copy, FolderOpen, Info, ListChecks,
+  Pencil, Play, RefreshCw, Square, Trash2, Users, Waypoints
+} from 'lucide-react'
+import { bridge, fmtDuration, fmtTime, fmtTokens } from '../api'
 import { taskService } from '../task-service'
-import { GOAL_STATUS_LABELS, isParkedQueued, PARKED_QUEUED_LABEL } from '../labels'
+import { GOAL_STATUS_LABELS, PARKED_QUEUED_LABEL, TASK_STATUS_LABELS, isParkedQueued } from '../labels'
 import { Markdown } from './Markdown'
 import { ui, isComposingKey } from '../ui/interaction-center'
 import { IssueIdChip } from '../ui/IssueIdChip'
+import { PageHeader } from '../ui/PageHeader'
 import { useTaskEvents } from '../hooks/useTaskEvents'
 import { useTurnModel } from '../hooks/turnModel'
 import { useIssueDetails } from '../hooks/useIssueDetails'
 import { PermissionPrompt } from './task/PermissionPrompt'
-import { TurnTimeline } from './task/TurnTimeline'
-import { SkillMenu, buildMenuItems, parseSkillDirective, wrapSkillDirective, type LocalCommandKey } from './task/SkillMenu'
+import { FOLLOW_EPSILON, TurnTimeline } from './task/TurnTimeline'
+import { SkillMenu, buildMenuItems, parseSkillDirective, wrapSkillDirective, SKILL_MENU_LISTBOX_ID, skillMenuOptionId, type LocalCommandKey } from './task/SkillMenu'
+import { ActionMenu, type ActionMenuItem } from './task/ActionMenu'
 import { usePromptHistory } from '../hooks/usePromptHistory'
 import { SideDock } from '../ui/SideDock'
+import { scrollElementTo } from '../ui/motion'
 import { useInteractionLayer } from '../hooks/useInteractionLayer'
 import { ActivityTimeline } from './task/ActivityTimeline'
 import { GitSummary } from './task/GitSummary'
@@ -25,32 +31,47 @@ import type { Meeting } from '../../../shared/meeting'
 import type { SkillMeta } from '../../../shared/skills'
 
 type Tab = 'activity' | 'log' | 'result' | 'git'
-const STATUS_META: Record<Task['status'], string> = { queued: '排队中', running: '执行中', done: '完成', failed: '失败', cancelled: '已取消' }
+const TAB_ITEMS: ReadonlyArray<{ key: Tab; label: string; hint: string }> = [
+  { key: 'activity', label: '动态', hint: 'Run 报告与 Agent 通知' },
+  { key: 'log', label: '执行记录', hint: '回合对话与工具调用（←/→ 切换）' },
+  { key: 'result', label: '结果', hint: '最终结果 Markdown' },
+  { key: 'git', label: 'Git 改动', hint: 'git stat 与统一 diff' }
+]
 const WORKFLOW_OPTIONS: Array<{ value: IssueStatus; label: string }> = [
   { value: 'backlog', label: '待梳理' }, { value: 'todo', label: '待办' }, { value: 'in_progress', label: '进行中' },
   { value: 'in_review', label: '审查中' }, { value: 'done', label: '已完成' }, { value: 'blocked', label: '受阻' },
   { value: 'cancelled', label: '已取消' }
 ]
 
+/**
+ * 任务详情：头部 chrome（标题 + 一行 meta + 动作区）、运行檐（执行中实时回报）、
+ * 视图页签（WAI-ARIA tabs：←/→/Home/End + Ctrl+1..4）、队员条、正文（动态/执行记录/结果/Git）
+ * 与底部追问区。所有状态机、桥调用与交互中心契约保持不变：动作仍走 taskService/ui。
+ */
 export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[]; onSelect: (id: string) => void }) {
   const [tab, setTab] = useState<Tab>('activity')
   const [followUp, setFollowUp] = useState('')
   const [busy, setBusy] = useState(false)
-  const [, setClock] = useState(0)
+  const [now, setNow] = useState(() => Date.now())
   const [editingTitle, setEditingTitle] = useState(false)
   const [titleDraft, setTitleDraft] = useState('')
   const [activeNav, setActiveNav] = useState(-1)
+  const [following, setFollowing] = useState(true)
   const [infoOpen, setInfoOpen] = useState(false)
   // 目标/会议浮窗：同一时刻至多开一个；goal/meeting 数据由面板上报（驱动 header 状态芯片）
   const [float, setFloat] = useState<'goal' | 'meeting' | null>(null)
   const [goal, setGoal] = useState<Goal | null>(null)
   const [meeting, setMeeting] = useState<Meeting | null>(null)
   const logRef = useRef<HTMLDivElement>(null)
+  /** 贴底跟随（审查项 2）：同步判定用 ref（事件回调里立刻可读），渲染用 following state */
+  const stickRef = useRef(true)
   const followRef = useRef<HTMLTextAreaElement>(null)
   const infoRef = useRef<HTMLDivElement>(null)
+  const infoPopRef = useRef<HTMLDivElement>(null)
   const titleEditBtnRef = useRef<HTMLButtonElement>(null)
   const editingTitleRef = useRef(false)
   const navFrameRef = useRef(0)
+  const tabRefs = useRef(new Map<Tab, HTMLButtonElement>())
   const { events, permission, refreshEvents, answerPermission } = useTaskEvents(task.id)
   const turns = useTurnModel(events, task.prompt)
   // 追问框：↑↓ 历史重写 + / 命令菜单（本地命令 + 技能；技能列表首按 / 时懒加载一次）
@@ -63,6 +84,10 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   const skillQuery = followUp.startsWith('/') ? followUp.slice(1).split(/\s/)[0] ?? '' : ''
   const menuItems = useMemo(() => buildMenuItems(skills, skillQuery, isZcode), [skills, skillQuery, isZcode])
   useEffect(() => { setSkillIndex(0) }, [skillQuery])
+  // 组合框展开态（审查项 5）：菜单开着且真有条目才算展开——SkillMenu 无条目时不渲染 listbox，
+  // 此时 aria-expanded 必须是 false，否则指向了不存在的 aria-controls。
+  const skillMenuExpanded = skillMenuOpen && menuItems.length > 0
+  const skillActiveOptionId = skillMenuExpanded ? skillMenuOptionId(Math.min(skillIndex, menuItems.length - 1)) : undefined
   // 首次打开菜单才拉技能清单；此后复用（安装/卸载技能后重开 Issue 即刷新）
   useEffect(() => {
     if (!skillMenuOpen || skillsLoadedRef.current) return
@@ -73,6 +98,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   const { issue, comments, runs, updateWorkflow } = useIssueDetails(issueId, `${task.status}:${task.result ?? ''}:${task.eventCount}`)
   const workers = tasks.filter((item) => item.parentTaskId === task.id).sort((a, b) => (a.workerIndex ?? 0) - (b.workerIndex ?? 0))
   const activeWorkers = workers.filter((item) => item.status === 'running' || item.status === 'queued')
+  const idleWorkers = workers.filter((item) => item.status !== 'running' && item.status !== 'queued')
   const parent = task.parentTaskId ? tasks.find((item) => item.id === task.parentTaskId) : null
   const relayPred = task.continuesFrom ? tasks.find((item) => item.id === task.continuesFrom) : null
   const relaySucc = tasks.find((item) => item.continuesFrom === task.id)
@@ -81,20 +107,80 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   const turnActive = task.status === 'running'
   const goalActive = !!goal && !['completed', 'cancelled'].includes(goal.status)
   const goalChipSummary = goal ? `${goal.runCount}/${goal.maxRuns} 轮 · ${GOAL_STATUS_LABELS[goal.status]}${goal.currentRunId ? ' · 执行中' : ''}` : ''
+  const stateLabel = isParkedQueued(task) ? PARKED_QUEUED_LABEL : TASK_STATUS_LABELS[task.status]
+  const elapsed = task.startedAt ? Math.max(0, (task.endedAt ?? now) - task.startedAt) : 0
+  const lastEventAt = events.length ? events[events.length - 1].ts : 0
+  const agentCommentCount = comments.filter((comment) => comment.author.type === 'agent').length
+  const gitFileCount = (task.gitStat ?? '').split('\n').filter((line) => line.includes('|')).length
+  const tabCount = (key: Tab): number | null => key === 'activity' ? runs.length + agentCommentCount : key === 'log' ? turns.length : key === 'git' ? gitFileCount : null
+  const enabledTabs = TAB_ITEMS.filter((item) => item.key !== 'git' || !!task.gitDiff || !!task.gitStat).map((item) => item.key)
+  const canDelete = task.status !== 'running' && task.status !== 'queued'
+  const workdir = task.workdir
 
   useEffect(() => {
     if (!turnActive) return
-    const timer = window.setInterval(() => setClock((value) => value + 1), 1000)
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
     return () => window.clearInterval(timer)
   }, [task.id, turnActive])
 
   // ℹ 弹层：统一浮层（外点收起 + 最上层 Escape），原 window mousedown 监听已收敛
   useInteractionLayer<HTMLDivElement>({ open: infoOpen, onClose: () => setInfoOpen(false), kind: 'popover', name: 'task-info', closeOnOutside: true, autoFocus: false, layerRef: infoRef })
 
+  // ℹ 弹层几何：打开时、窗口缩放、Dock 开合或拖宽（.detail-left 尺寸变化）、祖先滚动后都重新测量。
+  // 只写内联几何；层栈（useInteractionLayer）与焦点契约（Escape / 外点收起）完全不动。
+  useLayoutEffect(() => {
+    if (!infoOpen) return
+    const anchor = infoRef.current
+    const pop = infoPopRef.current
+    if (!anchor || !pop) return
+    const place = () => placeInfoPopover(anchor, pop)
+    place()
+    const observer = new ResizeObserver(place)
+    observer.observe(anchor)
+    const column = anchor.closest<HTMLElement>('.detail-left')
+    if (column) observer.observe(column)
+    window.addEventListener('resize', place)
+    window.addEventListener('scroll', place, true)
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', place)
+      window.removeEventListener('scroll', place, true)
+    }
+  }, [infoOpen])
+
+  // 跨任务校正不可用页签（审查项 1）：可用页签集合随任务变化（Git 改动只在有改动时可用）。
+  // 切到新任务后若还停在上一个任务才有的页签上，页签条会没有任何 active 项、正文空白，
+  // 且焦点会停在 disabled 按钮上掉给 body——这里把视图拉回首个可用页签，并把焦点接回来。
+  const enabledTabKey = enabledTabs.join(',')
+  const tabFocusPendingRef = useRef(false)
+  // 焦点在**渲染期**抓：disabled 是 commit 阶段落到 DOM 上的，等 effect 再读就已经丢了
+  const tabAvailable = enabledTabs.includes(tab)
+  if (!tabAvailable) tabFocusPendingRef.current = document.activeElement === tabRefs.current.get(tab)
+  useEffect(() => {
+    if (tabAvailable) return
+    setTab(enabledTabs[0] ?? 'activity')
+    // enabledTabs 每帧新建数组，用 join 出来的键做依赖（内容不变则不触发）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [task.id, enabledTabKey])
+  useEffect(() => {
+    if (!tabFocusPendingRef.current) return
+    tabFocusPendingRef.current = false
+    tabRefs.current.get(tab)?.focus()
+  }, [tab])
+
   const scrollEl = () => {
     const element = logRef.current
     if (!element) return null
     return element.scrollHeight > element.clientHeight + 1 ? element : element.closest<HTMLElement>('.detail-main') ?? element
+  }
+  /** 贴底判定：与 TurnTimeline.FOLLOW_EPSILON 同源（滚到底 = 正在跟随流式末尾） */
+  const atBottom = (element: HTMLElement) => element.scrollHeight - element.scrollTop - element.clientHeight < FOLLOW_EPSILON
+  const syncFollowing = () => {
+    const element = scrollEl()
+    if (!element) return
+    const next = atBottom(element)
+    stickRef.current = next
+    setFollowing((current) => (current === next ? current : next))
   }
   const updateActiveNav = () => {
     const element = scrollEl()
@@ -103,7 +189,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     if (!nodes.length) { setActiveNav(0); return }
     // 滚到底（含新消息后自动跟随最新内容）时，当前回合就是最新回合——
     // 否则短的新回合在视口下半部永远够不着顶部门线，高亮会卡在上一条
-    if (element.scrollHeight - element.scrollTop - element.clientHeight < 40) {
+    if (atBottom(element)) {
       setActiveNav(nodes.length - 1)
       return
     }
@@ -113,13 +199,17 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     setActiveNav(active)
   }
   const onLogScroll = () => {
+    // 贴底判定要立刻反映到「回到最新」按钮上，不等下一帧；activeNav 仍按帧节流
+    syncFollowing()
     if (navFrameRef.current) return
     navFrameRef.current = requestAnimationFrame(() => { navFrameRef.current = 0; updateActiveNav() })
   }
   useEffect(() => {
     if (tab !== 'log') return
     const element = scrollEl()
-    if (element) element.scrollTop = element.scrollHeight
+    // 贴底跟随（审查项 2）：只有用户在底部时才把流式新内容滚进视野；
+    // 已滚上去读旧内容时，新事件到达不抢滚动位置
+    if (element && stickRef.current) element.scrollTop = element.scrollHeight
     updateActiveNav()
   }, [events, tab, turns.length])
   const scrollToTurn = (index: number) => {
@@ -127,8 +217,19 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     const target = element?.querySelector<HTMLElement>(`#turn-${index}`)
     if (!element || !target) return
     const delta = target.getBoundingClientRect().top - element.getBoundingClientRect().top
-    element.scrollTo({ top: Math.max(0, element.scrollTop + delta - 8), behavior: 'smooth' })
+    // 跳到历史回合 = 暂时不再跟随流式末尾（滚到底部时滚动事件会把它同步回 true）
+    stickRef.current = false
+    setFollowing(false)
+    scrollElementTo(element, Math.max(0, element.scrollTop + delta - 8))
     setActiveNav(index)
+  }
+  /** 「回到最新」：滚到流式末尾并把跟随状态打开（滚动本身尊重 prefers-reduced-motion） */
+  const followLatest = () => {
+    const element = scrollEl()
+    stickRef.current = true
+    setFollowing(true)
+    if (element) scrollElementTo(element, element.scrollHeight)
+    if (turns.length) setActiveNav(turns.length - 1)
   }
 
   const doRewind = async (index: number) => {
@@ -220,45 +321,144 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     const body = ['## 摘要', '', (task.result ?? '').slice(0, 2000), '', '## 改动', '', files ? `${files} 个文件有改动。` : '见提交记录。', branch ? `\n> 由 AgentDeck 队员在隔离分支 \`${branch}\` 上完成。` : ''].join('\n')
     await navigator.clipboard.writeText(`**${task.title}**\n\n${body}`); ui.toast.success('PR 描述已复制（标题 + 摘要 + 改动）')
   }
-  const duration = task.startedAt ? (task.endedAt ?? Date.now()) - task.startedAt : 0
+  const copyPrompt = async () => { await navigator.clipboard.writeText(task.prompt); ui.toast.success('原始指令已复制') }
+  const openWorker = (id: string, title: string) => ui.dock.open({ id: `task:${id}`, kind: 'task', title, payload: { taskId: id } })
+  const selectTab = (key: Tab, moveFocus = true) => {
+    setTab(key)
+    if (moveFocus) tabRefs.current.get(key)?.focus()
+  }
 
-  return <div className="detail">
+  const actionItems: ActionMenuItem[] = [
+    { key: 'copy-result', label: '复制结果', hint: 'Markdown', icon: <Copy size={13} aria-hidden="true" />, disabled: busy || !task.result, run: () => void copyResult() },
+    { key: 'copy-pr', label: '复制 PR 描述', hint: '标题 + 摘要 + 改动', icon: <Copy size={13} aria-hidden="true" />, disabled: busy || !task.result, run: () => void copyPrBody() },
+    { key: 'copy-prompt', label: '复制原始指令', icon: <Copy size={13} aria-hidden="true" />, run: () => void copyPrompt() },
+    { key: 'duplicate', label: '复制为新任务', icon: <ListChecks size={13} aria-hidden="true" />, disabled: busy, run: () => void doDuplicate() },
+    ...(workdir ? [{ key: 'open-dir', label: '打开工作目录', hint: workdir, icon: <FolderOpen size={13} aria-hidden="true" />, run: () => void bridge.openPath(workdir) }] : []),
+    ...(canDelete ? [{ key: 'delete', label: '删除任务与日志', icon: <Trash2 size={13} aria-hidden="true" />, danger: true, run: () => void doDelete() }] : [])
+  ]
+
+  return <div
+    className="detail"
+    onKeyDown={(event) => {
+      // Ctrl/Cmd+1..4：视图页签直达（全局快捷键表未占用这组组合）
+      if (!(event.ctrlKey || event.metaKey) || !/^[1-9]$/.test(event.key)) return
+      const key = enabledTabs[Number(event.key) - 1]
+      if (!key) return
+      event.preventDefault()
+      selectTab(key)
+    }}
+  >
     <div className="detail-left">
-    <header className="detail-header page-header-bar"><div className="detail-title-wrap">
-      {editingTitle ? <input ref={titleEditRef} className="title-edit-input" value={titleDraft} autoFocus onChange={(event) => setTitleDraft(event.target.value)} onKeyDown={(event) => { if (isComposingKey(event.nativeEvent)) return; if (event.key === 'Enter') { event.preventDefault(); void saveTitle() } }} onBlur={() => void saveTitle()} /> : <h1 className="detail-title">{task.title}<button ref={titleEditBtnRef} className="title-edit" type="button" title="重命名" onClick={beginTitleEdit}><Pencil size={13} aria-hidden="true" /></button></h1>}
-      <div className="detail-meta">
-        <span className="meta-group meta-identity"><span className="detail-eyebrow">{parent ? '队员任务' : '工作任务'}</span>{parent && <a className="mini link" role="button" tabIndex={0} onClick={() => onSelect(parent.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(parent.id) } }}>↩ 领队任务: {parent.title}</a>}{workers.length > 0 && <button type="button" className="badge badge-squad link-badge" title="在右侧分页打开子任务" onClick={() => { const target = workers.find((item) => item.status === 'running') ?? workers[0]; if (target) ui.dock.open({ id: `task:${target.id}`, kind: 'task', title: target.title, payload: { taskId: target.id } }) }}>⚡ 子任务 {workers.filter((worker) => worker.status === 'done').length}/{workers.length}</button>}</span>
+    <PageHeader
+      title={editingTitle ? <input ref={titleEditRef} className="title-edit-input" value={titleDraft} autoFocus onChange={(event) => setTitleDraft(event.target.value)} onKeyDown={(event) => { if (isComposingKey(event.nativeEvent)) return; if (event.key === 'Enter') { event.preventDefault(); void saveTitle() } }} onBlur={() => void saveTitle()} /> : <><span className="task-title-text" title={task.title}>{task.title}</span><button ref={titleEditBtnRef} className="title-edit" type="button" title="重命名" onClick={beginTitleEdit}><Pencil size={13} aria-hidden="true" /></button></>}
+      metadata={<div className="detail-meta">
+        <span className="meta-group meta-identity"><span className="detail-eyebrow">{parent ? '队员任务' : '工作任务'}</span>{parent && <a className="mini link" role="button" tabIndex={0} onClick={() => onSelect(parent.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(parent.id) } }}>↩ 领队任务: {parent.title}</a>}{workers.length > 0 && <button type="button" className="badge badge-squad link-badge" title="在右侧分页打开子任务" onClick={() => { const target = workers.find((item) => item.status === 'running') ?? workers[0]; if (target) openWorker(target.id, target.title) }}>⚡ 子任务 {workers.filter((worker) => worker.status === 'done').length}/{workers.length}</button>}</span>
         <IssueIdChip id={issueId} />
         <select className="meta-workflow" title="工作流" aria-label="工作流" value={issue?.status ?? 'todo'} onChange={(event) => void updateWorkflow(event.target.value as IssueStatus)}>
           {WORKFLOW_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         </select>
-        <span className="meta-group meta-status"><span className={`status-chip status-${task.status}`}>{isParkedQueued(task) ? PARKED_QUEUED_LABEL : STATUS_META[task.status]}</span>{turnActive && <span className="active-duration" aria-live="polite">工作中 · {fmtDuration(Date.now() - (task.startedAt ?? Date.now()))}</span>}</span>
+        <span className="meta-group meta-status"><span className={`status-chip status-${task.status}`}>{stateLabel}</span>{turnActive && <span className="active-duration" aria-hidden="true">工作中 · {fmtDuration(elapsed)}</span>}</span>
         <span className="meta-divider" aria-hidden="true" />
-        <span className="meta-group meta-source"><span className="badge backend-chip" title={`执行后端 ${task.backend}`}>{task.backend}</span>{task.workdir && <button className="workspace-chip" type="button" title={task.workdir} onClick={() => void bridge.openPath(task.workdir)}><FolderOpen size={13} aria-hidden="true" /><span>{task.workdir.split(/[\\/]/).filter(Boolean).pop()}</span></button>}<span className="meta-chip" title="总用时">⏱ {duration > 0 ? fmtDuration(duration) : '—'}</span>{task.usage && <span className="meta-chip" title={`输入 ${task.usage.inputTokens.toLocaleString()} · 输出 ${task.usage.outputTokens.toLocaleString()} · 回合 ${task.usage.turns}${task.usage.costUsd > 0 ? ` · 成本 $${task.usage.costUsd.toFixed(4)}` : ''}`}>{fmtTokens(task.usage.inputTokens + task.usage.outputTokens)} tokens{task.usage.costUsd > 0 ? ` · $${task.usage.costUsd.toFixed(4)}` : ''}</span>}{task.integration?.branch && <span className="meta-chip mono" title={`集成分支 ${task.integration.branch}`}>⎇ {task.integration.branch.replace('agentdeck/task-', '#')}</span>}{!!task.attempt && <span className="retry-chip" title={`自动重试 ${task.attempt}/2`}>⟳ 重试 {task.attempt}/2</span>}</span>
+        <span className="meta-group meta-source"><span className="badge backend-chip" title={`执行后端 ${task.backend}`}>{task.backend}</span>{workdir && <button className="workspace-chip" type="button" title={workdir} onClick={() => void bridge.openPath(workdir)}><FolderOpen size={13} aria-hidden="true" /><span>{workdir.split(/[\\/]/).filter(Boolean).pop()}</span></button>}<span className="meta-chip" title={`${task.startedAt ? fmtTime(task.startedAt) : '未开始'} → ${task.endedAt ? fmtTime(task.endedAt) : turnActive ? '进行中' : '—'}`}>⏱ {elapsed > 0 ? fmtDuration(elapsed) : '—'}</span>{task.usage && <span className="meta-chip" title={`输入 ${task.usage.inputTokens.toLocaleString()} · 输出 ${task.usage.outputTokens.toLocaleString()} · 回合 ${task.usage.turns}${task.usage.costUsd > 0 ? ` · 成本 $${task.usage.costUsd.toFixed(4)}` : ''}`}>{fmtTokens(task.usage.inputTokens + task.usage.outputTokens)} tokens{task.usage.costUsd > 0 ? ` · $${task.usage.costUsd.toFixed(4)}` : ''}</span>}{task.integration?.branch && <span className="meta-chip mono" title={`集成分支 ${task.integration.branch}`}>⎇ {task.integration.branch.replace('agentdeck/task-', '#')}</span>}{!!task.attempt && <span className="retry-chip" title={`自动重试 ${task.attempt}/2`}>⟳ 重试 {task.attempt}/2</span>}</span>
         <div className="meta-info-wrap" ref={infoRef}>
           <button type="button" className={`meta-chip meta-info-btn ${infoOpen ? 'open' : ''}`} title="原始指令、交接备注与详细信息" aria-expanded={infoOpen} onClick={() => setInfoOpen((value) => !value)}><Info size={12} aria-hidden="true" /></button>
-          {infoOpen && <div className="meta-info-pop">
-            <div className="meta-info-sec"><span className="meta-info-label">原始指令</span><pre className="meta-info-prompt">{task.prompt}</pre></div>
+          {infoOpen && <div className="meta-info-pop" ref={infoPopRef}>
+            <div className="meta-info-sec"><div className="meta-info-head"><span className="meta-info-label">原始指令</span><button type="button" className="meta-info-copy" onClick={() => void copyPrompt()}>复制</button></div><pre className="meta-info-prompt">{task.prompt}</pre></div>
             {task.handoff && <div className="meta-info-sec"><span className="meta-info-label">交接备注</span><p>{task.handoff}</p></div>}
             {task.usage && <div className="meta-info-sec"><span className="meta-info-label">用量明细</span><p>输入 {task.usage.inputTokens.toLocaleString()} · 输出 {task.usage.outputTokens.toLocaleString()} · 回合 {task.usage.turns}{task.usage.costUsd > 0 ? ` · 成本 $${task.usage.costUsd.toFixed(4)}` : ''}</p></div>}
             {task.sessionId && <div className="meta-info-sec"><span className="meta-info-label">会话 ID</span><code className="meta-info-mono">{task.sessionId}</code></div>}
             {isRelay && <div className="meta-info-sec"><span className="meta-info-label"><Waypoints size={12} /> 阶段接力 · 第 {relayStage} 阶段</span>{relayPred && <p><a className="mini link" role="button" tabIndex={0} title={relayPred.title} onClick={() => onSelect(relayPred.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(relayPred.id) } }}>接力自：{relayPred.title}</a></p>}{relaySucc && <p><a className="mini link" role="button" tabIndex={0} title={relaySucc.title} onClick={() => onSelect(relaySucc.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(relaySucc.id) } }}>{relaySucc.status === 'queued' && relaySucc.parked ? '⏸ ' : '已接力 → '}{relaySucc.title.replace(/^▶ /, '')}</a></p>}{!relayPred && <p>触发：上一阶段接力（同 Issue 新会话）</p>}</div>}
-            {!task.workdir && <div className="meta-info-sec"><span className="meta-info-label">工作目录</span><p className="dim">未绑定</p></div>}
+            {!workdir && <div className="meta-info-sec"><span className="meta-info-label">工作目录</span><p className="dim">未绑定</p></div>}
           </div>}
         </div>
-      </div>
-    </div><div className="detail-actions">{goalActive && <button type="button" className="meta-chip float-chip is-goal" title={`${goal!.text}\n点击打开目标模式浮窗`} onClick={() => setFloat((cur) => (cur === 'goal' ? null : 'goal'))}>🎯 {goalChipSummary}</button>}{meeting && <button type="button" className="meta-chip float-chip is-meeting" title={`${meeting.topic}\n点击打开会议浮窗`} onClick={() => setFloat((cur) => (cur === 'meeting' ? null : 'meeting'))}>💬 {MEETING_STATUS_LABEL[meeting.status]}{meeting.round ? ` · 第 ${meeting.round}/${meeting.maxRounds} 轮` : ''}</button>}{task.status === 'queued' && <button className="btn primary" disabled={busy} onClick={() => void doStart()}>▶ 开始执行</button>}{task.status === 'done' && <><button className="btn detail-btn-ghost" title="复制结果为 Markdown" disabled={busy || !task.result} onClick={() => void copyResult()}>复制结果</button><button className="btn detail-btn-ghost" title="复制 PR 描述（标题+摘要+改动）" disabled={busy || !task.result} onClick={() => void copyPrBody()}>复制 PR 描述</button></>}{turnActive && <button className="btn danger" disabled={busy} onClick={() => void doCancel()}>停止</button>}{(task.status === 'failed' || task.status === 'cancelled' || task.status === 'done') && <><button className="btn detail-btn-emphasis" disabled={busy} onClick={() => void doRetry()}>重新运行</button><button className="btn detail-btn-ghost" disabled={busy} onClick={() => void doDuplicate()}>复制</button></>}{task.status !== 'running' && task.status !== 'queued' && <button className="btn detail-btn-ghost-danger" onClick={() => void doDelete()}>删除</button>}</div></header>
+      </div>}
+      actions={<>{goalActive && <button type="button" className="meta-chip float-chip is-goal" title={`${goal!.text}\n点击打开目标模式浮窗`} onClick={() => setFloat((cur) => (cur === 'goal' ? null : 'goal'))}>🎯 {goalChipSummary}</button>}{meeting && <button type="button" className="meta-chip float-chip is-meeting" title={`${meeting.topic}\n点击打开会议浮窗`} onClick={() => setFloat((cur) => (cur === 'meeting' ? null : 'meeting'))}>💬 {MEETING_STATUS_LABEL[meeting.status]}{meeting.round ? ` · 第 ${meeting.round}/${meeting.maxRounds} 轮` : ''}</button>}{task.status === 'queued' && <button className="btn primary" disabled={busy} onClick={() => void doStart()}><Play size={13} aria-hidden="true" /> 开始执行</button>}{turnActive && <button className="btn danger" disabled={busy} onClick={() => void doCancel()}><Square size={12} aria-hidden="true" /> 停止</button>}{(task.status === 'failed' || task.status === 'cancelled' || task.status === 'done') && <><button className="btn detail-btn-emphasis" disabled={busy} onClick={() => void doRetry()}><RefreshCw size={13} aria-hidden="true" /> 重新运行</button>{task.status === 'done' && <button className="btn detail-btn-ghost" title="复制结果为 Markdown" disabled={busy || !task.result} onClick={() => void copyResult()}><Copy size={13} aria-hidden="true" /> 复制结果</button>}</>}<ActionMenu items={actionItems} label="更多操作" /></>}
+    />
+    {(turnActive || task.status === 'queued') && <div className={`run-rail status-${task.status}${turnActive ? ' is-live' : ''}`} role="status" aria-live="polite">
+      <span className="run-rail-pulse" aria-hidden="true" />
+      <strong className="run-rail-state">{stateLabel}</strong>
+      {/* 每秒刷新的计时对读屏是噪音：视觉可见、不进无障碍树 */}
+      <span className="run-rail-item" aria-hidden="true">{turnActive ? `已用 ${fmtDuration(elapsed)}` : isParkedQueued(task) ? '等你启动' : '等待调度'}</span>
+      <span className="run-rail-sep" aria-hidden="true">·</span>
+      <span className="run-rail-item">{turns.length} 回合</span>
+      {lastEventAt > 0 && <><span className="run-rail-sep" aria-hidden="true">·</span><span className="run-rail-item" aria-hidden="true">最近事件 {fmtTime(lastEventAt)}</span></>}
+      {activeWorkers.length > 0 && <><span className="run-rail-sep" aria-hidden="true">·</span><span className="run-rail-item is-squad" aria-hidden="true"><Users size={11} aria-hidden="true" /> 队员 {activeWorkers.length}/{workers.length} 执行中</span></>}
+      <span className="run-rail-bar" aria-hidden="true"><i /></span>
+    </div>}
 
     <div className="detail-columns"><div className="detail-main" onScroll={onLogScroll}>
-      {task.status === 'failed' && task.error && <div className="error-banner"><div className="error-head"><span className="error-icon" aria-hidden="true">⚠</span><span className="error-title">{task.failure?.title ?? '执行失败'}</span>{task.failure?.code && <span className="failure-code">{task.failure.code}</span>}{task.failure?.retryable && <span className="failure-retryable">可重试</span>}</div>{task.failure?.hint && <div className="error-hint">{task.failure.hint}</div>}<details className="failure-raw"><summary>错误原文</summary><pre>{task.error}</pre></details></div>}
-      {task.integration?.note && <div className={`integration-banner ${task.integration.note.includes('未完成') ? 'warn' : ''}`}>🔀 {task.integration.note}{task.integration.branch && task.workdir && <a className="mini link" role="button" tabIndex={0} onClick={() => void bridge.openPath(task.workdir)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void bridge.openPath(task.workdir) } }}>打开仓库</a>}</div>}
-      {activeWorkers.length > 0 && <div className="workers-pane"><div className="list-group-label">运行中的队员（{activeWorkers.length}）</div>{activeWorkers.map((worker) => <div key={worker.id} className={`worker-card ${worker.status === 'cancelled' ? 'is-cancelled' : ''}`} role="button" tabIndex={0} onClick={() => ui.dock.open({ id: `task:${worker.id}`, kind: 'task', title: worker.title, payload: { taskId: worker.id } })} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); ui.dock.open({ id: `task:${worker.id}`, kind: 'task', title: worker.title, payload: { taskId: worker.id } }) } }}><span className={`dot dot-${worker.status}`} /><span className="worker-title">{worker.title}</span><span className="mini">{worker.status === 'running' ? '执行中…' : worker.status === 'queued' ? (worker.parked ? PARKED_QUEUED_LABEL : '排队') : worker.status === 'cancelled' ? '已取消' : worker.status === 'failed' ? '✗ 失败' : worker.startedAt && worker.endedAt ? `✓ ${fmtDuration(worker.endedAt - worker.startedAt)}` : '✓'}</span>{worker.gitStat ? <span className="mini dim">· 有改动</span> : null}</div>)}</div>}
+      {task.status === 'failed' && task.error && <div className="error-banner"><div className="error-head"><span className="error-icon" aria-hidden="true">⚠</span><span className="error-title">{task.failure?.title ?? '执行失败'}</span>{task.failure?.code && <span className="failure-code">{task.failure.code}</span>}{task.failure?.retryable && <span className="failure-retryable">可重试</span>}<button type="button" className="error-copy" onClick={() => { void navigator.clipboard.writeText(task.error ?? ''); ui.toast.success('错误原文已复制') }}>复制错误</button></div>{task.failure?.hint && <div className="error-hint">{task.failure.hint}</div>}<details className="failure-raw"><summary>错误原文</summary><pre>{task.error}</pre></details></div>}
+      {task.integration?.note && <div className={`integration-banner ${task.integration.note.includes('未完成') ? 'warn' : ''}`}>🔀 {task.integration.note}{task.integration.branch && workdir && <a className="mini link" role="button" tabIndex={0} onClick={() => void bridge.openPath(workdir)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void bridge.openPath(workdir) } }}>打开仓库</a>}</div>}
+      {workers.length > 0 && <div className={`workers-pane${activeWorkers.length ? ' has-active' : ''}`}>
+        <div className="workers-head">
+          <span className="list-group-label"><Users size={12} aria-hidden="true" /> 队员 {workers.filter((worker) => worker.status === 'done').length}/{workers.length} 完成</span>
+          {activeWorkers.length > 0 && <span className="workers-live"><span className="dot dot-running" aria-hidden="true" />{activeWorkers.length} 执行中</span>}
+        </div>
+        <div className="workers-list">{(activeWorkers.length ? activeWorkers : idleWorkers.slice(0, 3)).map((worker) => <button key={worker.id} type="button" className={`worker-card status-${worker.status}${worker.status === 'cancelled' ? ' is-cancelled' : ''}`} onClick={() => openWorker(worker.id, worker.title)} title={`${worker.title}\n在右侧分页打开只读详情`}>
+          <span className={`dot dot-${worker.status}`} aria-hidden="true" />
+          {worker.workerIndex != null && <span className="worker-index">#{worker.workerIndex + 1}</span>}
+          <span className="worker-title">{worker.title}</span>
+          <span className="worker-state mini">{worker.status === 'running' ? `执行中 · ${fmtDuration(Math.max(0, now - (worker.startedAt ?? now)))}` : worker.status === 'queued' ? (worker.parked ? PARKED_QUEUED_LABEL : '排队') : worker.status === 'cancelled' ? '已取消' : worker.status === 'failed' ? '✗ 失败' : worker.startedAt && worker.endedAt ? `✓ ${fmtDuration(worker.endedAt - worker.startedAt)}` : '✓'}</span>
+          {!!worker.attempt && <span className="mini dim">⟳{worker.attempt}</span>}
+          {worker.gitStat ? <span className="mini dim" title="有改动">· 有改动</span> : null}
+          {worker.status === 'running' && <span className="worker-progress" aria-hidden="true" />}
+        </button>)}</div>
+        {activeWorkers.length > 0 && idleWorkers.length > 0 && <details className="workers-more"><summary>另外 {idleWorkers.length} 个已结束队员</summary><div className="workers-list">{idleWorkers.map((worker) => <button key={worker.id} type="button" className={`worker-card status-${worker.status}${worker.status === 'cancelled' ? ' is-cancelled' : ''}`} onClick={() => openWorker(worker.id, worker.title)} title={`${worker.title}\n在右侧分页打开只读详情`}>
+          <span className={`dot dot-${worker.status}`} aria-hidden="true" />
+          {worker.workerIndex != null && <span className="worker-index">#{worker.workerIndex + 1}</span>}
+          <span className="worker-title">{worker.title}</span>
+          <span className="worker-state mini">{worker.status === 'cancelled' ? '已取消' : worker.status === 'failed' ? '✗ 失败' : worker.startedAt && worker.endedAt ? `✓ ${fmtDuration(worker.endedAt - worker.startedAt)}` : '✓'}</span>
+        </button>)}</div></details>}
+      </div>}
       {permission && <PermissionPrompt permission={permission} onAnswer={(decision) => void answerPermission(decision)} />}
-      <div className="tabs"><button className={tab === 'activity' ? 'active' : ''} onClick={() => setTab('activity')}>动态</button><button className={tab === 'log' ? 'active' : ''} onClick={() => setTab('log')}>执行记录</button><button className={tab === 'result' ? 'active' : ''} onClick={() => setTab('result')}>结果</button><button className={tab === 'git' ? 'active' : ''} onClick={() => setTab('git')} disabled={!task.gitDiff && !task.gitStat}>Git 改动</button></div>
-      <div className="detail-body">{tab === 'activity' && <ActivityTimeline task={task} issueIdentifier={issue?.identifier} runs={runs} comments={comments} onShowLog={() => setTab('log')} />}{tab === 'log' && <TurnTimeline task={task} turns={turns} activeNav={activeNav} onNavigate={scrollToTurn} onRewind={(index) => void doRewind(index)} logRef={logRef} onScroll={onLogScroll} />}{tab === 'result' && <div className="result">{task.result ? <Markdown text={task.result} /> : turnActive ? <div className="list-empty">执行中，暂无最终结果</div> : <div className="list-empty">（无结果）</div>}</div>}{tab === 'git' && <GitSummary task={task} />}</div>
+      <div className="tabs" role="tablist" aria-label="任务详情视图" aria-orientation="horizontal" onKeyDown={(event) => {
+        // IME 组合中不抢 ←/→（候选选择）
+        if (isComposingKey(event.nativeEvent)) return
+        const index = enabledTabs.indexOf(tab)
+        if (index < 0) return
+        if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
+          event.preventDefault()
+          selectTab(enabledTabs[(index + (event.key === 'ArrowRight' ? 1 : -1) + enabledTabs.length) % enabledTabs.length])
+          return
+        }
+        if (event.key === 'Home' || event.key === 'End') { event.preventDefault(); selectTab(event.key === 'Home' ? enabledTabs[0] : enabledTabs[enabledTabs.length - 1]) }
+      }}>
+        {TAB_ITEMS.map((item, index) => {
+          const disabled = item.key === 'git' && !task.gitDiff && !task.gitStat
+          const count = tabCount(item.key)
+          return <button
+            key={item.key}
+            ref={(node) => { if (node) tabRefs.current.set(item.key, node); else tabRefs.current.delete(item.key) }}
+            type="button"
+            role="tab"
+            id={`detail-tab-${item.key}`}
+            aria-controls="detail-tabpanel"
+            aria-selected={tab === item.key}
+            tabIndex={tab === item.key ? 0 : -1}
+            className={`${tab === item.key ? 'active' : ''}${item.key === 'result' && task.result ? ' has-content' : ''}`}
+            disabled={disabled}
+            title={disabled ? '本次执行没有 Git 改动' : `${item.hint}${index < 4 ? `（Ctrl+${index + 1}）` : ''}`}
+            onClick={() => setTab(item.key)}
+          >
+            {item.label}
+            {count != null && count > 0 && <span className="tab-count">{count}</span>}
+            {item.key === 'result' && task.result && <span className="tab-flag-dot" aria-hidden="true" />}
+          </button>
+        })}
+      </div>
+      <div className="detail-body" role="tabpanel" id="detail-tabpanel" aria-labelledby={`detail-tab-${tab}`}>{tab === 'activity' && <ActivityTimeline task={task} issueIdentifier={issue?.identifier} runs={runs} comments={comments} onShowLog={() => setTab('log')} />}{tab === 'log' && <TurnTimeline task={task} turns={turns} activeNav={activeNav} following={following} onFollowLatest={followLatest} onNavigate={scrollToTurn} onRewind={(index) => void doRewind(index)} logRef={logRef} onScroll={onLogScroll} />}{tab === 'result' && <div className="result" tabIndex={0} aria-label="最终结果">{task.result ? <Markdown text={task.result} /> : turnActive ? <div className="list-empty">执行中，暂无最终结果</div> : <div className="list-empty">（无结果）</div>}</div>}{tab === 'git' && <GitSummary task={task} />}</div>
       {task.sessionId && task.status !== 'queued' && <footer className="followup">
         {skillMenuOpen && <SkillMenu items={menuItems} activeIndex={skillIndex} onHover={setSkillIndex} onPickCommand={openLocalCommand} onPickSkill={(skill) => { setFollowUp(`/${skill.name} `); setSkillMenuOpen(false); followRef.current?.focus() }} />}
-        <textarea ref={followRef} value={followUp} placeholder="追问 / 继续这个会话…（Enter 发送，Shift+Enter 换行，↑↓ 翻历史，/ 命令与技能）" rows={1}
+        <div className="followup-row">
+        <textarea ref={followRef} value={followUp} placeholder="追问 / 继续这个会话…（Enter 发送，Shift+Enter 换行，↑↓ 翻历史，/ 命令与技能）" rows={1} aria-label="追问内容"
+          aria-describedby="followup-hint"
+          /* WAI-ARIA 1.2 组合框（审查项 5）：焦点始终留在 textarea，选项只通过 aria-activedescendant 指认 */
+          role="combobox"
+          aria-autocomplete="list"
+          aria-haspopup="listbox"
+          aria-expanded={skillMenuExpanded}
+          aria-controls={skillMenuExpanded ? SKILL_MENU_LISTBOX_ID : undefined}
+          aria-activedescendant={skillActiveOptionId}
           onChange={(event) => {
             setFollowUp(event.target.value); autoGrow(event.target)
             const startsSlash = event.target.value.startsWith('/')
@@ -302,7 +502,16 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
             if (event.key === 'Escape' && history.index >= 0) { event.preventDefault(); setFollowUp(history.navigate(1) ?? ''); return }
             if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendFollowUp(); setSkillMenuOpen(false) }
           }} />
-        <button className="btn" disabled={busy || !!task.parentTaskId || (task.status !== 'done' && task.status !== 'failed')} title={task.parentTaskId ? '委派子任务不参与阶段接力' : '让本执行交出下一阶段简报，并在同一 Issue 上硬切新会话'} onClick={() => void sendFollowUp('执行下一阶段', { relay: true })}>⇥ 接力下一阶段</button><button className="btn primary" disabled={busy || !followUp.trim()} onClick={() => { void sendFollowUp(); setSkillMenuOpen(false) }}>发送</button>
+        <button className="btn" disabled={busy || !!task.parentTaskId || (task.status !== 'done' && task.status !== 'failed')} title={task.parentTaskId ? '委派子任务不参与阶段接力' : '让本执行交出下一阶段简报，并在同一 Issue 上硬切新会话'} onClick={() => void sendFollowUp('执行下一阶段', { relay: true })}><Waypoints size={13} aria-hidden="true" /><span className="btn-text">接力下一阶段</span></button>
+        <button className="btn primary" disabled={busy || !followUp.trim()} onClick={() => { void sendFollowUp(); setSkillMenuOpen(false) }}>发送</button>
+        </div>
+        <div className="followup-hint" id="followup-hint">
+          <span><b>Enter</b> 发送</span><span><b>Shift+Enter</b> 换行</span><span><b>↑↓</b> 历史</span><span><b>/</b> 命令与技能</span>
+          {!!task.parentTaskId && <span className="is-warn">子任务不参与阶段接力</span>}
+          {busy && <span className="is-live">正在发送…</span>}
+          {skillMenuOpen && menuItems.length === 0 && <span className="is-warn">没有匹配的命令或技能</span>}
+          {skillMenuOpen && menuItems.length > 0 && <span className="is-live">{menuItems.length} 项可选<ChevronDown size={11} aria-hidden="true" /></span>}
+        </div>
       </footer>}
     </div>
     </div>
@@ -327,4 +536,60 @@ function relayNumber(task: Task, tasks: Task[]) {
 function autoGrow(element: HTMLTextAreaElement, max = 200) {
   element.style.height = 'auto'
   element.style.height = `${Math.min(element.scrollHeight, max)}px`
+}
+
+/** ℹ 弹层定位常量：与边界审查同源的内缩 7px / 锚点间距 8px；宽度上限同 CSS 的 min(420px, 100vw - 64px) */
+const POPOVER_EDGE = 7
+const POPOVER_GAP = 8
+const POPOVER_WIDTH = 420
+const POPOVER_MIN_WIDTH = 180
+
+/**
+ * ℹ 弹层：按**实际详情列（.detail-left）+ 视口**测量后内联定位。
+ * 样式表里的 `right: 0` 只相对 .meta-info-wrap：meta 行一换行，420px 的弹层就整个越过详情列
+ * 压住侧栏导航（1440 带 Dock 与 980 两档都复现）。这里不改 CSS，只写内联 left/top/width/max-height：
+ * - 横向：优先右对齐锚点（与 CSS 现状一致），列左边界放不下改左对齐，最后夹进详情列内缩后的区间；
+ * - 纵向：优先锚点下方，下方放不下翻到上方，上方也放不下就压 max-height（scrollHeight 不受 max-height 限制）；
+ * 弹层因此始终留在详情列与视口内；层栈顺序与焦点契约不受影响（外点/Escape 仍由交互中心代管）。
+ */
+function placeInfoPopover(anchor: HTMLElement, pop: HTMLElement) {
+  const column = anchor.closest<HTMLElement>('.detail-left') ?? anchor.parentElement ?? anchor
+  const anchorRect = anchor.getBoundingClientRect()
+  const columnRect = column.getBoundingClientRect()
+  const viewportWidth = document.documentElement.clientWidth || window.innerWidth
+  const viewportHeight = document.documentElement.clientHeight || window.innerHeight
+  // 详情列内的可用区间（列宽下限 340，正常情况都够放 420px 弹层；列极窄时才收窄）
+  const leftBound = Math.ceil(Math.max(columnRect.left, 0) + POPOVER_EDGE)
+  const rightBound = Math.floor(Math.min(columnRect.right || viewportWidth, viewportWidth) - POPOVER_EDGE)
+  const width = Math.floor(Math.min(POPOVER_WIDTH, viewportWidth - 64, Math.max(POPOVER_MIN_WIDTH, rightBound - leftBound)))
+  // 先落宽度再量高度：宽度变了换行数也变，先量会拿到旧高度
+  pop.style.width = `${width}px`
+  const natural = pop.scrollHeight
+  // 横向定位：右对齐锚点放不下就改成左对齐，仍越界则夹回区间
+  const aligned = anchorRect.right - width < leftBound ? anchorRect.left : anchorRect.right - width
+  const left = Math.max(Math.min(Math.round(aligned), rightBound - width), leftBound)
+  // 纵向定位：下方 → 上方 → 压高度
+  const below = anchorRect.bottom + POPOVER_GAP
+  const roomBelow = viewportHeight - POPOVER_EDGE - below
+  const roomAbove = anchorRect.top - POPOVER_GAP - POPOVER_EDGE
+  let top = below
+  let maxHeight = ''
+  if (natural > roomBelow) {
+    if (natural <= roomAbove) top = anchorRect.top - POPOVER_GAP - natural
+    else if (roomAbove > roomBelow) { top = POPOVER_EDGE; maxHeight = `${Math.floor(roomAbove)}px` }
+    else maxHeight = `${Math.floor(Math.max(roomBelow, 120))}px`
+  }
+  // 兜底：锚点被滚出视口等极端情形下也把弹层压在视口内（高度已由 maxHeight 限定）
+  const height = Math.min(natural, maxHeight ? parseFloat(maxHeight) : natural)
+  top = Math.min(Math.max(top, POPOVER_EDGE), Math.max(POPOVER_EDGE, viewportHeight - POPOVER_EDGE - height))
+  // 内联 left/top 是包含块（offsetParent 内边距盒）坐标，不是视口坐标；jsdom/无定位祖先时退化为列坐标
+  const box = pop.offsetParent as HTMLElement | null
+  const boxRect = box?.getBoundingClientRect() ?? columnRect
+  const boxStyle = box ? getComputedStyle(box) : null
+  const originLeft = boxRect.left + (parseFloat(boxStyle?.borderLeftWidth ?? '') || 0)
+  const originTop = boxRect.top + (parseFloat(boxStyle?.borderTopWidth ?? '') || 0)
+  pop.style.maxHeight = maxHeight
+  pop.style.right = 'auto'
+  pop.style.left = `${Math.round(left - originLeft)}px`
+  pop.style.top = `${Math.round(top - originTop)}px`
 }

@@ -33,7 +33,15 @@ export function buildMenuItems(skills: SkillMeta[], query: string, includeSkills
  * 追问框斜杠命令菜单：输入以 / 开头时浮现，顶部为内置「命令」组（本地动作），
  * 下方为「技能」组（共享技能）。键盘导航由宿主 textarea 的 onKeyDown 驱动
  * （↑↓选择、Enter/Tab 插入、Esc 关闭），本组件只负责展示与高亮，不抢焦点。
+ *
+ * 无障碍（审查项 5）：宿主 textarea 是 role="combobox" 且**始终持有 DOM 焦点**，
+ * 本组件是它的 listbox 弹层（aria-controls 指向下面的 id），高亮项通过宿主的
+ * aria-activedescendant 指认。因此选项一律 tabIndex={-1}：Tab 序列里只有输入框，
+ * 焦点绝不会掉进选项里（选项被点选走的是 mousedown + preventDefault，不搬焦点）。
  */
+export const SKILL_MENU_LISTBOX_ID = 'skill-menu-listbox'
+export const skillMenuOptionId = (index: number) => `skill-menu-opt-${index}`
+
 export function SkillMenu({ items, activeIndex, onHover, onPickCommand, onPickSkill }: {
   items: MenuItem[]
   activeIndex: number
@@ -43,15 +51,15 @@ export function SkillMenu({ items, activeIndex, onHover, onPickCommand, onPickSk
 }) {
   const listRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
-    listRef.current?.querySelector<HTMLElement>('[data-active="true"]')?.scrollIntoView({ block: 'nearest' })
+    listRef.current?.querySelector<HTMLElement>('[data-active="true"]')?.scrollIntoView?.({ block: 'nearest' })
   }, [activeIndex])
   if (!items.length) return null
   const firstCommand = items.findIndex((item) => item.kind === 'command')
   const firstSkill = items.findIndex((item) => item.kind === 'skill')
   return (
-    <div className="skill-menu" role="listbox" aria-label="命令与技能">
-      <div className="skill-menu-head">命令与技能 · ↑↓ 选择，Enter/Tab 确认</div>
-      <div className="skill-menu-list" ref={listRef}>
+    <div className="skill-menu">
+      <div className="skill-menu-head">命令与技能 · {items.length} 项 · ↑↓ 选择，Enter/Tab 确认</div>
+      <div className="skill-menu-list" id={SKILL_MENU_LISTBOX_ID} role="listbox" aria-label="命令与技能" ref={listRef}>
         {items.map((item, index) => (
           <div key={item.kind === 'command' ? `cmd-${item.key}` : `skill-${item.skill.name}`} className="skill-menu-slot">
             {index === firstCommand && <div className="skill-menu-group">命令</div>}
@@ -60,6 +68,8 @@ export function SkillMenu({ items, activeIndex, onHover, onPickCommand, onPickSk
               <button
                 type="button"
                 role="option"
+                id={skillMenuOptionId(index)}
+                tabIndex={-1}
                 aria-selected={index === activeIndex}
                 data-active={index === activeIndex}
                 className={`skill-menu-item is-command ${index === activeIndex ? 'active' : ''}`}
@@ -75,6 +85,8 @@ export function SkillMenu({ items, activeIndex, onHover, onPickCommand, onPickSk
               <button
                 type="button"
                 role="option"
+                id={skillMenuOptionId(index)}
+                tabIndex={-1}
                 aria-selected={index === activeIndex}
                 data-active={index === activeIndex}
                 className={`skill-menu-item ${index === activeIndex ? 'active' : ''}`}

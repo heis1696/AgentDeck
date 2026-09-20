@@ -1,11 +1,12 @@
-import { X } from 'lucide-react'
+import { ListTodo, X } from 'lucide-react'
 import type { ReactNode } from 'react'
 import type { Task } from '../../../shared/types'
 import { useIssues } from '../api'
+import { PageHeader } from '../ui/PageHeader'
 
 /**
- * Issue 主页：新建表单（WorkspaceView）即主体；
- * 上方一条紧凑横条汇总已打开的 Issue——流式胶囊（状态点+标题截断+×），
+ * Issue 主页：共享页头（唯一主标题）+ 新建表单（WorkspaceView）即主体；
+ * 页头下一条紧凑横条汇总已打开的 Issue——流式胶囊（状态点+标题截断+×），
  * 单行横向滚动，点胶囊进详情，× 只关标签页不删任务。
  */
 export function IssuesView({ tasks, tabs, onOpen, onClose, children }: {
@@ -23,8 +24,9 @@ export function IssuesView({ tasks, tabs, onOpen, onClose, children }: {
     return [{ id: task.id, status: task.status, title: issue?.title ?? task.title }]
   })
   return <div className="issues-page page-surface issue-home">
+    <PageHeader title="Issue" icon={<ListTodo size={16} />} count={opened.length} />
     {opened.length > 0 && <div className="issue-open-strip">
-      <span className="issue-open-label">已打开</span>
+      <span className="issue-open-label">已打开 <strong>{opened.length}</strong></span>
       <div className="issue-open-track" role="list" aria-label="已打开的 Issue">
         {opened.map((item) => (
           <span className="issue-pill" role="listitem" key={item.id}>

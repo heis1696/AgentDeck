@@ -10,6 +10,7 @@
 .board-card { transition: border-color var(--duration-base) var(--ease-in-out); }
 .board-card:hover { border-color: var(--border-strong); }
 .board-card[draggable='true']:active { cursor: grab; }
+.board-card.is-dragging { opacity: .48; border-style: dashed; }
 
 /* head：identifier + 语义徽章，不再混入标题文本流 */
 .board-card .board-card-head {
@@ -96,6 +97,7 @@
 /* ---------- 列头与列体 ---------- */
 .board-col { transition: border-color var(--duration-base) var(--ease-in-out), background var(--duration-base) var(--ease-in-out); }
 .board-col.is-drag-target { border-color: var(--accent); background: var(--accent-soft); }
+.board-col.is-drag-target .board-col-head { color: var(--accent); border-bottom-color: color-mix(in srgb, var(--accent) 42%, var(--border)); }
 .board-col-head .board-col-count {
   margin-left: auto;
   color: var(--text-faint);
@@ -246,3 +248,37 @@
 .board-day-nav-all { min-height: 22px; padding: 0 8px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: transparent; color: var(--text-dim); font-size: var(--text-micro); font-weight: 600; cursor: pointer; }
 .board-day-nav-all:hover { border-color: var(--accent); color: var(--accent); }
 .board-day-nav-all.is-active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+
+/* ---------- 看板工作台：工具栏层级、同步态与明确落点 ---------- */
+.board-toolbar { align-items: center; gap: 8px; padding-top: 9px; padding-bottom: 9px; }
+.board-toolbar-heading { display: flex; flex: 0 0 auto; flex-direction: column; gap: 2px; min-width: 112px; }
+.board-toolbar-heading strong { color: var(--text); font-size: var(--text-caption); font-weight: 700; }
+.board-toolbar-heading span { color: var(--text-faint); font: var(--text-micro)/1.2 var(--mono); font-variant-numeric: tabular-nums; }
+.board-toolbar .issues-search { min-width: 190px; }
+.board-filter-reset { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; padding: 0 8px; border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border)); border-radius: var(--radius-sm); background: var(--accent-soft); color: var(--accent); font-size: var(--text-micro); cursor: pointer; }
+.board-filter-reset:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, var(--bg-inset)); }
+.board-loading-state { display: flex; align-items: center; justify-content: center; gap: 7px; min-height: 116px; color: var(--text-faint); font-size: var(--text-micro); }
+.board-drop-hint { display: flex; align-items: center; justify-content: center; gap: 5px; min-height: 34px; margin: 0 9px 9px; border: 1px dashed color-mix(in srgb, var(--accent) 58%, var(--border)); border-radius: var(--radius-sm); background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent); font-size: var(--text-micro); }
+.board-drop-hint strong { font-weight: 700; }
+.issue-board .board-col { min-height: 250px; border: 1px solid var(--border); border-radius: var(--radius-md); background: color-mix(in srgb, var(--bg-inset) 72%, var(--bg)); }
+.issue-board .board-col-head { min-height: 46px; padding-inline: 12px; background: color-mix(in srgb, var(--bg-raised) 44%, transparent); }
+.issue-board .board-col-body { min-height: 190px; }
+.issue-board .board-col-body > .empty-state { margin: 4px; border: 1px dashed color-mix(in srgb, var(--border) 76%, transparent); border-radius: var(--radius-sm); background: color-mix(in srgb, var(--bg-raised) 35%, transparent); }
+
+@media (max-width: 980px) {
+  .board-toolbar-heading { flex-basis: 100%; }
+  .board-toolbar .issues-search { flex: 1 1 220px; }
+  .board-retention-note { display: none; }
+}
+@media (max-width: 680px) {
+  .board-toolbar { align-items: stretch; padding-inline: 12px; }
+  .board-toolbar .issues-scopes, .board-toolbar .issues-status-select, .board-toolbar .board-filter-reset { flex: 0 0 auto; }
+  .board-toolbar .issues-search { order: 3; flex-basis: 100%; max-width: none; }
+  .board-day-nav { order: 4; width: 100%; margin-left: 0; justify-content: center; }
+  .board-day-nav-label { flex: 1; }
+  .board-day-nav-select { max-width: 116px; }
+  .board-day-head { flex-wrap: wrap; padding-inline: 12px; }
+  .issue-board { padding-inline: 12px; }
+  .issue-board .board-col { min-width: min(288px, calc(100vw - 36px)); max-width: min(320px, calc(100vw - 36px)); }
+}
+@media (prefers-reduced-motion: reduce) { .board-card.is-dragging { transition: none; } }

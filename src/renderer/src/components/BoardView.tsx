@@ -8,7 +8,7 @@ import { ui } from '../ui/interaction-center'
 import { useInteractionLayer } from '../hooks/useInteractionLayer'
 import { IssueIdChip } from '../ui/IssueIdChip'
 import { EmptyState } from '../ui/EmptyState'
-import { CheckCircle2, CircleAlert, CircleDot, Clock3, Ban, Eye, ListTodo, Search, ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react'
+import { Ban, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, CircleDot, Clock3, Eye, ListTodo, LoaderCircle, Search, X } from 'lucide-react'
 
 type Scope = 'all' | 'mine' | 'agents'
 type CardKind = 'normal' | 'delegate' | 'handoff' | 'goal' | 'meeting'
@@ -137,6 +137,7 @@ function descendants(node: BoardNode): BoardNode[] { return node.children.flatMa
 
 export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: string) => void }) {
   const [issues, setIssues] = useState<Issue[]>([])
+  const [loading, setLoading] = useState(true)
   const [query, setQuery] = useState('')
   const [scope, setScope] = useState<Scope>('all')
   const [status, setStatus] = useState<IssueStatus | 'all'>('all')
@@ -147,12 +148,13 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
   const [selectedDay, setSelectedDay] = useState<number | null>(() => boardDayFloor(Date.now()))
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null)
   const [dropTarget, setDropTarget] = useState<IssueStatus | null>(null)
+  const [draggingTask, setDraggingTask] = useState<string | null>(null)
   const [starting, setStarting] = useState<string | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   // 统一浮层：卡片右键菜单的外点关闭 / 最上层 Escape（原 window click+keydown 监听已收敛）
   useInteractionLayer<HTMLDivElement>({ open: menu !== null, onClose: () => setMenu(null), kind: 'popover', name: 'board-card-menu', closeOnOutside: true, autoFocus: false, layerRef: menuRef })
   useEffect(() => {
-    const refresh = () => void bridge.issues.list().then(setIssues).catch(() => ui.toast.error('读取 Issue 失败'))
+    const refresh = () => void bridge.issues.list().then(setIssues).catch(() => ui.toast.error('读取 Issue 失败')).finally(() => setLoading(false))
     refresh()
     const off = bridge.issues.onUpdated(refresh)
     const offTasks = bridge.tasks.onDeleted(refresh)
@@ -194,6 +196,7 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
       && (!q || `${issue?.identifier ?? ''} ${task.title} ${task.prompt} ${issue?.labels.join(' ') ?? ''} ${task.backend}`.toLowerCase().includes(q))
     return own || node.children.some(matches)
   }
+  const visibleCount = useMemo(() => [...dayRoots, ...dayOrphans].filter(matches).length, [dayRoots, dayOrphans, query, scope, status])
   const move = async (taskId: string, next: IssueStatus) => {
     setMenu(null)
     const issue = byTask.get(taskId)
@@ -240,10 +243,10 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
     const workers = descendants(node)
     const done = workers.filter((child) => child.task.status === 'done').length
     const open = filtering || expanded.has(task.id)
-    return <article key={task.id} className={`board-card issue-card kind-${kind} status-${task.status}${parked ? ' is-parked' : ''}`} data-card-kind={kind} data-task-id={task.id}
+    return <article key={task.id} className={`board-card issue-card kind-${kind} status-${task.status}${parked ? ' is-parked' : ''}${draggingTask === task.id ? ' is-dragging' : ''}`} data-card-kind={kind} data-task-id={task.id}
       onClick={(event) => { if (!(event.target as HTMLElement).closest('button, a, input, select')) onOpen(task.id) }}
       onContextMenu={(event) => { if (!issue) return; event.preventDefault(); event.stopPropagation(); setMenu({ id: task.id, x: Math.min(event.clientX, window.innerWidth - 190), y: Math.min(event.clientY, window.innerHeight - 310) }) }}
-      draggable={!!issue} onDragStart={(event) => { event.dataTransfer.setData('text/task-id', task.id); event.dataTransfer.effectAllowed = 'move' }} onDragEnd={() => setDropTarget(null)}>
+      draggable={!!issue} onDragStart={(event) => { setDraggingTask(task.id); event.dataTransfer.setData('text/task-id', task.id); event.dataTransfer.effectAllowed = 'move' }} onDragEnd={() => { setDraggingTask(null); setDropTarget(null) }}>
       <div className="board-card-head"><span className="issue-identifier">{issue?.identifier ?? task.id}</span>{issue && <IssueIdChip id={issue.id} />}{issue && issue.priority !== 'none' && <span className={`badge board-priority priority-${issue.priority}`}>{PRIORITY_LABELS[issue.priority]}</span>}</div>
       <button className="board-card-open" onClick={() => onOpen(task.id)} title={task.prompt.slice(0, 120)}><span className="board-card-title">{issue?.title ?? task.title}</span></button>
       <div className="board-card-tags"><span className="board-kind-badge">{KIND_LABELS[kind]}</span>{parked && <span className="badge badge-parked">{PARKED_QUEUED_LABEL}</span>}{task.status === 'running' && <span className="board-running-label">运行中</span>}{issue?.labels.filter((label) => label !== '委派').slice(0, 2).map((label) => <span className="badge badge-meta" key={label}>{label}</span>)}</div>
@@ -256,11 +259,14 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
     </article>
   }
   const menuIssue = menu ? byTask.get(menu.id) : undefined
+  const clearFilters = () => { setQuery(''); setScope('all'); setStatus('all') }
   return <div className="board-page">
     <div className="issues-toolbar board-toolbar">
+      <div className="board-toolbar-heading"><strong>工作流</strong><span>{loading ? '正在同步…' : `${visibleCount} / ${dayTotal} 个 Issue`}</span></div>
       <div className="issues-scopes" role="tablist" aria-label="看板范围">{([['all', '全部'], ['mine', '我的'], ['agents', '智能体']] as const).map(([key, label]) => <button key={key} className={scope === key ? 'active' : ''} role="tab" aria-selected={scope === key} onClick={() => setScope(key)}>{label}</button>)}</div>
       <label className="issues-search"><Search size={14} /><input aria-label="搜索 Issue" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索 Issue…" /></label>
       <select className="issues-status-select" value={status} onChange={(event) => setStatus(event.target.value as IssueStatus | 'all')} aria-label="按状态筛选"><option value="all">所有状态</option>{COLUMNS.map((column) => <option value={column.key} key={column.key}>{column.label}</option>)}</select>
+      {filtering && <button type="button" className="board-filter-reset" aria-label="清除筛选" title="清除筛选" onClick={clearFilters}><X size={13} /> 清除</button>}
       <div className="board-day-nav" role="group" aria-label="看板日期导航">
         <button type="button" className={`board-day-nav-all${selectedDay == null ? ' is-active' : ''}`} aria-pressed={selectedDay == null} title="显示保留窗内全部日期的 Issue" onClick={() => setSelectedDay(null)}>全部</button>
         <button type="button" className="board-day-nav-btn" aria-label="前一天" title="前一天" disabled={selectedDay == null} onClick={() => setSelectedDay((day) => day == null ? day : shiftBoardDay(day, -1, todayFloor))}><ChevronLeft size={14} /></button>
@@ -277,7 +283,7 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
     </div>
     <div className="board-day-head" data-day-key={selectedDay == null ? 'all' : boardDayKey(selectedDay)}>
       <span className="board-day-head-date">{selectedDay == null ? '全部日期（30 天保留窗）' : formatBoardDay(selectedDay, todayFloor)}</span>
-      <span className="board-day-head-count">{dayTotal > 0 ? `共 ${dayTotal} 个 Issue` : selectedDay == null ? '还没有 Issue' : BOARD_EMPTY_DAY_HINT}</span>
+      <span className="board-day-head-count">{loading ? '正在读取最新状态…' : dayTotal > 0 ? `共 ${dayTotal} 个 Issue` : selectedDay == null ? '还没有 Issue' : BOARD_EMPTY_DAY_HINT}</span>
       {overAgeDay && <span className="board-expiring-badge" title={EXPIRING_TITLE}>将自动清理</span>}
     </div>
     <div className="board issue-board">{COLUMNS.map((column) => {
@@ -285,7 +291,8 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
       const orphans = dayOrphans.filter((node) => nodeStatus(node) === column.key && matches(node)).sort((a, b) => updatedAt(b) - updatedAt(a))
       return <section key={column.key} className={`board-col ${dropTarget === column.key ? 'is-drag-target' : ''}`} aria-label={column.label} onDragEnter={() => setDropTarget(column.key)} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move' }} onDragLeave={(event) => { if (event.currentTarget === event.target) setDropTarget(null) }} onDrop={(event) => { event.preventDefault(); const id = event.dataTransfer.getData('text/task-id'); if (id) void move(id, column.key); setDropTarget(null) }}>
         <div className="board-col-head"><span className={`dot board-col-dot board-col-dot-${column.key}`} /><column.icon size={14} aria-hidden="true" /><span className="board-col-title">{column.label}</span><span className="board-col-count">{items.length + orphans.length}</span></div>
-        <div className="board-col-body">{items.map(renderCard)}{orphans.length > 0 && <section className="board-orphans"><h3 className="board-orphans-head">（无领队）<span>{orphans.length}</span></h3>{orphans.map(renderCard)}</section>}{!items.length && !orphans.length && <EmptyState compact title={!dayHasCards ? BOARD_EMPTY_DAY_HINT : filtering ? '无匹配' : '空'} />}</div>
+        <div className="board-col-body">{loading && !issues.length ? <div className="board-loading-state" aria-live="polite"><LoaderCircle size={17} className="spin" /><span>正在加载</span></div> : <>{items.map(renderCard)}{orphans.length > 0 && <section className="board-orphans"><h3 className="board-orphans-head">（无领队）<span>{orphans.length}</span></h3>{orphans.map(renderCard)}</section>}{!items.length && !orphans.length && <EmptyState compact title={!dayHasCards ? BOARD_EMPTY_DAY_HINT : filtering ? '无匹配' : '空'} />}</>}</div>
+        {draggingTask && dropTarget === column.key && <div className="board-drop-hint"><span>放置到</span><strong>{column.label}</strong></div>}
       </section>
     })}</div>
     {menu && menuIssue && <div className="board-context-menu" ref={menuRef} role="menu" style={{ left: menu.x, top: menu.y }} onClick={(event) => event.stopPropagation()}><button role="menuitem" onClick={() => { setMenu(null); onOpen(menu.id) }}>打开 Issue</button><div className="board-context-separator" />{COLUMNS.filter((column) => column.key !== menuIssue.status).map((column) => <button key={column.key} role="menuitem" onClick={() => void move(menu.id, column.key)}>移到「{column.label}」</button>)}</div>}

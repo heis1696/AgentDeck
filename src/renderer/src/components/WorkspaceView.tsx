@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ListTodo, MessagesSquare, Target, ArrowUpRight, Clock3, FolderOpen, Sparkles } from 'lucide-react'
+import { ArrowUpRight, ChevronDown, ChevronRight, Clock3, FolderOpen, ListTodo, LoaderCircle, MessagesSquare, Target, Zap } from 'lucide-react'
 import { bridge, getTaskWhenReady, type AgentInfo } from '../api'
 import { isComposingKey, ui } from '../ui/interaction-center'
 import { useInteractionSelector } from '../hooks/useInteraction'
@@ -81,6 +81,7 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
   const [critic, setCritic] = useState(draft.critic)
   const [designer, setDesigner] = useState(draft.designer)
   const [agents, setAgents] = useState<AgentInfo[]>([])
+  const [agentsLoading, setAgentsLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const promptRef = useRef<HTMLTextAreaElement>(null)
 
@@ -93,7 +94,7 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
         draft.agentId = first.id
         setAgentId(first.id)
       }
-    })
+    }).catch(() => setAgents([])).finally(() => setAgentsLoading(false))
   }, [])
 
   // 会议型三队长预填：取前三位合格队长（不足三位留空，由校验提示兜底）
@@ -238,18 +239,14 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
   const canSubmit = !!prompt.trim() && kindValid && !busy
   const selectedAgent = agents.find((a) => a.id === agentId)
   const isLeader = !!selectedAgent?.subordinates?.length && selectedAgent.backend !== 'dsh'
-  const greeting = new Date().getHours() < 12 ? '早上好，开始一个新任务' : new Date().getHours() < 18 ? '下午好，继续推进工作' : '晚上好，收尾一个任务'
   /** 队长下拉排除另外两个角色已选的人，从源头杜绝重复 */
   const captainOptions = (self: string) => eligibleCaptains.filter((a) => a.id !== reporter && a.id !== critic && a.id !== designer || a.id === self)
 
   return (
     <div className="workspace">
       <div className="workspace-card">
-        <div className="workspace-greeting">{greeting}</div>
-        <div className="workspace-title">
-          <span className="brand-mark" aria-hidden="true"><Sparkles size={15} /></span>
-          <span>开始一个任务</span>
-        </div>
+        {/* 创建表单的标题降为次级（主标题在 Issue 共享页头）；问候语与宣传式引导已移除 */}
+        <div className="section-heading"><h3>新建 Issue</h3></div>
         <div className="workspace-types" role="tablist" aria-label="Issue 类型">
           {KINDS.map(({ key, label, icon: Icon }) => (
             <button key={key} role="tab" aria-selected={kind === key} className={kind === key ? 'active' : ''} onClick={() => setKind(key)}>
@@ -257,7 +254,6 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
             </button>
           ))}
         </div>
-        <p className="hint workspace-lead">描述目标、约束和验收标准，AgentDeck 会把执行过程集中到一个工作区。</p>
         <div className="suggest-row">
           {SUGGESTIONS[kind].map((sg) => (
             <button key={sg} className="suggest-chip" onClick={() => { setPrompt(sg); promptRef.current?.focus() }}>
@@ -265,7 +261,9 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
             </button>
           ))}
         </div>
-        {kind !== 'meeting' && (agents.length > 0 ? (
+        {kind !== 'meeting' && (agentsLoading ? (
+          <div className="workspace-agent-loading" aria-live="polite"><LoaderCircle size={14} className="spin" /> 正在加载 Agent…</div>
+        ) : agents.length > 0 ? (
           <div className="field">
             <span>执行 Agent{isLeader ? '（领队可按需拆分任务）' : ''}</span>
             <div className="agent-picker">
@@ -273,6 +271,7 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
                 <button
                   key={a.id}
                   className={`agent-pick ${a.id === agentId ? 'active' : ''}`}
+                  aria-pressed={a.id === agentId}
                   onClick={() => setAgentId(a.id)}
                   title={`${a.role ? a.role + ' · ' : ''}${a.model ? a.model + ' · ' : ''}${a.note || a.backend}`}
                 >
@@ -341,26 +340,28 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
             </div>
           </div>
         )}
-        <div className="composer-label">{COMPOSER_LABEL[kind]}</div>
-        <textarea
-          ref={promptRef}
-          className="workspace-prompt"
-          value={prompt}
-          rows={3}
-          placeholder={PROMPT_PLACEHOLDER[kind]}
-          onChange={(e) => {
-            setPrompt(e.target.value)
-            const el = e.target
-            el.style.height = 'auto'
-            el.style.height = `${Math.min(el.scrollHeight, window.innerHeight * 0.4)}px`
-          }}
-          onKeyDown={onKeyDown}
-        />
+        <div className="workspace-composer">
+          <div className="composer-label">{COMPOSER_LABEL[kind]}</div>
+          <textarea
+            ref={promptRef}
+            className="workspace-prompt"
+            value={prompt}
+            rows={3}
+            placeholder={PROMPT_PLACEHOLDER[kind]}
+            onChange={(e) => {
+              setPrompt(e.target.value)
+              const el = e.target
+              el.style.height = 'auto'
+              el.style.height = `${Math.min(el.scrollHeight, window.innerHeight * 0.4)}px`
+            }}
+            onKeyDown={onKeyDown}
+          />
+        </div>
         <div className="workspace-context">
           <div><span className="context-label">当前工作区</span><strong title={workdir}>{workdir ? workdir.split(/[\\/]/).pop() : '尚未选择'}</strong></div>
           <button className="btn" onClick={onPickWorkspace} title="选择工作区"><FolderOpen size={14} aria-hidden="true" /> 更换</button>
         </div>
-        <div className="workspace-row">
+        <div className="workspace-row workspace-actions">
           <button
             className="btn"
             disabled={!canSubmit}
@@ -370,20 +371,20 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
             <Clock3 size={14} aria-hidden="true" /> 稍后
           </button>
           <button className="btn primary" disabled={!canSubmit} onClick={() => void submit(true)}>
-            {busy ? '创建中…' : <><ArrowUpRight size={14} aria-hidden="true" /> 开始执行</>}
+            {busy ? <><LoaderCircle size={14} className="spin" aria-hidden="true" /> 创建中…</> : <><ArrowUpRight size={14} aria-hidden="true" /> 开始执行</>}
           </button>
         </div>
         {submitHint && <p className="hint workspace-mode-hint">{submitHint}</p>}
         {kind !== 'meeting' && selectedAgent && (
           <p className="trigger-preview" title="触发预览">
-            ⚡ 将唤醒：<b>{selectedAgent.name}</b>（{selectedAgent.role || selectedAgent.backend}
+             <Zap size={13} aria-hidden="true" /> 将唤醒：<b>{selectedAgent.name}</b>（{selectedAgent.role || selectedAgent.backend}
             {isLeader ? ` · 领队，可自行派工给 ${selectedAgent.subordinates?.length} 名队员` : ''}
             {handoff.trim() ? ' · 含交接备注' : ''}）
           </p>
         )}
         <div className="handoff-zone">
           <button className="link handoff-toggle" onClick={() => setHandoffOpen((o) => !o)}>
-            {handoffOpen ? '▾' : '▸'} 交接备注{handoff.trim() ? '（已填写）' : '（可选）'}
+            {handoffOpen ? <ChevronDown size={13} aria-hidden="true" /> : <ChevronRight size={13} aria-hidden="true" />} 交接备注{handoff.trim() ? '（已填写）' : '（可选）'}
           </button>
           {handoffOpen && (
             <textarea

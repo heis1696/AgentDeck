@@ -9,10 +9,19 @@
    - 历史 ID 别名（--surface 系、--ink 系、--line 系、--shell、
      --brand、--teal、--signal 系等）在此统一桥接，styles.css 与
      polish 里的旧引用无需改动即收敛到同一套视觉
+   - 3.0 增补（全局视觉基础 + 应用壳层）：行高/字重、焦点环、
+     禁用态、滚动条、控件高度、应用壳几何（侧栏 / 顶栏 / 工作区
+     切换器）、浮层遮罩、color-scheme。shell 层的几何与状态只从
+     这里取值，polish/*.css 不再写字面量。
    ============================================================ */
 
 /* ---- 暗色模式（默认）---- */
 :root {
+  /* 原生控件与滚动条跟随主题（否则浅色下 select 弹层/滚动条仍是深色的）*/
+  color-scheme: dark;
+  --canvas-grid: rgba(153, 172, 180, 0.07);
+  --canvas-route: rgba(61, 191, 174, 0.12);
+
   /* 表面四层：壳 → 画布 → 表面 → 浮起（中性灰，无色偏） */
   --app-shell: #0b0c0e;           /* 最外框，包裹整个应用 */
   --bg: #101113;                  /* 页面画布（内容生活的地方）*/
@@ -20,10 +29,12 @@
   --bg-hover: #1f2023;            /* 表面悬停 */
   --bg-inset: #0d0e10;            /* 凹陷输入（文本框内部）*/
   --bg-selected: #26292d;         /* 选中态背景 */
+  --bg-overlay: #1b1c20;          /* 浮层表面（菜单/下拉，比表面再亮一档）*/
 
   /* 边框 */
   --border: #27292d;              /* 默认边框 */
   --border-strong: #35383d;       /* 强调边框（浮层/对话框）*/
+  --border-subtle: color-mix(in srgb, var(--border) 62%, transparent); /* 内部分隔线 */
 
   /* 文字 */
   --text: #e9eaec;                /* 主文字 */
@@ -35,6 +46,8 @@
   --accent-ink: #062522;                        /* accent 之上的墨色文字（暗主题用深墨）*/
   --accent-soft: rgba(61, 191, 174, 0.13);      /* 柔和背景 */
   --accent-glow: rgba(61, 191, 174, 0.24);      /* 光晕效果 */
+  --accent-hover: color-mix(in srgb, var(--accent) 88%, #ffffff); /* 悬停提亮（不靠 filter）*/
+  --accent-active: color-mix(in srgb, var(--accent) 88%, #000000); /* 按下压暗 */
 
   /* 状态色：运行态光环的核心 */
   --status-running: #3dbfae;      /* 运行中=青绿电弧（唯一发光态）*/
@@ -74,7 +87,12 @@
   /* 气泡顶缘高光（暗色极淡）*/
   --bubble-inset: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 
+  /* 浮层遮罩：深浅主题各一套，浅色下不再压 72% 纯黑 */
+  --scrim: rgba(3, 6, 9, 0.72);
+  --scrim-blur: 8px;
+
   /* 圆角：控件 6px，卡片/对话框最多 8px；胶囊仅用于状态芯片 */
+  --radius-xs: 4px;     /* 徽标、kbd、内联代码等最小构件 */
   --radius-sm: 6px;     /* 小按钮、菜单项、徽标 */
   --radius-md: 8px;     /* 输入框、卡片、对话框 */
   --radius-lg: 8px;     /* 浮层面板（统一收敛到 8px）*/
@@ -97,11 +115,66 @@
   --text-body: 14px;        /* 正文、输入文本 */
   --text-title-sm: 16px;    /* 卡片标题、对话框标题 */
   --text-title: 18px;       /* 页面标题 */
+  --text-page-title: 20px;  /* 共享页面主标题 */
+  --text-section-title: 16px;
+
+  /* 行高（角色命名；正文 1.55，密集信息 1.4，长文/markdown 1.65）*/
+  --leading-none: 1;
+  --leading-tight: 1.4;
+  --leading-normal: 1.55;
+  --leading-relaxed: 1.65;
+  --leading-page-title: 28px;
+  --leading-section-title: 24px;
+
+  /* 字重（西文取值；中文由系统字体就近映射）*/
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
 
   /* 字体栈（本地字体优先：Segoe UI / 微软雅黑；代码 Cascadia Code / Consolas）*/
   --font-ui: 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei', system-ui, sans-serif;
   --font-mono: 'Cascadia Code', Consolas, 'Courier New', monospace;
   --mono: var(--font-mono);  /* 向后兼容别名 */
+
+  /* 焦点：统一 outline 环（不被 overflow 裁切、兼容强制色彩模式）
+     + 输入类软光晕（border 变 accent 时叠一圈 accent-soft）*/
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 2px;
+  --focus-ring-inset: -2px;
+  --focus-ring-color: var(--accent);
+  --focus-halo: 0 0 0 3px var(--accent-soft);
+
+  /* 禁用态：不透明度 + 中性面/线，且不允许 hover 反馈（颜色之外另有 cursor 语义）*/
+  --disabled-opacity: 0.45;
+  --disabled-bg: var(--bg-hover);
+  --disabled-border: var(--border);
+
+  /* 滚动条（Chromium 覆盖式细滚动条：滑轨透明、滑块悬浮胶囊）*/
+  --scrollbar-size: 10px;
+  --scrollbar-size-thin: 8px;
+  --scrollbar-thumb: #3a3e45;
+  --scrollbar-thumb-hover: #4b5058;
+  --scrollbar-track: transparent;
+
+  /* 控件高度（命中区统一：sm=顶栏/工具条，md=页头动作，lg=主 CTA）*/
+  --control-sm: 30px;
+  --control-md: 36px;
+  --control-lg: 42px;
+
+  /* 应用壳几何（侧栏 / 顶栏 / 工作区切换器 / 导航项）*/
+  --sidebar-w: 252px;              /* 常规侧栏 */
+  --sidebar-w-compact: 224px;      /* 窄视口（≤760px）*/
+  --sidebar-w-rail: 64px;          /* 图标轨（≤560px）*/
+  --sidebar-gutter: 14px;          /* 侧栏左右内边距 */
+  --brand-h: 58px;                 /* 侧栏页头（与顶栏同高，形成一条檐）*/
+  --topbar-h: 58px;                /* 主区顶栏 */
+  --topbar-h-compact: 48px;        /* 窄视口顶栏 */
+  --toolbar-h: 52px;               /* 顶栏下的次级工具条 */
+  --toolbar-h-compact: 44px;
+  --nav-item-h: 36px;              /* 侧栏导航项 */
+  --nav-item-h-compact: 34px;
+  --switch-h: 46px;                /* 工作区切换器按钮 */
 
   /* 动效令牌 */
   --duration-quick: 0.12s;   /* 菜单展开、tooltip */
@@ -113,7 +186,8 @@
   --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1); /* 悬停、状态切换 */
 
   /* 页面沟槽 */
-  --page-gutter: 16px;
+  --page-gutter: 24px;
+  --page-gutter-compact: 16px;
 
   /* ---- 历史变量别名（旧名 → 新令牌，勿在新代码中使用）---- */
   --shell: var(--app-shell);
@@ -157,28 +231,36 @@
 
 /* ---- 浅色模式（完整令牌重映射，无组件级补丁）---- */
 html.light {
+  --canvas-grid: rgba(75, 95, 105, 0.055);
+  --canvas-route: rgba(13, 125, 112, 0.08);
+  color-scheme: light;
+
   --app-shell: #ecedee;
   --bg: #f7f7f8;
   --bg-raised: #ffffff;
   --bg-hover: #efeff0;
   --bg-inset: #f2f2f3;
-  --bg-selected: #e2e6e6;
+  --bg-selected: #e3e5e6;         /* 中性化：去掉残留的青偏 */
+  --bg-overlay: #ffffff;
 
-  --border: #e1e2e4;
-  --border-strong: #cfd1d4;
+  --border: #dee0e3;              /* 比旧值略深：白底上的细线需要能分辨控件边界 */
+  --border-strong: #c4c8ce;
 
   --text: #1b1c1e;
   --text-dim: #5f6368;
   --text-faint: #61666c;
 
-  --accent: #0e8577;
+  /* accent 压深到 5.0:1（白底正文/按钮文字双双过 AA；旧值 #0e8577 仅 4.5:1 贴线）*/
+  --accent: #0d7d70;
   --accent-ink: #ffffff;                          /* 浅主题 accent 更深，用白墨 */
-  --accent-soft: rgba(14, 133, 119, 0.1);
-  --accent-glow: rgba(14, 133, 119, 0.18);
+  --accent-soft: rgba(13, 125, 112, 0.1);
+  --accent-glow: rgba(13, 125, 112, 0.18);
+  --accent-hover: color-mix(in srgb, var(--accent) 90%, #000000);
+  --accent-active: color-mix(in srgb, var(--accent) 84%, #000000);
 
-  --status-running: #0e8577;
-  --status-running-bg: rgba(14, 133, 119, 0.1);
-  --status-running-glow: rgba(14, 133, 119, 0.18);
+  --status-running: #0d7d70;
+  --status-running-bg: rgba(13, 125, 112, 0.1);
+  --status-running-glow: rgba(13, 125, 112, 0.18);
 
   --status-queued: #9a6610;
   --status-queued-bg: rgba(154, 102, 16, 0.1);
@@ -208,6 +290,13 @@ html.light {
   --shadow-panel: 0 12px 30px rgba(35, 38, 42, 0.1), 0 2px 8px rgba(35, 38, 42, 0.06);
 
   --bubble-inset: inset 0 1px 0 rgba(255, 255, 255, 0.75);
+
+  /* 浅色遮罩用中性深灰而非纯黑：对话框背后的白面不会被压死 */
+  --scrim: rgba(24, 28, 34, 0.36);
+
+  /* 浅色滚动条：白底上需要更实的灰才看得见 */
+  --scrollbar-thumb: #c9ccd0;
+  --scrollbar-thumb-hover: #a8adb3;
 
   /* 历史别名（浅色侧重映射 color-mix 比例）*/
   --teal-line: color-mix(in srgb, var(--accent) 36%, transparent);

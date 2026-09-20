@@ -7,24 +7,30 @@
 import { useRef, useState } from 'react'
 import type { Task } from '../../src/shared/types'
 import { useInteractionLayer } from '../../src/renderer/src/hooks/useInteractionLayer'
-import { ui } from '../../src/renderer/src/ui/interaction-center'
+import { useInteractionSelector } from '../../src/renderer/src/hooks/useInteraction'
+import { ui, rootTabsOf } from '../../src/renderer/src/ui/interaction-center'
 import { ConfirmHost } from '../../src/renderer/src/ui/Confirm'
 import { FloatWindow } from '../../src/renderer/src/ui/FloatWindow'
 import { Menu } from '../../src/renderer/src/ui/Menu'
 import { Palette } from '../../src/renderer/src/ui/Palette'
 import { SideDock } from '../../src/renderer/src/ui/SideDock'
+import { CodeViewer } from '../../src/renderer/src/ui/CodeViewer'
+import { TabBar } from '../../src/renderer/src/components/TabBar'
 import { TaskDetail } from '../../src/renderer/src/components/TaskDetail'
 
 export { act, StrictMode, createElement, useEffect, useRef, useState } from 'react'
 export { createRoot } from 'react-dom/client'
 export { useInteractionLayer, resetOutsideFocusHistory } from '../../src/renderer/src/hooks/useInteractionLayer'
 export { interactionLayers } from '../../src/renderer/src/ui/interaction-layer'
-export { ui } from '../../src/renderer/src/ui/interaction-center'
+export { ui, rootTabsOf } from '../../src/renderer/src/ui/interaction-center'
 export { ConfirmHost } from '../../src/renderer/src/ui/Confirm'
 export { FloatWindow } from '../../src/renderer/src/ui/FloatWindow'
 export { Menu } from '../../src/renderer/src/ui/Menu'
 export { Palette } from '../../src/renderer/src/ui/Palette'
 export { SideDock } from '../../src/renderer/src/ui/SideDock'
+export { CodeViewer, parseUnifiedDiff, findDiffRowIndex } from '../../src/renderer/src/ui/CodeViewer'
+export { prefersReducedMotion, scrollBehavior } from '../../src/renderer/src/ui/motion'
+export { TabBar } from '../../src/renderer/src/components/TabBar'
 export { TaskDetail } from '../../src/renderer/src/components/TaskDetail'
 
 /** 场景 1：Agent 页「新建 Agent」——模态里的输入框带 autoFocus（缺陷原始复现路径） */
@@ -218,8 +224,14 @@ export function OverlapStackScenario({ hideInfo = false }: { hideInfo?: boolean 
  * 场景 10：真实 TaskDetail（重命名输入框 + 追问框 + 斜杠技能菜单）。
  * bridge 由 scripts/smoke-ui-focus.mjs 在 import 前铺到 window.agentdeck 上（桩记录调用）。
  */
-export function TaskDetailScenario() {
-  const task = {
+export function TaskDetailScenario({ task: override }: { task?: Task } = {}) {
+  const task = override ?? makeTask()
+  return <TaskDetail task={task} tasks={[task]} onSelect={() => {}} />
+}
+
+/** 造一个真实形状的任务（回归场景可覆盖任意字段） */
+export function makeTask(overrides: Partial<Task> = {}): Task {
+  return {
     id: 'task-ime',
     title: '修复登录超时',
     prompt: '原始指令：修登录',
@@ -228,7 +240,24 @@ export function TaskDetailScenario() {
     workdir: '',
     sessionId: 'sess-ime',
     createdAt: 1,
-    endedAt: 2
+    endedAt: 2,
+    ...overrides
   } as unknown as Task
-  return <TaskDetail task={task} tasks={[task]} onSelect={() => {}} />
+}
+
+/**
+ * 场景 11：真实 TabBar（审查项 3）——宿主状态取自交互中心，与 App 同一条路径
+ * （tabs 经 rootTabsOf 过滤 + closeTab 结算 activeId），断言「关闭后焦点跟随实际 activeId」。
+ */
+export function TabBarScenario() {
+  const tabs = useInteractionSelector((state) => state.tabs)
+  const activeId = useInteractionSelector((state) => state.activeId)
+  const tasks = ui.tasks() as unknown as Task[]
+  return <TabBar
+    tabs={rootTabsOf(tasks, tabs)}
+    tasks={tasks}
+    activeId={activeId}
+    onSelect={(id) => { ui.openTask(id) }}
+    onClose={(id) => ui.closeTab(id)}
+  />
 }

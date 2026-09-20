@@ -23,6 +23,7 @@ import {
 import { bridge, useSettings } from '../api'
 import { ui, isComposingKey } from '../ui/interaction-center'
 import { EmptyState } from '../ui/EmptyState'
+import { PageHeader } from '../ui/PageHeader'
 import { SkillsTab } from './SkillsView'
 import type {
   CatalogEntry,
@@ -85,18 +86,14 @@ export function ExtensionsView() {
   }, [settings?.sharedDir])
 
   return <div className="skills-view page-surface ext-view">
-    <header className="page-header-bar">
-      <div className="detail-title-wrap">
-        <div className="page-title-row">
-          <Layers size={16} className="page-icon" />
-          <h2 className="page-title">扩展</h2>
-          <span className="page-desc">技能 / MCP / Hooks / 插件，统一存放于共享目录，可安装到各 agent CLI。</span>
-        </div>
-        <button className="skills-root-link" onClick={() => void bridge.skills.openDir()} title="打开共享目录">
-          <FolderOpen size={13} /><span>{root || settings?.sharedDir || '…'}</span>
-        </button>
-      </div>
-    </header>
+    {/* 共享目录路径是页头里的上下文/动作项，不再另起一套页头布局 */}
+    <PageHeader
+      title="扩展"
+      icon={<Layers size={16} />}
+      metadata={<button className="skills-root-link" onClick={() => void bridge.skills.openDir()} title="打开共享目录">
+        <FolderOpen size={13} /><span>{root || settings?.sharedDir || '…'}</span>
+      </button>}
+    />
     <div className="ext-tabs" role="tablist" aria-label="扩展分类">
       {TABS.map((item) => (
         <button

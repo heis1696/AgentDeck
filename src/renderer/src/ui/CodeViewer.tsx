@@ -7,10 +7,13 @@
  * v2（反馈4）：diff 通道优先——payload 带 git 统一 diff 时按 GitHub 风格渲染
  * （双行号 + hunk 头 + +/- 底色），行号是文件绝对行号；diffNote 说明数据来源
  * （clean=git 无未提交改动、回退参数快照等）。binary=true 只显示统计不渲染文本。
+ * v3（审查项 4）：diff 模式「跳转」按**新/旧文件绝对行号**定位（不再拿行下标充当行号），
+ * 行号选择器切换新文件 / 旧文件；显式滚动统一走 motion.ts（尊重 prefers-reduced-motion）。
  */
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { HighlighterCore, ThemedToken } from 'shiki'
 import { isComposingKey } from './interaction-center'
+import { scrollElementTo } from './motion'
 
 export interface CodeViewerProps {
   file: string
@@ -79,7 +82,22 @@ function getHighlighter() {
   return highlighterPromise
 }
 
-type CodeRow = { text: string; number: number; kind: 'normal' | 'deleted' | 'added' | 'hunk'; oldNumber?: number }
+/**
+ * 行模型。三套行号语义必须分清楚（跳转正确性的根）：
+ * - `number`：本行在**自身所属文件**里的行号（新增/上下文 = 新文件，删除 = 旧文件），仅用于左侧展示；
+ * - `oldNumber`：该行在**旧文件**里的绝对行号（仅删除行与上下文行有）；
+ * - `newNumber`：该行在**新文件**里的绝对行号（仅新增行与上下文行有）；
+ * 删除行的 `number` 等于旧文件行号，所以跳转判定不能只看 `number`——必须按侧取 oldNumber/newNumber。
+ * hunk 头（@@）不是文件里的行，两侧行号都不登记：按行号跳转要落在真实内容行上。
+ */
+export type CodeRow = {
+  text: string
+  number: number
+  kind: 'normal' | 'deleted' | 'added' | 'hunk'
+  oldNumber?: number
+  newNumber?: number
+}
+export type DiffSide = 'old' | 'new'
 const lines = (text: string) => text.split(/\r\n|\n|\r/)
 
 /** 统一 diff → 行模型：@@ 头为 hunk 行；上下文双号推进；-旧行 / +新行各自推进 */
@@ -89,14 +107,23 @@ export function parseUnifiedDiff(diff: string): CodeRow[] {
   let newNo = 0
   for (const raw of lines(diff)) {
     const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(raw)
-    if (hunk) { oldNo = Number(hunk[1]); newNo = Number(hunk[2]); rows.push({ text: raw, number: newNo, oldNumber: oldNo, kind: 'hunk' }); continue }
+    if (hunk) { oldNo = Number(hunk[1]); newNo = Number(hunk[2]); rows.push({ text: raw, number: newNo, kind: 'hunk' }); continue }
     if (raw.startsWith('diff --git ') || raw.startsWith('index ') || raw.startsWith('--- ') || raw.startsWith('+++ ') || raw.startsWith('new file mode') || raw.startsWith('deleted file mode') || raw.startsWith('Binary files') || raw.startsWith('\\ No newline')) continue
-    if (raw.startsWith('-')) { rows.push({ text: raw.slice(1), number: oldNo, kind: 'deleted' }); oldNo++; continue }
-    if (raw.startsWith('+')) { rows.push({ text: raw.slice(1), number: newNo, kind: 'added' }); newNo++; continue }
-    rows.push({ text: raw.startsWith(' ') ? raw.slice(1) : raw, number: newNo, oldNumber: oldNo, kind: 'normal' })
+    if (raw.startsWith('-')) { rows.push({ text: raw.slice(1), number: oldNo, oldNumber: oldNo, kind: 'deleted' }); oldNo++; continue }
+    if (raw.startsWith('+')) { rows.push({ text: raw.slice(1), number: newNo, newNumber: newNo, kind: 'added' }); newNo++; continue }
+    rows.push({ text: raw.startsWith(' ') ? raw.slice(1) : raw, number: newNo, oldNumber: oldNo, newNumber: newNo, kind: 'normal' })
     oldNo++; newNo++
   }
   return rows
+}
+
+/**
+ * 按**某一侧的绝对行号**定位行下标（审查项 4）：diff 里行下标 ≠ 文件行号
+ * （hunk 之间会跳号），所以必须整体扫描该侧行号，找不到返回 -1。
+ */
+export function findDiffRowIndex(rows: CodeRow[], line: number, side: DiffSide): number {
+  if (!Number.isFinite(line) || line < 1) return -1
+  return rows.findIndex((row) => (side === 'old' ? row.oldNumber : row.newNumber) === line)
 }
 
 export function CodeViewer(props: CodeViewerProps) {
@@ -113,8 +140,14 @@ function CodeSnapshot({ file, content, oldString, newString, truncated, addition
   const [highlight, setHighlight] = useState<{ count: number; tokens: ThemedToken[][] } | null>(null)
   const [highlightError, setHighlightError] = useState(false)
   const [copyState, setCopyState] = useState('复制')
+  const [gotoValue, setGotoValue] = useState('')
+  const [gotoSide, setGotoSide] = useState<DiffSide>('new')
+  const [jumpLine, setJumpLine] = useState(-1)
+  const [atTop, setAtTop] = useState(true)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const searchRef = useRef<HTMLInputElement>(null)
   const copyTimer = useRef<ReturnType<typeof setTimeout>>()
+  const jumpTimer = useRef<ReturnType<typeof setTimeout>>()
   const isDiff = diff !== undefined && diff !== ''
   const isContent = !isDiff && content !== undefined
   const missing = !isDiff && !isContent && oldString === undefined && newString === undefined
@@ -179,9 +212,9 @@ function CodeSnapshot({ file, content, oldString, newString, truncated, addition
     if (selectedLine >= limit) { setLimit(Math.ceil((selectedLine + 1) / PAGE_SIZE) * PAGE_SIZE); return }
     const container = scrollRef.current
     const row = container?.querySelector<HTMLElement>(`[data-code-line="${selectedLine}"]`)
-    if (container && row) container.scrollTo({ top: Math.max(0, row.offsetTop - container.clientHeight / 2), behavior: 'smooth' })
+    if (container && row) scrollElementTo(container, Math.max(0, row.offsetTop - container.clientHeight / 2))
   }, [selectedLine, limit, highlight])
-  useEffect(() => () => { clearTimeout(copyTimer.current) }, [])
+  useEffect(() => () => { clearTimeout(copyTimer.current); clearTimeout(jumpTimer.current) }, [])
 
   const moveMatch = (direction: number) => {
     if (matches.length) setMatchIndex((index) => (index + direction + matches.length) % matches.length)
@@ -194,33 +227,77 @@ function CodeSnapshot({ file, content, oldString, newString, truncated, addition
     clearTimeout(copyTimer.current)
     copyTimer.current = setTimeout(() => setCopyState('复制'), 1800)
   }
+  /** 跳到第 N 行：diff 模式下 N 是**所选一侧的绝对文件行号**（非行下标）；其余模式 N 就是行号 */
+  const gotoLine = (raw: string) => {
+    const target = Number.parseInt(raw, 10)
+    if (!Number.isFinite(target) || target < 1) return
+    const index = isDiff ? findDiffRowIndex(rows, target, gotoSide) : Math.min(rows.length, target) - 1
+    if (index < 0) return
+    if (index >= limit) setLimit(Math.ceil((index + 1) / PAGE_SIZE) * PAGE_SIZE)
+    setGotoValue(String(target))
+    setJumpLine(index)
+    clearTimeout(jumpTimer.current)
+    jumpTimer.current = setTimeout(() => setJumpLine(-1), 1600)
+    requestAnimationFrame(() => {
+      const container = scrollRef.current
+      const row = container?.querySelector<HTMLElement>(`[data-code-line="${index}"]`)
+      if (container && row) scrollElementTo(container, Math.max(0, row.offsetTop - container.clientHeight / 3))
+    })
+  }
+  const onViewerKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
+    // IME 组合中一律放行（Enter/Escape/↑↓ 都属于输入法候选）
+    if (isComposingKey(event.nativeEvent)) return
+    const target = event.target as HTMLElement
+    const inField = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
+    if (!inField && event.key === '/') { event.preventDefault(); searchRef.current?.focus(); return }
+    if (inField || event.ctrlKey || event.metaKey || event.altKey) return
+    if (event.key === 'n' || event.key === 'N') { event.preventDefault(); moveMatch(event.key === 'n' ? 1 : -1); return }
+    if (event.key === 'w') { event.preventDefault(); setWrap((value) => !value); return }
+    if (event.key === 'c') { event.preventDefault(); void copy(); return }
+    if (event.key === 'g' || event.key === 'G') {
+      event.preventDefault()
+      const container = scrollRef.current
+      if (container) scrollElementTo(container, event.key === 'g' ? 0 : container.scrollHeight)
+    }
+  }
   const ready = highlight?.count === visibleRows.length
-  return <section className={`code-viewer${wrap ? ' is-wrapped' : ''}${isDiff ? ' is-diff' : ''}`} aria-label={`${file} 只读代码`}>
+  const totalAdds = additions ?? 0
+  const totalDels = deletions ?? 0
+  const changeTotal = totalAdds + totalDels
+  return <section className={`code-viewer${wrap ? ' is-wrapped' : ''}${isDiff ? ' is-diff' : ''}`} aria-label={`${file} 只读代码`} onKeyDown={onViewerKeyDown}>
     {truncated && <div className="code-warning" role="status">内容已截断：工具事件最多保留 64 KB，以下不是完整文件。</div>}
     <header className="code-toolbar">
       <span className="code-filename" title={file}>{file.split(/[\\/]/).pop()}</span>
       <span className="code-language">{language} · {isDiff ? 'git diff' : '只读'}</span>
-      {(additions != null || deletions != null) && <span className="code-counts"><span className="edit-added">+{additions ?? 0}</span> <span className="edit-deleted">-{deletions ?? 0}</span></span>}
-      <button type="button" aria-pressed={wrap} onClick={() => setWrap((value) => !value)}>自动换行</button>
-      <button type="button" disabled={missing || binary} title={isDiff ? '复制 diff 原文' : isContent ? '复制当前快照（含未展开行）' : '复制替换后的片段'} onClick={() => void copy()}>{copyState}</button>
+      {(additions != null || deletions != null) && <span className="code-counts" title={`新增 ${totalAdds} 行 · 删除 ${totalDels} 行`}><span className="edit-added">+{totalAdds}</span> <span className="edit-deleted">-{totalDels}</span>{changeTotal > 0 && <span className="code-change-bar" aria-hidden="true"><i className="is-add" style={{ flexGrow: totalAdds }} /><i className="is-del" style={{ flexGrow: totalDels }} /></span>}</span>}
+      <button type="button" aria-pressed={wrap} title="自动换行（W）" onClick={() => setWrap((value) => !value)}>自动换行</button>
+      <button type="button" disabled={missing || binary} title={`${isDiff ? '复制 diff 原文' : isContent ? '复制当前快照（含未展开行）' : '复制替换后的片段'}（C）`} onClick={() => void copy()}>{copyState}</button>
     </header>
     <div className="code-search">
-      <input type="search" value={query} aria-label="查找代码" placeholder="查找代码…" onChange={(event) => { setQuery(event.target.value); setMatchIndex(0) }} onKeyDown={(event) => {
+      <input ref={searchRef} type="search" value={query} aria-label="查找代码" placeholder="查找代码…（/ 聚焦，Enter 下一个）" onChange={(event) => { setQuery(event.target.value); setMatchIndex(0) }} onKeyDown={(event) => {
         // IME 组合中：Enter 上屏、Escape 取消候选，都不该被查找框当成命令
         if (isComposingKey(event.nativeEvent)) return
         if (event.key === 'Enter') { event.preventDefault(); moveMatch(event.shiftKey ? -1 : 1) }
         if (event.key === 'Escape') { setQuery(''); setMatchIndex(0) }
       }} />
       <span role="status">{query ? matches.length ? `${matchIndex % matches.length + 1}/${matches.length} 行` : '无匹配' : `${rows.length} 行`}</span>
-      <button type="button" disabled={!matches.length} aria-label="上一个匹配行" onClick={() => moveMatch(-1)}>↑</button>
-      <button type="button" disabled={!matches.length} aria-label="下一个匹配行" onClick={() => moveMatch(1)}>↓</button>
+      <button type="button" disabled={!matches.length} aria-label="上一个匹配行" title="上一个匹配行（N）" onClick={() => moveMatch(-1)}>↑</button>
+      <button type="button" disabled={!matches.length} aria-label="下一个匹配行" title="下一个匹配行（n）" onClick={() => moveMatch(1)}>↓</button>
+      <form className="code-goto" onSubmit={(event) => { event.preventDefault(); gotoLine(gotoValue) }}>
+        {isDiff && <select className="code-goto-side" value={gotoSide} aria-label="跳转行号按哪一侧的文件" title="按新文件或旧文件的绝对行号跳转" onChange={(event) => setGotoSide(event.target.value === 'old' ? 'old' : 'new')}>
+          <option value="new">新文件</option>
+          <option value="old">旧文件</option>
+        </select>}
+        <input inputMode="numeric" value={gotoValue} aria-label={isDiff ? (gotoSide === 'old' ? '跳转到旧文件行' : '跳转到新文件行') : '跳转到行'} placeholder="行号" title={isDiff ? `${gotoSide === 'old' ? '旧' : '新'}文件绝对行号后回车（不在本次 diff 范围内则无命中）` : '跳转到指定行后回车'} onChange={(event) => setGotoValue(event.target.value.replace(/[^\d]/g, ''))} />
+        <button type="submit" disabled={!gotoValue} title="跳转到该行">跳转</button>
+      </form>
     </div>
     {diffNote && <div className="code-diff-note">{diffNote}</div>}
     {!isContent && !isDiff && !missing && <div className="code-diff-note">替换片段 · 删除 / 新增行号分别从 1 开始，非文件绝对行号</div>}
     {highlightError && <div className="code-warning" role="status">语法高亮加载失败，已回退为纯文本。</div>}
-    <div ref={scrollRef} className="code-scroll" tabIndex={0} aria-label="代码内容">
+    <div ref={scrollRef} className="code-scroll" tabIndex={0} aria-label="代码内容（/ 查找，n/N 跳匹配，w 换行，c 复制，g/G 首尾）" onScroll={() => setAtTop((scrollRef.current?.scrollTop ?? 0) < 24)}>
       {missing || binary ? <div className="code-empty">{binary ? '二进制文件：只有行数统计，没有可渲染文本。' : '此事件只有编辑统计，未提供代码快照。'}</div> : !rows.length ? <div className="code-empty">空替换片段</div> : !ready && !highlightError ? <div className="code-skeleton" role="status" aria-label="正在加载语法高亮">{[72, 48, 85, 60, 38, 76].map((width, index) => <i key={index} style={{ width: `${width}%` }} />)}</div> : <div className="code-lines">
-        {visibleRows.map((row, index) => <div key={index} data-code-line={index} className={`code-line is-${row.kind}${matchSet.has(index) ? ' is-match' : ''}${selectedLine === index ? ' is-current-match' : ''}`}>
+        {visibleRows.map((row, index) => <div key={index} data-code-line={index} className={`code-line is-${row.kind}${matchSet.has(index) ? ' is-match' : ''}${selectedLine === index ? ' is-current-match' : ''}${jumpLine === index ? ' is-jump' : ''}`}>
           {isDiff
             ? <><span className="code-line-number code-line-number-old" aria-hidden="true">{row.kind === 'added' || row.kind === 'hunk' ? '' : row.oldNumber ?? row.number}</span><span className="code-line-number" aria-hidden="true">{row.kind === 'deleted' || row.kind === 'hunk' ? '' : row.number}</span></>
             : <span className="code-line-number" aria-hidden="true">{row.number}</span>}
@@ -229,7 +306,8 @@ function CodeSnapshot({ file, content, oldString, newString, truncated, addition
         </div>)}
       </div>}
       {rows.length > limit && <button className="code-load-more" type="button" onClick={() => setLimit((value) => value + PAGE_SIZE)}>加载更多（剩余 {rows.length - limit} 行）</button>}
+      {!atTop && <button type="button" className="code-to-top" title="回到顶部（g）" aria-label="回到顶部" onClick={() => scrollElementTo(scrollRef.current, 0)}>↑</button>}
     </div>
-    <footer className="code-status" title={file}><span>{file}</span><span>{isDiff ? 'git diff' : isContent ? '文件快照' : '编辑片段'} · {Math.min(limit, rows.length)}/{rows.length} 行</span></footer>
+    <footer className="code-status" title={file}><span>{file}</span><span>{isDiff ? 'git diff' : isContent ? '文件快照' : '编辑片段'} · {Math.min(limit, rows.length)}/{rows.length} 行{changeTotal > 0 ? ` · +${totalAdds}/-${totalDels}` : ''}</span></footer>
   </section>
 }

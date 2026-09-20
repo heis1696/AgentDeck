@@ -3,6 +3,7 @@ import type { AppSettings } from '../../../shared/types'
 import { bridge, usePetState, useSettings } from '../api'
 import { Settings } from 'lucide-react'
 import { Menu } from '../ui/Menu'
+import { PageHeader } from '../ui/PageHeader'
 import { EmptyState } from '../ui/EmptyState'
 import { RuntimeView } from './RuntimeView'
 import { UpdatePanel } from './UpdatePanel'
@@ -22,34 +23,30 @@ export function SettingsView({ section, onSection }: { section: string; onSectio
   const current = SECTIONS.flatMap((g) => g.items).find((item) => item.id === active)!
   return (
     <div className="settings-page">
-      <aside className="settings-nav">
-        <div className="settings-nav-head"><Settings size={15} /> 设置</div>
-        {SECTIONS.map((group) => (
-          <div className="settings-nav-group" key={group.group}>
-            <div className="settings-nav-group-label">{group.group}</div>
-            {group.items.map((item) => (
-              <button key={item.id} className={`settings-nav-item ${item.id === active ? 'active' : ''}`} onClick={() => onSection(item.id)}>
-                <span>{item.label}</span>
-                <small>{item.desc}</small>
-              </button>
-            ))}
-          </div>
-        ))}
-      </aside>
-      <div className="settings-body">
-        <header className="page-header-bar">
-          <div className="detail-title-wrap">
-            <div className="page-title-row">
-              <h2 className="page-title">{current.label}</h2>
-              <span className="page-desc">{current.desc}</span>
+      {/* 页题在两栏之上：全页只有一个主标题，导航与内容都从属于它 */}
+      <PageHeader title="设置" icon={<Settings size={16} />} />
+      <div className="settings-layout">
+        <aside className="settings-nav" aria-label="设置分区">
+          {SECTIONS.map((group) => (
+            <div className="settings-nav-group" key={group.group}>
+              <div className="settings-nav-group-label">{group.group}</div>
+              {group.items.map((item) => (
+                <button key={item.id} className={`settings-nav-item ${item.id === active ? 'active' : ''}`} onClick={() => onSection(item.id)}>
+                  <span>{item.label}</span>
+                  <small>{item.desc}</small>
+                </button>
+              ))}
             </div>
-          </div>
-        </header>
-        {active === 'general' && <GeneralSection />}
-        {active === 'updates' && <UpdatePanel />}
-        {active === 'runtime' && <RuntimeSection />}
-        {active === 'advanced' && <AdvancedSection />}
-        {active === 'storage' && <StorageSection />}
+          ))}
+        </aside>
+        <div className="settings-body">
+          <div className="section-heading"><h2>{current.label}</h2><span>{current.desc}</span></div>
+          {active === 'general' && <GeneralSection />}
+          {active === 'updates' && <UpdatePanel />}
+          {active === 'runtime' && <RuntimeSection />}
+          {active === 'advanced' && <AdvancedSection />}
+          {active === 'storage' && <StorageSection />}
+        </div>
       </div>
     </div>
   )

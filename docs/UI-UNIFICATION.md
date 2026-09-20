@@ -1,5 +1,9 @@
 # AgentDeck UI unification
 
+> Visual correction (2026-09-20): [UI-VISUAL-REPAIR.md](UI-VISUAL-REPAIR.md)
+> supersedes the page-title sizes and blanket background removal below. All
+> primary pages now use PageHeader, with a shared graphical canvas treatment.
+
 ## Objective and scope
 
 Unify the existing desktop workbench and provide one typed entry point for shared UI interactions. Preserve the Issue, board, task detail, Agent, automation, extensions, usage and settings workflows. Keep task execution in the existing renderer task-service and typed bridge. No changes to main-process orchestration, IPC contracts or backend adapters are needed.

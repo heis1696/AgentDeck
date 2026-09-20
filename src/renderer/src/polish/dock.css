@@ -131,14 +131,14 @@ html.light .code-token { color: var(--shiki-light); font-style: var(--shiki-ligh
 .worker-pane .log-line { font-size: var(--text-micro); }
 .worker-pane-error { flex-shrink: 0; max-height: 90px; overflow: auto; padding: 8px 12px; background: var(--status-failed-bg); color: var(--err); font-size: var(--text-caption); overflow-wrap: anywhere; }
 .worker-pane-empty { justify-content: center; padding: 24px; text-align: center; color: var(--text-dim); }
-@media (max-width: 1100px) { .dock-tab-row { max-width: 150px; } }
+@container main (max-width: 1100px) { .dock-tab-row { max-width: 150px; } }
 /* 窄视口（低于横排下限 256+340+280=876，如 DevTools 拉窄或未来调低窗口 minWidth）：
    分栏转为整宽堆叠到主区下方——内联宽度/上限用 !important 压过 TS 的 style width，
    行内分割线退场，两块各自内部滚动，是明确可用的窄屏布局而非隐藏溢出 */
-@media (max-width: 880px) {
-  .detail { flex-direction: column; overflow-y: auto; }
-  .detail-left { flex: 0 0 auto; min-width: 0; min-height: 0; }
-  .detail-columns { flex: 0 0 320px; height: 320px; }
+@container main (max-width: 880px) {
+  .detail:has(.side-dock) { flex-direction: column; overflow-y: auto; }
+  .detail:has(.side-dock) .detail-left { flex: 0 0 auto; min-width: 0; min-height: 0; }
+  .detail:has(.side-dock) .detail-columns { flex: 0 0 320px; height: 320px; }
   .side-dock {
     flex: 0 0 320px;
     width: auto !important;
@@ -158,3 +158,171 @@ html.light .code-token { color: var(--shiki-light); font-style: var(--shiki-ligh
 .code-viewer.is-diff .code-line-number-old { border-right: 1px solid var(--border); color: var(--text-faint); }
 .code-line.is-hunk { background: var(--bg-inset); color: var(--text-dim); }
 .code-line.is-hunk > code { font-size: 11px; }
+
+/* ============================================================
+   0.22.0 SideDock / CodeViewer / WorkerPane 升级 Wave
+   目标：页签条密度与状态可读、分割线键盘可达、代码长内容阅读
+   （行号列横向吸附 / 跳行 / 键盘快捷键 / 变更占比条）、
+   Worker 面板运行反馈。契约不变：类名与桥调用沿用既有实现。
+   ============================================================ */
+
+/* ---------- A. 侧栏标题檐 + 页签条 ---------- */
+.dock-head {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+  min-height: 26px;
+  padding: 0 var(--space-2);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-inset);
+  color: var(--text-faint);
+  font-size: var(--text-micro);
+}
+.dock-head-title { font-weight: 600; }
+.dock-head-count {
+  min-width: 16px;
+  padding: 0 5px;
+  border-radius: var(--radius-pill);
+  background: var(--bg);
+  color: var(--text-faint);
+  font: 600 var(--text-micro) var(--font-ui);
+  text-align: center;
+}
+.dock-head-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  padding: 1px 7px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-faint);
+  font: var(--text-micro) var(--font-ui);
+  cursor: pointer;
+}
+.dock-head-action:hover { border-color: var(--border); background: var(--bg-hover); color: var(--err); }
+.dock-tabs { padding: 6px var(--space-2) 0; }
+.dock-tab-row { max-width: 210px; min-height: 32px; }
+.dock-tab-stats { flex: 0 0 auto; display: inline-flex; gap: 4px; font: var(--text-micro) var(--font-mono); }
+.dock-tab .dock-tab-title { flex: 1 1 auto; min-width: 0; }
+.dock-tab-row > .dock-tab + .dot { flex: 0 0 auto; }
+.dock-tab-row.is-active .dock-tab-stats .edit-added { color: color-mix(in srgb, var(--ok) 80%, var(--text)); }
+
+/* ---------- B. 分割线：可聚焦 + 键盘微调 ---------- */
+.dock-splitter { position: relative; }
+.dock-splitter:focus-visible { outline-offset: var(--focus-ring-inset); background: var(--accent-soft); }
+.dock-splitter::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 2px;
+  height: 26px;
+  border-radius: 2px;
+  background: var(--border-strong);
+  opacity: 0;
+  transform: translate(-50%, -50%);
+  transition: opacity var(--duration-base) var(--ease-in-out);
+}
+.dock-splitter:hover::after, .dock-splitter:focus-visible::after { opacity: 1; }
+
+/* ---------- C. 代码视图：变更占比、跳行、吸附行号、长内容快捷键 ---------- */
+.code-counts { align-items: center; }
+.code-change-bar {
+  display: inline-flex;
+  gap: 2px;
+  width: 54px;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--bg-inset);
+}
+.code-change-bar i { display: block; height: 100%; min-width: 2px; }
+.code-change-bar i.is-add { background: var(--ok); }
+.code-change-bar i.is-del { background: var(--err); }
+.code-goto { display: inline-flex; align-items: center; gap: 4px; }
+.code-goto input { width: 64px; padding: 5px 7px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-inset); color: var(--text); font: inherit; }
+.code-goto input:focus { outline: none; border-color: var(--focus-ring-color); box-shadow: var(--focus-halo); }
+/* diff 跳转的新/旧文件侧选择器：与行号输入框同一套外观（审查项 4） */
+.code-goto-side { width: 66px; padding: 5px 4px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-inset); color: var(--text-dim); font: inherit; }
+.code-goto-side:focus { outline: none; border-color: var(--focus-ring-color); box-shadow: var(--focus-halo); }
+/* 行号/符号列横向吸附：横向滚动时始终知道读到第几行 */
+.code-viewer .code-line-number { position: sticky; z-index: 2; left: 0; background: var(--bg); }
+.code-viewer .code-line-number:not(.code-line-number-old) { left: 50px; }
+.code-viewer.is-diff .code-line-number:not(.code-line-number-old) { left: 42px; }
+.code-viewer .code-line-sign { position: sticky; z-index: 2; left: 50px; background: var(--bg); }
+.code-viewer.is-diff .code-line-sign { left: 84px; }
+.code-line.is-added .code-line-number, .code-line.is-added .code-line-sign { background: color-mix(in srgb, var(--ok) 13%, var(--bg)); }
+.code-line.is-deleted .code-line-number, .code-line.is-deleted .code-line-sign { background: color-mix(in srgb, var(--err) 13%, var(--bg)); }
+.code-line.is-hunk .code-line-number, .code-line.is-hunk .code-line-sign { background: var(--bg-inset); }
+.code-line.is-match .code-line-number, .code-line.is-match .code-line-sign { background: color-mix(in srgb, var(--warn) 13%, var(--bg)); }
+.code-line.is-current-match .code-line-number, .code-line.is-current-match .code-line-sign { background: color-mix(in srgb, var(--warn) 20%, var(--bg)); }
+/* 跳到第 N 行：短暂高亮，便于在长文件里定位 */
+@keyframes code-jump {
+  0%, 55% { background: var(--status-queued-bg); }
+  100% { background: transparent; }
+}
+.code-line.is-jump { animation: code-jump 1.6s var(--ease-out) both; }
+.code-to-top {
+  position: sticky;
+  bottom: 8px;
+  display: block;
+  width: fit-content;
+  margin: 4px 12px 0 auto;
+  padding: 4px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  font: var(--text-micro) var(--font-ui);
+  box-shadow: var(--shadow-panel);
+  cursor: pointer;
+}
+.code-to-top:hover { border-color: var(--accent); color: var(--accent); }
+.code-scroll:focus-visible { outline-offset: var(--focus-ring-inset); }
+
+/* ---------- D. Worker 面板：运行反馈与密度 ---------- */
+.worker-pane-header { position: relative; padding: 10px 12px; }
+.worker-pane-title button { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; font-size: var(--text-micro); }
+.worker-pane-open-text { white-space: nowrap; }
+.worker-pane-meta { gap: 6px; margin-top: 7px; }
+.worker-pane-meta .status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 19px;
+  padding: 1px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  font: 600 var(--text-micro) var(--font-ui);
+}
+.worker-pane-meta .status-chip .dot { width: 6px; height: 6px; }
+.worker-pane-meta .status-chip.status-running { background: var(--status-running-bg); border-color: color-mix(in srgb, var(--status-running) 34%, transparent); color: var(--status-running); }
+.worker-pane-meta .status-chip.status-queued { background: var(--status-queued-bg); border-color: color-mix(in srgb, var(--status-queued) 34%, transparent); color: var(--status-queued); }
+.worker-pane-meta .status-chip.status-done { background: var(--status-done-bg); border-color: color-mix(in srgb, var(--status-done) 34%, transparent); color: var(--status-done); }
+.worker-pane-meta .status-chip.status-failed { background: var(--status-failed-bg); border-color: color-mix(in srgb, var(--status-failed) 34%, transparent); color: var(--status-failed); }
+.worker-pane-meta .status-chip.status-cancelled { background: var(--status-cancelled-bg); border-color: color-mix(in srgb, var(--status-cancelled) 34%, transparent); color: var(--status-cancelled); }
+.worker-pane-item { color: var(--text-dim); white-space: nowrap; }
+.worker-pane-progress { display: block; height: 2px; margin: 9px -12px -10px; background: var(--status-running); opacity: 0.5; animation: pulse 1.2s infinite; }
+
+/* Worker 面板保持只读：回退控件一律不出现（含回合页眉里的常显回退） */
+.worker-pane .turn-rewind-inline { display: none !important; }
+.worker-pane .chat-latest { right: 12px; bottom: 10px; }
+.worker-pane .bubble-tools { display: none; }
+
+/* ---------- E. 窄栏（分栏被拖到 320 或窄窗） ---------- */
+@container main (max-width: 1200px) {
+  .dock-tab-row { max-width: 168px; }
+  .worker-pane-open-text { display: none; }
+}
+@container main (max-width: 720px) {
+  .dock-head-action span { display: none; }
+  .code-change-bar { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .code-line.is-jump { animation: none; background: var(--status-queued-bg); }
+  .worker-pane-progress { animation: none; }
+}

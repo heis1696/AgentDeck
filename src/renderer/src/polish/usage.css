@@ -250,3 +250,38 @@
 @media (prefers-reduced-motion: reduce) {
   .us-chart-plot, .us-area, .us-mix-track i, .us-back-track i, .us-panel, .us-mix-row, .us-back-row, .us-table tbody tr { animation: none; }
 }
+
+/* Usage page: stronger scan lines and controls that survive narrow windows. */
+.us-hero { padding-top: 24px; }
+.us-stats { padding-bottom: 22px; border-bottom: 1px solid var(--border-subtle); }
+.us-stat-figure { letter-spacing: 0; }
+.us-chart { padding-top: 18px; }
+.us-chart-plot { min-height: 140px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: color-mix(in srgb, var(--bg-inset) 64%, transparent); overflow: hidden; }
+.us-chart-plot > svg, .us-chart-overlay, .us-chart-cols { inset: 10px 0 0; }
+.us-chart-x { padding-inline: 2px; }
+.us-panel { border-color: color-mix(in srgb, var(--border) 88%, transparent); box-shadow: 0 1px 0 color-mix(in srgb, var(--text) 3%, transparent); }
+.us-panel:hover { background: color-mix(in srgb, var(--bg-raised) 96%, var(--bg-hover)); }
+.us-panel-head { min-height: 26px; }
+.us-table-scroll { scrollbar-gutter: stable; }
+.us-table th { position: sticky; top: 0; background: var(--bg-raised); }
+.us-table td:first-child, .us-table th:first-child { padding-left: 4px; }
+.us-foot { padding-top: 8px; }
+
+@container page (max-width: 760px) {
+  .us-chart-head { align-items: flex-start; gap: 8px; flex-direction: column; }
+  .us-chart-plot { min-height: 132px; }
+  .us-panel { padding: 14px; }
+  .us-panel-head { align-items: flex-start; gap: 6px; flex-direction: column; }
+  .us-panel-head .us-subtle { align-self: flex-start; }
+}
+
+@container page (max-width: 480px) {
+  .us-hero { padding-inline: 0; }
+  .us-stat-sub { white-space: normal; }
+  .us-mix-row { grid-template-columns: 22px minmax(0, 1fr) 30px; gap: 8px; }
+  .us-mix-track { grid-column: 2 / -1; grid-row: 2; }
+  .us-mix-count { grid-column: 3; grid-row: 1; }
+  .us-back-row { grid-template-columns: minmax(0, 1fr) 42px; gap: 8px; }
+  .us-back-track { grid-column: 1; grid-row: 2; }
+  .us-back-share { grid-column: 2; grid-row: 1 / span 2; }
+}

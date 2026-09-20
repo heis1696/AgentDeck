@@ -1,31 +1,217 @@
 /* ============================================================
-   0.15.0 UI Polish Wave · foundation（领队专属文件）
-   职责：主 CTA、主按钮、品牌徽标、全局焦点环、选区等基础层统一。
-   约定：本文件在 styles.css/tokens.css 之后加载，只做覆盖与
-   别名桥接，不修改既有文件；组件级样式归属各自的 polish/*.css，
-   不要写在这里。
-   历史变量别名桥接（--signal、--brand、--teal、--surface 系、
-   --ink 系等）已统一收敛到 tokens.css，此处不再重复定义。
-   UI 统一规范：按钮平面化——无光晕投影、无 hover 位移，
-   反馈只用颜色/边框/亮度（120–180ms）。
+   全局视觉基础层（foundation）
+   职责（全站唯一的基础层，不承载任何组件级布局）：
+   1) 主题与排印基线：color-scheme、字体、字号、行高、字距、选区、占位符
+   2) 统一焦点：可交互元素 outline 环；文本控件 accent 边框 + 软光晕
+   3) 统一禁用态：不透明度 / 光标 / 抑制 hover 反馈
+   4) 统一滚动条：滑轨透明 + 滑块悬浮胶囊，深浅两套
+   5) 统一阴影：浮层一律取 --menu-shadow / --shadow-pop（自带浅色变体）
+   6) 主 CTA、主按钮、品牌徽标
+   约定：本文件在 styles.css / tokens.css 之后加载，只做覆盖与别名桥接；
+   组件级样式归属各自的 polish/*.css，不要写在这里。
+   历史变量别名桥接（--signal、--brand、--teal、--surface 系、--ink 系等）
+   已统一收敛到 tokens.css，此处不再重复定义。
+   UI 统一规范：按钮平面化——无光晕投影、无 hover 位移，反馈只用
+   颜色/边框/亮度（120–180ms）。
+   特异性约定：`html:root` 前缀既是主题锚点也是刻意的特异性配重——本层
+   必须压过 styles.css 与 polish/*.css 里遗留的 `outline: none`、硬编码
+   阴影与各自为政的禁用态；不带该前缀的规则只用于新增声明。
    ============================================================ */
 
-/* ---- 主 CTA（新建任务）：唯一的 accent 电弧光 ---- */
+/* ---- 1. 主题与排印基线 ---- */
+
+/* 原生控件/滚动条跟随主题（深浅切换后 select 弹层、spinner 同步换色）*/
+html { background: var(--app-shell); }
+html.light { color-scheme: light; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--text-label);       /* 控件/列表正文 13px，全站基准 */
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-normal); /* 1.55：正文与输入框 */
+  letter-spacing: 0;
+  text-underline-offset: 2px;
+}
+
+h1, h2, h3, h4, h5, h6 { line-height: var(--leading-tight); letter-spacing: 0; }
+p { line-height: var(--leading-normal); }
+/* 长文（markdown 正文 / 引导段落）收敛到同一个 1.65，替换散落的 1.6/1.7 */
+.md, .workspace-lead { line-height: var(--leading-relaxed); }
+
+/* Section headings stay below the shared page-title scale. */
+:is(.section-heading > h2, .section-heading > h3, .settings-card > h3) {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--text-section-title);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-section-title);
+  letter-spacing: 0;
+}
+:is(.section-heading > span, .settings-body > .section-heading > span) {
+  min-width: 0;
+  color: var(--text-dim);
+  line-height: var(--leading-normal);
+}
+
+/* 表单控件继承排印：消灭 UA 默认 13.333px 与兄弟文本不一致的接缝 */
+button, input, textarea, select, optgroup {
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  letter-spacing: 0;
+}
+
+/* 数字类信息（时间戳、计数、ID）用等宽 + 表格数字，避免跳动 */
+.mono, kbd, .badge, .nav-count, time, .toolbar-count, .issue-identifier, .ws-menu-path {
+  font-variant-numeric: tabular-nums;
+}
+
+kbd {
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--bg-inset);
+  color: var(--text-dim);
+  font: var(--weight-medium) var(--text-micro)/var(--leading-none) var(--font-mono);
+}
+
+/* 唯一一处非零字距（旧 0.04em）收敛回 0 */
+.inbox-filters label { letter-spacing: 0; }
+
+/* ---- 2. 统一焦点 ---- */
+
+/* 2a. 可交互元素：2px accent 环。用 outline（不被 overflow 裁切、兼容
+   强制色彩模式），偏移 2px；被裁剪的滚动容器在下方单独改为内偏移。
+   文本控件不在此列——它们用 2b 的边框 + 软光晕，避免双重描边。 */
+html:root :is(
+  a[href], button, summary,
+  [role='button'], [role='menuitem'], [role='menuitemradio'], [role='menuitemcheckbox'],
+  [role='tab'], [role='option'], [role='switch'], [role='checkbox'], [role='radio'],
+  [contenteditable='true'], [tabindex]
+):focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
+}
+
+/* 环会溢出并被子元素裁剪的容器：改用内偏移（沿用 dock/页签条的原始意图）*/
+html:root :is(.tab-bar, .dock-tabs, .side-dock, .worker-pane, .code-viewer)
+  :is(button, a[href], [role='button'], [role='tab'], [tabindex]):focus-visible {
+  outline-offset: var(--focus-ring-inset);
+}
+
+/* 2b. 文本控件：accent 边框 + 统一软光晕（--focus-halo）。
+   styles.css 与 detail.css 里遗留的 --accent-soft / --accent-glow 两个
+   变体在这里收敛成同一个值；缺光晕的（.workspace-row input）在此补齐。 */
+html:root :is(
+  .workspace-prompt, .workspace-row input, .field input, .field textarea, .field select,
+  .followup textarea, .handoff-input, .skills-body, .ext-textarea,
+  .comment-compose input, .inbox-filters select, .issue-meta-edit input, .issue-meta-edit select,
+  .ext-mp-select
+):focus {
+  border-color: var(--focus-ring-color);
+  box-shadow: var(--focus-halo);
+}
+/* detail.css 的 composer 选择器更深，单独配平（同为 --focus-halo）*/
+html:root .detail-page .detail-main > .followup textarea:focus { box-shadow: var(--focus-halo); }
+
+/* 复合搜索框：光环画在外框上，内部 input 无边框，避免内外双环 */
+html:root :is(.issues-search, .market-search):focus-within {
+  border-color: var(--focus-ring-color);
+  box-shadow: var(--focus-halo);
+}
+/* 代码检索框旧实现只有 1px 环，与其余输入不一致 */
+html:root .code-search input:focus {
+  border-color: var(--focus-ring-color);
+  box-shadow: var(--focus-halo);
+  outline: none;
+}
+
+/* 文本控件只用边框 + 光晕，不叠 outline：与 2a 的环构成两轨一致焦点语言 */
+html:root :is(.workspace-prompt, .followup textarea, .field input, .field textarea, .field select):focus { outline: none; }
+
+/* ---- 3. 统一禁用态 ---- */
+
+/* 颜色不是唯一信号：不透明度 + cursor +（调用方应同时设置 disabled/aria-disabled）*/
+html:root :is(button, input, textarea, select, [role='button'], [tabindex]):disabled,
+html:root [aria-disabled='true'] {
+  opacity: var(--disabled-opacity);
+  cursor: not-allowed;
+  filter: none;
+  transform: none;
+}
+html:root :is(button, input, textarea, select):disabled:hover,
+html:root [aria-disabled='true']:hover {
+  filter: none;
+  transform: none;
+  box-shadow: none;
+}
+/* 禁用输入：面与线切换到中性禁用值；文字保持原令牌色，仅由 opacity 压暗
+   （再叠一层压低对比的文字色会掉到不可读）*/
+html:root :is(input, textarea, select):disabled {
+  background: var(--disabled-bg);
+  border-color: var(--disabled-border);
+}
+
+/* ---- 4. 统一滚动条 ---- */
+
+/* 滑轨透明、滑块用透明边框 + background-clip 做悬浮胶囊：在任何表面上
+   都不会像旧实现那样露出与背景不匹配的描边。 */
+::-webkit-scrollbar { width: var(--scrollbar-size); height: var(--scrollbar-size); }
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner { background: var(--scrollbar-track); }
+::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: var(--radius-pill);
+  background: var(--scrollbar-thumb);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover,
+::-webkit-scrollbar-thumb:active {
+  background: var(--scrollbar-thumb-hover);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+
+/* 常驻滚动的主滚动容器预留滑槽：内容不因滚动条出现而左右跳动 */
+.psh-body, .issues-page, .workspace, .settings-body { scrollbar-gutter: stable; }
+
+/* 代码块内的滚动条再窄一档（长行横滚不抢视线）*/
+.md-code pre::-webkit-scrollbar { width: var(--scrollbar-size-thin); height: var(--scrollbar-size-thin); }
+
+/* ---- 5. 统一阴影：浮层只用两级，且自带浅色变体 ---- */
+/* 旧代码里三处硬编码纯黑投影（仅适配暗色）与对话框的 0 30px 80px 一并收敛 */
+.dialog { box-shadow: var(--shadow-pop); }
+.meta-info-pop, .skill-menu { box-shadow: var(--menu-shadow); }
+.float-window { box-shadow: var(--shadow-pop); }
+
+/* ---- 6. 选区与占位符 ---- */
+::selection { background: color-mix(in srgb, var(--accent) 32%, transparent); }
+
+/* 占位符统一 text-faint 且满不透明：旧规则里的 opacity .7 会把对比度压到
+   AA 以下（暗色 3.6:1）。 */
+html:root ::placeholder { color: var(--text-faint); opacity: 1; }
+
+/* 浮层遮罩：深浅两套（浅色不再用 72% 纯黑压死白面）*/
+.overlay { background: var(--scrim); backdrop-filter: blur(var(--scrim-blur)); }
+
+/* ---- 7. 主 CTA（新建任务）：唯一的 accent 电弧光 ---- */
 .new-task-btn,
 html.light .new-task-btn {
   border: 1px solid transparent;
   background: var(--accent);
   color: var(--accent-ink);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   box-shadow: none;
 }
 .new-task-btn:hover {
-  background: var(--accent);
+  background: var(--accent-hover);
   color: var(--accent-ink);
-  filter: brightness(1.06);
+  filter: none;
   box-shadow: none;
 }
-.new-task-btn:active { filter: brightness(0.97); }
+.new-task-btn:active { background: var(--accent-active); filter: none; }
 .new-task-btn kbd {
   margin-left: auto;
   border: none;
@@ -33,46 +219,41 @@ html.light .new-task-btn {
   color: var(--accent-ink);
 }
 
-/* ---- 主要按钮：与 CTA 同一强调系统 ---- */
+/* ---- 8. 主要按钮：与 CTA 同一强调系统 ---- */
 .btn.primary,
 html.light .btn.primary {
   border-color: transparent;
   background: var(--accent);
   color: var(--accent-ink);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   box-shadow: none;
 }
 .btn.primary:hover {
-  background: var(--accent);
+  background: var(--accent-hover);
   border-color: transparent;
   color: var(--accent-ink);
-  filter: brightness(1.06);
+  filter: none;
 }
-.btn.primary:active { filter: brightness(0.97); }
-.btn.primary:disabled { opacity: 0.5; filter: none; }
+.btn.primary:active { background: var(--accent-active); filter: none; }
+.btn.primary:disabled { opacity: var(--disabled-opacity); filter: none; }
 
-/* ---- 品牌徽标：accent 底 + 墨字，移除过期的硬编码版本角标 ---- */
+/* ---- 9. 品牌徽标：accent 底 + 墨字，移除过期的硬编码版本角标 ---- */
 .brand-mark,
 html.light .brand-mark {
   background: var(--accent);
   color: var(--accent-ink);
-  font-weight: 700;
+  font-weight: var(--weight-bold);
   box-shadow: none;
 }
 .workspace-title .brand-mark { background: var(--accent); color: var(--accent-ink); }
 .brand::after { display: none; }
 
-/* ---- 全局焦点环：键盘可达性统一 accent ---- */
-button:focus-visible,
-input:focus-visible,
-textarea:focus-visible,
-select:focus-visible,
-a:focus-visible,
-[role='button']:focus-visible,
-[tabindex]:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+/* ---- 10. 辅助功能：降低动画强度（令牌之外再兜一层）---- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
-
-/* ---- 选区色与品牌一致 ---- */
-::selection { background: color-mix(in srgb, var(--accent) 32%, transparent); }
