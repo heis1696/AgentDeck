@@ -28,7 +28,7 @@ await build({
 })
 const {
   ui, createInteractionCenter, resolveShortcut, isEditableTarget,
-  createLayerStack, trapTargetIndex,
+  createLayerStack, trapTargetIndex, rootTabsOf, resolveRootIn, taskCatalogOf,
   toast, confirmDialog
 } = await import(pathToFileURL(outfile).href)
 
@@ -177,6 +177,37 @@ section('当前任务导航：祖先链 / 8 页签 / 删除 / 切换')
   ok(c.getState().tabs.length === 0 && c.getState().activeId === null && c.getState().view === 'issues', '全部任务删除后回到 Issue 主页')
 }
 
+/* ------------------------------------------------------- 页签条过滤（App） */
+
+section('页签条过滤：断裂祖先任务的普通页签不能被藏掉')
+{
+  const c = createInteractionCenter({ layers: createLayerStack() })
+  const catalog = [
+    { id: 'rootA', title: '领队A' },
+    { id: 'kidA1', title: '队员A1', parentTaskId: 'rootA' },
+    { id: 'orphan', title: '断链任务', parentTaskId: 'missing' },
+    { id: 'cyc1', title: '环1', parentTaskId: 'cyc2' },
+    { id: 'cyc2', title: '环2', parentTaskId: 'cyc1' },
+    { id: 'plain', title: '普通任务' }
+  ]
+  c.setTasks(catalog)
+  c.openTask('rootA'); c.openTask('orphan'); c.openTask('cyc1'); c.openTask('plain')
+  const tabs = [...c.getState().tabs]
+  ok(c.isRootTab('orphan') && c.isRootTab('cyc1'), '祖先链断裂（缺节点/成环）的任务是普通页签：isRootTab 为真')
+  const visible = rootTabsOf(catalog, tabs)
+  ok(visible.includes('orphan') && visible.includes('cyc1'), 'rootTabsOf 保留断裂祖先任务的页签（App 页签条据此显示）')
+  ok(visible.length === tabs.length && tabs.length === 4, '四个普通页签全部可见，没有被 parentTaskId 一刀切过滤')
+
+  c.openTask('kidA1')
+  ok(c.openTask('kidA1') === 'dock' && !c.isRootTab('kidA1'), '祖先链完整的子任务路由到 dock，不进页签条')
+  ok(rootTabsOf(catalog, ['rootA', 'kidA1']).join() === 'rootA', 'rootTabsOf 只摘掉「子任务且祖先链完整」的页签')
+  ok(rootTabsOf(catalog, ['kidA1']).length === 0 && rootTabsOf(catalog, ['orphan']).length === 1, '同一个过滤器：子任务摘掉、断链任务保留（与 openTask 判定同源）')
+
+  const graph = taskCatalogOf(catalog)
+  ok(resolveRootIn(graph, 'orphan').broken && resolveRootIn(graph, 'cyc1').broken && resolveRootIn(graph, 'missing-x').rootId === 'missing-x', '纯函数 resolveRootIn：断链/成环/目录外任务都能解析')
+  ok(resolveRootIn(graph, 'kidA1').rootId === 'rootA' && !resolveRootIn(graph, 'kidA1').broken, '纯函数 resolveRootIn：正常子任务解析到根')
+}
+
 /* ------------------------------------------------------------- dock 异步更新 */
 
 section('dock：按根任务隔离 + 打开请求标识')
@@ -294,6 +325,22 @@ section('结构回归：导入环 / DOM 事件 / pet 路由')
   ok(/\^#\\\/\?pet\$/.test(app) && /\^#\\\/\?pet-settings\$/.test(app), 'App 保留 #/pet 与 #/pet-settings 两个小助理路由')
   ok(!/from '\.\.\/ui\/SideDock'|from '\.\.\/\.\.\/ui\/SideDock'/.test(turnTimeline) && /ui\.dock\.update/.test(turnTimeline), 'TurnTimeline 不再 import SideDock（导入环已断），异步 diff 走 token 回写')
   ok(!/addEventListener\(FOCUS_WORKSPACE/.test(workspaceView) && /composerTick/.test(workspaceView), 'WorkspaceView 不再监听 DOM 事件，改用中心 composer 请求')
+
+  // 触发焦点记录：必须在渲染期快照（早于 React autoFocus）+ 层用 useLayoutEffect（关闭当帧归还）
+  const layerHook = read('src/renderer/src/hooks/useInteractionLayer.ts')
+  const layerCore = read('src/renderer/src/ui/interaction-layer.ts')
+  ok(/if \(open\) \{[\s\S]{0,200}captureTrigger\(/.test(layerHook), '触发焦点在**渲染期**抓（open 由 false→true 的那次 render），不是等 useEffect')
+  ok(!/\buseEffect\b/.test(layerHook.split('\n')[0]) && /useLayoutEffect/.test(layerHook.split('\n')[0]), '浮层挂载/归还走 useLayoutEffect（不再 import useEffect）：关闭当帧就把焦点还回去，不留 body 空档')
+  ok(/queueMicrotask/.test(layerHook) && /restoreFocusRef/.test(layerHook), '触发元素被就地替换（重命名）时有显式归还目标 + 微任务补挂')
+  ok(/containsNode/.test(layerCore) && /pickRestoreTarget/.test(layerCore), '层栈提供「焦点是否还在浮层内」与归还目标挑选（纯逻辑可测）')
+
+  // SideDock 页签焦点：不能再用分割线容器去找 tab
+  ok(!/stripRef\.current\?\.querySelectorAll/.test(sideDock) && /tabRefs\.current\.get\(/.test(sideDock), 'SideDock 页签焦点改按 id 登记的 tabRefs 定位（不再从分割线 ref 里按序号找 tab）')
+  ok(/const closeTab = \(index: number\)/.test(sideDock) && /focusTab\(next\.id\)/.test(sideDock), 'SideDock 关页签（Delete）后焦点交给接棒页签')
+
+  // App 页签条：与 openTask 同源的过滤
+  ok(/rootTabsOf\(tasks, tabs\)/.test(app) && /<TabBar tabs=\{rootTabs\}/.test(app), 'App 页签条用 rootTabsOf 过滤（与 openTask 路由同源）')
+  ok(!/tabs\.filter\(\(id\) => !tasks\.find/.test(app), 'App 不再按 parentTaskId 一刀切过滤页签（断裂祖先任务被藏掉的根因）')
 
   // 全量渲染层导入环检测（相对导入，.ts/.tsx 双扩展名解析）
   const files = []

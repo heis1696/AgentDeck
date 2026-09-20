@@ -173,6 +173,52 @@ export interface RootResolution { rootId: string; isRoot: boolean; broken: boole
 
 export type OpenTaskRoute = 'tab' | 'dock' | 'ignored'
 
+/* ------------------------------------------------- 祖先链解析（纯函数） */
+
+/** 任务目录 → 查找表 */
+export function taskCatalogOf(tasks: readonly CenterTask[]): Map<string, CenterTask> {
+  return new Map(tasks.map((task) => [task.id, task]))
+}
+
+/** 沿 parentTaskId 上溯到根；缺节点或成环时 broken=true 并停在断点 */
+export function resolveRootIn(catalog: ReadonlyMap<string, CenterTask>, id: string): RootResolution {
+  const first = catalog.get(id)
+  if (!first) return { rootId: id, isRoot: true, broken: false, depth: 0 }
+  const seen = new Set<string>()
+  let current = first
+  let depth = 0
+  while (current.parentTaskId) {
+    if (seen.has(current.id)) return { rootId: current.id, isRoot: false, broken: true, depth }
+    seen.add(current.id)
+    const parent = catalog.get(current.parentTaskId)
+    if (!parent) return { rootId: current.id, isRoot: false, broken: true, depth }
+    current = parent
+    depth++
+  }
+  return { rootId: current.id, isRoot: true, broken: false, depth }
+}
+
+/**
+ * 该任务是否要「路由到领队详情 + dock 分页」（是则返回根任务 id，否则 null = 开普通顶部页签）。
+ * 祖先链断裂（缺节点/成环）时返回 null：没有可路由的领队，只能按普通页签兜底。
+ */
+function dockRouteRootIdIn(catalog: ReadonlyMap<string, CenterTask>, id: string): string | null {
+  if (!catalog.get(id)?.parentTaskId) return null
+  const resolution = resolveRootIn(catalog, id)
+  return !resolution.broken && resolution.isRoot && resolution.rootId !== id ? resolution.rootId : null
+}
+
+/**
+ * 顶部页签条要显示的子集（纯函数，与 openTask 的路由判定同源）。
+ * 只有「子任务且祖先链完整」的页签该隐藏（它们在领队详情的右侧分页里）；
+ * 祖先链断裂（缺节点/成环）的任务走普通页签，必须照常显示。
+ * 入参用界面侧**当前**的任务目录，避免依赖交互中心 effect 里的快照差一帧。
+ */
+export function rootTabsOf(tasks: readonly CenterTask[], tabs: readonly string[]): string[] {
+  const catalog = taskCatalogOf(tasks)
+  return tabs.filter((id) => dockRouteRootIdIn(catalog, id) === null)
+}
+
 export interface InteractionCenter {
   subscribe(listener: () => void): () => void
   getState(): InteractionSnapshot
@@ -181,6 +227,12 @@ export interface InteractionCenter {
   tasks(): readonly CenterTask[]
   rootTaskId(id: string): string
   resolveRoot(id: string): RootResolution
+  /**
+   * 顶部页签条是否显示该任务（与 openTask 的路由判定同源）：
+   * 只有「子任务且祖先链完整」的页签该隐藏（它们在领队详情的 dock 里）；
+   * 祖先链断裂（缺节点/成环）的任务走普通页签，必须显示。
+   */
+  isRootTab(id: string): boolean
   activeRootId(): string | null
   navigate(view: UiView): void
   openTask(id: string): OpenTaskRoute
@@ -279,43 +331,25 @@ export function createInteractionCenter(options: InteractionCenterOptions = {}):
   }
 
   /* -------------------------------------------------------- navigation */
-  const catalogOf = (): Map<string, CenterTask> => catalog
-
-  const resolveRoot = (id: string): RootResolution => {
-    const tasks = catalogOf()
-    const first = tasks.get(id)
-    if (!first) return { rootId: id, isRoot: true, broken: false, depth: 0 }
-    const seen = new Set<string>()
-    let current = first
-    let depth = 0
-    while (current.parentTaskId) {
-      if (seen.has(current.id)) return { rootId: current.id, isRoot: false, broken: true, depth }
-      seen.add(current.id)
-      const parent = tasks.get(current.parentTaskId)
-      if (!parent) return { rootId: current.id, isRoot: false, broken: true, depth }
-      current = parent
-      depth++
-    }
-    return { rootId: current.id, isRoot: true, broken: false, depth }
-  }
+  const resolveRoot = (id: string): RootResolution => resolveRootIn(catalog, id)
 
   const activateTab = (id: string): void => {
     const tabs = state.tabs.includes(id) ? state.tabs : [...state.tabs, id].slice(-MAX_OPEN_TABS)
     emit({ tabs, activeId: id })
   }
 
+  /** 与 ui/isRootTab 同源：见 dockRouteRootIdIn（祖先链断裂 → 普通页签兜底） */
+  const dockRouteRootId = (id: string): string | null => dockRouteRootIdIn(catalog, id)
+
   const openTask = (id: string): OpenTaskRoute => {
     if (!id) return 'ignored'
-    const task = catalog.get(id)
-    if (task?.parentTaskId) {
-      const resolution = resolveRoot(id)
+    const routeRootId = dockRouteRootId(id)
+    if (routeRootId) {
       // 祖先链完整且根不是自己 → 子任务不开顶部页签：路由到根详情并在其 dock 桶里打开
-      if (!resolution.broken && resolution.isRoot && resolution.rootId !== id) {
-        activateTab(resolution.rootId)
-        emit({ view: 'detail' })
-        api.dock.open({ id: `task:${id}`, kind: 'task', title: task.title, payload: { taskId: id } }, { rootId: resolution.rootId })
-        return 'dock'
-      }
+      activateTab(routeRootId)
+      emit({ view: 'detail' })
+      api.dock.open({ id: `task:${id}`, kind: 'task', title: catalog.get(id)?.title ?? id, payload: { taskId: id } }, { rootId: routeRootId })
+      return 'dock'
     }
     activateTab(id)
     emit({ view: 'detail' })
@@ -377,6 +411,7 @@ export function createInteractionCenter(options: InteractionCenterOptions = {}):
     tasks: () => [...catalog.values()],
     rootTaskId: (id) => resolveRoot(id).rootId,
     resolveRoot,
+    isRootTab: (id) => dockRouteRootId(id) === null,
     activeRootId: () => (state.activeId ? resolveRoot(state.activeId).rootId : null),
     navigate: (view) => { if (UI_VIEWS.includes(view)) emit({ view }) },
     openTask,

@@ -48,6 +48,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   const logRef = useRef<HTMLDivElement>(null)
   const followRef = useRef<HTMLTextAreaElement>(null)
   const infoRef = useRef<HTMLDivElement>(null)
+  const titleEditBtnRef = useRef<HTMLButtonElement>(null)
   const editingTitleRef = useRef(false)
   const navFrameRef = useRef(0)
   const { events, permission, refreshEvents, answerPermission } = useTaskEvents(task.id)
@@ -162,6 +163,15 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   }
   const beginTitleEdit = () => { setTitleDraft(task.title); editingTitleRef.current = true; setEditingTitle(true) }
   const cancelTitleEdit = () => { editingTitleRef.current = false; setEditingTitle(false) }
+  // 就地重命名也是「浮层」：Escape 由统一交互层消费（最上层），关闭后焦点回到重命名按钮。
+  // 编辑框把触发按钮**替换**掉了，所以显式给出归还目标（restoreFocusRef）。
+  const titleEditRef = useInteractionLayer<HTMLInputElement>({
+    open: editingTitle,
+    onClose: cancelTitleEdit,
+    kind: 'popover',
+    name: 'title-edit',
+    restoreFocusRef: titleEditBtnRef
+  })
   const saveTitle = async () => {
     if (!editingTitleRef.current) return
     editingTitleRef.current = false
@@ -215,7 +225,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   return <div className="detail">
     <div className="detail-left">
     <header className="detail-header page-header-bar"><div className="detail-title-wrap">
-      {editingTitle ? <input className="title-edit-input" value={titleDraft} autoFocus onChange={(event) => setTitleDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void saveTitle() } else if (event.key === 'Escape') cancelTitleEdit() }} onBlur={() => void saveTitle()} /> : <h1 className="detail-title">{task.title}<button className="title-edit" type="button" title="重命名" onClick={beginTitleEdit}><Pencil size={13} aria-hidden="true" /></button></h1>}
+      {editingTitle ? <input ref={titleEditRef} className="title-edit-input" value={titleDraft} autoFocus onChange={(event) => setTitleDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void saveTitle() } }} onBlur={() => void saveTitle()} /> : <h1 className="detail-title">{task.title}<button ref={titleEditBtnRef} className="title-edit" type="button" title="重命名" onClick={beginTitleEdit}><Pencil size={13} aria-hidden="true" /></button></h1>}
       <div className="detail-meta">
         <span className="meta-group meta-identity"><span className="detail-eyebrow">{parent ? '队员任务' : '工作任务'}</span>{parent && <a className="mini link" role="button" tabIndex={0} onClick={() => onSelect(parent.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(parent.id) } }}>↩ 领队任务: {parent.title}</a>}{workers.length > 0 && <button type="button" className="badge badge-squad link-badge" title="在右侧分页打开子任务" onClick={() => { const target = workers.find((item) => item.status === 'running') ?? workers[0]; if (target) ui.dock.open({ id: `task:${target.id}`, kind: 'task', title: target.title, payload: { taskId: target.id } }) }}>⚡ 子任务 {workers.filter((worker) => worker.status === 'done').length}/{workers.length}</button>}</span>
         <IssueIdChip id={issueId} />

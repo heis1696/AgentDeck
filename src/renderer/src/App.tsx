@@ -16,7 +16,7 @@ import { ListTodo, Kanban, Gauge, Settings, Search, Plus, Command, FolderOpen, C
 import { ToastHost } from './ui/Toasts'
 import { ConfirmHost } from './ui/Confirm'
 import { Palette, type PaletteCommand } from './ui/Palette'
-import { ui, type UiView } from './ui/interaction-center'
+import { ui, rootTabsOf, type UiView } from './ui/interaction-center'
 import { useInteractionSelector } from './hooks/useInteraction'
 import { useInteractionLayer } from './hooks/useInteractionLayer'
 import { PetStage } from './pet/PetStage'
@@ -46,6 +46,10 @@ export function App() {
     try { return JSON.parse(localStorage.getItem('agentdeck:recent-workspaces') ?? '[]') as string[] } catch { return [] }
   })
   const selected = tasks.find((task) => task.id === activeId) ?? null
+  // 顶部页签条只列「普通页签」：子任务（祖先链完整）在领队详情的右侧分页里。
+  // 判定与 openTask 的路由同源（rootTabsOf）：祖先链断裂的任务是普通页签，不能再按
+  // parentTaskId 一刀切过滤——那会把它们从页签条上藏掉，只剩一个看不见的激活项。
+  const rootTabs = useMemo(() => rootTabsOf(tasks, tabs), [tasks, tabs])
 
   useEffect(() => {
     const theme = settings?.theme ?? 'light'
@@ -155,7 +159,7 @@ export function App() {
       <div className="sidebar-footer"><span className="connection-dot" /> 本地引擎就绪</div>
     </aside>
     <main className="main">
-      {view === 'agents' ? <AgentsView /> : view === 'automation' ? <AutomationView /> : view === 'skills' ? <ExtensionsView /> : view === 'settings' ? <SettingsView section={settingsSection} onSection={(section) => ui.openSettings(section)} /> : view === 'usage' ? <UsageView /> : view === 'board' ? <Page title="看板" count={tasks.length}><BoardView tasks={tasks} onOpen={openTask} /></Page> : view === 'detail' && selected ? <div className="tasks-column detail-page"><Chrome title={selected.title} onBack={() => ui.navigate('issues')} />{tabs.length > 0 && <TabBar tabs={tabs.filter((id) => !tasks.find((task) => task.id === id)?.parentTaskId)} tasks={tasks} activeId={activeId} onSelect={openTask} onClose={(id) => ui.closeTab(id)} />}<TaskDetail task={selected} tasks={tasks} onSelect={openTask} /></div> : <IssuesView tasks={tasks} tabs={tabs} onOpen={openTask} onClose={(id) => ui.closeTab(id)}><WorkspaceView onCreated={(task) => openTask(task.id)} workspaceDir={workspaceDir} onPickWorkspace={pickWorkspace} /></IssuesView>}
+      {view === 'agents' ? <AgentsView /> : view === 'automation' ? <AutomationView /> : view === 'skills' ? <ExtensionsView /> : view === 'settings' ? <SettingsView section={settingsSection} onSection={(section) => ui.openSettings(section)} /> : view === 'usage' ? <UsageView /> : view === 'board' ? <Page title="看板" count={tasks.length}><BoardView tasks={tasks} onOpen={openTask} /></Page> : view === 'detail' && selected ? <div className="tasks-column detail-page"><Chrome title={selected.title} onBack={() => ui.navigate('issues')} />{rootTabs.length > 0 && <TabBar tabs={rootTabs} tasks={tasks} activeId={activeId} onSelect={openTask} onClose={(id) => ui.closeTab(id)} />}<TaskDetail task={selected} tasks={tasks} onSelect={openTask} /></div> : <IssuesView tasks={tasks} tabs={tabs} onOpen={openTask} onClose={(id) => ui.closeTab(id)}><WorkspaceView onCreated={(task) => openTask(task.id)} workspaceDir={workspaceDir} onPickWorkspace={pickWorkspace} /></IssuesView>}
     </main>
   </div>
 }

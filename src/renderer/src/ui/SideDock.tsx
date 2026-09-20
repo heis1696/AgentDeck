@@ -46,6 +46,10 @@ export function SideDock({ taskId, tasks, onOpen }: { taskId: string; tasks: Tas
     return Number.isFinite(saved) && saved >= DOCK_MIN && saved <= DOCK_MAX ? saved : 480
   })
   const stripRef = useRef<HTMLDivElement>(null)
+  // 页签按钮按 id 登记：键盘切换靠它把焦点带到新激活页签。
+  // （原先拿 stripRef 这个**分割线**容器去 querySelectorAll('[role=tab]')，永远查不到元素：
+  //   ←/→/Home/End 只换激活项、焦点原地不动，Delete 关页签还会把焦点掉到 body。）
+  const tabRefs = useRef(new Map<string, HTMLButtonElement>())
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null)
   const prefix = useId()
 
@@ -71,21 +75,32 @@ export function SideDock({ taskId, tasks, onOpen }: { taskId: string; tasks: Tas
   const active = items.find((item) => item.id === activeId)
   if (!active) return null
   const activeIndex = items.indexOf(active)
+  const focusTab = (id: string) => tabRefs.current.get(id)?.focus()
   const activate = (index: number) => {
     const item = items[index]
     if (!item) return
     ui.dock.activate(item.id, { rootId })
-    stripRef.current?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[index]?.focus()
+    // 焦点跟着激活项走（roving tabindex）：按 id 取自己的按钮，不再从容器 ref 里按序号找
+    focusTab(item.id)
+  }
+  /** Delete 关页签：先把焦点交给接棒的页签，否则按钮一卸载焦点就掉到 body */
+  const closeTab = (index: number) => {
+    const item = items[index]
+    if (!item) return
+    const rest = items.filter((current) => current.id !== item.id)
+    const next = rest[Math.min(index, rest.length - 1)]
+    ui.dock.close(item.id, { rootId })
+    if (next) focusTab(next.id)
   }
   return <aside className="side-dock" aria-label="子任务与文件预览" style={{ width }}>
     <div ref={stripRef} className="dock-splitter" role="separator" aria-orientation="vertical" aria-label="拖动调整分页宽度" title="拖动调整分页宽度" onPointerDown={onSplitterDown} onPointerMove={onSplitterMove} onPointerUp={onSplitterUp} onPointerCancel={onSplitterUp} />
     <div className="dock-body">
       <div className="dock-tabs" role="tablist" aria-label="右侧分页" aria-orientation="horizontal">
         {items.map((item, index) => <div className={`dock-tab-row${item.id === active.id ? ' is-active' : ''}`} key={item.id}>
-          <button type="button" role="tab" id={`${prefix}-tab-${index}`} aria-controls={`${prefix}-panel`} aria-selected={item.id === active.id} tabIndex={item.id === active.id ? 0 : -1} title={item.kind === 'file' ? item.payload.file : item.title} className="dock-tab" onClick={() => activate(index)} onKeyDown={(event) => {
+          <button type="button" role="tab" id={`${prefix}-tab-${index}`} aria-controls={`${prefix}-panel`} aria-selected={item.id === active.id} tabIndex={item.id === active.id ? 0 : -1} title={item.kind === 'file' ? item.payload.file : item.title} className="dock-tab" ref={(node) => { if (node) tabRefs.current.set(item.id, node); else tabRefs.current.delete(item.id) }} onClick={() => activate(index)} onKeyDown={(event) => {
             if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') { event.preventDefault(); activate((index + (event.key === 'ArrowRight' ? 1 : -1) + items.length) % items.length) }
             if (event.key === 'Home' || event.key === 'End') { event.preventDefault(); activate(event.key === 'Home' ? 0 : items.length - 1) }
-            if (event.key === 'Delete') { event.preventDefault(); ui.dock.close(item.id, { rootId }) }
+            if (event.key === 'Delete') { event.preventDefault(); closeTab(index) }
           }}>
             {item.kind === 'file' ? <FileCode2 size={14} aria-hidden="true" /> : <ListTodo size={14} aria-hidden="true" />}
             <span className="dock-tab-title">{item.title}</span>

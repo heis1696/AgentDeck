@@ -19,6 +19,8 @@ export interface LayerRecord {
   onOutside?: () => void
   /** 命中判定：外点关闭用 */
   contains?: (node: unknown) => boolean
+  /** 本层根节点（可空）：判断焦点是否还留在某个浮层内 */
+  root?: unknown
 }
 
 export type LayerInput = Omit<LayerRecord, 'id' | 'trap'> & { trap?: boolean }
@@ -40,7 +42,20 @@ export interface LayerStack {
   escape(): boolean
   /** 把外点交给最上层（node 为事件目标）；无人消费返回 false */
   outside(node: unknown): boolean
+  /** node 是否落在任一浮层内（层外焦点历史、焦点归还判定用） */
+  containsNode(node: unknown): boolean
   reset(): void
+}
+
+/**
+ * 触发焦点候选挑选（纯函数）：按优先级取第一个「可用」的元素。
+ * 候选顺序由调用方给定：本次打开前抓到的触发元素 → 层外焦点历史 → 显式归还目标。
+ */
+export function pickRestoreTarget<T>(candidates: readonly (T | null | undefined)[], usable: (node: T) => boolean): T | null {
+  for (const candidate of candidates) {
+    if (candidate && usable(candidate)) return candidate
+  }
+  return null
 }
 
 export function createLayerStack(): LayerStack {
@@ -49,7 +64,7 @@ export function createLayerStack(): LayerStack {
   const find = (id: number) => layers.findIndex((layer) => layer.id === id)
   return {
     push(layer) {
-      const record: LayerRecord = { id: nextId++, kind: layer.kind, name: layer.name, trap: layer.trap === true, onEscape: layer.onEscape, onOutside: layer.onOutside, contains: layer.contains }
+      const record: LayerRecord = { id: nextId++, kind: layer.kind, name: layer.name, trap: layer.trap === true, onEscape: layer.onEscape, onOutside: layer.onOutside, contains: layer.contains, root: layer.root }
       layers.push(record)
       return record.id
     },
@@ -92,6 +107,9 @@ export function createLayerStack(): LayerStack {
       if (top.contains?.(node)) return false
       top.onOutside()
       return true
+    },
+    containsNode(node) {
+      return layers.some((layer) => layer.root != null && layer.contains?.(node) === true)
     },
     reset() {
       layers.length = 0
