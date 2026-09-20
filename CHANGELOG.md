@@ -18,6 +18,8 @@
 - **文档架构重组 + 提示词模块化**：冻结的一次性设计/拆解/报告归档 docs/archive/（teardown、reports、施工册，保留热更活文档在 docs/ 顶层）；新增 docs/README.md 导航索引与 docs/graph/ 结构图谱（scripts/view-graph.mjs 生成/查看）；根新增 AGENTS.md（代理协作入口说明）。主进程提示词按域抽取到 src/main/prompts/（delegation/forge/goal/handoff/meeting/personas 纯函数模块，业务模块只取文案、解析器留在原地）；src/main/sidecar/ 三文件目录合并回平铺 sidecar*.ts（index.ts 再导出层移除）。
 ### 修复
 
+- **浮层交互三合一收口（c8/c5 并行线整合）**：① 层栈一致性——视觉/指针/焦点同一顺序（z 序订阅式更新，层卸载存活层即时重排，归还内联 z 不抹调用方样式）；② 本地按键 IME 保护——组合输入中的 Enter/Escape/↑↓ 不再被浮层快捷键拦截吞字；③ 快捷键只对最上层模态让路（非模态浮窗/菜单不封锁全局键）；④ 草稿创建后等目录快照可见再导航 + 刷新乱序判废（useTasks 单调请求序号，先发后至旧列表丢弃）；⑤ SideDock 页签焦点 roving tabindex（←/→/Home/End/Delete 焦点跟激活项走，关页签焦点交给接棒页签不再掉 body）。`smoke:ui` 三组（interaction-center/focus/draft-catalog）扩断言全绿。
+
 - **sidecar 停放后继对用户隐形**：sidecar 通道的硬切 parked 后继此前无任何可见信号（调度泵与重启对账都跳过 parked，sidecar 又没有任务变更推送通道）——现在新建停放（10s 内）落一条 Issue 评论「⏸ 阶段接力已备好……点『▶ 启动』」，幂等重放不刷屏，与主进程 attachContinue 行为对齐。
 
 - **双列最小宽与收缩策略（反馈三轮1）**：主内容列硬最小宽 380→420；SideDock 改 `flex-shrink:1` + `min-width:320/max-width:720`——窗口变窄时优先收分栏到 320 下限，配合窗口 minWidth 980（侧栏+两列最小宽之和）两列都不再被挤没或溢出遮蔽。
