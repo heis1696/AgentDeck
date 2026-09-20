@@ -21,7 +21,7 @@ import {
   type LucideIcon
 } from 'lucide-react'
 import { bridge, useSettings } from '../api'
-import { ui } from '../ui/interaction-center'
+import { ui, isComposingKey } from '../ui/interaction-center'
 import { EmptyState } from '../ui/EmptyState'
 import { SkillsTab } from './SkillsView'
 import type {
@@ -269,7 +269,7 @@ function SkillDiscoverPanel({ onLibraryChanged }: { onLibraryChanged: () => void
             value={url}
             disabled={urlBusy}
             onChange={(e) => setUrl(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') void installFromUrl() }}
+            onKeyDown={(e) => { if (isComposingKey(e.nativeEvent)) return; if (e.key === 'Enter') void installFromUrl() }}
             placeholder="https://github.com/owner/repo"
             aria-label="技能仓库 URL"
           />
@@ -1076,7 +1076,7 @@ function PluginsTab() {
                 value={installSpec}
                 disabled={busy}
                 onChange={(e) => setInstallSpec(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') void installPlugin() }}
+                onKeyDown={(e) => { if (isComposingKey(e.nativeEvent)) return; if (e.key === 'Enter') void installPlugin() }}
                 placeholder="plugin@marketplace"
               />
             </label>
@@ -1610,7 +1610,7 @@ function SourceManager() {
             value={customRef}
             onChange={(e) => setCustomRef(e.target.value)}
             placeholder="https://github.com/owner/repo.git"
-            onKeyDown={(e) => { if (e.key === 'Enter') void quickAdd(customRef) }}
+            onKeyDown={(e) => { if (isComposingKey(e.nativeEvent)) return; if (e.key === 'Enter') void quickAdd(customRef) }}
           />
         </label>
         <button className="btn" onClick={() => void pickLocal()}><FolderOpen size={14} /> 选目录</button>

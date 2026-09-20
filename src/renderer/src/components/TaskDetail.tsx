@@ -4,7 +4,7 @@ import { bridge, fmtDuration, fmtTokens } from '../api'
 import { taskService } from '../task-service'
 import { GOAL_STATUS_LABELS, isParkedQueued, PARKED_QUEUED_LABEL } from '../labels'
 import { Markdown } from './Markdown'
-import { ui } from '../ui/interaction-center'
+import { ui, isComposingKey } from '../ui/interaction-center'
 import { IssueIdChip } from '../ui/IssueIdChip'
 import { useTaskEvents } from '../hooks/useTaskEvents'
 import { useTurnModel } from '../hooks/turnModel'
@@ -225,7 +225,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   return <div className="detail">
     <div className="detail-left">
     <header className="detail-header page-header-bar"><div className="detail-title-wrap">
-      {editingTitle ? <input ref={titleEditRef} className="title-edit-input" value={titleDraft} autoFocus onChange={(event) => setTitleDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void saveTitle() } }} onBlur={() => void saveTitle()} /> : <h1 className="detail-title">{task.title}<button ref={titleEditBtnRef} className="title-edit" type="button" title="重命名" onClick={beginTitleEdit}><Pencil size={13} aria-hidden="true" /></button></h1>}
+      {editingTitle ? <input ref={titleEditRef} className="title-edit-input" value={titleDraft} autoFocus onChange={(event) => setTitleDraft(event.target.value)} onKeyDown={(event) => { if (isComposingKey(event.nativeEvent)) return; if (event.key === 'Enter') { event.preventDefault(); void saveTitle() } }} onBlur={() => void saveTitle()} /> : <h1 className="detail-title">{task.title}<button ref={titleEditBtnRef} className="title-edit" type="button" title="重命名" onClick={beginTitleEdit}><Pencil size={13} aria-hidden="true" /></button></h1>}
       <div className="detail-meta">
         <span className="meta-group meta-identity"><span className="detail-eyebrow">{parent ? '队员任务' : '工作任务'}</span>{parent && <a className="mini link" role="button" tabIndex={0} onClick={() => onSelect(parent.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(parent.id) } }}>↩ 领队任务: {parent.title}</a>}{workers.length > 0 && <button type="button" className="badge badge-squad link-badge" title="在右侧分页打开子任务" onClick={() => { const target = workers.find((item) => item.status === 'running') ?? workers[0]; if (target) ui.dock.open({ id: `task:${target.id}`, kind: 'task', title: target.title, payload: { taskId: target.id } }) }}>⚡ 子任务 {workers.filter((worker) => worker.status === 'done').length}/{workers.length}</button>}</span>
         <IssueIdChip id={issueId} />
@@ -266,6 +266,9 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
             if (!startsSlash) history.exitBrowse()
           }}
           onKeyDown={(event) => {
+            // IME 组合中（isComposing / keyCode 229）：Enter 上屏、Esc 取消候选、↑↓ 选候选、
+            // Tab 上屏——全部属于输入法，追问框与命令菜单都不抢键
+            if (isComposingKey(event.nativeEvent)) return
             // 命令/技能菜单开着时先服务菜单导航
             if (skillMenuOpen && menuItems.length > 0) {
               if (event.key === 'ArrowDown') { event.preventDefault(); setSkillIndex((i) => Math.min(menuItems.length - 1, i + 1)); return }
@@ -297,7 +300,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
               return
             }
             if (event.key === 'Escape' && history.index >= 0) { event.preventDefault(); setFollowUp(history.navigate(1) ?? ''); return }
-            if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void sendFollowUp(); setSkillMenuOpen(false) }
+            if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendFollowUp(); setSkillMenuOpen(false) }
           }} />
         <button className="btn" disabled={busy || !!task.parentTaskId || (task.status !== 'done' && task.status !== 'failed')} title={task.parentTaskId ? '委派子任务不参与阶段接力' : '让本执行交出下一阶段简报，并在同一 Issue 上硬切新会话'} onClick={() => void sendFollowUp('执行下一阶段', { relay: true })}>⇥ 接力下一阶段</button><button className="btn primary" disabled={busy || !followUp.trim()} onClick={() => { void sendFollowUp(); setSkillMenuOpen(false) }}>发送</button>
       </footer>}

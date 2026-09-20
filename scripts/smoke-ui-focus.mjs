@@ -8,7 +8,11 @@
 //   5. 卸载：浮层宿主卸载 → 焦点归还；触发元素与浮层一起卸载 → 不抢焦点、不报错；
 //   6. 真实确认框宿主 FIFO 接棒：焦点跟着接棒的确认按钮走，最后一问关闭后回触发按钮；
 //   7. 真实命令面板（trap + initialFocusRef）；
-//   8. 真实 SideDock 页签条：←/→ 切换后焦点必须落在新激活页签上。
+//   8. 真实 SideDock 页签条：←/→ 切换后焦点必须落在新激活页签上；
+//   9. 层栈一致性（本轮修复）：浮窗 z=38 / 信息弹层 z=40 与模态 overlay 同屏时，
+//      视觉 z 跟随层序，模态开着时指针与焦点都到不了它下面，模态自身与「浮在模态之上」的嵌套菜单照常可用；
+//  10. 真实 IME 组合（compositionstart/update/end + isComposing / keyCode 229）：
+//      Palette、Menu、TaskDetail 的重命名与追问框/技能菜单都不在组合中抢 Enter/Escape/↑↓。
 //
 // 依赖：npm install 安装的开发依赖 jsdom。运行：npm run smoke:ui。
 import { build } from 'esbuild'
@@ -29,6 +33,7 @@ globalThis.window = window
 globalThis.document = window.document
 globalThis.HTMLElement = window.HTMLElement
 globalThis.HTMLInputElement = window.HTMLInputElement
+globalThis.HTMLTextAreaElement = window.HTMLTextAreaElement
 globalThis.HTMLButtonElement = window.HTMLButtonElement
 globalThis.Node = window.Node
 globalThis.Element = window.Element
@@ -46,6 +51,36 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true
 // jsdom 没有排版：getClientRects 恒为空会让「层内第一个可聚焦元素」判定为不可见。
 // 打桩成「有一个矩形」，等价于浏览器里的可见元素（生产代码的可见性判据本身不改）。
 window.Element.prototype.getClientRects = function () { return [{ x: 0, y: 0, width: 120, height: 20, top: 0, left: 0, right: 120, bottom: 20 }] }
+// jsdom 也没实现 scrollIntoView（真实菜单高亮滚动用）：桩成空操作，生产代码不改
+window.Element.prototype.scrollIntoView = function () {}
+
+/* ------------------------------------------------- 渲染层 bridge 桩（真实 TaskDetail） */
+
+/**
+ * api.ts 在**模块初始化**时读 window.agentdeck，所以必须在 import 产物之前铺好。
+ * 未知路径按名字给形状：on* → 退订函数（浮层不看返回值）、*.list/events/comments/runs/checkpoints → 空数组、
+ * *.followUp/rename/... → { ok: true }、其余 → null；同时记录调用供断言（重命名/追问是否真的发出去）。
+ */
+function installBridgeStub() {
+  const calls = []
+  const resolveValue = (callPath) => {
+    if (callPath === 'skills.list') return { skills: [] }
+    if (/\.(list|events|comments|runs|checkpoints)$/.test(callPath)) return []
+    if (/\.(followUp|rename|start|cancel|retry|delete|rewind|create|update)$/.test(callPath)) return { ok: true }
+    return null
+  }
+  const make = (callPath) => new Proxy(function () {}, {
+    get: (_target, prop) => (prop === 'then' ? undefined : make(callPath ? `${callPath}.${String(prop)}` : String(prop))),
+    apply: (_target, _this, args) => {
+      calls.push({ path: callPath, args })
+      if (/\.on[A-Z]/.test(callPath)) return () => {}
+      return Promise.resolve(resolveValue(callPath))
+    }
+  })
+  window.agentdeck = make('')
+  return { calls, count: (suffix) => calls.filter((call) => call.path.endsWith(suffix)).length }
+}
+const bridgeCalls = installBridgeStub()
 
 /* ----------------------------------------------------------------- 打包夹具 */
 
@@ -66,6 +101,7 @@ await build({
 const {
   act, createElement, StrictMode, createRoot,
   NewAgentScenario, NestedModalScenario, MenuInModalScenario, UnmountScenario, ConfirmScenario, PaletteScenario, InlineEditScenario, SideDockScenario,
+  OverlapStackScenario, TaskDetailScenario, stackHits, resetStackHits, paletteRuns, interactionLayers,
   ui, resetOutsideFocusHistory
 } = await import(pathToFileURL(outfile).href)
 
@@ -80,7 +116,7 @@ const section = (title) => console.log(`\n── ${title}`)
 
 const container = window.document.getElementById('app')
 const active = () => window.document.activeElement
-const nameOf = (node) => !node ? 'null' : (node.getAttribute?.('data-testid') ?? node.id ?? node.tagName?.toLowerCase() ?? String(node))
+const nameOf = (node) => !node ? 'null' : (node.getAttribute?.('data-testid') || node.id || node.tagName?.toLowerCase() || String(node))
 const byTestId = (id) => container.querySelector(`[data-testid="${id}"]`)
 
 let reactRoot = null
@@ -100,6 +136,32 @@ const key = (keyName, target) => act(async () => {
   node.dispatchEvent(new window.KeyboardEvent('keydown', { key: keyName, bubbles: true, cancelable: true }))
 })
 const escape = () => key('Escape')
+
+/* ------------------------------- 真实指针事件 / 组合事件（层栈一致性与 IME 用） */
+
+/** 派发真实指针事件并返回它（断言 defaultPrevented：被模态屏障截断的信号） */
+async function fire(element, type) {
+  const event = new window.MouseEvent(type, { bubbles: true, cancelable: true })
+  await act(async () => { element.dispatchEvent(event) })
+  return event
+}
+/** 派发真实 keydown；isComposing 走 KeyboardEventInit，keyCode 229 只能自己补（浏览器旧路径） */
+async function keyOn(element, keyName, init = {}) {
+  const event = new window.KeyboardEvent('keydown', { key: keyName, bubbles: true, cancelable: true, isComposing: init.isComposing === true })
+  if (init.keyCode) Object.defineProperty(event, 'keyCode', { value: init.keyCode })
+  await act(async () => { element.dispatchEvent(event) })
+  return event
+}
+/** 真实组合事件（compositionstart / compositionupdate / compositionend） */
+const compose = (element, type, data = '') => act(async () => {
+  element.dispatchEvent(new window.CompositionEvent(type, { bubbles: true, cancelable: true, data }))
+})
+/** 像用户输入那样改值（绕过 React 的 value 追踪，触发 onChange） */
+const setValue = (element, value) => act(async () => {
+  const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), 'value')?.set
+  setter.call(element, value)
+  element.dispatchEvent(new window.Event('input', { bubbles: true }))
+})
 
 /* ------------------------------------------------- 1. 关键缺陷：模态 autoFocus */
 
@@ -266,6 +328,157 @@ section('SideDock 页签条：←/→ 切换把焦点带到新激活页签')
   await key('Delete', tabs()[1])
   ok(tabs().length === 1 && tabs()[0].getAttribute('aria-selected') === 'true', 'Delete 关掉当前页签，剩下的成为激活项')
   ok(active() === tabs()[0], `关页签后焦点落到新的激活页签（实测 ${nameOf(active())}）`)
+  await unmount()
+}
+
+/* ------------------------------------- 7. 层栈一致性（视觉 / 指针 / 焦点同序） */
+
+section('层栈一致性：浮窗 + 信息弹层 + 模态同屏（视觉 z 跟随层序）')
+{
+  resetStackHits()
+  await render(createElement(OverlapStackScenario))
+  const floatRoot = () => container.querySelector('.float-window')
+  const infoRoot = () => byTestId('info-wrap')
+  const modalRoot = () => byTestId('modal-root')
+  const menuRoot = () => container.querySelector('.menu-root')
+  const z = (node) => Number(node?.style?.zIndex ?? 0)
+  ok(!!floatRoot() && z(floatRoot()) > 0, `非模态浮窗入栈并拿到层栈内联 z（实测 ${z(floatRoot())}）`)
+  await click(byTestId('toggle-info'))
+  ok(!!byTestId('info-pop'), '信息弹层打开')
+  ok(z(infoRoot()) > z(floatRoot()), `视觉层序：后开的信息弹层 z(${z(infoRoot())}) 在浮窗 z(${z(floatRoot())}) 之上`)
+  await click(byTestId('open-modal'))
+  ok(!!modalRoot(), '模态打开（创建/确认路径）')
+  ok(z(modalRoot()) > z(infoRoot()), `视觉层序：模态 z(${z(modalRoot())}) 压住信息弹层 z(${z(infoRoot())}) 与浮窗 z(${z(floatRoot())})`)
+  ok(interactionLayers.topModal()?.name === 'confirm', 'topModal() 仍返回最上层模态（共享契约保留）')
+
+  /* 指针：模态开着时，落在模态之下的浮层收不到任何指针事件 */
+  const down = await fire(byTestId('float-btn'), 'mousedown')
+  ok(down.defaultPrevented, '背景浮窗的 mousedown 在捕获阶段被模态屏障截断（defaultPrevented）')
+  await fire(byTestId('float-btn'), 'pointerdown')
+  await fire(byTestId('float-btn'), 'click')
+  await fire(byTestId('float-btn'), 'contextmenu')
+  await fire(byTestId('info-btn'), 'click')
+  ok(stackHits.float === 0 && stackHits.info === 0, `模态下方的浮窗/信息弹层一次点击都没收到（计数 ${stackHits.float}/${stackHits.info}）`)
+
+  /* 焦点：背景元素在模态开着时拿不到焦点 */
+  const infoBtn = byTestId('info-btn')
+  await focus(infoBtn)
+  ok(active() !== infoBtn && !!active()?.closest?.('[data-testid="modal-root"]'), `背景信息弹层抢不到焦点，焦点被拉回模态内（实测 ${nameOf(active())}）`)
+
+  /* 模态自身 + 浮在模态之上的嵌套菜单照常可用 */
+  await click(byTestId('modal-ok'))
+  ok(stackHits.modal === 1, '模态自己的按钮照常可点')
+  await click(byTestId('modal-menu-trigger'))
+  ok(!!container.querySelector('.menu-panel'), '模态内嵌套菜单打开')
+  ok(z(menuRoot()) > z(modalRoot()), `嵌套菜单 z(${z(menuRoot())}) 在模态 z(${z(modalRoot())}) 之上（层序更晚）`)
+  await click(container.querySelector('.menu-panel .menu-item'))
+  ok(stackHits.menu === 1 && stackHits.menuPick === 'yes', `模态之上的嵌套菜单照常选中（pick=${stackHits.menuPick}）`)
+
+  /* 外点关闭仍只归最上层；模态关掉后背景恢复可点 */
+  await click(modalRoot())
+  ok(!modalRoot(), '点击遮罩本身关闭模态（外点语义只作用于最上层）')
+  await click(byTestId('float-btn'))
+  ok(stackHits.float === 1, '模态关闭后背景浮窗恢复可点（计数 1）')
+  ok(z(floatRoot()) > 0 && z(infoRoot()) > 0, '两个非模态浮层仍在栈上、z 未被打乱')
+  await unmount()
+}
+
+/* --------------------------------------------- 8. 真实 IME 组合（不抢本地按键） */
+
+section('IME：真实组合事件下 Palette / Menu / 重命名 / 追问技能菜单都不抢 Enter/Escape/↑↓')
+{
+  /* 命令面板 */
+  paletteRuns.count = 0
+  await render(createElement(PaletteScenario))
+  await click(byTestId('trigger'))
+  const paletteInput = container.querySelector('.palette input')
+  ok(!!paletteInput, '命令面板打开')
+  const paletteItems = () => [...container.querySelectorAll('.palette-item')]
+  const activePalette = () => container.querySelector('.palette-item.active')
+  await compose(paletteInput, 'compositionstart')
+  await compose(paletteInput, 'compositionupdate', 'ji')
+  await keyOn(paletteInput, 'Enter', { isComposing: true })
+  ok(paletteRuns.count === 0 && !!container.querySelector('.palette'), '组合中 Enter 不执行命令、面板不关')
+  await keyOn(paletteInput, 'ArrowDown', { isComposing: true })
+  ok(activePalette() === paletteItems()[0], '组合中 ↑↓ 不移动高亮（还是第一条）')
+  await keyOn(paletteInput, 'Enter', { keyCode: 229 })
+  ok(paletteRuns.count === 0, 'keyCode 229 走同一条保护（仍不执行）')
+  await compose(paletteInput, 'compositionend', 'ji')
+  await keyOn(paletteInput, 'ArrowDown')
+  ok(activePalette() === paletteItems()[1], '组合结束后 ↑↓ 恢复正常（移到第二条）')
+  await keyOn(paletteInput, 'Enter')
+  ok(paletteRuns.count === 1 && paletteRuns.last === 'go-board', `组合结束后 Enter 正常执行选中项（${paletteRuns.last}）`)
+  await unmount()
+
+  /* 真实 Menu（模态内下拉） */
+  await render(createElement(MenuInModalScenario))
+  await click(byTestId('trigger'))
+  const menuTrigger = byTestId('menu-trigger')
+  await focus(menuTrigger)
+  await click(menuTrigger)
+  ok(!!container.querySelector('.menu-panel'), '模态内下拉菜单打开')
+  const activeMenuLabel = () => container.querySelector('.menu-item.active .menu-label')?.textContent
+  await compose(menuTrigger, 'compositionstart')
+  await keyOn(menuTrigger, 'ArrowDown', { isComposing: true })
+  ok(activeMenuLabel() === 'codex', `组合中 ↑↓ 不改菜单高亮（实测 ${activeMenuLabel()}）`)
+  await keyOn(menuTrigger, 'Enter', { isComposing: true })
+  ok(!!container.querySelector('.menu-panel'), '组合中 Enter 不选中项、菜单不关')
+  await keyOn(menuTrigger, 'Enter', { keyCode: 229 })
+  ok(!!container.querySelector('.menu-panel'), 'keyCode 229 同样不选中')
+  await compose(menuTrigger, 'compositionend')
+  await keyOn(menuTrigger, 'Enter')
+  ok(!container.querySelector('.menu-panel') && menuTrigger.textContent.includes('codex'), `组合结束后 Enter 正常选中（实测「${menuTrigger.textContent}」）`)
+  await escape()
+  ok(!byTestId('modal'), '清理：关闭场景模态')
+  await unmount()
+
+  /* 真实 TaskDetail：重命名输入框 + 追问框 / 斜杠技能菜单 */
+  const renameCalls = () => bridgeCalls.count('tasks.rename')
+  const followUpCalls = () => bridgeCalls.count('tasks.followUp')
+  await render(createElement(TaskDetailScenario))
+  const editBtn = container.querySelector('.title-edit')
+  ok(!!editBtn, '真实 TaskDetail 渲染出重命名按钮')
+  await focus(editBtn)
+  await click(editBtn)
+  const titleInput = container.querySelector('.title-edit-input')
+  ok(!!titleInput && active() === titleInput, '重命名输入框打开并拿到焦点（autoFocus）')
+  await setValue(titleInput, '新的标题')
+  await compose(titleInput, 'compositionstart')
+  await compose(titleInput, 'compositionupdate', 'xin')
+  await keyOn(titleInput, 'Enter', { isComposing: true })
+  ok(!!container.querySelector('.title-edit-input') && renameCalls() === 0, '组合中 Enter 不提交重命名')
+  await keyOn(titleInput, 'Escape', { isComposing: true })
+  ok(!!container.querySelector('.title-edit-input'), '组合中 Escape 不关重命名层（层栈同样守 IME）')
+  await keyOn(titleInput, 'Enter', { keyCode: 229 })
+  ok(renameCalls() === 0, 'keyCode 229 同样不提交重命名')
+  await compose(titleInput, 'compositionend', 'xin')
+  await keyOn(titleInput, 'Enter')
+  ok(!container.querySelector('.title-edit-input') && renameCalls() === 1, '组合结束后 Enter 提交重命名（桥调用 1 次）')
+  ok(active() === container.querySelector('.title-edit'), `提交后焦点回到重新挂载的重命名按钮（实测 ${nameOf(active())}）`)
+
+  const composer = container.querySelector('.followup textarea')
+  ok(!!composer, '追问框渲染出来')
+  await setValue(composer, '/')
+  ok(!!container.querySelector('.skill-menu'), '输入 / 后「命令与技能」菜单打开')
+  const activeSkill = () => container.querySelector('.skill-menu-item.active .skill-menu-name')?.textContent
+  const firstSkill = activeSkill()
+  await compose(composer, 'compositionstart')
+  await keyOn(composer, 'ArrowDown', { isComposing: true })
+  ok(activeSkill() === firstSkill, `组合中 ↑↓ 不移动技能菜单高亮（实测 ${activeSkill()}）`)
+  await keyOn(composer, 'Enter', { isComposing: true })
+  ok(!!container.querySelector('.skill-menu') && followUpCalls() === 0, '组合中 Enter 不选中命令、也不发送')
+  await keyOn(composer, 'Escape', { isComposing: true })
+  ok(!!container.querySelector('.skill-menu'), '组合中 Escape 不关技能菜单')
+  await keyOn(composer, 'Enter', { keyCode: 229 })
+  ok(followUpCalls() === 0, 'keyCode 229 同样不发送')
+  await compose(composer, 'compositionend')
+  await keyOn(composer, 'ArrowDown')
+  ok(activeSkill() !== firstSkill, `组合结束后 ↓ 正常移动高亮（${activeSkill()}）`)
+  await keyOn(composer, 'Escape')
+  ok(!container.querySelector('.skill-menu'), '组合结束后 Escape 正常关闭技能菜单')
+  await setValue(composer, '继续修一下')
+  await keyOn(composer, 'Enter')
+  ok(followUpCalls() === 1, '非组合 Enter 正常发送追问（followUp 桥调用 1 次）')
   await unmount()
 }
 

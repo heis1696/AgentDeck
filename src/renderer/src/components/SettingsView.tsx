@@ -6,7 +6,7 @@ import { Menu } from '../ui/Menu'
 import { EmptyState } from '../ui/EmptyState'
 import { RuntimeView } from './RuntimeView'
 import { UpdatePanel } from './UpdatePanel'
-import { ui } from '../ui/interaction-center'
+import { ui, isComposingKey } from '../ui/interaction-center'
 
 /** 设置分区（侧栏导航用）；队伍已提级为顶级 Agent tab，运行时页并入设置 */
 type Section = 'general' | 'runtime' | 'advanced' | 'storage' | 'updates'
@@ -149,7 +149,7 @@ function TuningNumber({ label, value, min, max, unit, hint, onCommit }: {
         type="number" min={min} max={max} step={1} value={draft}
         onChange={(e) => setDraft(e.target.value)}
         onBlur={commit}
-        onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLInputElement).blur() } }}
+        onKeyDown={(e) => { if (isComposingKey(e.nativeEvent)) return; if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLInputElement).blur() } }}
       />
       {hint && <span className="hint">{hint}</span>}
     </label>

@@ -10,6 +10,7 @@
  */
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import type { HighlighterCore, ThemedToken } from 'shiki'
+import { isComposingKey } from './interaction-center'
 
 export interface CodeViewerProps {
   file: string
@@ -205,6 +206,8 @@ function CodeSnapshot({ file, content, oldString, newString, truncated, addition
     </header>
     <div className="code-search">
       <input type="search" value={query} aria-label="查找代码" placeholder="查找代码…" onChange={(event) => { setQuery(event.target.value); setMatchIndex(0) }} onKeyDown={(event) => {
+        // IME 组合中：Enter 上屏、Escape 取消候选，都不该被查找框当成命令
+        if (isComposingKey(event.nativeEvent)) return
         if (event.key === 'Enter') { event.preventDefault(); moveMatch(event.shiftKey ? -1 : 1) }
         if (event.key === 'Escape') { setQuery(''); setMatchIndex(0) }
       }} />

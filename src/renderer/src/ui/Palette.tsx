@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useInteractionLayer } from '../hooks/useInteractionLayer'
+import { isComposingKey } from './interaction-center'
 
 export interface PaletteCommand {
   id: string
@@ -78,6 +79,8 @@ export function Palette({ open, onClose, commands, placeholder }: PaletteProps) 
 
   // Escape（含关闭）交给统一交互层；这里只处理列表导航
   const onKeyDown = (e: React.KeyboardEvent) => {
+    // IME 组合中（isComposing / keyCode 229）：Enter 是上屏、↑↓ 是选候选，一律不抢
+    if (isComposingKey(e.nativeEvent)) return
     if (e.key === 'ArrowDown') { e.preventDefault(); setActive((a) => Math.min(results.length - 1, a + 1)) }
     else if (e.key === 'ArrowUp') { e.preventDefault(); setActive((a) => Math.max(0, a - 1)) }
     else if (e.key === 'Enter') { e.preventDefault(); runAt(active) }

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { bridge, type AgentInfo as Agent, type AgentModelCatalog, type ApiPresetInfo as Preset, type AgentDraft, type ImproveOutcome, type EvaluateOutcome } from '../api'
 import { Users, KeyRound, Sparkles, X, RefreshCw, Network, Download, Upload } from 'lucide-react'
 import { useInteractionLayer } from '../hooks/useInteractionLayer'
-import { ui } from '../ui/interaction-center'
+import { ui, isComposingKey } from '../ui/interaction-center'
 import { Menu } from '../ui/Menu'
 import { BACKEND_IDS } from '../../../shared/types'
 import { isForgeAgent } from '../../../shared/forge'
@@ -287,7 +287,7 @@ export function AgentsView() {
       </div>
       <div className="tm-grid">
         {presets.map((p) => (
-          <div key={p.id} className="tm-card" role="button" tabIndex={0} onClick={() => setEditingPreset(p)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setEditingPreset(p) } }}>
+          <div key={p.id} className="tm-card" role="button" tabIndex={0} onClick={() => setEditingPreset(p)} onKeyDown={(e) => { if (isComposingKey(e.nativeEvent)) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setEditingPreset(p) } }}>
             <div className="tm-card-top">
               <div className="agent-avatar tm-avatar-preset"><KeyRound size={16} /></div>
               <div className="tm-id">
@@ -326,7 +326,7 @@ export function AgentsView() {
           {agents.map((a) => {
             const preset = presets.find((p) => p.id === a.presetId)
             return (
-              <div key={a.id} className="tm-card" role="button" tabIndex={0} onClick={() => setEditing(a)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setEditing(a) } }}>
+              <div key={a.id} className="tm-card" role="button" tabIndex={0} onClick={() => setEditing(a)} onKeyDown={(e) => { if (isComposingKey(e.nativeEvent)) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setEditing(a) } }}>
                 <div className="tm-card-top">
                   <div className="agent-avatar" style={{ background: a.color }}>{a.name.slice(0, 1)}</div>
                   <div className="tm-id">

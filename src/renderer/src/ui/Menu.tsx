@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useInteractionLayer } from '../hooks/useInteractionLayer'
+import { isComposingKey } from './interaction-center'
 
 /** 下拉菜单项 */
 export interface MenuItem {
@@ -37,6 +38,8 @@ export function Menu({ items, value, onChange, trigger, align = 'left', width }:
   }, [open, items, value])
 
   const onKeyDown = (e: React.KeyboardEvent) => {
+    // IME 组合中（isComposing / keyCode 229）：Enter/空格/↑↓ 属于输入法，不能当菜单导航
+    if (isComposingKey(e.nativeEvent)) return
     if (!open) {
       if (e.key === 'Enter' || e.key === 'ArrowDown' || e.key === ' ') {
         e.preventDefault()

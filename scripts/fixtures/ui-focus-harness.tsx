@@ -9,18 +9,23 @@ import type { Task } from '../../src/shared/types'
 import { useInteractionLayer } from '../../src/renderer/src/hooks/useInteractionLayer'
 import { ui } from '../../src/renderer/src/ui/interaction-center'
 import { ConfirmHost } from '../../src/renderer/src/ui/Confirm'
+import { FloatWindow } from '../../src/renderer/src/ui/FloatWindow'
 import { Menu } from '../../src/renderer/src/ui/Menu'
 import { Palette } from '../../src/renderer/src/ui/Palette'
 import { SideDock } from '../../src/renderer/src/ui/SideDock'
+import { TaskDetail } from '../../src/renderer/src/components/TaskDetail'
 
 export { act, StrictMode, createElement, useEffect, useRef, useState } from 'react'
 export { createRoot } from 'react-dom/client'
 export { useInteractionLayer, resetOutsideFocusHistory } from '../../src/renderer/src/hooks/useInteractionLayer'
+export { interactionLayers } from '../../src/renderer/src/ui/interaction-layer'
 export { ui } from '../../src/renderer/src/ui/interaction-center'
 export { ConfirmHost } from '../../src/renderer/src/ui/Confirm'
+export { FloatWindow } from '../../src/renderer/src/ui/FloatWindow'
 export { Menu } from '../../src/renderer/src/ui/Menu'
 export { Palette } from '../../src/renderer/src/ui/Palette'
 export { SideDock } from '../../src/renderer/src/ui/SideDock'
+export { TaskDetail } from '../../src/renderer/src/components/TaskDetail'
 
 /** 场景 1：Agent 页「新建 Agent」——模态里的输入框带 autoFocus（缺陷原始复现路径） */
 export function NewAgentScenario() {
@@ -112,11 +117,17 @@ export function ConfirmScenario() {
 }
 
 /** 场景 6：真实命令面板（trap + initialFocusRef 路径） */
+export const paletteRuns = { count: 0, last: '' }
+
 export function PaletteScenario() {
   const [open, setOpen] = useState(false)
+  const commands = [
+    { id: 'go-issues', group: '跳转', label: 'Issue', run: () => { paletteRuns.count++; paletteRuns.last = 'go-issues' } },
+    { id: 'go-board', group: '跳转', label: '看板', run: () => { paletteRuns.count++; paletteRuns.last = 'go-board' } }
+  ]
   return <div>
     <button id="open-palette" data-testid="trigger" onClick={() => setOpen(true)}>搜索任务</button>
-    <Palette open={open} onClose={() => setOpen(false)} commands={[{ id: 'go-issues', group: '跳转', label: 'Issue' }]} />
+    <Palette open={open} onClose={() => setOpen(false)} commands={commands} />
   </div>
 }
 
@@ -150,4 +161,74 @@ export function InlineEditScenario() {
       ? <input ref={inputRef} data-testid="title-input" autoFocus value={draft} onChange={(event) => setDraft(event.target.value)} />
       : <h1 className="detail-title">{title}<button ref={titleBtnRef} data-testid="title-edit" onClick={() => { setDraft(title); setEditing(true) }}>重命名</button></h1>}
   </div>
+}
+
+/* ------------------------------------------------------------------------- */
+/* 场景 9+：本轮修复的回归面（视觉/指针/焦点同序、真实 IME 组合事件、真实 TaskDetail） */
+/* ------------------------------------------------------------------------- */
+
+/** 命中计数：背景浮窗 / 信息弹层 / 模态 / 模态内菜单各自被真实点击的次数 */
+export const stackHits = { float: 0, info: 0, modal: 0, menu: 0, menuPick: '' }
+
+export function resetStackHits(): void {
+  stackHits.float = 0
+  stackHits.info = 0
+  stackHits.modal = 0
+  stackHits.menu = 0
+  stackHits.menuPick = ''
+}
+
+/**
+ * 场景 9：同屏堆叠——非模态浮窗（z 38）+ 信息弹层（z 40）+ 模态 overlay + 模态内嵌套菜单。
+ * 复现「浮窗/信息弹层压在 overlay 之上、模态下方仍可点击」的真实结构：
+ * 断言看 smoke-ui-focus.mjs（视觉 z 跟随层序、模态阻断背景指针与焦点、嵌套菜单仍可用）。
+ */
+export function OverlapStackScenario() {
+  const [modalOpen, setModalOpen] = useState(false)
+  const [infoOpen, setInfoOpen] = useState(false)
+  const [floatOpen, setFloatOpen] = useState(true)
+  const modalRef = useInteractionLayer<HTMLDivElement>({ open: modalOpen, onClose: () => setModalOpen(false), kind: 'modal', name: 'confirm', trap: true })
+  const infoBoxRef = useRef<HTMLDivElement>(null)
+  useInteractionLayer<HTMLDivElement>({ open: infoOpen, onClose: () => setInfoOpen(false), kind: 'popover', name: 'task-info', closeOnOutside: true, autoFocus: false, layerRef: infoBoxRef })
+  return <div className="detail">
+    <button data-testid="open-modal" onClick={() => setModalOpen(true)}>删除任务</button>
+    <button data-testid="toggle-info" onClick={() => setInfoOpen(true)}>详细信息</button>
+    <div className="meta-info-wrap" ref={infoBoxRef} data-testid="info-wrap">
+      {infoOpen && <div className="meta-info-pop" data-testid="info-pop">
+        <button data-testid="info-btn" onClick={() => { stackHits.info++ }}>信息层按钮</button>
+      </div>}
+    </div>
+    {floatOpen && <FloatWindow title="目标模式" onClose={() => setFloatOpen(false)}>
+      <button data-testid="float-btn" onClick={() => { stackHits.float++ }}>浮窗体按钮</button>
+    </FloatWindow>}
+    {modalOpen && <div className="overlay" ref={modalRef} data-testid="modal-root" onClick={(event) => { if (event.target === event.currentTarget) setModalOpen(false) }}>
+      <div className="dialog">
+        <Menu
+          items={[{ value: 'yes', label: '确认删除' }, { value: 'no', label: '保留' }]}
+          onChange={(value) => { stackHits.menu++; stackHits.menuPick = value }}
+          trigger={() => <button data-testid="modal-menu-trigger">更多操作</button>}
+        />
+        <button data-testid="modal-ok" onClick={() => { stackHits.modal++ }}>模态按钮</button>
+      </div>
+    </div>}
+  </div>
+}
+
+/**
+ * 场景 10：真实 TaskDetail（重命名输入框 + 追问框 + 斜杠技能菜单）。
+ * bridge 由 scripts/smoke-ui-focus.mjs 在 import 前铺到 window.agentdeck 上（桩记录调用）。
+ */
+export function TaskDetailScenario() {
+  const task = {
+    id: 'task-ime',
+    title: '修复登录超时',
+    prompt: '原始指令：修登录',
+    status: 'done',
+    backend: 'zcode',
+    workdir: '',
+    sessionId: 'sess-ime',
+    createdAt: 1,
+    endedAt: 2
+  } as unknown as Task
+  return <TaskDetail task={task} tasks={[task]} onSelect={() => {}} />
 }
