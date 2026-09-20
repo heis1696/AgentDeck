@@ -203,7 +203,38 @@ detail surfaces have already been applied before delegation.
   untracked files, corrupt-index command errors, non-Git/missing directories,
   same-run integration preservation and delayed old-run finalization. It is
   also registered under `smoke:git-errors`, already part of `smoke:all`.
-- Still pending: worker creation-clock rollback must become unclassified;
-  actual detail tabs and worker-window lifecycle need the requested keyboard
-  coverage; Settings must test Escape with the menu actually open plus arrow
-  opening/navigation. These are separate from the Git correction.
+- Worker creation-clock rollback now becomes unclassified using unique, valid
+  worker indices only to detect ambiguity. Lead review extended the teammate
+  implementation to retain the previous timestamp high-water mark, so a clock
+  sequence 2100 -> 1500 -> 1600 cannot classify the third worker into an older
+  turn. Duplicate indices remain unreliable even if one duplicate has no valid
+  timestamp. Focused regressions cover both cases.
+- Actual TaskDetail tests now cover Arrow/Home/End/Ctrl view navigation, IME,
+  second-click worker-window close, Escape focus return and switching tasks
+  while the window is open. The Settings browser test now opens the menu before
+  Escape and covers ArrowDown opening and ArrowUp navigation.
+- Review of `8f83bb2` found that only GitSummary rejected stale snapshots;
+  acceptance verification, counts, copied summaries and badges still consumed
+  raw fields. This remains blocking until every current-execution consumer is
+  routed through the shared helpers below. Raw historical fields are retained.
+
+### Current Snapshot Consumer Follow-up
+
+- Lead added `src/shared/git-snapshot.ts`: `currentGitSnapshot(task)` validates
+  capture time and run/phase/start association with an identifiable execution;
+  `currentGitChanges(task)` returns diff/stat only for a matching `available`
+  snapshot. Legacy or stale data cannot certify current changes. Finalizer now
+  reuses the same provenance predicate for integration-snapshot preservation.
+- UI ownership: `TaskDetail.tsx`, `BoardView.tsx`, `task/WorkerOverview.tsx`,
+  `task/GitSummary.tsx` and focused UI tests/fixtures. Use the shared predicate
+  for current Git counts, copy actions and badges. Only GitSummary may show
+  legacy data explicitly labeled historical. Preserve public parser exports.
+- Main ownership: `acceptance-verifier.ts`, the legacy gitStat branch fallback
+  in `delegate.ts`, localized repository probing in `git.ts`, and focused
+  acceptance/Git/delegate tests. A previous-run or unprovenanced diff must not
+  pass deterministic acceptance. Add a real delegate -> finalizer -> store
+  reload -> renderer integration assertion using the existing fake backend.
+- Do not modify scheduling, retry/IPC behavior, production settings, or the
+  independent persistence/update WIP. The shared helper, package registration,
+  plan and dependency graphs remain lead-owned; source-module graph refresh
+  already succeeds at 185 modules on the combined working tree.

@@ -18,7 +18,7 @@ await build({ stdin: { contents: [
 const { buildWorkerRounds, buildTurns, WorkerOverview, GitSummary } = await import(pathToFileURL(outfile).href)
 const event = (seq, ts, kind) => ({ seq, ts, kind, text: `event-${seq}` })
 const events = [event(1, 1000, 'user'), event(2, 1100, 'final'), event(3, 2000, 'user'), event(4, 2500, 'text'), event(5, 3000, 'user'), event(6, 3100, 'final')]
-const task = (id, createdAt, status, extra = {}) => ({ id, createdAt, status, title: id, prompt: id, workdir: 'C:/fixture', backend: 'zcode', eventCount: 0, workerIndex: 99, ...extra })
+const task = (id, createdAt, status, extra = {}) => ({ id, createdAt, status, title: id, prompt: id, workdir: 'C:/fixture', backend: 'zcode', eventCount: 0, ...extra })
 const workers = [task('early', 500, 'done'), task('one', 1200, 'done'), task('two', 1800, 'failed'), task('three', 2100, 'running'), task('four', 2200, 'queued'), task('five', 2300, 'queued', { parked: true }), task('six', 3300, 'cancelled')]
 const turns = buildTurns(events, 'prompt')
 const rounds = buildWorkerRounds(workers, turns, events)
@@ -49,6 +49,56 @@ assert(buildWorkerRounds([task('tie', 1000, 'done')], buildTurns(tied), tied)[0]
 assert.equal(buildWorkerRounds([task('after-tie', 1100, 'done')], buildTurns(tied), tied)[0].label, '回合 2')
 const backwards = [event(1, 2000, 'user'), event(2, 1000, 'user')]
 assert(buildWorkerRounds([task('clock-change', 2500, 'done')], buildTurns(backwards), backwards)[0].unclassified)
+
+const roundBoundaryEvents = [event(1, 1000, 'user'), event(2, 2000, 'user')]
+const roundBoundaryTurns = buildTurns(roundBoundaryEvents)
+const regressingWorkers = [
+  task('worker-one', 2100, 'done', { workerIndex: 1 }),
+  task('worker-two', 1500, 'done', { workerIndex: 2 })
+]
+const regressingRounds = buildWorkerRounds(regressingWorkers, roundBoundaryTurns, roundBoundaryEvents)
+assert.equal(regressingRounds.find((round) => round.label === '回合 2').workers[0].id, 'worker-one')
+assert.deepEqual(regressingRounds.find((round) => round.unclassified).workers.map((worker) => worker.id), ['worker-two'])
+
+const recoveringRounds = buildWorkerRounds([
+  ...regressingWorkers,
+  task('worker-three', 1600, 'done', { workerIndex: 3 }),
+  task('worker-four', 2200, 'done', { workerIndex: 4 })
+], roundBoundaryTurns, roundBoundaryEvents)
+assert.deepEqual(recoveringRounds.find((round) => round.unclassified).workers.map((worker) => worker.id), ['worker-two', 'worker-three'])
+assert.deepEqual(recoveringRounds.find((round) => round.label === '回合 2').workers.map((worker) => worker.id), ['worker-one', 'worker-four'])
+
+const normalWorkers = [
+  task('normal-one', 1100, 'done', { workerIndex: 1 }),
+  task('normal-two', 2100, 'done', { workerIndex: 2 })
+]
+const normalRounds = buildWorkerRounds(normalWorkers, roundBoundaryTurns, roundBoundaryEvents)
+assert.equal(normalRounds.find((round) => round.label === '回合 1').workers[0].id, 'normal-one')
+assert.equal(normalRounds.find((round) => round.label === '回合 2').workers[0].id, 'normal-two')
+assert.equal(normalRounds.some((round) => round.unclassified), false)
+
+const missingIndexWorkers = [
+  task('missing-index-one', 2100, 'done', { workerIndex: 1 }),
+  task('missing-index-two', 1500, 'done')
+]
+const missingIndexRounds = buildWorkerRounds(missingIndexWorkers, roundBoundaryTurns, roundBoundaryEvents)
+assert.equal(missingIndexRounds.find((round) => round.label === '回合 1').workers[0].id, 'missing-index-two')
+assert.equal(missingIndexRounds.some((round) => round.unclassified), false)
+
+const duplicateIndexWorkers = [
+  task('duplicate-index-one', 2100, 'done', { workerIndex: 1 }),
+  task('duplicate-index-two', 1500, 'done', { workerIndex: 1 })
+]
+const duplicateIndexRounds = buildWorkerRounds(duplicateIndexWorkers, roundBoundaryTurns, roundBoundaryEvents)
+assert.equal(duplicateIndexRounds.find((round) => round.label === '回合 1').workers[0].id, 'duplicate-index-two')
+assert.equal(duplicateIndexRounds.some((round) => round.unclassified), false)
+
+const invalidDuplicate = buildWorkerRounds([
+  ...regressingWorkers,
+  task('duplicate-without-timestamp', 0, 'done', { workerIndex: 1 })
+], roundBoundaryTurns, roundBoundaryEvents)
+assert.deepEqual(invalidDuplicate.find((round) => round.unclassified).workers.map((worker) => worker.id), ['duplicate-without-timestamp'])
+assert.equal(invalidDuplicate.find((round) => round.label === '回合 1').workers[0].id, 'worker-two', 'An invalid timestamp does not make its duplicate index reliable')
 
 const patch = 'diff --git a/test.ts b/test.ts\n--- a/test.ts\n+++ b/test.ts\n@@ -1 +1 @@\n-old\n+new\n'
 for (const [status, extra, expected] of [

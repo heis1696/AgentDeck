@@ -3,6 +3,7 @@ import type { TaskStore } from './store'
 import { snapshotGitAfter } from './git'
 import { aggregateUsage } from './usage'
 import { canTransition } from '../shared/taskflow'
+import { currentGitSnapshot } from '../shared/git-snapshot'
 
 export class TaskFinalizer {
   constructor(
@@ -35,12 +36,11 @@ export class TaskFinalizer {
       this.pushTask(taskId)
       return
     }
-    const previous = current.gitSnapshot
+    const previous = currentGitSnapshot(current)
     // Integration diffs describe another branch. Keep only a proven same-run
     // integration snapshot when the final working-tree capture is clean.
     const keepIntegration = captured.snapshot?.state === 'clean'
       && previous?.scope === 'integration'
-      && previous.runId === runId && previous.phaseIndex === phaseIndex && previous.startedAt === startedAt
     const gitFields: Pick<Task, 'gitDiff' | 'gitStat' | 'gitSnapshot'> = keepIntegration
       ? { gitDiff: current.gitDiff, gitStat: current.gitStat, gitSnapshot: previous }
       : {

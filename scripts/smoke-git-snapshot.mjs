@@ -17,12 +17,13 @@ await build({
     "export { snapshotGitAfter, branchDiffSummary } from './src/main/git'",
     "export { TaskStore } from './src/main/store'",
     "export { TaskFinalizer } from './src/main/task-finalizer'",
+    "export { currentGitSnapshot, currentGitChanges } from './src/shared/git-snapshot'",
     "export { GitSummary } from './src/renderer/src/components/task/GitSummary'"
   ].join('\n'), resolveDir: root, loader: 'tsx' },
   outfile, bundle: true, platform: 'node', format: 'cjs', jsx: 'automatic',
   external: ['electron', 'react', 'react/jsx-runtime', 'lucide-react']
 })
-const { snapshotGitAfter, branchDiffSummary, TaskStore, TaskFinalizer, GitSummary } = await import(pathToFileURL(outfile).href)
+const { snapshotGitAfter, branchDiffSummary, TaskStore, TaskFinalizer, GitSummary, currentGitSnapshot, currentGitChanges } = await import(pathToFileURL(outfile).href)
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-git-snapshot-'))
 const repo = path.join(temp, 'repo')
 const nonRepo = path.join(temp, 'not-a-repo')
@@ -86,6 +87,18 @@ try {
   assert(saved.gitDiff.includes('+changed'))
   render(saved, 'available')
   const dirtySnapshot = structuredClone(saved)
+  assert.equal(currentGitChanges(saved).diff, saved.gitDiff)
+  for (const changed of [
+    { runId: 'another-run' }, { phaseIndex: saved.phaseIndex + 1 }, { startedAt: saved.startedAt + 1 },
+    { gitSnapshot: undefined }, { gitSnapshot: { ...saved.gitSnapshot, capturedAt: NaN } }
+  ]) {
+    assert.equal(currentGitSnapshot({ ...saved, ...changed }), undefined)
+    assert.equal(currentGitChanges({ ...saved, ...changed }), undefined)
+  }
+  for (const state of ['clean', 'error', 'unavailable']) {
+    assert.equal(currentGitChanges({ ...saved, gitSnapshot: { ...saved.gitSnapshot, state } }), undefined)
+  }
+  assert.equal(currentGitSnapshot({ gitSnapshot: { ...saved.gitSnapshot, runId: undefined, phaseIndex: undefined, startedAt: undefined } }), undefined)
 
   start(task.id)
   render(store.get(task.id), 'executing')

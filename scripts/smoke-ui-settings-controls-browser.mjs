@@ -9,7 +9,8 @@
  * 覆盖的验收点：
  *   1. 可见边界 = 命中区：在真实坐标上，紧贴自定义下拉/按钮可视边界之外点击不得触发，
  *      边界内（中心/左缘/右缘/下缘）必须触发。包裹式 <label> 的空白区同样不得打开菜单。
- *   2. 键盘操作：Enter/↓ 打开、↑↓ 移动、Enter 选中、Esc 关闭并归还焦点。
+ *   2. 键盘操作：Enter/↓ 都能打开、打开态 Esc 只关菜单（不写盘、焦点留在触发器）、
+ *      ↑↓ 双向移动高亮（↓ 之后 ↑ 回到原项）、Enter 选中并归还焦点。
  *   3. 普通 label 只能聚焦输入框 / 切换复选框，点击留白不得改动滑杆或复选框。
  *   4. 禁用控件不可点（保存路径、开始更新）。
  *   5. 保留既有保存队列与草稿保护：脏值、保存中、保存失败、检测前先保存、连点去重。
@@ -317,36 +318,65 @@ const checkSectionGeometry = async (width, theme, section) => {
   return geometry.count
 }
 
-/** 键盘操作：Tab 走到触发器时必须看得见焦点环，Enter/↓/Enter 能完成选择并归还焦点 */
+/**
+ * 键盘操作：Tab 走到触发器时必须看得见焦点环；Enter 与 ↓ 是等价的打开路径；
+ * 打开态 Esc 只关菜单（不写设置、焦点留在触发器）；↑↓ 双向移动高亮；Enter 选中并归还焦点。
+ */
 const checkKeyboardOperation = async (label) => {
   await openSection('general')
   const trigger = page.locator('.settings-page .menu-trigger').first()
+  /** 焦点是否正好落在被测触发器上（不是「某个 .menu-trigger」——同页还有第二个下拉） */
+  const triggerFocused = () => page.evaluate(() => document.activeElement === document.querySelector('.settings-page .menu-trigger'))
+  const activeOption = () => page.locator('.menu-panel .menu-item.active').textContent()
   await page.locator('.settings-body').click({ position: { x: 4, y: 6 } })
   let tabs = 0
   let focused = false
   for (; tabs < 40 && !focused; tabs += 1) {
     await page.keyboard.press('Tab')
-    focused = await page.evaluate(() => Boolean(document.activeElement?.classList.contains('menu-trigger')))
+    focused = await triggerFocused()
   }
   check(focused, `${label}: Tab reaches the dropdown trigger`, { tabs })
   const focusRing = await page.evaluate(() => (document.activeElement?.classList.contains('menu-trigger') ? getComputedStyle(document.activeElement).boxShadow : 'no-trigger-focus'))
   check(focusRing !== 'none' && focusRing !== '' && focusRing !== 'no-trigger-focus', `${label}: the keyboard-focused trigger renders a visible focus ring`, focusRing)
+
+  // ↓ 打开：与 Enter 等价的第二条键盘打开路径（不必先回车）
+  await page.keyboard.press('ArrowDown')
+  await settle()
+  check(await menuOpen() === 1, `${label}: ArrowDown opens the dropdown`)
+  check(await trigger.getAttribute('aria-expanded') === 'true', `${label}: ArrowDown opening reports aria-expanded`)
+
+  // 打开态 Esc：只关菜单，不改设置、不写盘、焦点仍在触发器上
+  const beforeEscape = await page.evaluate(() => ({ theme: window.__settings.getSettings().theme, saves: window.__settings.probe.saves.length }))
+  await page.keyboard.press('Escape')
+  await settle()
+  check(await menuOpen() === 0, `${label}: Escape closes the open dropdown`)
+  check(await trigger.getAttribute('aria-expanded') === 'false', `${label}: Escape clears aria-expanded on the trigger`)
+  check(await triggerFocused(), `${label}: Escape keeps focus on the trigger`)
+  const afterEscape = await page.evaluate(() => ({ theme: window.__settings.getSettings().theme, saves: window.__settings.probe.saves.length }))
+  check(afterEscape.theme === beforeEscape.theme && afterEscape.saves === beforeEscape.saves, `${label}: Escape writes nothing`, { beforeEscape, afterEscape })
+
   await page.keyboard.press('Enter')
   await settle()
   check(await menuOpen() === 1, `${label}: Enter opens the dropdown`)
   check(await trigger.getAttribute('aria-expanded') === 'true', `${label}: the open dropdown reports aria-expanded`)
-  const firstActive = await page.locator('.menu-panel .menu-item.active').textContent()
+  const firstActive = await activeOption()
   await page.keyboard.press('ArrowDown')
   await settle()
-  const secondActive = await page.locator('.menu-panel .menu-item.active').textContent()
+  const secondActive = await activeOption()
   check(firstActive !== secondActive, `${label}: ArrowDown moves the active option`, { firstActive, secondActive })
+  await page.keyboard.press('ArrowUp')
+  await settle()
+  const backActive = await activeOption()
+  check(backActive === firstActive, `${label}: ArrowUp moves the active option back up`, { firstActive, secondActive, backActive })
+  await page.keyboard.press('ArrowDown')
+  await settle()
   const beforeTheme = await page.evaluate(() => window.__settings.getSettings().theme)
   await page.keyboard.press('Enter')
   await settle()
   check(await menuOpen() === 0, `${label}: Enter commits and closes`)
   const afterTheme = await page.evaluate(() => window.__settings.getSettings().theme)
   check(beforeTheme !== afterTheme, `${label}: choosing an option writes the setting`, { beforeTheme, afterTheme })
-  check(await page.evaluate(() => document.activeElement?.classList.contains('menu-trigger')), `${label}: committing returns focus to the trigger`)
+  check(await triggerFocused(), `${label}: committing returns focus to the trigger`)
   await page.keyboard.press('Escape')
 }
 

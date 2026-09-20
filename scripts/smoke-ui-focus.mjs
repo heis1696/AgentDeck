@@ -16,6 +16,8 @@
 //  11. 审查项 1~6：跨任务校正不可用页签（+ 焦点接回）、流式自动滚动受「贴底跟随」控制、
 //      顶部页签关闭后焦点跟随实际 activeId、CodeViewer 在 diff 中按新旧文件绝对行号跳转、
 //      追问框 combobox ↔ listbox 的 aria 关系与选项 Tab 序列、显式平滑滚动尊重 prefers-reduced-motion。
+//  12. 真实 TaskDetail 视图页签（含「动态 / 结果」两个次级页签）：←/→ 环绕、Home/End 跳首末、
+//      Ctrl+1..4 直达；激活项 / 面板指向 / roving tabindex / 焦点四者同源，IME 组合中方向键归输入法。
 //
 // 依赖：npm install 安装的开发依赖 jsdom。运行：npm run smoke:ui。
 import { build } from 'esbuild'
@@ -742,6 +744,71 @@ section('审查项 5：追问框（combobox）↔ 技能 listbox 的 aria 关系
   await keyOn(composer, 'Escape')
   ok(composer.getAttribute('aria-expanded') === 'false' && !composer.hasAttribute('aria-controls') && !composer.hasAttribute('aria-activedescendant') && !listbox(),
     'Escape 关闭后 aria 关系收回（没有指向已卸载 listbox 的悬空引用）')
+  await unmount()
+}
+
+/* ---------------------- 14. 真实 TaskDetail 视图页签：←/→/Home/End 与 Ctrl+1..4 */
+
+section('真实 TaskDetail 视图页签：次级页签（动态 / 结果）参与 ←/→ 环绕与 Home/End，Ctrl+1..4 直达且焦点跟随')
+{
+  const task = makeTask({ id: 'tab-nav', title: '页签导航', status: 'done', result: '## 结果正文' })
+  await render(createElement(TaskDetail, { task, tasks: [task], onSelect: () => {} }))
+  const order = ['log', 'git', 'activity', 'result']
+  const tabEl = (key) => container.querySelector(`#detail-tab-${key}`)
+  const selected = () => order.find((key) => tabEl(key)?.getAttribute('aria-selected') === 'true') ?? null
+  const panel = () => container.querySelector('#detail-tabpanel')
+  /** 一次导航的四条同源判据：激活项、面板指向、roving tabindex、真实焦点 */
+  const at = (key) => selected() === key
+    && panel().getAttribute('aria-labelledby') === `detail-tab-${key}`
+    && tabEl(key).tabIndex === 0
+    && active() === tabEl(key)
+  /** Ctrl+数字：事件从当前焦点冒泡到 .detail（真实页面里就是这么按的） */
+  const ctrl = (digit) => act(async () => {
+    const node = active() ?? container.querySelector('.tabs')
+    node.dispatchEvent(new window.KeyboardEvent('keydown', { key: digit, ctrlKey: true, bubbles: true, cancelable: true }))
+  })
+
+  ok(order.every((key) => !!tabEl(key)), '真实 TaskDetail 渲染出四个视图页签')
+  ok(tabEl('activity').classList.contains('tab-secondary') && tabEl('result').classList.contains('tab-secondary'),
+    '「动态 / 结果」是次级页签（tab-secondary），与两个主视图同处一条 ←/→ 路径')
+  ok(selected() === 'log' && tabEl('log').tabIndex === 0 && order.slice(1).every((key) => tabEl(key).tabIndex === -1),
+    'roving tabindex：只有激活页签在 Tab 序列里')
+
+  await focus(tabEl('log'))
+  await key('ArrowLeft', tabEl('log'))
+  ok(at('result'), `← 从首条环绕到末条「结果」（次级页签是环绕路径的一部分，实测焦点 ${nameOf(active())}）`)
+  await key('ArrowRight', tabEl('result'))
+  ok(at('log'), '→ 从末条环绕回首条「执行记录」')
+  await key('End', tabEl('log'))
+  ok(at('result'), 'End 直达末条次级页签')
+  await key('Home', tabEl('result'))
+  ok(at('log'), 'Home 回到首条')
+  await key('ArrowRight', tabEl('log'))
+  ok(at('git'), '→ 逐格右移')
+  await key('ArrowRight', tabEl('git'))
+  ok(at('activity'), '→ 进入次级页签「动态」')
+  await key('ArrowRight', tabEl('activity'))
+  ok(at('result'), '→ 再一格到「结果」')
+  await key('ArrowLeft', tabEl('result'))
+  ok(at('activity'), '← 从「结果」退回「动态」（次级页签之间也能反向走）')
+
+  await ctrl('4')
+  ok(at('result'), 'Ctrl+4 直达第四个页签「结果」，焦点一并带过去')
+  await ctrl('3')
+  ok(at('activity'), 'Ctrl+3 直达次级页签「动态」')
+  await ctrl('2')
+  ok(at('git'), 'Ctrl+2 直达「Git 改动」')
+  await ctrl('1')
+  ok(at('log'), 'Ctrl+1 直达首条「执行记录」')
+  await ctrl('9')
+  ok(at('log'), 'Ctrl+9 越界不生效（没有第 9 个页签，停在原处且不报错）')
+
+  await keyOn(tabEl('log'), 'ArrowRight', { isComposing: true })
+  ok(at('log'), 'IME 组合中 → 归输入法，页签不切换')
+  await keyOn(tabEl('log'), 'End', { keyCode: 229 })
+  ok(at('log'), 'keyCode 229 的 End 同样不抢')
+  await keyOn(tabEl('log'), 'ArrowRight')
+  ok(at('git'), '组合结束后 → 恢复正常')
   await unmount()
 }
 

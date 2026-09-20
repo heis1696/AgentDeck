@@ -4,6 +4,7 @@
 //   2. 忙态：A 的追问还在途时切到 B，B 不被禁用；回到 A 仍在途；A 的响应在 B 的界面上结算也不改 B；
 //   3. 重命名：在 A 上编辑标题时切走，编辑框被取消、不落库、也不改到 B 的标题上；B 自己的重命名照常生效；
 //   4. 浮层：ℹ 弹层 / 命令菜单 / 目标浮窗与目标芯片都不跟到 B；回到 A 不自行重开，但草稿与芯片各自回来；
+//   4b. 队员浮窗：首次点击打开、二次点击同一个触发器关闭、Escape 关闭并把焦点还给触发器、打开时切任务不跟过去；
 //   5. 旧异步响应：A 的 events 快照晚于切任务落地，不得渲染成 B 的回合；切任务当帧也不显示上一个任务的回合。
 // 运行：node scripts/smoke-ui-task-state.mjs（jsdom 为既有 devDependency）。
 import { build } from 'esbuild'
@@ -83,6 +84,7 @@ const section = (title) => console.log(`\n── ${title}`)
 
 const bridge = getTaskStateBridge()
 const container = window.document.getElementById('app')
+const active = () => window.document.activeElement
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const byQuery = (selector) => container.querySelector(selector)
 
@@ -151,6 +153,8 @@ const click = (node) => act(async () => {
   node.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }))
   await sleep(10)
 })
+/** 真实用户路径：先聚焦触发器再点开浮层（浮层的「关闭后归还焦点」据此记录触发元素） */
+const focus = (node) => act(async () => { node.focus(); await sleep(10) })
 const keyOn = (node, key, init = {}) => act(async () => {
   node.dispatchEvent(new window.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...init }))
   await sleep(10)
@@ -356,6 +360,48 @@ section('浮层/芯片不串任务：ℹ 弹层、命令菜单、目标浮窗都
   ok(!skillMenu(), '回到 A：命令菜单不自行重开（瞬态会话作废，不是恢复）')
   ok(!floatWindow(), '回到 A：目标浮窗不自行重开')
   ok(!!goalChip(), '回到 A：目标芯片由面板重新上报后回来（清空没有把芯片打死）')
+  await unmount()
+}
+
+/* --------------------- 4b. 队员浮窗：二次点击关闭 / Escape 归还焦点 / 打开时切任务隔离 */
+
+section('队员浮窗：二次点击同一个触发器关闭、Escape 关闭并把焦点还给触发器、打开时切任务不跟过去')
+{
+  await mount('done', ['done', 'done'])
+  await openTask('taskA')
+  const trigger = () => byQuery('.worker-overview-trigger')
+  const where = () => active()?.className || active()?.tagName?.toLowerCase() || String(active())
+  ok(!!trigger(), 'A 头部渲染出队员概览触发器')
+  ok(!floatWindow(), '默认没有队员浮窗')
+
+  await focus(trigger())
+  await click(trigger())
+  ok(!!floatWindow() && !!byQuery('#worker-overview'), '第一次点击打开队员浮窗')
+  ok(trigger()?.getAttribute('aria-expanded') === 'true' && trigger()?.getAttribute('aria-controls') === 'worker-overview', '打开时 aria-expanded=true 且 aria-controls 指向浮窗本体')
+  ok(!!floatWindow()?.contains(active()), `浮窗打开时首焦点落在浮窗内（实测 ${where()}）`)
+
+  await click(trigger())
+  ok(!floatWindow() && !byQuery('#worker-overview'), '第二次点击同一个触发器关闭浮窗（不是又开一层）')
+  ok(trigger()?.getAttribute('aria-expanded') === 'false' && !trigger()?.hasAttribute('aria-controls'), '关闭后 aria 关系收回')
+  ok(active() === trigger(), `二次点击关闭后焦点回到触发器（实测 ${where()}）`)
+
+  await focus(trigger())
+  await click(trigger())
+  ok(!!floatWindow(), '重新打开队员浮窗（Escape 用例前置）')
+  await keyOn(active(), 'Escape')
+  ok(!floatWindow() && !byQuery('#worker-overview'), 'Escape 关闭最上层的队员浮窗')
+  ok(active() === trigger(), `Escape 关闭后焦点归还触发按钮（实测 ${where()}）`)
+  ok(trigger()?.getAttribute('aria-expanded') === 'false', 'Escape 关闭后 aria-expanded 同步复位')
+
+  await focus(trigger())
+  await click(trigger())
+  ok(!!floatWindow(), '队员浮窗再次打开（切任务用例前置）')
+  await openTask('taskB')
+  ok(!floatWindow() && !byQuery('#worker-overview'), '切到 B：队员浮窗不跟过来')
+  ok(!trigger(), 'B 没有队员任务，头部不显示队员触发器')
+  await openTask('taskA')
+  ok(!floatWindow(), '回到 A：瞬态浮窗不自行重开')
+  ok(!!trigger() && trigger()?.getAttribute('aria-expanded') === 'false', '回到 A：触发器回来且是关闭态')
   await unmount()
 }
 

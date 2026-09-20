@@ -26,6 +26,40 @@ function taskOrder(a: Task, b: Task): number {
   return a.id.localeCompare(b.id)
 }
 
+function reliableWorkerIndex(worker: Task): number | undefined {
+  return typeof worker.workerIndex === 'number' && Number.isSafeInteger(worker.workerIndex) && worker.workerIndex >= 0
+    ? worker.workerIndex
+    : undefined
+}
+
+function validCreatedAt(worker: Task): number | undefined {
+  return Number.isFinite(worker.createdAt) && worker.createdAt > 0 ? worker.createdAt : undefined
+}
+
+function backwardsWorkers(workers: Task[]): Set<string> {
+  const indexCounts = new Map<number, number>()
+  for (const worker of workers) {
+    const index = reliableWorkerIndex(worker)
+    if (index !== undefined) indexCounts.set(index, (indexCounts.get(index) ?? 0) + 1)
+  }
+  const indexed = workers.flatMap((worker) => {
+    const index = reliableWorkerIndex(worker)
+    const createdAt = validCreatedAt(worker)
+    return index === undefined || createdAt === undefined ? [] : [{ worker, index, createdAt }]
+  })
+  const ordered = indexed
+    .filter((item) => indexCounts.get(item.index) === 1)
+    .sort((a, b) => a.index - b.index)
+  const backwards = new Set<string>()
+  let latestTimestamp = 0
+  for (const item of ordered) {
+    // A recovering clock remains ambiguous until it reaches the previous high.
+    if (item.createdAt < latestTimestamp) backwards.add(item.worker.id)
+    latestTimestamp = Math.max(latestTimestamp, item.createdAt)
+  }
+  return backwards
+}
+
 function eventTimestamp(turn: Turn, events: ReadonlyMap<number, TaskEvent>): number | undefined {
   if (turn.firstSeq <= 0) return undefined
   const event = events.get(turn.firstSeq)
@@ -49,6 +83,7 @@ function makeRound(id: string, label: string, details: Pick<WorkerRound, 'firstS
  */
 export function buildWorkerRounds(workers: Task[], turns: Turn[], events: TaskEvent[]): WorkerRound[] {
   const orderedWorkers = [...new Map(workers.map((worker) => [worker.id, worker])).values()].sort(taskOrder)
+  const backwards = backwardsWorkers(orderedWorkers)
   const bySequence = new Map(events.map((event) => [event.seq, event] as const))
   const boundaries = turns.map((turn) => eventTimestamp(turn, bySequence))
   const known = boundaries.filter((timestamp): timestamp is number => timestamp !== undefined)
@@ -62,9 +97,9 @@ export function buildWorkerRounds(workers: Task[], turns: Turn[], events: TaskEv
   const unclassified = makeRound(UNCLASSIFIED_WORKER_ROUND_ID, '未分类记录', { unclassified: true })
 
   for (const worker of orderedWorkers) {
-    const createdAt = Number.isFinite(worker.createdAt) && worker.createdAt > 0 ? worker.createdAt : undefined
+    const createdAt = validCreatedAt(worker)
     let round: WorkerRound | undefined
-    if (createdAt !== undefined && chronological && boundaries.filter((timestamp) => timestamp === createdAt).length <= 1) {
+    if (!backwards.has(worker.id) && createdAt !== undefined && chronological && boundaries.filter((timestamp) => timestamp === createdAt).length <= 1) {
       for (let index = boundaries.length - 1; index >= 0; index--) {
         const start = boundaries[index]
         const end = index === boundaries.length - 1 ? Infinity : boundaries[index + 1]
