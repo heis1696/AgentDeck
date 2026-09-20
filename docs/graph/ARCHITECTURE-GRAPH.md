@@ -288,18 +288,25 @@ flowchart TB
   V6 --> SVC["task-service.ts<br/>领域命令封装（组件不拼 IPC payload）"]
   V6 --> UI6["ui/<br/>SideDock · CodeViewer · Palette · Toasts …"]
   V6 --> HKS["hooks/<br/>useTaskEvents · turnModel · eventMerge"]
+  APP --> CTR["ui/interaction-center.ts<br/>导航 · 页签 · 通知 · 确认 · dock"]
+  V6 --> CTR
+  UI6 --> IHOOK["hooks/useInteraction<br/>hooks/useInteractionLayer"]
+  IHOOK --> CTR
+  IHOOK --> LAY["ui/interaction-layer.ts<br/>共享浮层栈与焦点策略"]
+  CTR --> LAY
   SVC --> APIR6["api.ts<br/>bridge = window.agentdeck + use* hooks"]
   HKS --> APIR6
   APIR6 ==> PRE6["preload 桥"]
 
   UI6 -.->|"① import WorkerPane"| WP6["task/WorkerPane"]
   WP6 -->|"② import"| TT6["task/TurnTimeline"]
-  TT6 -.->|"③ import SideDock（三角环）"| UI6
+  TT6 -->|"dock.open / update"| CTR
 ```
 
 **人话导读**
 
 - 渲染层是单向漏斗：**视图 → task-service（领域命令）→ api.ts → preload 桥**；组件只传领域值，不碰 IPC payload 细节。
-- 全仓唯一的渲染层真值循环依赖在图中右下三角：`ui/SideDock → task/WorkerPane → task/TurnTimeline → ui/SideDock`，靠 ESM 提升才运行正常；解耦建议（抽 `openDockItem` 到独立总线模块）记在 README 的「WIP 后处理清单」。
+- 2026-09-20 UI 统一改造已解开 `SideDock → WorkerPane → TurnTimeline → SideDock` 旧循环。`TurnTimeline` 直接调用不依赖视图的 `interaction-center`；页面与宿主通过中心共享状态，业务执行继续调用 `task-service`。
+- `npm run smoke:ui` 覆盖交互中心和真实 React DOM 的焦点回归，并纳入 `smoke:all`。新增的直接消费导出同属测试面公共 API。
 - `hooks/turnModel` 被 `npm run smoke:turn-model` 经 esbuild **直连消费**——渲染层也有测试面 API，不能当死代码删（INVENTORY 附录 A）。
 - 样式按 `styles.css / tokens.css + polish/ 8 分区`组织，改动视觉先看 tokens。

@@ -52,4 +52,15 @@ Existing unrelated work must be preserved: `docs/features/desktop-pet.md`, `scri
 ## Status
 
 - Repository and UI entry-point inspection complete.
-- Design and ownership boundaries recorded; implementation pending.
+- Visual tokens and all eight polish sections are implemented; minimum-window dock layout and focus restoration fixes are integrated.
+- `npm run smoke:ui` runs the interaction-center and React DOM focus suites, using the normal jsdom devDependency. The command is also included in `smoke:all`.
+- Independent review found remaining work: refresh the task catalog after draft creation; reconcile deferred task/dock routing when the catalog arrives; align visual and logical layer order; allow application shortcuts through nonmodal windows; guard local Enter handlers during IME composition. These remain acceptance blockers until fixed and verified.
+
+## Review Follow-up Ownership
+
+The integrated baseline contains the visual work, minimum-window layout fix, interaction center, focus restoration fix and standard `smoke:ui` command. Main-branch assistant settings/generation changes are preserved. The lead reran build, stage6 (including typecheck), UI smoke and an isolated Electron check: 980px dock right edge is 980px; Agent modal Escape returns focus to its trigger; no renderer exceptions.
+
+- Task catalog/navigation: own `api.ts`, `App.tsx`, `components/WorkspaceView.tsx`, `ui/interaction-center.ts`, `scripts/smoke-ui-interaction-center.mjs` and a separate new draft/catalog integration test. Fix draft-created tasks becoming visible before navigation, refresh response races, initially unavailable catalog routing and dock migration without invalidating live handles or reviving closed entries. Fix global shortcuts to consult `interactionLayers.topModal()` rather than blocking on all windows/popovers.
+- Layers/IME: own `ui/interaction-layer.ts`, `hooks/useInteractionLayer.ts`, rendered UI hosts/components other than App/WorkspaceView, `scripts/smoke-ui-focus.mjs`, its fixtures and any necessary layer-specific CSS only. Align pointer/focus/visual stacking; protect local Enter/Escape/arrow handlers during composition, using the existing `isComposingKey(event.nativeEvent)` helper from the center. Preserve focus restoration fixes and support nested layers without input leaking to lower windows.
+- Shared contract already supplied: `LayerStack.topModal(): LayerRecord | null` returns the highest modal even when a popover is above it. `isComposingKey({ isComposing?, keyCode? }): boolean` is the shared IME guard. The two workstreams must preserve these exports; no further joint file edits are needed.
+- Lead owns package scripts/dependencies, docs/graph generation and final integrated verification. New tests may be added by either workstream; report their commands for standard-suite registration. Do not revert existing integration changes or assistant-window routes.

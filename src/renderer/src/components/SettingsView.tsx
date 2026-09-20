@@ -6,7 +6,7 @@ import { Menu } from '../ui/Menu'
 import { EmptyState } from '../ui/EmptyState'
 import { RuntimeView } from './RuntimeView'
 import { UpdatePanel } from './UpdatePanel'
-import { toast } from '../ui/Toasts'
+import { ui } from '../ui/interaction-center'
 
 /** 设置分区（侧栏导航用）；队伍已提级为顶级 Agent tab，运行时页并入设置 */
 type Section = 'general' | 'runtime' | 'advanced' | 'storage' | 'updates'
@@ -162,7 +162,7 @@ function AdvancedSection() {
   if (!settings) return <EmptyState title="设置加载中" />
   const num = (v: number | undefined, d: number) => v ?? d
   const save = (patch: Partial<AppSettings>) => {
-    update(patch).catch((e) => toast.error(e instanceof Error ? e.message : String(e)))
+    update(patch).catch((e) => ui.toast.error(e instanceof Error ? e.message : String(e)))
   }
   return (
     <div className="settings-stack">
@@ -335,7 +335,7 @@ function StorageSection() {
     const dir = await bridge.pickDir()
     if (!dir) return
     await bridge.settings.set({ sharedDir: dir })
-    toast.success('共享目录已更新')
+    ui.toast.success('共享目录已更新')
   }
 
   return (

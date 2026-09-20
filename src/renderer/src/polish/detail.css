@@ -14,12 +14,23 @@
   padding-top: 16px;
   padding-bottom: 12px;
 }
+/* 窄视口（如 980x560 + SideDock）：动作按钮行允许换行收窄，
+   不把标题挤成竖排（长标题必须保有可读宽度） */
+.detail-header.page-header-bar { flex-wrap: wrap; }
+.detail-header .detail-title-wrap { flex: 1 1 220px; }
+.detail-header .detail-actions {
+  flex-shrink: 1;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  row-gap: 6px;
+  max-width: min(60%, 460px);
+}
 .detail .detail-title-wrap .detail-title {
   margin-bottom: 9px;
   color: var(--text);
-  font-size: clamp(19px, 1.7vw, 23px);
-  font-weight: 680;
-  letter-spacing: -0.2px;
+  font-size: var(--text-title);
+  font-weight: 600;
+  letter-spacing: 0;
 }
 .detail .detail-meta {
   gap: 8px;
@@ -32,6 +43,9 @@
   align-items: center;
   gap: 6px;
   min-width: 0;
+  /* 主区收窄到 340 下限时 chip 行可换行，标识 chip 不被右缘裁半（布局修复） */
+  flex-wrap: wrap;
+  row-gap: 6px;
 }
 .detail .detail-meta .meta-divider {
   flex: 0 0 auto;
@@ -43,8 +57,8 @@
   margin: 0;
   color: var(--text-faint);
   font-size: var(--text-micro);
-  font-weight: 650;
-  letter-spacing: 0.6px;
+  font-weight: 600;
+  letter-spacing: 0;
   text-transform: uppercase;
 }
 .detail .detail-meta .link { color: var(--text-dim); }
@@ -386,8 +400,8 @@ html.light .detail-actions .detail-btn-ghost-danger {
   margin-bottom: 5px;
   color: var(--text-faint);
   font-size: var(--text-micro);
-  font-weight: 650;
-  letter-spacing: 0.4px;
+  font-weight: 600;
+  letter-spacing: 0;
 }
 .meta-info-sec p { margin: 0; color: var(--text-dim); font-size: var(--text-caption); line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
 .meta-info-sec p.dim { color: var(--text-faint); }
@@ -527,7 +541,7 @@ html.light .tab.active {
 .meeting-create input, .meeting-selects select, .meeting-interject input { min-width: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--ink); }
 .meeting-create input { min-height: 30px; padding: 0 8px; }
 .meeting-selects { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }
-.meeting-selects label { display: flex; flex-direction: column; gap: 3px; color: var(--text-faint); font-size: 10px; }
+.meeting-selects label { display: flex; flex-direction: column; gap: 3px; color: var(--text-faint); font-size: var(--text-micro); }
 .meeting-selects select { width: 100%; min-height: 27px; padding: 0 4px; font-size: 11px; }
 .meeting-create-btn { align-self: flex-start; min-height: 29px; padding: 0 9px; font-size: var(--text-caption); }
 .meeting-status-line { display: flex; align-items: center; gap: 7px; padding: 6px 7px; border-left: 2px solid var(--teal); background: var(--surface); color: var(--ink-dim); font-size: var(--text-caption); }
@@ -537,14 +551,14 @@ html.light .tab.active {
 .meeting-stop-reason { margin-left: auto; overflow: hidden; color: var(--text-faint); text-overflow: ellipsis; white-space: nowrap; }
 .meeting-participants { display: flex; flex-direction: column; gap: 3px; margin: 8px 0; }
 .meeting-participant { display: grid; grid-template-columns: 34px minmax(0, 1fr) 7px; align-items: center; gap: 6px; min-height: 23px; color: var(--ink-dim); font-size: var(--text-caption); }
-.meeting-role { color: var(--text-faint); font-size: 10px; }
+.meeting-role { color: var(--text-faint); font-size: var(--text-micro); }
 .meeting-mini-status { width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); }
 .meeting-mini-status.active { background: var(--teal); box-shadow: 0 0 0 3px color-mix(in srgb, var(--teal) 13%, transparent); }
 .meeting-mini-status.waiting_user { background: var(--warn); }
 .meeting-mini-status.concluded { background: var(--status-done); }
 .meeting-minutes { margin: 8px 0; padding-top: 7px; border-top: 1px solid var(--border); }
 .meeting-minutes p { margin: 4px 0; color: var(--ink-dim); font-size: var(--text-caption); line-height: 1.45; }
-.meeting-open { color: var(--warn); font-size: 10px; line-height: 1.4; }
+.meeting-open { color: var(--warn); font-size: var(--text-micro); line-height: 1.4; }
 .meeting-actions { display: flex; align-items: center; gap: 5px; margin-top: 7px; }
 .meeting-interject { display: flex; flex: 1; min-width: 0; gap: 4px; }
 .meeting-interject input { width: 100%; min-height: 27px; padding: 0 7px; font-size: 11px; }
@@ -554,17 +568,17 @@ html.light .tab.active {
 
 /* ---- 追问框技能命令菜单（F4）：textarea 上方浮层，样式对齐 Palette ---- */
 .detail-page .detail-main > .followup { position: relative; }
-.skill-menu { position: absolute; left: 12px; right: 12px; bottom: calc(100% + 6px); z-index: 30; background: var(--bg-raised, var(--bg)); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 12px 32px rgb(0 0 0 / 0.28); overflow: hidden; }
+.skill-menu { position: absolute; left: 12px; right: 12px; bottom: calc(100% + 6px); z-index: 30; background: var(--bg-raised, var(--bg)); border: 1px solid var(--border); border-radius: var(--radius-md); box-shadow: 0 12px 32px rgb(0 0 0 / 0.28); overflow: hidden; }
 .skill-menu-head { padding: 6px 12px; font-size: var(--text-micro); color: var(--text-dim); border-bottom: 1px solid var(--border); }
 .skill-menu-foot { padding: 5px 12px; font-size: var(--text-micro); color: var(--text-faint); border-top: 1px solid var(--border); }
 .skill-menu-list { max-height: 260px; overflow-y: auto; padding: 4px; }
-.skill-menu-item { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; border: 0; border-radius: 7px; background: transparent; color: var(--text); cursor: pointer; text-align: left; }
+.skill-menu-item { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text); cursor: pointer; text-align: left; }
 .skill-menu-item.active { background: var(--bg-hover, var(--bg-inset)); }
 .skill-menu-item.active .skill-menu-name { color: var(--accent, var(--text)); }
 .skill-menu-name { font-family: var(--mono); font-size: 12px; flex-shrink: 0; }
 .skill-menu-desc { font-size: var(--text-micro); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 分组：内置「命令」（本地动作）在前，「技能」在后 */
-.skill-menu-group { padding: 6px 10px 3px; color: var(--text-faint); font-size: 10px; font-weight: 650; letter-spacing: 0.8px; text-transform: uppercase; }
+.skill-menu-group { padding: 6px 10px 3px; color: var(--text-faint); font-size: var(--text-micro); font-weight: 600; letter-spacing: 0; text-transform: uppercase; }
 .skill-menu-item.is-command .skill-menu-name { color: var(--accent, var(--text)); }
 .skill-menu-item.is-command .skill-menu-desc { color: var(--text); }
 .skill-menu-tag {
@@ -575,6 +589,6 @@ html.light .tab.active {
   border-radius: var(--radius-pill);
   background: var(--accent-soft);
   color: var(--accent);
-  font-size: 10px;
-  font-weight: 650;
+  font-size: var(--text-micro);
+  font-weight: 600;
 }

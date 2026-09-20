@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Plus, RefreshCw, Search, Sparkles, Trash2, Upload } from 'lucide-react'
 import { bridge, fmtTime, useSettings } from '../api'
-import { toast } from '../ui/Toasts'
-import { confirmDialog } from '../ui/Confirm'
+import { ui } from '../ui/interaction-center'
 import { EmptyState } from '../ui/EmptyState'
 import type { SkillDetail, SkillMeta, SkillTarget, SyncState } from '../../../shared/skills'
 
@@ -61,10 +60,10 @@ export function SkillsTab() {
   const openSkill = async (name: string) => {
     try {
       const detail: SkillDetail | null = await bridge.skills.get(name)
-      if (!detail) { toast.error(`技能不存在: ${name}`); return }
+      if (!detail) { ui.toast.error(`技能不存在: ${name}`); return }
       setDraft({ name: detail.name, description: detail.description, body: detail.body, originName: detail.name })
     } catch (e) {
-      toast.error('读取技能失败: ' + (e instanceof Error ? e.message : String(e)))
+      ui.toast.error('读取技能失败: ' + (e instanceof Error ? e.message : String(e)))
     }
   }
   const newSkill = () => setDraft({ name: '', description: '', body: '', originName: null })
@@ -72,7 +71,7 @@ export function SkillsTab() {
   const save = async () => {
     if (!draft || busy) return
     const name = draft.name.trim()
-    if (!name) { toast.error('技能名不能为空'); return }
+    if (!name) { ui.toast.error('技能名不能为空'); return }
     setBusy(true)
     try {
       const meta = await bridge.skills.save(name, {
@@ -82,23 +81,23 @@ export function SkillsTab() {
       })
       await refreshAll()
       setDraft({ name: meta.name, description: meta.description, body: draft.body, originName: meta.name })
-      toast.success(`已保存「${meta.name}」`)
+      ui.toast.success(`已保存「${meta.name}」`)
     } catch (e) {
-      toast.error('保存失败: ' + (e instanceof Error ? e.message : String(e)))
+      ui.toast.error('保存失败: ' + (e instanceof Error ? e.message : String(e)))
     } finally {
       setBusy(false)
     }
   }
 
   const remove = async (name: string) => {
-    if (!await confirmDialog({ title: `删除技能「${name}」？`, body: '共享目录中的技能目录会被删除；已安装到各工具的副本不受影响，可稍后卸载。', danger: true, confirmText: '删除' })) return
+    if (!await ui.confirm({ title: `删除技能「${name}」？`, body: '共享目录中的技能目录会被删除；已安装到各工具的副本不受影响，可稍后卸载。', danger: true, confirmText: '删除' })) return
     try {
       await bridge.skills.delete(name)
       if (draft?.originName === name) setDraft(null)
       await refreshAll()
-      toast.success(`已删除「${name}」`)
+      ui.toast.success(`已删除「${name}」`)
     } catch (e) {
-      toast.error('删除失败: ' + (e instanceof Error ? e.message : String(e)))
+      ui.toast.error('删除失败: ' + (e instanceof Error ? e.message : String(e)))
     }
   }
 
@@ -109,9 +108,9 @@ export function SkillsTab() {
       const meta = await bridge.skills.import(dir)
       await refreshAll()
       await openSkill(meta.name)
-      toast.success(`已导入「${meta.name}」`)
+      ui.toast.success(`已导入「${meta.name}」`)
     } catch (e) {
-      toast.error('导入失败: ' + (e instanceof Error ? e.message : String(e)))
+      ui.toast.error('导入失败: ' + (e instanceof Error ? e.message : String(e)))
     }
   }
 
@@ -124,7 +123,7 @@ export function SkillsTab() {
       else await bridge.skills.install(name, targetId)
       await loadTargets()
     } catch (e) {
-      toast.error('同步失败: ' + (e instanceof Error ? e.message : String(e)))
+      ui.toast.error('同步失败: ' + (e instanceof Error ? e.message : String(e)))
     } finally {
       setBusy(false)
     }
@@ -143,9 +142,9 @@ export function SkillsTab() {
         }
       }
       await loadTargets()
-      toast.success(pending > 0 ? `已同步 ${pending} 项` : '全部目标均已是最新')
+      ui.toast.success(pending > 0 ? `已同步 ${pending} 项` : '全部目标均已是最新')
     } catch (e) {
-      toast.error('同步失败: ' + (e instanceof Error ? e.message : String(e)))
+      ui.toast.error('同步失败: ' + (e instanceof Error ? e.message : String(e)))
       await loadTargets()
     } finally {
       setBusy(false)

@@ -3,69 +3,92 @@
    用途：暗色/浅色主题全部令牌，供 styles.css 与 polish/*.css 引用
    约定：
    - 组件代码只引用令牌变量，不直接写色值
-   - 主张：深夜驾驶舱的深邃平静 + 唯一的青色电弧光作为品牌强调
-   - 状态色语义：运行中=青色电弧（唯一允许发光）、排队=琥珀、
+   - 主张：中性灰表面的克制工作台 + 一处青绿电弧光作为品牌强调
+   - 状态色语义：运行中=青绿电弧（唯一允许发光）、排队=琥珀、
      完成=翠绿、失败=红、取消=灰（后四者不发光）
+   - 历史 ID 别名（--surface 系、--ink 系、--line 系、--shell、
+     --brand、--teal、--signal 系等）在此统一桥接，styles.css 与
+     polish 里的旧引用无需改动即收敛到同一套视觉
    ============================================================ */
 
 /* ---- 暗色模式（默认）---- */
 :root {
-  /* 表面四层：壳 → 画布 → 表面 → 浮起 */
-  --app-shell: #090b10;           /* 最外框，包裹整个应用 */
-  --bg: #0d1117;                  /* 页面画布（内容生活的地方）*/
-  --bg-raised: #151b24;           /* 表面（卡片/输入框）*/
-  --bg-hover: #1c2531;            /* 表面悬停 */
-  --bg-inset: #0a0e14;            /* 凹陷输入（文本框内部）*/
-  --bg-selected: #1c3140;         /* 选中态背景 */
+  /* 表面四层：壳 → 画布 → 表面 → 浮起（中性灰，无色偏） */
+  --app-shell: #0b0c0e;           /* 最外框，包裹整个应用 */
+  --bg: #101113;                  /* 页面画布（内容生活的地方）*/
+  --bg-raised: #17181b;           /* 表面（卡片/输入框/侧栏）*/
+  --bg-hover: #1f2023;            /* 表面悬停 */
+  --bg-inset: #0d0e10;            /* 凹陷输入（文本框内部）*/
+  --bg-selected: #26292d;         /* 选中态背景 */
 
   /* 边框 */
-  --border: #263341;              /* 默认边框 */
-  --border-strong: #344556;       /* 强调边框（浮层/对话框）*/
+  --border: #27292d;              /* 默认边框 */
+  --border-strong: #35383d;       /* 强调边框（浮层/对话框）*/
 
   /* 文字 */
-  --text: #edf3f7;                /* 主文字 */
-  --text-dim: #9aa9b7;            /* 次要文字 */
-  --text-faint: #657482;          /* 辅助文字（提示/标签）*/
+  --text: #e9eaec;                /* 主文字 */
+  --text-dim: #9ba0a8;            /* 次要文字 */
+  --text-faint: #90969e;          /* 辅助文字，在常规表面上保持可读对比度 */
 
-  /* 品牌色：唯一的电弧光 */
-  --accent: #4bc0c8;                            /* 主强调色（链接/按钮/焦点/激活）*/
-  --accent-ink: #06262b;                        /* accent 之上的墨色文字（暗主题用深墨）*/
-  --accent-soft: rgba(75, 192, 200, 0.14);      /* 柔和背景 */
-  --accent-glow: rgba(75, 192, 200, 0.24);      /* 光晕效果 */
+  /* 品牌色：唯一的电弧光（克制的青绿） */
+  --accent: #3dbfae;                            /* 主强调色（链接/按钮/焦点/激活）*/
+  --accent-ink: #062522;                        /* accent 之上的墨色文字（暗主题用深墨）*/
+  --accent-soft: rgba(61, 191, 174, 0.13);      /* 柔和背景 */
+  --accent-glow: rgba(61, 191, 174, 0.24);      /* 光晕效果 */
 
   /* 状态色：运行态光环的核心 */
-  --status-running: #4bc0c8;      /* 运行中=青色电弧（唯一发光态）*/
-  --status-running-bg: rgba(75, 192, 200, 0.14);
-  --status-running-glow: rgba(75, 192, 200, 0.28);
+  --status-running: #3dbfae;      /* 运行中=青绿电弧（唯一发光态）*/
+  --status-running-bg: rgba(61, 191, 174, 0.13);
+  --status-running-glow: rgba(61, 191, 174, 0.28);
 
-  --status-queued: #e3a84b;       /* 排队=琥珀 */
-  --status-queued-bg: rgba(227, 168, 75, 0.14);
-  --status-queued-glow: rgba(227, 168, 75, 0.24);
+  --status-queued: #d9a24a;       /* 排队=琥珀 */
+  --status-queued-bg: rgba(217, 162, 74, 0.13);
+  --status-queued-glow: rgba(217, 162, 74, 0.24);
 
-  --status-done: #58c58a;         /* 成功=翠绿（不发光）*/
-  --status-done-bg: rgba(88, 197, 138, 0.14);
+  --status-done: #4cba78;         /* 成功=翠绿（不发光）*/
+  --status-done-bg: rgba(76, 186, 120, 0.13);
 
-  --status-failed: #ef7168;       /* 失败=红（不发光）*/
-  --status-failed-bg: rgba(239, 113, 104, 0.14);
+  --status-failed: #e5655c;       /* 失败=红（不发光）*/
+  --status-failed-bg: rgba(229, 101, 92, 0.13);
 
-  --status-cancelled: #7b8995;    /* 已取消=灰（不发光）*/
-  --status-cancelled-bg: rgba(123, 137, 149, 0.14);
+  --status-cancelled: #7d838b;    /* 已取消=灰（不发光）*/
+  --status-cancelled-bg: rgba(125, 131, 139, 0.13);
 
   /* 功能色（向后兼容既有 --ok/--warn/--err）*/
-  --ok: #58c58a;
-  --warn: #e3a84b;
-  --err: #ef7168;
+  --ok: #4cba78;
+  --warn: #d9a24a;
+  --err: #e5655c;
 
-  /* 阴影：双阴影系统（menu 轻 / pop 重）*/
+  /* 类型语义色（非状态：阶段接力紫 / 会议蓝，看板与协议卡共用）*/
+  --violet: #a78bfa;
+  --violet-soft: rgba(167, 139, 250, 0.13);
+  --violet-line: rgba(167, 139, 250, 0.4);
+  --violet-ink: #1b1430;
+  --type-meeting: #6a9fea;
+
+  /* 阴影：双阴影系统（menu 轻 / pop 重）+ 面板中阴影 */
   --menu-shadow: 0 18px 44px rgba(0, 0, 0, 0.42), 0 3px 12px rgba(0, 0, 0, 0.25);
   --shadow-pop: 0 28px 64px rgba(0, 0, 0, 0.5), 0 6px 18px rgba(0, 0, 0, 0.28);
+  --shadow-panel: 0 12px 30px rgba(0, 0, 0, 0.24), 0 2px 8px rgba(0, 0, 0, 0.16);
 
-  /* 圆角 */
+  /* 气泡顶缘高光（暗色极淡）*/
+  --bubble-inset: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+
+  /* 圆角：控件 6px，卡片/对话框最多 8px；胶囊仅用于状态芯片 */
   --radius-sm: 6px;     /* 小按钮、菜单项、徽标 */
   --radius-md: 8px;     /* 输入框、卡片、对话框 */
-  --radius-lg: 12px;    /* 大卡片、浮层面板 */
-  --radius-pill: 999px; /* 胶囊按钮、状态芯片 */
+  --radius-lg: 8px;     /* 浮层面板（统一收敛到 8px）*/
+  --radius-pill: 999px; /* 胶囊状态芯片 */
   --radius: 8px;        /* 向后兼容 */
+
+  /* 间距（4px 基准网格：4/8/12/16/20/24/32）*/
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
 
   /* 字阶（角色命名，全站仅用这些步进）*/
   --text-micro: 11px;       /* 时间戳、辅助标签、键盘提示 */
@@ -75,9 +98,9 @@
   --text-title-sm: 16px;    /* 卡片标题、对话框标题 */
   --text-title: 18px;       /* 页面标题 */
 
-  /* 字体栈 */
-  --font-ui: Inter, 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei UI', sans-serif;
-  --font-mono: 'Cascadia Code', 'SFMono-Regular', Consolas, monospace;
+  /* 字体栈（本地字体优先：Segoe UI / 微软雅黑；代码 Cascadia Code / Consolas）*/
+  --font-ui: 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei', system-ui, sans-serif;
+  --font-mono: 'Cascadia Code', Consolas, 'Courier New', monospace;
   --mono: var(--font-mono);  /* 向后兼容别名 */
 
   /* 动效令牌 */
@@ -88,52 +111,117 @@
 
   --ease-out: cubic-bezier(0.2, 0, 0, 1);      /* 入场、展开 */
   --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1); /* 悬停、状态切换 */
+
+  /* 页面沟槽 */
+  --page-gutter: 16px;
+
+  /* ---- 历史变量别名（旧名 → 新令牌，勿在新代码中使用）---- */
+  --shell: var(--app-shell);
+  --surface-0: var(--bg);
+  --surface-1: var(--bg-raised);
+  --surface-2: var(--bg-hover);
+  --surface-3: var(--bg-hover);
+  --surface: var(--bg-raised);
+  --surface-raised: var(--bg-raised);
+  --surface-hover: var(--bg-hover);
+  --surface-inset: var(--bg-inset);
+  --line: var(--border);
+  --line-soft: var(--border);
+  --line-strong: var(--border-strong);
+  --ink-strong: var(--text);
+  --ink: var(--text);
+  --ink-dim: var(--text-dim);
+  --ink-muted: var(--text-dim);
+  --ink-faint: var(--text-faint);
+  --brand: var(--accent);
+  --brand-ink: var(--accent-ink);
+  --teal: var(--accent);
+  --teal-soft: var(--accent-soft);
+  --teal-line: color-mix(in srgb, var(--accent) 42%, transparent);
+  --signal: var(--accent);
+  --signal-strong: var(--accent);
+  --red-soft: var(--status-failed-bg);
+  --accent-dim: var(--border-strong);   /* 0.8 代遗留名，仅 tab.active 边框使用 */
+
+  /* 代码语法高亮（代码可读性配色，独立于品牌；函数色对齐 accent）*/
+  --tok-kw: #c39ef2;    /* 关键字：紫 */
+  --tok-str: #98c379;   /* 字符串/diff 新增：绿 */
+  --tok-num: #d19a66;   /* 数字与字面常量：橙 */
+  --tok-com: #6b7280;   /* 注释：灰 */
+  --tok-fn: var(--accent); /* 函数：主题青绿 */
+  --tok-type: #e5c07b;  /* 类型/类名/选择器：黄 */
+  --tok-prop: #7dcfff;  /* 属性/键/命令行开关：浅蓝 */
+  --tok-tag: #e5655c;   /* 标签/diff 删除：红 */
+  --tok-attr: #d19a66;  /* HTML 属性：橙 */
 }
 
 /* ---- 浅色模式（完整令牌重映射，无组件级补丁）---- */
 html.light {
-  --app-shell: #eef2f4;
-  --bg: #f6f8f9;
+  --app-shell: #ecedee;
+  --bg: #f7f7f8;
   --bg-raised: #ffffff;
-  --bg-hover: #edf2f4;
-  --bg-inset: #f1f5f6;
-  --bg-selected: #dff1f2;
+  --bg-hover: #efeff0;
+  --bg-inset: #f2f2f3;
+  --bg-selected: #e2e6e6;
 
-  --border: #d9e2e5;
-  --border-strong: #c3d0d5;
+  --border: #e1e2e4;
+  --border-strong: #cfd1d4;
 
-  --text: #17232a;
-  --text-dim: #61717a;
-  --text-faint: #8c9ba2;
+  --text: #1b1c1e;
+  --text-dim: #5f6368;
+  --text-faint: #61666c;
 
-  --accent: #087f87;
+  --accent: #0e8577;
   --accent-ink: #ffffff;                          /* 浅主题 accent 更深，用白墨 */
-  --accent-soft: rgba(8, 127, 135, 0.1);
-  --accent-glow: rgba(8, 127, 135, 0.18);
+  --accent-soft: rgba(14, 133, 119, 0.1);
+  --accent-glow: rgba(14, 133, 119, 0.18);
 
-  --status-running: #087f87;
-  --status-running-bg: rgba(8, 127, 135, 0.1);
-  --status-running-glow: rgba(8, 127, 135, 0.18);
+  --status-running: #0e8577;
+  --status-running-bg: rgba(14, 133, 119, 0.1);
+  --status-running-glow: rgba(14, 133, 119, 0.18);
 
-  --status-queued: #a66c0a;
-  --status-queued-bg: rgba(166, 108, 10, 0.1);
-  --status-queued-glow: rgba(166, 108, 10, 0.16);
+  --status-queued: #9a6610;
+  --status-queued-bg: rgba(154, 102, 16, 0.1);
+  --status-queued-glow: rgba(154, 102, 16, 0.16);
 
-  --status-done: #187548;
-  --status-done-bg: rgba(24, 117, 72, 0.1);
+  --status-done: #1a7c48;
+  --status-done-bg: rgba(26, 124, 72, 0.1);
 
-  --status-failed: #bf493f;
-  --status-failed-bg: rgba(191, 73, 63, 0.1);
+  --status-failed: #c03f37;
+  --status-failed-bg: rgba(192, 63, 55, 0.1);
 
-  --status-cancelled: #718089;
-  --status-cancelled-bg: rgba(113, 128, 137, 0.1);
+  --status-cancelled: #6f747c;
+  --status-cancelled-bg: rgba(111, 116, 124, 0.1);
 
-  --ok: #187548;
-  --warn: #a66c0a;
-  --err: #bf493f;
+  --ok: #1a7c48;
+  --warn: #9a6610;
+  --err: #c03f37;
 
-  --menu-shadow: 0 18px 44px rgba(38, 58, 67, 0.16), 0 3px 12px rgba(38, 58, 67, 0.1);
-  --shadow-pop: 0 28px 64px rgba(38, 58, 67, 0.18), 0 6px 18px rgba(38, 58, 67, 0.1);
+  --violet: #8250df;
+  --violet-soft: rgba(130, 80, 223, 0.09);
+  --violet-line: rgba(130, 80, 223, 0.32);
+  --violet-ink: #ffffff;
+  --type-meeting: #326dc2;
+
+  --menu-shadow: 0 18px 44px rgba(35, 38, 42, 0.14), 0 3px 12px rgba(35, 38, 42, 0.08);
+  --shadow-pop: 0 28px 64px rgba(35, 38, 42, 0.16), 0 6px 18px rgba(35, 38, 42, 0.09);
+  --shadow-panel: 0 12px 30px rgba(35, 38, 42, 0.1), 0 2px 8px rgba(35, 38, 42, 0.06);
+
+  --bubble-inset: inset 0 1px 0 rgba(255, 255, 255, 0.75);
+
+  /* 历史别名（浅色侧重映射 color-mix 比例）*/
+  --teal-line: color-mix(in srgb, var(--accent) 36%, transparent);
+
+  /* 代码语法高亮（浅色）*/
+  --tok-kw: #8250df;
+  --tok-str: #1a7f37;
+  --tok-num: #b3540b;
+  --tok-com: #8a949b;
+  --tok-fn: var(--accent);
+  --tok-type: #9a6700;
+  --tok-prop: #0550ae;
+  --tok-tag: #cf222e;
+  --tok-attr: #953800;
 }
 
 /* ---- 辅助功能：降低动画强度 ---- */

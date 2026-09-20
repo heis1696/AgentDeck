@@ -1,60 +1,47 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef } from 'react'
+import { ui, type ConfirmOptions } from './interaction-center'
+import { useInteractionSelector } from '../hooks/useInteraction'
+import { useInteractionLayer } from '../hooks/useInteractionLayer'
 
-interface ConfirmOptions {
-  title: string
-  body?: string
-  /** 危险操作：确认按钮红色 */
-  danger?: boolean
-  confirmText?: string
-  cancelText?: string
-}
+export type { ConfirmOptions }
 
-let askFn: ((o: ConfirmOptions) => Promise<boolean>) | null = null
-
-/** 命令式确认框（Promise）；替代原生 confirm() */
-export function confirmDialog(o: ConfirmOptions): Promise<boolean> {
-  return askFn ? askFn(o) : Promise.resolve(false)
+/** 兼容转发：命令式确认框改由交互中心排队（FIFO，多个并发按调用顺序逐个弹） */
+export function confirmDialog(options: ConfirmOptions): Promise<boolean> {
+  return ui.confirm(options)
 }
 
 /** 确认框宿主：挂一次在 App 根部 */
 export function ConfirmHost() {
-  const [opt, setOpt] = useState<ConfirmOptions | null>(null)
-  const resolveRef = useRef<((v: boolean) => void) | null>(null)
+  const request = useInteractionSelector((state) => state.confirm)
   const confirmBtnRef = useRef<HTMLButtonElement>(null)
+  const layerRef = useInteractionLayer<HTMLDivElement>({
+    open: request !== null,
+    onClose: () => { ui.confirmHost.respond(false) },
+    kind: 'modal',
+    name: 'confirm',
+    trap: true,
+    initialFocusRef: confirmBtnRef
+  })
 
-  useEffect(() => {
-    askFn = (o) =>
-      new Promise<boolean>((resolve) => {
-        resolveRef.current?.(false) // 上一个未决的直接取消
-        resolveRef.current = resolve
-        setOpt(o)
-      })
-    return () => { askFn = null }
-  }, [])
+  // 宿主卸载：当前 + 排队中的全部按「取消」结算，不留悬空 Promise
+  useEffect(() => () => ui.confirmHost.cancelAll(), [])
+  // FIFO 下一个请求接棒时把焦点移到确认按钮（层本身没有重新打开）
+  useEffect(() => { if (request) confirmBtnRef.current?.focus() }, [request?.id])
 
-  useEffect(() => {
-    if (opt) confirmBtnRef.current?.focus()
-  }, [opt])
-
-  if (!opt) return null
-  const done = (v: boolean) => {
-    resolveRef.current?.(v)
-    resolveRef.current = null
-    setOpt(null)
-  }
+  if (!request) return null
   return (
-    <div className="overlay" onClick={(e) => e.target === e.currentTarget && done(false)}>
-      <div className="dialog confirm-dialog">
-        <h2>{opt.title}</h2>
-        {opt.body && <p className="confirm-body">{opt.body}</p>}
+    <div className="overlay" ref={layerRef} onClick={(e) => e.target === e.currentTarget && ui.confirmHost.respond(false)}>
+      <div className="dialog confirm-dialog" role="dialog" aria-modal="true" aria-label={request.title}>
+        <h2>{request.title}</h2>
+        {request.body && <p className="confirm-body">{request.body}</p>}
         <div className="dialog-footer">
-          <button className="btn" onClick={() => done(false)}>{opt.cancelText ?? '取消'}</button>
+          <button className="btn" onClick={() => ui.confirmHost.respond(false)}>{request.cancelText ?? '取消'}</button>
           <button
             ref={confirmBtnRef}
-            className={`btn ${opt.danger ? 'danger' : 'primary'}`}
-            onClick={() => done(true)}
+            className={`btn ${request.danger ? 'danger' : 'primary'}`}
+            onClick={() => ui.confirmHost.respond(true)}
           >
-            {opt.confirmText ?? '确定'}
+            {request.confirmText ?? '确定'}
           </button>
         </div>
       </div>

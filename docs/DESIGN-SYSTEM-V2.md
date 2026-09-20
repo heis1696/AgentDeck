@@ -1,4 +1,5 @@
 # AgentDeck 设计体系 v2
+> 2026-09-20 更新：当前配色、排印、间距、圆角和动效以 [UI-UNIFICATION.md](UI-UNIFICATION.md) 与 `src/renderer/src/tokens.css` 为准。本文保留 v2 设计背景；下文蓝色强调、运行态光晕、按钮上浮和 12px 面板圆角不再是现行要求。
 > ✅ 校验于 `6b2f038` / v0.22.0-hot.19（2026-09-19 文档审计）——令牌与组件规格仍为现行视觉规范；§5「styles.css 重组方案」已执行完毕，0.19.0 起页面级样式迁移至 `src/renderer/src/polish/` 命名空间（foundation / page-shell / usage / team / board / detail / dock / issue-home）；§3.14 详情页属性栏已被 0.22.0 反馈迭代改版（SideDock 分栏）取代。
 
 

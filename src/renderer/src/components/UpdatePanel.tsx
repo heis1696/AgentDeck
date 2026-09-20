@@ -3,7 +3,7 @@ import { Download, RefreshCw, RotateCcw, Rocket } from 'lucide-react'
 import { bridge, useSettings } from '../api'
 import type { UpdateStateSnapshot } from '../../../shared/contracts'
 import { EmptyState } from '../ui/EmptyState'
-import { toast } from '../ui/Toasts'
+import { ui } from '../ui/interaction-center'
 
 const PHASE_LABEL: Record<UpdateStateSnapshot['phase'], string> = {
   idle: '空闲',
@@ -40,7 +40,7 @@ export function UpdatePanel() {
   useEffect(() => {
     let mounted = true
     bridge.updates.getState().then((snapshot) => { if (mounted) setState(snapshot) }).catch((e) => {
-      if (mounted) toast.error(e instanceof Error ? e.message : String(e))
+      if (mounted) ui.toast.error(e instanceof Error ? e.message : String(e))
     })
     const off = bridge.updates.onState((snapshot) => { if (mounted) setState(snapshot) })
     return () => { mounted = false; off() }
@@ -66,12 +66,12 @@ export function UpdatePanel() {
     try {
       const r = await op()
       if (r && typeof r === 'object' && 'ok' in r && !(r as { ok: boolean }).ok) {
-        toast.error((r as { error?: string }).error ?? '操作失败')
+        ui.toast.error((r as { error?: string }).error ?? '操作失败')
       } else if (okMsg) {
-        toast.success(okMsg)
+        ui.toast.success(okMsg)
       }
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e))
+      ui.toast.error(e instanceof Error ? e.message : String(e))
     } finally {
       setBusy(false)
     }
@@ -79,7 +79,7 @@ export function UpdatePanel() {
 
   const commitFeed = () => {
     const next = feedDraft.trim()
-    update({ updateFeedUrl: next }).catch((e) => toast.error(e instanceof Error ? e.message : String(e)))
+    update({ updateFeedUrl: next }).catch((e) => ui.toast.error(e instanceof Error ? e.message : String(e)))
   }
 
   return (

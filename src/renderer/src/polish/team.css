@@ -1,9 +1,9 @@
 /* ============================================================
    Agent（队员）页重制
-   设计主张：与用量页同族的"驾驶舱"语言 —— 全宽自适应、顶部
-   极光氛围层、卡片浮于氛围之上；徽章系统承载平台/模型/预设/
-   领队身份。tm- 前缀为本页专属命名空间，全部颜色取自 tokens。
-   页面骨架（页头/滚动区/极光/容器宿主）在 polish/page-shell.css。
+   设计主张：与用量页同族的克制工作台语言 —— 全宽自适应、
+   平面卡片；徽章系统承载平台/模型/预设/领队身份。tm- 前缀为
+   本页专属命名空间，全部颜色取自 tokens。
+   页面骨架（页头/滚动区/容器宿主）在 polish/page-shell.css。
    响应式：容器查询（容器 = .psh-body 内容区宽）。
    ============================================================ */
 
@@ -16,7 +16,7 @@
 }
 .tm-section-head h3 {
   display: inline-flex; align-items: center; gap: 7px; margin: 0;
-  font-size: var(--text-title-sm); font-weight: 650;
+  font-size: var(--text-title-sm); font-weight: 600;
 }
 .tm-hicon { color: var(--text-faint); }
 .tm-hicon-accent { color: var(--accent); }
@@ -25,31 +25,28 @@
 /* ---- 卡片网格：auto-fill 随容器流动 ---- */
 .tm-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(272px, 1fr)); gap: 12px; }
 
-/* ---- 卡片：头像+身份行 / 徽章行 / 描述行 ---- */
+/* ---- 卡片：头像+身份行 / 徽章行 / 描述行（平面，无位移无投影） ---- */
 .tm-card {
   display: flex; flex-direction: column; min-width: 0;
-  padding: 14px 16px;
+  padding: var(--space-3) var(--space-4);
   border: 1px solid var(--border); border-radius: var(--radius-lg);
-  background: color-mix(in srgb, var(--bg-raised) 92%, transparent);
-  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.1);
+  background: var(--bg-raised);
   cursor: pointer;
-  transition: border-color var(--duration-base) var(--ease-in-out), transform var(--duration-base) var(--ease-in-out), box-shadow var(--duration-base) var(--ease-in-out);
+  transition: border-color var(--duration-base) var(--ease-in-out);
   animation: tm-fade-up 0.35s var(--ease-out) both;
 }
 .tm-card:hover {
   border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
-  transform: translateY(-1px);
-  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.14);
 }
 .tm-card-top { display: flex; align-items: center; gap: 11px; min-width: 0; }
 .tm-card .agent-avatar {
-  width: 40px; height: 40px; border-radius: 11px; font-size: 15px;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14), 0 3px 10px rgba(0, 0, 0, 0.22);
+  width: 40px; height: 40px; border-radius: var(--radius-md); font-size: 14px;
+  box-shadow: inset 0 0 0 1px var(--border);
 }
 .tm-avatar-preset { background: var(--bg-hover); color: var(--text-dim); box-shadow: inset 0 0 0 1px var(--border); }
 .tm-id { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
 .tm-name {
-  font-size: var(--text-body); font-weight: 650; color: var(--text);
+  font-size: var(--text-body); font-weight: 600; color: var(--text);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .tm-role { font-size: var(--text-micro); color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -70,12 +67,11 @@
   display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
   padding: 2px 8px; border-radius: var(--radius-pill);
   background: var(--bg-hover); color: var(--text-dim);
-  font-size: 10.5px; font-weight: 550;
+  font-size: var(--text-micro); font-weight: 500;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .tm-badge-mono { font-family: var(--font-mono); color: var(--text-faint); }
-.tm-badge-forge { background: color-mix(in srgb, #8f7ff0 16%, transparent); color: #a99cf4; }
-html.light .tm-badge-forge { background: color-mix(in srgb, #8f7ff0 14%, transparent); color: #6a58c8; }
+.tm-badge-forge { background: var(--violet-soft); color: var(--violet); }
 .tm-badge-lead { background: var(--accent-soft); color: var(--accent); }
 .tm-badge-preset { color: var(--text-faint); }
 

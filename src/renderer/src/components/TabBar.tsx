@@ -8,7 +8,7 @@ export function TabBar({
   onSelect,
   onClose
 }: {
-  tabs: string[]
+  tabs: readonly string[]
   tasks: Task[]
   activeId: string | null
   onSelect: (id: string) => void

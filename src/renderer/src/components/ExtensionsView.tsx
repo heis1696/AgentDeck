@@ -21,8 +21,7 @@ import {
   type LucideIcon
 } from 'lucide-react'
 import { bridge, useSettings } from '../api'
-import { toast } from '../ui/Toasts'
-import { confirmDialog } from '../ui/Confirm'
+import { ui } from '../ui/interaction-center'
 import { EmptyState } from '../ui/EmptyState'
 import { SkillsTab } from './SkillsView'
 import type {
@@ -198,9 +197,9 @@ function SkillDiscoverPanel({ onLibraryChanged }: { onLibraryChanged: () => void
       setUrl('')
       await load()
       onLibraryChanged()
-      toast.success(`从 ${result.sourceName} 导入 ${result.skills.length} 个技能`)
+      ui.toast.success(`从 ${result.sourceName} 导入 ${result.skills.length} 个技能`)
     } catch (e) {
-      toast.error('安装失败: ' + errText(e))
+      ui.toast.error('安装失败: ' + errText(e))
     } finally {
       setUrlBusy(false)
     }
@@ -213,9 +212,9 @@ function SkillDiscoverPanel({ onLibraryChanged }: { onLibraryChanged: () => void
       const result = await bridge.sources.importSkill(group.source.id, asset.path)
       await load()
       onLibraryChanged()
-      toast.success(`已导入技能「${result.name}」`)
+      ui.toast.success(`已导入技能「${result.name}」`)
     } catch (e) {
-      toast.error('导入失败: ' + errText(e))
+      ui.toast.error('导入失败: ' + errText(e))
     } finally {
       setImporting(null)
     }
@@ -243,11 +242,11 @@ function SkillDiscoverPanel({ onLibraryChanged }: { onLibraryChanged: () => void
       const summary = `导入 ${imported} / 跳过 ${skipped}`
       if (failures.length > 0) {
         const detail = failures.slice(0, 3).join('；') + (failures.length > 3 ? `…等 ${failures.length} 项` : '')
-        toast.error(`${summary} / 失败：${detail}`)
+        ui.toast.error(`${summary} / 失败：${detail}`)
       } else if (imported > 0) {
-        toast.success(summary)
+        ui.toast.success(summary)
       } else {
-        toast.info(`${summary}（没有新技能可导入）`)
+        ui.toast.info(`${summary}（没有新技能可导入）`)
       }
     } finally {
       setImporting(null)
@@ -504,7 +503,7 @@ function McpTab() {
 
   const openServer = (name: string) => {
     const def = servers.find((server) => server.name === name)
-    if (!def) { toast.error(`服务器不存在: ${name}`); return }
+    if (!def) { ui.toast.error(`服务器不存在: ${name}`); return }
     setDraft(mcpToDraft(def))
   }
   const newServer = () => setDraft(emptyMcpDraft())
@@ -512,9 +511,9 @@ function McpTab() {
   const save = async () => {
     if (!draft || busy) return
     const name = draft.name.trim()
-    if (!name) { toast.error('服务器名不能为空'); return }
-    if (draft.type === 'stdio' && !draft.command.trim()) { toast.error('stdio 类型必须填写 command'); return }
-    if (draft.type !== 'stdio' && !draft.url.trim()) { toast.error(`${draft.type} 类型必须填写 url`); return }
+    if (!name) { ui.toast.error('服务器名不能为空'); return }
+    if (draft.type === 'stdio' && !draft.command.trim()) { ui.toast.error('stdio 类型必须填写 command'); return }
+    if (draft.type !== 'stdio' && !draft.url.trim()) { ui.toast.error(`${draft.type} 类型必须填写 url`); return }
     setBusy(true)
     try {
       const transport = draftToTransport(draft)
@@ -524,23 +523,23 @@ function McpTab() {
       )
       await refreshAll()
       setDraft(mcpToDraft(meta))
-      toast.success(`已保存「${meta.name}」`)
+      ui.toast.success(`已保存「${meta.name}」`)
     } catch (e) {
-      toast.error('保存失败: ' + errText(e))
+      ui.toast.error('保存失败: ' + errText(e))
     } finally {
       setBusy(false)
     }
   }
 
   const remove = async (name: string) => {
-    if (!await confirmDialog({ title: `删除 MCP 服务器「${name}」？`, body: '共享目录中的定义文件会被删除；已安装到各 CLI 配置的键不受影响，可稍后卸载。', danger: true, confirmText: '删除' })) return
+    if (!await ui.confirm({ title: `删除 MCP 服务器「${name}」？`, body: '共享目录中的定义文件会被删除；已安装到各 CLI 配置的键不受影响，可稍后卸载。', danger: true, confirmText: '删除' })) return
     try {
       await bridge.mcp.delete(name)
       if (draft?.originName === name) setDraft(null)
       await refreshAll()
-      toast.success(`已删除「${name}」`)
+      ui.toast.success(`已删除「${name}」`)
     } catch (e) {
-      toast.error('删除失败: ' + errText(e))
+      ui.toast.error('删除失败: ' + errText(e))
     }
   }
 
@@ -552,11 +551,11 @@ function McpTab() {
       if (state === 'in-sync') await bridge.mcp.uninstall(name, targetId)
       else {
         const result = await bridge.mcp.install(name, targetId)
-        if (result.ok === false) toast.info(result.error ?? '该目标不支持此服务器类型，已跳过')
+        if (result.ok === false) ui.toast.info(result.error ?? '该目标不支持此服务器类型，已跳过')
       }
       await loadTargets()
     } catch (e) {
-      toast.error('安装失败: ' + errText(e))
+      ui.toast.error('安装失败: ' + errText(e))
     } finally {
       setBusy(false)
     }
@@ -765,10 +764,10 @@ function HooksTab() {
   const openHook = async (name: string) => {
     try {
       const detail = await bridge.hooks.get(name)
-      if (!detail) { toast.error(`Hook 不存在: ${name}`); return }
+      if (!detail) { ui.toast.error(`Hook 不存在: ${name}`); return }
       setDraft(hookToDraft(detail))
     } catch (e) {
-      toast.error('读取 Hook 失败: ' + errText(e))
+      ui.toast.error('读取 Hook 失败: ' + errText(e))
     }
   }
   const newHook = () => setDraft(emptyHookDraft())
@@ -776,7 +775,7 @@ function HooksTab() {
   const save = async () => {
     if (!draft || busy) return
     const name = draft.name.trim()
-    if (!name) { toast.error('Hook 名不能为空'); return }
+    if (!name) { ui.toast.error('Hook 名不能为空'); return }
     setBusy(true)
     try {
       const meta = await bridge.hooks.save(name, {
@@ -787,23 +786,23 @@ function HooksTab() {
       })
       await refreshAll()
       setDraft({ ...draft, name: meta.name, originName: meta.name })
-      toast.success(`已保存「${meta.name}」`)
+      ui.toast.success(`已保存「${meta.name}」`)
     } catch (e) {
-      toast.error('保存失败: ' + errText(e))
+      ui.toast.error('保存失败: ' + errText(e))
     } finally {
       setBusy(false)
     }
   }
 
   const remove = async (name: string) => {
-    if (!await confirmDialog({ title: `删除 Hook「${name}」？`, body: '共享目录中的 hook 目录会被删除；已安装到各 CLI 配置的事件组不受影响，可稍后卸载。', danger: true, confirmText: '删除' })) return
+    if (!await ui.confirm({ title: `删除 Hook「${name}」？`, body: '共享目录中的 hook 目录会被删除；已安装到各 CLI 配置的事件组不受影响，可稍后卸载。', danger: true, confirmText: '删除' })) return
     try {
       await bridge.hooks.delete(name)
       if (draft?.originName === name) setDraft(null)
       await refreshAll()
-      toast.success(`已删除「${name}」`)
+      ui.toast.success(`已删除「${name}」`)
     } catch (e) {
-      toast.error('删除失败: ' + errText(e))
+      ui.toast.error('删除失败: ' + errText(e))
     }
   }
 
@@ -816,7 +815,7 @@ function HooksTab() {
       else await bridge.hooks.install(name, targetId)
       await loadTargets()
     } catch (e) {
-      toast.error('安装失败: ' + errText(e))
+      ui.toast.error('安装失败: ' + errText(e))
     } finally {
       setBusy(false)
     }
@@ -964,7 +963,7 @@ function PluginsTab() {
       const data = await bridge.plugins.inventory()
       setItems(data.items)
     } catch (e) {
-      toast.error('读取插件清单失败: ' + errText(e))
+      ui.toast.error('读取插件清单失败: ' + errText(e))
     } finally {
       setLoading(false)
     }
@@ -988,9 +987,9 @@ function PluginsTab() {
     try {
       await bridge.plugins.setEnabled({ cli: 'claude', name: item.name, marketplace: item.marketplace, enabled: !item.enabled })
       await load()
-      toast.success(`${item.enabled ? '已停用' : '已启用'}「${item.name}」`)
+      ui.toast.success(`${item.enabled ? '已停用' : '已启用'}「${item.name}」`)
     } catch (e) {
-      toast.error('切换失败: ' + errText(e))
+      ui.toast.error('切换失败: ' + errText(e))
     } finally {
       setBusy(false)
     }
@@ -1004,15 +1003,15 @@ function PluginsTab() {
     try {
       const result = await bridge.plugins.install({ cli: 'claude', spec })
       if (!result.ok) {
-        toast.error(`安装失败: ${result.output || '未知错误'}`)
+        ui.toast.error(`安装失败: ${result.output || '未知错误'}`)
         return
       }
       setInstallSpec('')
       await load()
       await loadMarketplaceNames()
-      toast.success(`已安装「${spec}」`)
+      ui.toast.success(`已安装「${spec}」`)
     } catch (e) {
-      toast.error('安装失败: ' + errText(e))
+      ui.toast.error('安装失败: ' + errText(e))
     } finally {
       setBusy(false)
     }
@@ -1022,7 +1021,7 @@ function PluginsTab() {
   const uninstall = async (item: PluginInventoryItem) => {
     if (item.cli !== 'claude' || !item.marketplace || busy) return
     const spec = `${item.name}@${item.marketplace}`
-    if (!await confirmDialog({
+    if (!await ui.confirm({
       title: `卸载插件「${spec}」？`,
       body: '将通过 claude 官方 CLI 卸载该插件，其本地缓存与配置会被移除；重启会话后生效。',
       danger: true,
@@ -1032,13 +1031,13 @@ function PluginsTab() {
     try {
       const result = await bridge.plugins.uninstall({ cli: 'claude', spec })
       if (!result.ok) {
-        toast.error(`卸载失败: ${result.output || '未知错误'}`)
+        ui.toast.error(`卸载失败: ${result.output || '未知错误'}`)
         return
       }
       await load()
-      toast.success(`已卸载「${spec}」`)
+      ui.toast.success(`已卸载「${spec}」`)
     } catch (e) {
-      toast.error('卸载失败: ' + errText(e))
+      ui.toast.error('卸载失败: ' + errText(e))
     } finally {
       setBusy(false)
     }
@@ -1048,7 +1047,7 @@ function PluginsTab() {
     try {
       await bridge.plugins.openDir(cli)
     } catch (e) {
-      toast.error('打开目录失败: ' + errText(e))
+      ui.toast.error('打开目录失败: ' + errText(e))
     }
   }
 
@@ -1259,13 +1258,13 @@ function MarketplacePluginPanel({ marketplaceName, plugins, loading, error, canI
     try {
       const result = await bridge.plugins.install({ cli: 'claude', spec })
       if (!result.ok) {
-        toast.error(`安装「${spec}」失败: ${result.output || '未知错误'}`)
+        ui.toast.error(`安装「${spec}」失败: ${result.output || '未知错误'}`)
         return
       }
       onInstalled?.(plugin.name)
-      toast.success(`已安装「${spec}」`)
+      ui.toast.success(`已安装「${spec}」`)
     } catch (e) {
-      toast.error(`安装「${spec}」失败: ${errText(e)}`)
+      ui.toast.error(`安装「${spec}」失败: ${errText(e)}`)
     } finally {
       setInstalling(null)
     }
@@ -1380,7 +1379,7 @@ function SourceManager() {
       setEntries(catalog.entries)
       setSources(list.sources)
     } catch (e) {
-      toast.error('读取扩展源失败: ' + errText(e))
+      ui.toast.error('读取扩展源失败: ' + errText(e))
     } finally {
       setLoading(false)
     }
@@ -1405,9 +1404,9 @@ function SourceManager() {
       const meta = await bridge.sources.add(trimmed, name)
       await load()
       if (!name) setCustomRef('')
-      toast.success(`已添加扩展源「${meta.name}」`)
+      ui.toast.success(`已添加扩展源「${meta.name}」`)
     } catch (e) {
-      toast.error('添加失败: ' + errText(e))
+      ui.toast.error('添加失败: ' + errText(e))
     } finally {
       setBusy(false)
     }
@@ -1438,9 +1437,9 @@ function SourceManager() {
       await load()
       const skills = result.assets.filter((asset) => asset.kind === 'skill').length
       const markets = result.assets.filter((asset) => asset.kind === 'marketplace').length
-      toast.success(`发现 ${skills} 技能 / ${markets} 市场`)
+      ui.toast.success(`发现 ${skills} 技能 / ${markets} 市场`)
     } catch (e) {
-      toast.error('安装失败: ' + errText(e))
+      ui.toast.error('安装失败: ' + errText(e))
     } finally {
       setBusy(false)
     }
@@ -1465,7 +1464,7 @@ function SourceManager() {
       const data = await bridge.sources.browse(id)
       setAssets((current) => ({ ...current, [id]: data.assets }))
     } catch (e) {
-      toast.error('扫描失败: ' + errText(e))
+      ui.toast.error('扫描失败: ' + errText(e))
       setBrowsingId(null)
     }
   }
@@ -1477,16 +1476,16 @@ function SourceManager() {
       await bridge.sources.sync(id)
       await load()
       if (browsingId === id) await refreshBrowse(id)
-      toast.success('已同步')
+      ui.toast.success('已同步')
     } catch (e) {
-      toast.error('同步失败: ' + errText(e))
+      ui.toast.error('同步失败: ' + errText(e))
     } finally {
       setBusy(false)
     }
   }
 
   const removeSource = async (source: ExtSourceMeta) => {
-    if (!await confirmDialog({
+    if (!await ui.confirm({
       title: `移除扩展源「${source.name}」？`,
       body: source.kind === 'git' ? '注册表项与已 clone 的仓库目录会被删除。' : '只移除注册表项，本地目录内容不受影响。',
       danger: true,
@@ -1496,9 +1495,9 @@ function SourceManager() {
       await bridge.sources.remove(source.id)
       if (browsingId === source.id) setBrowsingId(null)
       await load()
-      toast.success(`已移除「${source.name}」`)
+      ui.toast.success(`已移除「${source.name}」`)
     } catch (e) {
-      toast.error('移除失败: ' + errText(e))
+      ui.toast.error('移除失败: ' + errText(e))
     }
   }
 
@@ -1506,9 +1505,9 @@ function SourceManager() {
     try {
       const result = await bridge.sources.importSkill(sourceId, asset.path)
       await refreshBrowse(sourceId)
-      toast.success(`已导入技能「${result.name}」`)
+      ui.toast.success(`已导入技能「${result.name}」`)
     } catch (e) {
-      toast.error('导入失败: ' + errText(e))
+      ui.toast.error('导入失败: ' + errText(e))
     }
   }
 
@@ -1533,11 +1532,11 @@ function SourceManager() {
       const summary = `导入 ${imported} / 跳过 ${skipped}`
       if (failures.length > 0) {
         const detail = failures.slice(0, 3).join('；') + (failures.length > 3 ? `…等 ${failures.length} 项` : '')
-        toast.error(`${summary} / 失败：${detail}`)
+        ui.toast.error(`${summary} / 失败：${detail}`)
       } else if (imported > 0) {
-        toast.success(summary)
+        ui.toast.success(summary)
       } else {
-        toast.info(`${summary}（没有新技能可导入）`)
+        ui.toast.info(`${summary}（没有新技能可导入）`)
       }
     } finally {
       setImportingAll(false)
@@ -1559,12 +1558,12 @@ function SourceManager() {
       const result = await bridge.marketplaces.register(source.id, asset.path)
       await loadMarketplaceStatus()
       const count = result.pluginCount || asset.pluginCount || 0
-      if (result.claudeName) toast.success(`Claude 市场「${result.claudeName}」已注册${count ? `（${count} 个插件）` : ''}`)
-      else toast.error(`Claude 注册失败: ${result.claudeError ?? '未知错误'}`)
-      if (result.zcodeId) toast.success(`ZCode 市场「${result.zcodeId}」已注册`)
-      else toast.error(`ZCode 注册失败: ${result.zcodeError ?? '未知错误'}`)
+      if (result.claudeName) ui.toast.success(`Claude 市场「${result.claudeName}」已注册${count ? `（${count} 个插件）` : ''}`)
+      else ui.toast.error(`Claude 注册失败: ${result.claudeError ?? '未知错误'}`)
+      if (result.zcodeId) ui.toast.success(`ZCode 市场「${result.zcodeId}」已注册`)
+      else ui.toast.error(`ZCode 注册失败: ${result.zcodeError ?? '未知错误'}`)
     } catch (e) {
-      toast.error('注册市场失败: ' + errText(e))
+      ui.toast.error('注册市场失败: ' + errText(e))
     } finally {
       setBusy(false)
     }

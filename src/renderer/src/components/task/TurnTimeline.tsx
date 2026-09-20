@@ -6,7 +6,7 @@ import { PARKED_QUEUED_LABEL } from '../../labels'
 import type { Task, TaskEvent } from '../../../../shared/types'
 import type { Turn } from '../../hooks/turnModel'
 import { classifyTool, navSummary } from '../../hooks/turnModel'
-import { openDockItem, type DockEditMetadata } from '../../ui/SideDock'
+import { ui, type DockEditMetadata } from '../../ui/interaction-center'
 
 const TimelineTaskId = createContext('')
 
@@ -15,10 +15,10 @@ function EditBadge({ edit, seq }: { edit: DockEditMetadata; seq: number }) {
   if (!edit || typeof edit.file !== 'string' || !edit.file) return null
   const name = edit.file.split(/[\\/]/).pop() || edit.file
   const dockId = `file:${taskId}:${seq}:${edit.file}`
-  // 二段式：先以工具入参快照立即开页（流式即可点），git 权威 diff 回来后同 id 补写——
-  // 同 id 重复 open 是 SideDock 约定的"更新快照并激活"；clean/失败回退快照并留来源说明
+  // 二段式：先以工具入参快照立即开页（流式即可点），git 权威 diff 回来后凭打开请求标识回写——
+  // token 只认这一次打开：页签被关掉（或另开一次）后旧结果直接作废，绝不重开分页
   const open = () => {
-    openDockItem({ id: dockId, kind: 'file', title: name, payload: { ...edit, taskId } })
+    const handle = ui.dock.open({ id: dockId, kind: 'file', title: name, payload: { ...edit, taskId } })
     void bridge.tasks.fileDiff(taskId, edit.file).then((r) => {
       if (!r) return
       const patch = r.ok
@@ -26,7 +26,7 @@ function EditBadge({ edit, seq }: { edit: DockEditMetadata; seq: number }) {
           ? { diff: r.diff, additions: r.additions ?? edit.additions, deletions: r.deletions ?? edit.deletions, binary: r.binary, diffNote: r.binary ? '二进制文件，仅统计' : 'git 未提交 diff（工作区 + 暂存）' }
           : { diffNote: `git 显示无未提交改动（${r.note ?? 'clean'}）——回退为工具入参快照` }
         : { diffNote: `git diff 不可用（${r.error ?? r.code ?? '失败'}）——回退为工具入参快照` }
-      openDockItem({ id: dockId, kind: 'file', title: name, payload: { ...edit, taskId, ...patch } })
+      ui.dock.update(handle, { payload: patch })
     }).catch(() => {})
   }
   return <button type="button" className="timeline-edit-badge" title={edit.file} aria-label={`查看 ${edit.file}，新增 ${edit.additions} 行，删除 ${edit.deletions} 行`} onClick={open}><span className="timeline-edit-name">{name}</span><span className="edit-added">+{edit.additions}</span><span className="edit-deleted">-{edit.deletions}</span></button>

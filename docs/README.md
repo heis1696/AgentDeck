@@ -15,7 +15,8 @@
 | [SIDECAR.md](SIDECAR.md) | Business Brain sidecar：独立 Node 进程、loopback RPC 契约与生命周期 | A |
 | [SKILLS-SHARED-DIR.md](SKILLS-SHARED-DIR.md) | 共享目录（`~/.agentdeck`）与技能库设计：SKILL.md 模型、安装目标与同步状态 | A |
 | [EXTENSIONS-HUB.md](EXTENSIONS-HUB.md) | 扩展模块设计：Skills/MCP/Hooks/插件四类资产 + 扩展源仓库 + 插件市场闭环 | A |
-| [DESIGN-SYSTEM-V2.md](DESIGN-SYSTEM-V2.md) | 现行视觉规范：令牌系统、组件规格、交互态总规范（§5 重组方案已执行完） | A |
+| [UI-UNIFICATION.md](UI-UNIFICATION.md) | 统一视觉与交互中心：当前设计决策、模块边界及验收记录 | A |
+| [DESIGN-SYSTEM-V2.md](DESIGN-SYSTEM-V2.md) | v2 视觉规范参考；本轮统一调整以 UI-UNIFICATION.md 为准 | A · 已注明后续替代项 |
 | [HOT-UPDATE-IMPL-DESIGN.md](HOT-UPDATE-IMPL-DESIGN.md) | 免安装热更机制设计基准：三层（渲染/载荷/壳）指针模型、验签、自愈回退 | A · 0.19–0.21 已全量落地 |
 | [HOT-FEED-DEPLOY.md](HOT-FEED-DEPLOY.md) | 热更 feed 运维手册：nginx 部署、两条发版命令、回滚、域名迁移 | A · 现行操作手册 |
 | `graph/`（INVENTORY.md · deps.json · README） | 领域图谱：IPC 面 141 调用点/20 域清单、模块依赖图及读图指南 | 随并行工作合入本目录后即为现行参考 |

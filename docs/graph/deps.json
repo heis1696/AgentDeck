@@ -4725,6 +4725,13 @@
       "valid": true
     },
     {
+      "source": "src/renderer/out/renderer/assets/index-DHUaLCg5.js",
+      "dependencies": [],
+      "dependents": [],
+      "orphan": true,
+      "valid": true
+    },
+    {
       "source": "src/renderer/src/App.tsx",
       "dependencies": [
         {
@@ -4915,6 +4922,40 @@
           "valid": true
         },
         {
+          "module": "./hooks/useInteraction",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/hooks/useInteraction.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "./hooks/useInteractionLayer",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/hooks/useInteractionLayer.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "./labels",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -5000,6 +5041,23 @@
           "valid": true
         },
         {
+          "module": "./ui/interaction-center",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "./ui/Palette",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -5009,23 +5067,6 @@
             "import"
           ],
           "resolved": "src/renderer/src/ui/Palette.tsx",
-          "coreModule": false,
-          "followable": true,
-          "couldNotResolve": false,
-          "matchesDoNotFollow": false,
-          "circular": false,
-          "valid": true
-        },
-        {
-          "module": "./ui/SideDock",
-          "moduleSystem": "es6",
-          "dynamic": false,
-          "exoticallyRequired": false,
-          "dependencyTypes": [
-            "local",
-            "import"
-          ],
-          "resolved": "src/renderer/src/ui/SideDock.tsx",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -5145,6 +5186,40 @@
           "valid": true
         },
         {
+          "module": "../hooks/useInteractionLayer",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/hooks/useInteractionLayer.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "../ui/interaction-center",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "../ui/Menu",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -5160,23 +5235,6 @@
           "matchesDoNotFollow": false,
           "circular": false,
           "valid": true
-        },
-        {
-          "module": "../ui/Toasts",
-          "moduleSystem": "es6",
-          "dynamic": false,
-          "exoticallyRequired": false,
-          "dependencyTypes": [
-            "local",
-            "import"
-          ],
-          "resolved": "src/renderer/src/ui/Toasts.tsx",
-          "coreModule": false,
-          "followable": true,
-          "couldNotResolve": false,
-          "matchesDoNotFollow": false,
-          "circular": false,
-          "valid": true
         }
       ],
       "dependents": [
@@ -5186,20 +5244,72 @@
       "valid": true
     },
     {
-      "source": "src/renderer/src/ui/Menu.tsx",
-      "dependencies": [],
+      "source": "src/renderer/src/hooks/useInteractionLayer.ts",
+      "dependencies": [
+        {
+          "module": "../ui/interaction-layer",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/interaction-layer.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
       "dependents": [
+        "src/renderer/src/App.tsx",
         "src/renderer/src/components/AgentsView.tsx",
-        "src/renderer/src/components/SettingsView.tsx",
+        "src/renderer/src/ui/Menu.tsx",
+        "src/renderer/src/components/AutomationView.tsx",
+        "src/renderer/src/components/BoardView.tsx",
+        "src/renderer/src/components/TaskDetail.tsx",
+        "src/renderer/src/ui/FloatWindow.tsx",
         "src/renderer/src/components/goal/GoalCreateDialog.tsx",
-        "src/renderer/src/pet/PetSettingsPage.tsx"
+        "src/renderer/src/ui/Confirm.tsx",
+        "src/renderer/src/ui/Palette.tsx"
       ],
       "orphan": false,
       "valid": true
     },
     {
-      "source": "src/renderer/src/ui/Toasts.tsx",
+      "source": "src/renderer/src/ui/interaction-layer.ts",
       "dependencies": [],
+      "dependents": [
+        "src/renderer/src/hooks/useInteractionLayer.ts",
+        "src/renderer/src/ui/interaction-center.ts"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
+      "source": "src/renderer/src/ui/interaction-center.ts",
+      "dependencies": [
+        {
+          "module": "./interaction-layer",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/interaction-layer.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
       "dependents": [
         "src/renderer/src/App.tsx",
         "src/renderer/src/components/AgentsView.tsx",
@@ -5211,10 +5321,44 @@
         "src/renderer/src/components/SettingsView.tsx",
         "src/renderer/src/components/UpdatePanel.tsx",
         "src/renderer/src/components/TaskDetail.tsx",
+        "src/renderer/src/ui/SideDock.tsx",
+        "src/renderer/src/components/task/TurnTimeline.tsx",
+        "src/renderer/src/hooks/useInteraction.ts",
         "src/renderer/src/components/goal/GoalPanel.tsx",
         "src/renderer/src/components/goal/GoalCreateDialog.tsx",
         "src/renderer/src/components/meeting/MeetingPanel.tsx",
         "src/renderer/src/components/WorkspaceView.tsx",
+        "src/renderer/src/ui/Toasts.tsx",
+        "src/renderer/src/ui/Confirm.tsx"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
+      "source": "src/renderer/src/ui/Menu.tsx",
+      "dependencies": [
+        {
+          "module": "../hooks/useInteractionLayer",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/hooks/useInteractionLayer.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
+      "dependents": [
+        "src/renderer/src/components/AgentsView.tsx",
+        "src/renderer/src/components/SettingsView.tsx",
+        "src/renderer/src/components/goal/GoalCreateDialog.tsx",
         "src/renderer/src/pet/PetSettingsPage.tsx"
       ],
       "orphan": false,
@@ -5275,7 +5419,7 @@
           "valid": true
         },
         {
-          "module": "../ui/Toasts",
+          "module": "../hooks/useInteractionLayer",
           "moduleSystem": "es6",
           "dynamic": false,
           "exoticallyRequired": false,
@@ -5283,7 +5427,24 @@
             "local",
             "import"
           ],
-          "resolved": "src/renderer/src/ui/Toasts.tsx",
+          "resolved": "src/renderer/src/hooks/useInteractionLayer.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "../ui/interaction-center",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -5311,6 +5472,23 @@
             "import"
           ],
           "resolved": "src/renderer/src/api.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "../hooks/useInteractionLayer",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/hooks/useInteractionLayer.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -5370,6 +5548,23 @@
           "valid": true
         },
         {
+          "module": "../ui/interaction-center",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "../ui/IssueIdChip",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -5379,23 +5574,6 @@
             "import"
           ],
           "resolved": "src/renderer/src/ui/IssueIdChip.tsx",
-          "coreModule": false,
-          "followable": true,
-          "couldNotResolve": false,
-          "matchesDoNotFollow": false,
-          "circular": false,
-          "valid": true
-        },
-        {
-          "module": "../ui/Toasts",
-          "moduleSystem": "es6",
-          "dynamic": false,
-          "exoticallyRequired": false,
-          "dependencyTypes": [
-            "local",
-            "import"
-          ],
-          "resolved": "src/renderer/src/ui/Toasts.tsx",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -5470,7 +5648,7 @@
       "source": "src/renderer/src/ui/IssueIdChip.tsx",
       "dependencies": [
         {
-          "module": "./Toasts",
+          "module": "./interaction-center",
           "moduleSystem": "es6",
           "dynamic": false,
           "exoticallyRequired": false,
@@ -5478,7 +5656,7 @@
             "local",
             "import"
           ],
-          "resolved": "src/renderer/src/ui/Toasts.tsx",
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -5515,23 +5693,6 @@
           "valid": true
         },
         {
-          "module": "../ui/Confirm",
-          "moduleSystem": "es6",
-          "dynamic": false,
-          "exoticallyRequired": false,
-          "dependencyTypes": [
-            "local",
-            "import"
-          ],
-          "resolved": "src/renderer/src/ui/Confirm.tsx",
-          "coreModule": false,
-          "followable": true,
-          "couldNotResolve": false,
-          "matchesDoNotFollow": false,
-          "circular": false,
-          "valid": true
-        },
-        {
           "module": "../ui/EmptyState",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -5549,7 +5710,7 @@
           "valid": true
         },
         {
-          "module": "../ui/Toasts",
+          "module": "../ui/interaction-center",
           "moduleSystem": "es6",
           "dynamic": false,
           "exoticallyRequired": false,
@@ -5557,7 +5718,7 @@
             "local",
             "import"
           ],
-          "resolved": "src/renderer/src/ui/Toasts.tsx",
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -5590,19 +5751,6 @@
       "valid": true
     },
     {
-      "source": "src/renderer/src/ui/Confirm.tsx",
-      "dependencies": [],
-      "dependents": [
-        "src/renderer/src/App.tsx",
-        "src/renderer/src/components/ExtensionsView.tsx",
-        "src/renderer/src/components/SkillsView.tsx",
-        "src/renderer/src/components/TaskDetail.tsx",
-        "src/renderer/src/components/goal/GoalPanel.tsx"
-      ],
-      "orphan": false,
-      "valid": true
-    },
-    {
       "source": "src/renderer/src/components/SkillsView.tsx",
       "dependencies": [
         {
@@ -5615,23 +5763,6 @@
             "import"
           ],
           "resolved": "src/renderer/src/api.ts",
-          "coreModule": false,
-          "followable": true,
-          "couldNotResolve": false,
-          "matchesDoNotFollow": false,
-          "circular": false,
-          "valid": true
-        },
-        {
-          "module": "../ui/Confirm",
-          "moduleSystem": "es6",
-          "dynamic": false,
-          "exoticallyRequired": false,
-          "dependencyTypes": [
-            "local",
-            "import"
-          ],
-          "resolved": "src/renderer/src/ui/Confirm.tsx",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -5657,7 +5788,7 @@
           "valid": true
         },
         {
-          "module": "../ui/Toasts",
+          "module": "../ui/interaction-center",
           "moduleSystem": "es6",
           "dynamic": false,
           "exoticallyRequired": false,
@@ -5665,7 +5796,7 @@
             "local",
             "import"
           ],
-          "resolved": "src/renderer/src/ui/Toasts.tsx",
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -5745,6 +5876,23 @@
           "valid": true
         },
         {
+          "module": "../ui/interaction-center",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "../ui/Menu",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -5754,23 +5902,6 @@
             "import"
           ],
           "resolved": "src/renderer/src/ui/Menu.tsx",
-          "coreModule": false,
-          "followable": true,
-          "couldNotResolve": false,
-          "matchesDoNotFollow": false,
-          "circular": false,
-          "valid": true
-        },
-        {
-          "module": "../ui/Toasts",
-          "moduleSystem": "es6",
-          "dynamic": false,
-          "exoticallyRequired": false,
-          "dependencyTypes": [
-            "local",
-            "import"
-          ],
-          "resolved": "src/renderer/src/ui/Toasts.tsx",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -5884,7 +6015,7 @@
           "valid": true
         },
         {
-          "module": "../ui/Toasts",
+          "module": "../ui/interaction-center",
           "moduleSystem": "es6",
           "dynamic": false,
           "exoticallyRequired": false,
@@ -5892,7 +6023,7 @@
             "local",
             "import"
           ],
-          "resolved": "src/renderer/src/ui/Toasts.tsx",
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -5946,6 +6077,23 @@
             "import"
           ],
           "resolved": "src/renderer/src/hooks/turnModel.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "../hooks/useInteractionLayer",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/hooks/useInteractionLayer.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -6039,7 +6187,7 @@
           "valid": true
         },
         {
-          "module": "../ui/Confirm",
+          "module": "../ui/interaction-center",
           "moduleSystem": "es6",
           "dynamic": false,
           "exoticallyRequired": false,
@@ -6047,7 +6195,7 @@
             "local",
             "import"
           ],
-          "resolved": "src/renderer/src/ui/Confirm.tsx",
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -6082,23 +6230,6 @@
             "import"
           ],
           "resolved": "src/renderer/src/ui/SideDock.tsx",
-          "coreModule": false,
-          "followable": true,
-          "couldNotResolve": false,
-          "matchesDoNotFollow": false,
-          "circular": false,
-          "valid": true
-        },
-        {
-          "module": "../ui/Toasts",
-          "moduleSystem": "es6",
-          "dynamic": false,
-          "exoticallyRequired": false,
-          "dependencyTypes": [
-            "local",
-            "import"
-          ],
-          "resolved": "src/renderer/src/ui/Toasts.tsx",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -6384,30 +6515,24 @@
           "followable": true,
           "couldNotResolve": false,
           "matchesDoNotFollow": false,
-          "circular": true,
-          "cycle": [
-            {
-              "name": "src/renderer/src/components/task/WorkerPane.tsx",
-              "dependencyTypes": [
-                "local",
-                "import"
-              ]
-            },
-            {
-              "name": "src/renderer/src/components/task/TurnTimeline.tsx",
-              "dependencyTypes": [
-                "local",
-                "import"
-              ]
-            },
-            {
-              "name": "src/renderer/src/ui/SideDock.tsx",
-              "dependencyTypes": [
-                "local",
-                "import"
-              ]
-            }
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "../hooks/useInteraction",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
           ],
+          "resolved": "src/renderer/src/hooks/useInteraction.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
           "valid": true
         },
         {
@@ -6426,12 +6551,27 @@
           "matchesDoNotFollow": false,
           "circular": false,
           "valid": true
+        },
+        {
+          "module": "./interaction-center",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
         }
       ],
       "dependents": [
-        "src/renderer/src/App.tsx",
-        "src/renderer/src/components/TaskDetail.tsx",
-        "src/renderer/src/components/task/TurnTimeline.tsx"
+        "src/renderer/src/components/TaskDetail.tsx"
       ],
       "orphan": false,
       "valid": true
@@ -6521,30 +6661,7 @@
           "followable": true,
           "couldNotResolve": false,
           "matchesDoNotFollow": false,
-          "circular": true,
-          "cycle": [
-            {
-              "name": "src/renderer/src/components/task/TurnTimeline.tsx",
-              "dependencyTypes": [
-                "local",
-                "import"
-              ]
-            },
-            {
-              "name": "src/renderer/src/ui/SideDock.tsx",
-              "dependencyTypes": [
-                "local",
-                "import"
-              ]
-            },
-            {
-              "name": "src/renderer/src/components/task/WorkerPane.tsx",
-              "dependencyTypes": [
-                "local",
-                "import"
-              ]
-            }
-          ],
+          "circular": false,
           "valid": true
         }
       ],
@@ -6609,7 +6726,7 @@
           "valid": true
         },
         {
-          "module": "../../ui/SideDock",
+          "module": "../../ui/interaction-center",
           "moduleSystem": "es6",
           "dynamic": false,
           "exoticallyRequired": false,
@@ -6617,35 +6734,12 @@
             "local",
             "import"
           ],
-          "resolved": "src/renderer/src/ui/SideDock.tsx",
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
           "matchesDoNotFollow": false,
-          "circular": true,
-          "cycle": [
-            {
-              "name": "src/renderer/src/ui/SideDock.tsx",
-              "dependencyTypes": [
-                "local",
-                "import"
-              ]
-            },
-            {
-              "name": "src/renderer/src/components/task/WorkerPane.tsx",
-              "dependencyTypes": [
-                "local",
-                "import"
-              ]
-            },
-            {
-              "name": "src/renderer/src/components/task/TurnTimeline.tsx",
-              "dependencyTypes": [
-                "local",
-                "import"
-              ]
-            }
-          ],
+          "circular": false,
           "valid": true
         },
         {
@@ -6680,6 +6774,37 @@
         "src/renderer/src/components/TaskDetail.tsx",
         "src/renderer/src/components/task/TurnTimeline.tsx",
         "src/renderer/src/components/task/ActivityTimeline.tsx"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
+      "source": "src/renderer/src/hooks/useInteraction.ts",
+      "dependencies": [
+        {
+          "module": "../ui/interaction-center",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
+      "dependents": [
+        "src/renderer/src/App.tsx",
+        "src/renderer/src/ui/SideDock.tsx",
+        "src/renderer/src/components/WorkspaceView.tsx",
+        "src/renderer/src/ui/Toasts.tsx",
+        "src/renderer/src/ui/Confirm.tsx"
       ],
       "orphan": false,
       "valid": true
@@ -6731,23 +6856,6 @@
           "valid": true
         },
         {
-          "module": "../../ui/Confirm",
-          "moduleSystem": "es6",
-          "dynamic": false,
-          "exoticallyRequired": false,
-          "dependencyTypes": [
-            "local",
-            "import"
-          ],
-          "resolved": "src/renderer/src/ui/Confirm.tsx",
-          "coreModule": false,
-          "followable": true,
-          "couldNotResolve": false,
-          "matchesDoNotFollow": false,
-          "circular": false,
-          "valid": true
-        },
-        {
           "module": "../../ui/FloatWindow",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -6765,7 +6873,7 @@
           "valid": true
         },
         {
-          "module": "../../ui/Toasts",
+          "module": "../../ui/interaction-center",
           "moduleSystem": "es6",
           "dynamic": false,
           "exoticallyRequired": false,
@@ -6773,7 +6881,7 @@
             "local",
             "import"
           ],
-          "resolved": "src/renderer/src/ui/Toasts.tsx",
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -6807,7 +6915,25 @@
     },
     {
       "source": "src/renderer/src/ui/FloatWindow.tsx",
-      "dependencies": [],
+      "dependencies": [
+        {
+          "module": "../hooks/useInteractionLayer",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/hooks/useInteractionLayer.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
       "dependents": [
         "src/renderer/src/components/goal/GoalPanel.tsx",
         "src/renderer/src/components/meeting/MeetingPanel.tsx"
@@ -6836,6 +6962,40 @@
           "valid": true
         },
         {
+          "module": "../../hooks/useInteractionLayer",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/hooks/useInteractionLayer.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "../../ui/interaction-center",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "../../ui/Menu",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -6845,23 +7005,6 @@
             "import"
           ],
           "resolved": "src/renderer/src/ui/Menu.tsx",
-          "coreModule": false,
-          "followable": true,
-          "couldNotResolve": false,
-          "matchesDoNotFollow": false,
-          "circular": false,
-          "valid": true
-        },
-        {
-          "module": "../../ui/Toasts",
-          "moduleSystem": "es6",
-          "dynamic": false,
-          "exoticallyRequired": false,
-          "dependencyTypes": [
-            "local",
-            "import"
-          ],
-          "resolved": "src/renderer/src/ui/Toasts.tsx",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -6959,7 +7102,7 @@
           "valid": true
         },
         {
-          "module": "../../ui/Toasts",
+          "module": "../../ui/interaction-center",
           "moduleSystem": "es6",
           "dynamic": false,
           "exoticallyRequired": false,
@@ -6967,7 +7110,7 @@
             "local",
             "import"
           ],
-          "resolved": "src/renderer/src/ui/Toasts.tsx",
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -7189,7 +7332,7 @@
           "valid": true
         },
         {
-          "module": "../ui/Toasts",
+          "module": "../hooks/useInteraction",
           "moduleSystem": "es6",
           "dynamic": false,
           "exoticallyRequired": false,
@@ -7197,7 +7340,24 @@
             "local",
             "import"
           ],
-          "resolved": "src/renderer/src/ui/Toasts.tsx",
+          "resolved": "src/renderer/src/hooks/useInteraction.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "../ui/interaction-center",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -7320,6 +7480,51 @@
       ],
       "dependents": [
         "src/renderer/src/App.tsx"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
+      "source": "src/renderer/src/ui/Toasts.tsx",
+      "dependencies": [
+        {
+          "module": "../hooks/useInteraction",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/hooks/useInteraction.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "./interaction-center",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
+      "dependents": [
+        "src/renderer/src/App.tsx",
+        "src/renderer/src/pet/PetSettingsPage.tsx"
       ],
       "orphan": false,
       "valid": true
@@ -7454,8 +7659,87 @@
       "valid": true
     },
     {
+      "source": "src/renderer/src/ui/Confirm.tsx",
+      "dependencies": [
+        {
+          "module": "../hooks/useInteraction",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/hooks/useInteraction.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "../hooks/useInteractionLayer",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/hooks/useInteractionLayer.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "./interaction-center",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
+      "dependents": [
+        "src/renderer/src/App.tsx"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
       "source": "src/renderer/src/ui/Palette.tsx",
-      "dependencies": [],
+      "dependencies": [
+        {
+          "module": "../hooks/useInteractionLayer",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/hooks/useInteractionLayer.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
       "dependents": [
         "src/renderer/src/App.tsx"
       ],
@@ -7862,10 +8146,10 @@
     "warn": 0,
     "info": 0,
     "ignore": 0,
-    "totalCruised": 168,
-    "totalDependenciesCruised": 348,
+    "totalCruised": 173,
+    "totalDependenciesCruised": 365,
     "optionsUsed": {
-      "baseDir": "D:\\agentdeck\\.agentdeck-worktrees\\t_mu8bp1d0_4v1tjc_c12",
+      "baseDir": "D:\\agentdeck",
       "combinedDependencies": false,
       "detectJSDocImports": false,
       "detectProcessBuiltinModuleCalls": false,

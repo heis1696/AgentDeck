@@ -55,7 +55,7 @@ npx dependency-cruiser src --include-only "^src" --output-type json  --no-config
 以下事项因落在主检出**禁改 WIP 文件**里（本轮动了会冲突毁两边），只登记不动刀。WIP 合入后处理：
 
 1. **WIP 文件内的死符号**：`src/main/goal-controller.ts:44-48` 的 `computeGoalProgressKey` / `stableProgressKey` / `computeProgressKey`——三个都是 `progressKeyForOutput` 的历史迭代别名，全仓零引用（INVENTORY §4.A 高置信档）。注意 `progressKeyForOutput` 本身被 `smoke-goal-guards` 消费，**不可删**（§4.C）。其余 WIP 文件（delegate/runner/agents/agent-forge/meeting-controller/smoke-meeting-consult/prompts）合入后建议重跑一轮 INVENTORY 的符号扫描再定。
-2. **renderer 三角环解耦**（INVENTORY §2.6 环 2）：`src/renderer/src/ui/SideDock.tsx` → `src/renderer/src/components/task/WorkerPane.tsx` → `src/renderer/src/components/task/TurnTimeline.tsx` → `ui/SideDock.tsx` 是真值导入环（`SideDock.tsx:16`、`WorkerPane.tsx:15`、`TurnTimeline.tsx:9`），目前靠 ESM 提升成立，属重构风险点。建议：把 `TurnTimeline` 需要的 `openDockItem` 抽到独立模块（如 `src/renderer/src/ui/dock-bus.ts`），让 `TurnTimeline` 改从总线导入，环即断。
+2. **renderer 三角环已解耦（2026-09-20）**：`TurnTimeline` 已改依赖 `ui/interaction-center.ts`，不再反向导入 `SideDock`。UI 中心与 `interaction-layer` 共用类型明确的状态/命令接口；`npm run smoke:ui` 包含导入环检查及真实 React DOM 焦点回归。
 3. **45/46 文件数差异**：任务书口径「src/main 46 个顶层 .ts」，基线快照实为 **45 个**。差异来源即 WIP 的 `src/main/prompts/`——该目录合入后顶层计数会再次变化，届时以 `npm run graph:deps` 产物为准（另：`src/main/sidecar/` 下三个零引用垫片已在本轮删除，`src/main/sidecar/` 目录仅存 `protocol.ts`）。
 
 ## 维护约定

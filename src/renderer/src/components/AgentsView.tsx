@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { bridge, type AgentInfo as Agent, type AgentModelCatalog, type ApiPresetInfo as Preset, type AgentDraft, type ImproveOutcome, type EvaluateOutcome } from '../api'
 import { Users, KeyRound, Sparkles, X, RefreshCw, Network, Download, Upload } from 'lucide-react'
-import { toast } from '../ui/Toasts'
+import { useInteractionLayer } from '../hooks/useInteractionLayer'
+import { ui } from '../ui/interaction-center'
 import { Menu } from '../ui/Menu'
 import { BACKEND_IDS } from '../../../shared/types'
 import { isForgeAgent } from '../../../shared/forge'
@@ -41,6 +42,12 @@ export function AgentsView() {
   const [improveOutcome, setImproveOutcome] = useState<ImproveOutcome | null>(null)
   const [improvePicked, setImprovePicked] = useState<Record<string, boolean>>({})
 
+  // 统一浮层：四个页面内模态共用「最上层 Escape + Tab 焦点陷阱 + 关闭后焦点归还」
+  const presetLayerRef = useInteractionLayer<HTMLDivElement>({ open: editingPreset !== null, onClose: () => setEditingPreset(null), kind: 'modal', name: 'preset-editor', trap: true })
+  const draftLayerRef = useInteractionLayer<HTMLDivElement>({ open: draftOpen, onClose: () => { if (!drafting) setDraftOpen(false) }, kind: 'modal', name: 'agent-draft', trap: true })
+  const improveLayerRef = useInteractionLayer<HTMLDivElement>({ open: improveOpen, onClose: () => { if (!improving) setImproveOpen(false) }, kind: 'modal', name: 'agent-improve', trap: true })
+  const editingLayerRef = useInteractionLayer<HTMLDivElement>({ open: editing !== null, onClose: () => setEditing(null), kind: 'modal', name: 'agent-editor', trap: true })
+
   useEffect(() => {
     bridge.agents.list().then(setAgents)
     bridge.presets.list().then(setPresets)
@@ -62,7 +69,7 @@ export function AgentsView() {
     if (!editing) return
     setFetching(true)
     const source = editing.presetId ? bridge.presets.models(editing.presetId) : bridge.agents.models(editing.backend)
-    source.then((c) => { setCatalog(c); toast.success(`获取到 ${c.models.length} 个模型`) }).catch((e) => toast.error('获取模型失败: ' + (e instanceof Error ? e.message : String(e)))).finally(() => setFetching(false))
+    source.then((c) => { setCatalog(c); ui.toast.success(`获取到 ${c.models.length} 个模型`) }).catch((e) => ui.toast.error('获取模型失败: ' + (e instanceof Error ? e.message : String(e)))).finally(() => setFetching(false))
   }
 
   const saveAgents_ = async (list: Agent[]) => {
@@ -100,7 +107,7 @@ export function AgentsView() {
     try {
       const result = await bridge.agents.draft(draftText.trim(), answers)
       if (!result.ok) {
-        toast.error('生成失败：' + result.error)
+        ui.toast.error('生成失败：' + result.error)
         return
       }
       if (result.kind === 'clarify') {
@@ -115,7 +122,7 @@ export function AgentsView() {
       setEvaluation(null)
       setDraftStage('confirm')
     } catch (err) {
-      toast.error('生成失败：' + (err instanceof Error ? err.message : String(err)))
+      ui.toast.error('生成失败：' + (err instanceof Error ? err.message : String(err)))
     } finally {
       setDrafting(false)
     }
@@ -137,7 +144,7 @@ export function AgentsView() {
       subordinates: []
     })
     setDraftOpen(false)
-    toast.success('草稿已填入——请检查后保存')
+    ui.toast.success('草稿已填入——请检查后保存')
   }
   const openImprove = (a: Agent) => {
     setImproveTarget(a)
@@ -151,7 +158,7 @@ export function AgentsView() {
     try {
       const result = await bridge.agents.improve(improveTarget.id, improveText.trim())
       if (!result.ok) {
-        toast.error('改进失败：' + result.error)
+        ui.toast.error('改进失败：' + result.error)
         return
       }
       const d = result.outcome.draft
@@ -166,7 +173,7 @@ export function AgentsView() {
       setImprovePicked(changed)
       setImproveOutcome(result.outcome)
     } catch (err) {
-      toast.error('改进失败：' + (err instanceof Error ? err.message : String(err)))
+      ui.toast.error('改进失败：' + (err instanceof Error ? err.message : String(err)))
     } finally {
       setImproving(false)
     }
@@ -184,13 +191,13 @@ export function AgentsView() {
     if (improvePicked.model) patch.model = d.model ?? ''
     void saveAgents_(agents.map((a) => (a.id === improveTarget.id ? { ...a, ...patch } : a)))
     setImproveOpen(false)
-    toast.success(`已改进「${improveTarget.name}」并保存`)
+    ui.toast.success(`已改进「${improveTarget.name}」并保存`)
   }
   /** 导入 subagent .md：解析为草稿后走既有确认视图（backend 等仍人工配置） */
   const importMd = async () => {
     const result = await bridge.agents.importMd()
     if (!result.ok) {
-      if (result.error !== '已取消导入') toast.error('导入失败：' + result.error)
+      if (result.error !== '已取消导入') ui.toast.error('导入失败：' + result.error)
       return
     }
     setDraftResult(result.draft)
@@ -204,10 +211,10 @@ export function AgentsView() {
   const exportMd = async (a: Agent) => {
     const result = await bridge.agents.exportMd(a.id)
     if (!result.ok) {
-      if (result.error !== '已取消导出') toast.error('导出失败：' + result.error)
+      if (result.error !== '已取消导出') ui.toast.error('导出失败：' + result.error)
       return
     }
-    toast.success(`已导出：${result.path}`)
+    ui.toast.success(`已导出：${result.path}`)
   }
   /** 触发评测：锻造师构造 should/should-not 输入并判定归属，低命中时给修改建议 */
   const runEvaluate = async () => {
@@ -216,12 +223,12 @@ export function AgentsView() {
     try {
       const result = await bridge.agents.evaluate(draftResult)
       if (!result.ok) {
-        toast.error('评测失败：' + result.error)
+        ui.toast.error('评测失败：' + result.error)
         return
       }
       setEvaluation(result.outcome)
     } catch (err) {
-      toast.error('评测失败：' + (err instanceof Error ? err.message : String(err)))
+      ui.toast.error('评测失败：' + (err instanceof Error ? err.message : String(err)))
     } finally {
       setEvaluating(false)
     }
@@ -242,8 +249,8 @@ export function AgentsView() {
     savePresets_(presets.filter((p) => p.id !== id))
   }
   const testPreset = (p: Preset) => {
-    toast.info(`正在从 ${p.name} 拉取模型…`)
-    bridge.presets.models(p.id).then((c) => toast.success(`${p.name}：${c.models.length} 个模型（${c.models.slice(0, 3).join('、')}${c.models.length > 3 ? '…' : ''}）`)).catch((e) => toast.error('拉取失败: ' + (e instanceof Error ? e.message : String(e))))
+    ui.toast.info(`正在从 ${p.name} 拉取模型…`)
+    bridge.presets.models(p.id).then((c) => ui.toast.success(`${p.name}：${c.models.length} 个模型（${c.models.slice(0, 3).join('、')}${c.models.length > 3 ? '…' : ''}）`)).catch((e) => ui.toast.error('拉取失败: ' + (e instanceof Error ? e.message : String(e))))
   }
 
   /** 确认页将填入的字段数（名字恒填入）：用于页脚计数与"只填入名字"按钮文案，防误取消全部字段 */
@@ -363,7 +370,7 @@ export function AgentsView() {
   const dialogs = (
     <>
       {editingPreset && (
-        <div className="overlay" onClick={(e) => e.target === e.currentTarget && setEditingPreset(null)}>
+        <div className="overlay" ref={presetLayerRef} onClick={(e) => e.target === e.currentTarget && setEditingPreset(null)}>
           <div className="dialog">
             <h2>{presets.some((p) => p.id === editingPreset.id) ? '编辑 API 预设' : '新建 API 预设'}</h2>
             <label className="field"><span>名称 *</span><input value={editingPreset.name} onChange={(e) => setEditingPreset({ ...editingPreset, name: e.target.value })} placeholder="如：智谱官方 / 某中转站" autoFocus /></label>
@@ -397,7 +404,7 @@ export function AgentsView() {
       )}
 
       {draftOpen && (
-        <div className="overlay" onClick={(e) => { if (!drafting && e.target === e.currentTarget) setDraftOpen(false) }}>
+        <div className="overlay" ref={draftLayerRef} onClick={(e) => { if (!drafting && e.target === e.currentTarget) setDraftOpen(false) }}>
           <div className="dialog">
             {draftStage === 'input' && (
               <>
@@ -493,7 +500,7 @@ export function AgentsView() {
       )}
 
       {improveOpen && improveTarget && (
-        <div className="overlay" onClick={(e) => { if (!improving && e.target === e.currentTarget) setImproveOpen(false) }}>
+        <div className="overlay" ref={improveLayerRef} onClick={(e) => { if (!improving && e.target === e.currentTarget) setImproveOpen(false) }}>
           <div className="dialog">
             {!improveOutcome ? (
               <>
@@ -547,7 +554,7 @@ export function AgentsView() {
       )}
 
       {editing && (
-        <div className="overlay" onClick={(e) => e.target === e.currentTarget && setEditing(null)}>
+        <div className="overlay" ref={editingLayerRef} onClick={(e) => e.target === e.currentTarget && setEditing(null)}>
           <div className="dialog">
             <h2>{agents.some((a) => a.id === editing.id) ? '编辑 Agent' : '新建 Agent'}</h2>
             <label className="field">

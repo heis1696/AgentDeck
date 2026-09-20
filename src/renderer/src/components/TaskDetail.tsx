@@ -4,8 +4,7 @@ import { bridge, fmtDuration, fmtTokens } from '../api'
 import { taskService } from '../task-service'
 import { GOAL_STATUS_LABELS, isParkedQueued, PARKED_QUEUED_LABEL } from '../labels'
 import { Markdown } from './Markdown'
-import { confirmDialog } from '../ui/Confirm'
-import { toast } from '../ui/Toasts'
+import { ui } from '../ui/interaction-center'
 import { IssueIdChip } from '../ui/IssueIdChip'
 import { useTaskEvents } from '../hooks/useTaskEvents'
 import { useTurnModel } from '../hooks/turnModel'
@@ -14,7 +13,8 @@ import { PermissionPrompt } from './task/PermissionPrompt'
 import { TurnTimeline } from './task/TurnTimeline'
 import { SkillMenu, buildMenuItems, parseSkillDirective, wrapSkillDirective, type LocalCommandKey } from './task/SkillMenu'
 import { usePromptHistory } from '../hooks/usePromptHistory'
-import { SideDock, openDockItem } from '../ui/SideDock'
+import { SideDock } from '../ui/SideDock'
+import { useInteractionLayer } from '../hooks/useInteractionLayer'
 import { ActivityTimeline } from './task/ActivityTimeline'
 import { GitSummary } from './task/GitSummary'
 import { GoalPanel } from './goal/GoalPanel'
@@ -48,6 +48,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   const logRef = useRef<HTMLDivElement>(null)
   const followRef = useRef<HTMLTextAreaElement>(null)
   const infoRef = useRef<HTMLDivElement>(null)
+  const titleEditBtnRef = useRef<HTMLButtonElement>(null)
   const editingTitleRef = useRef(false)
   const navFrameRef = useRef(0)
   const { events, permission, refreshEvents, answerPermission } = useTaskEvents(task.id)
@@ -87,13 +88,8 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     return () => window.clearInterval(timer)
   }, [task.id, turnActive])
 
-  // ℹ 弹层：点外面收起
-  useEffect(() => {
-    if (!infoOpen) return
-    const onDown = (event: MouseEvent) => { if (!infoRef.current?.contains(event.target as Node)) setInfoOpen(false) }
-    window.addEventListener('mousedown', onDown)
-    return () => window.removeEventListener('mousedown', onDown)
-  }, [infoOpen])
+  // ℹ 弹层：统一浮层（外点收起 + 最上层 Escape），原 window mousedown 监听已收敛
+  useInteractionLayer<HTMLDivElement>({ open: infoOpen, onClose: () => setInfoOpen(false), kind: 'popover', name: 'task-info', closeOnOutside: true, autoFocus: false, layerRef: infoRef })
 
   const scrollEl = () => {
     const element = logRef.current
@@ -138,17 +134,17 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   const doRewind = async (index: number) => {
     const turn = turns[index]
     if (!turn || index === 0) return
-    const ok = await confirmDialog({ title: '回退到这里？', body: `将删除第 ${index + 1} 回合及其之后的所有消息记录，并按剩余内容重算任务结果与用量。该操作只影响本地日志，不会改动后端会话上下文，且不可撤销。`, danger: true, confirmText: '回退' })
+    const ok = await ui.confirm({ title: '回退到这里？', body: `将删除第 ${index + 1} 回合及其之后的所有消息记录，并按剩余内容重算任务结果与用量。该操作只影响本地日志，不会改动后端会话上下文，且不可撤销。`, danger: true, confirmText: '回退' })
     if (!ok) return
     const result = await taskService.rewind(task.id, turn.firstSeq - 1)
-    if (!result.ok) toast.error(result.error ?? '回退失败')
-    else { toast.success('已回退'); void refreshEvents() }
+    if (!result.ok) ui.toast.error(result.error ?? '回退失败')
+    else { ui.toast.success('已回退'); void refreshEvents() }
   }
   const doAction = async (action: () => Promise<{ ok: boolean; error?: string }>) => {
     setBusy(true)
     try {
       const result = await action()
-      if (!result.ok && result.error) toast.error(result.error)
+      if (!result.ok && result.error) ui.toast.error(result.error)
     } finally {
       setBusy(false)
     }
@@ -157,9 +153,9 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   const doRetry = () => doAction(() => taskService.retry(task.id))
   const doStart = () => doAction(() => taskService.start(task.id))
   const doDelete = async () => {
-    if (!(await confirmDialog({ title: '删除该任务及其日志？', body: task.title, danger: true, confirmText: '删除' }))) return
+    if (!(await ui.confirm({ title: '删除该任务及其日志？', body: task.title, danger: true, confirmText: '删除' }))) return
     const result = await taskService.delete(task.id)
-    if (!result.ok) toast.error(result.error ?? '删除失败')
+    if (!result.ok) ui.toast.error(result.error ?? '删除失败')
   }
   const doDuplicate = async () => {
     const copy = await taskService.duplicate(task)
@@ -167,6 +163,15 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   }
   const beginTitleEdit = () => { setTitleDraft(task.title); editingTitleRef.current = true; setEditingTitle(true) }
   const cancelTitleEdit = () => { editingTitleRef.current = false; setEditingTitle(false) }
+  // 就地重命名也是「浮层」：Escape 由统一交互层消费（最上层），关闭后焦点回到重命名按钮。
+  // 编辑框把触发按钮**替换**掉了，所以显式给出归还目标（restoreFocusRef）。
+  const titleEditRef = useInteractionLayer<HTMLInputElement>({
+    open: editingTitle,
+    onClose: cancelTitleEdit,
+    kind: 'popover',
+    name: 'title-edit',
+    restoreFocusRef: titleEditBtnRef
+  })
   const saveTitle = async () => {
     if (!editingTitleRef.current) return
     editingTitleRef.current = false
@@ -174,7 +179,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     const title = titleDraft.trim()
     if (!title || title === task.title) return
     const next = await taskService.rename(task.id, title)
-    if (next) toast.success('标题已更新')
+    if (next) ui.toast.success('标题已更新')
   }
   /** 本地命令（/goal /meeting）：打开对应浮窗/创建流程，不发给后端 */
   const openLocalCommand = (key: LocalCommandKey) => {
@@ -198,7 +203,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     try {
       // wait:false：IPC 在回合开跑即返回，busy 不锁整轮追问——否则「停止」会禁用到回合结束
       const result = await taskService.followUp(task.id, content, { ...opts, wait: false })
-      if (!result.ok) toast.error(result.error ?? '续聊失败')
+      if (!result.ok) ui.toast.error(result.error ?? '续聊失败')
     } finally {
       setBusy(false)
     }
@@ -207,22 +212,22 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     const parts = [`# ${task.title}`, '', task.result ?? '']
     if (task.gitStat) parts.push('', '## 改动', '```', task.gitStat, '```')
     if (task.integration?.branch) parts.push('', `集成分支：\`${task.integration.branch}\``)
-    await navigator.clipboard.writeText(parts.join('\n')); toast.success('结果已复制为 Markdown')
+    await navigator.clipboard.writeText(parts.join('\n')); ui.toast.success('结果已复制为 Markdown')
   }
   const copyPrBody = async () => {
     const branch = task.integration?.branch
     const files = (task.gitStat || '').split('\n').filter((line) => line.includes('|')).length
     const body = ['## 摘要', '', (task.result ?? '').slice(0, 2000), '', '## 改动', '', files ? `${files} 个文件有改动。` : '见提交记录。', branch ? `\n> 由 AgentDeck 队员在隔离分支 \`${branch}\` 上完成。` : ''].join('\n')
-    await navigator.clipboard.writeText(`**${task.title}**\n\n${body}`); toast.success('PR 描述已复制（标题 + 摘要 + 改动）')
+    await navigator.clipboard.writeText(`**${task.title}**\n\n${body}`); ui.toast.success('PR 描述已复制（标题 + 摘要 + 改动）')
   }
   const duration = task.startedAt ? (task.endedAt ?? Date.now()) - task.startedAt : 0
 
   return <div className="detail">
     <div className="detail-left">
     <header className="detail-header page-header-bar"><div className="detail-title-wrap">
-      {editingTitle ? <input className="title-edit-input" value={titleDraft} autoFocus onChange={(event) => setTitleDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void saveTitle() } else if (event.key === 'Escape') cancelTitleEdit() }} onBlur={() => void saveTitle()} /> : <h1 className="detail-title">{task.title}<button className="title-edit" type="button" title="重命名" onClick={beginTitleEdit}><Pencil size={13} aria-hidden="true" /></button></h1>}
+      {editingTitle ? <input ref={titleEditRef} className="title-edit-input" value={titleDraft} autoFocus onChange={(event) => setTitleDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void saveTitle() } }} onBlur={() => void saveTitle()} /> : <h1 className="detail-title">{task.title}<button ref={titleEditBtnRef} className="title-edit" type="button" title="重命名" onClick={beginTitleEdit}><Pencil size={13} aria-hidden="true" /></button></h1>}
       <div className="detail-meta">
-        <span className="meta-group meta-identity"><span className="detail-eyebrow">{parent ? '队员任务' : '工作任务'}</span>{parent && <a className="mini link" role="button" tabIndex={0} onClick={() => onSelect(parent.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(parent.id) } }}>↩ 领队任务: {parent.title}</a>}{workers.length > 0 && <button type="button" className="badge badge-squad link-badge" title="在右侧分页打开子任务" onClick={() => { const target = workers.find((item) => item.status === 'running') ?? workers[0]; if (target) openDockItem({ id: `task:${target.id}`, kind: 'task', title: target.title, payload: { taskId: target.id } }) }}>⚡ 子任务 {workers.filter((worker) => worker.status === 'done').length}/{workers.length}</button>}</span>
+        <span className="meta-group meta-identity"><span className="detail-eyebrow">{parent ? '队员任务' : '工作任务'}</span>{parent && <a className="mini link" role="button" tabIndex={0} onClick={() => onSelect(parent.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(parent.id) } }}>↩ 领队任务: {parent.title}</a>}{workers.length > 0 && <button type="button" className="badge badge-squad link-badge" title="在右侧分页打开子任务" onClick={() => { const target = workers.find((item) => item.status === 'running') ?? workers[0]; if (target) ui.dock.open({ id: `task:${target.id}`, kind: 'task', title: target.title, payload: { taskId: target.id } }) }}>⚡ 子任务 {workers.filter((worker) => worker.status === 'done').length}/{workers.length}</button>}</span>
         <IssueIdChip id={issueId} />
         <select className="meta-workflow" title="工作流" aria-label="工作流" value={issue?.status ?? 'todo'} onChange={(event) => void updateWorkflow(event.target.value as IssueStatus)}>
           {WORKFLOW_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
@@ -247,7 +252,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     <div className="detail-columns"><div className="detail-main" onScroll={onLogScroll}>
       {task.status === 'failed' && task.error && <div className="error-banner"><div className="error-head"><span className="error-icon" aria-hidden="true">⚠</span><span className="error-title">{task.failure?.title ?? '执行失败'}</span>{task.failure?.code && <span className="failure-code">{task.failure.code}</span>}{task.failure?.retryable && <span className="failure-retryable">可重试</span>}</div>{task.failure?.hint && <div className="error-hint">{task.failure.hint}</div>}<details className="failure-raw"><summary>错误原文</summary><pre>{task.error}</pre></details></div>}
       {task.integration?.note && <div className={`integration-banner ${task.integration.note.includes('未完成') ? 'warn' : ''}`}>🔀 {task.integration.note}{task.integration.branch && task.workdir && <a className="mini link" role="button" tabIndex={0} onClick={() => void bridge.openPath(task.workdir)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void bridge.openPath(task.workdir) } }}>打开仓库</a>}</div>}
-      {activeWorkers.length > 0 && <div className="workers-pane"><div className="list-group-label">运行中的队员（{activeWorkers.length}）</div>{activeWorkers.map((worker) => <div key={worker.id} className={`worker-card ${worker.status === 'cancelled' ? 'is-cancelled' : ''}`} role="button" tabIndex={0} onClick={() => openDockItem({ id: `task:${worker.id}`, kind: 'task', title: worker.title, payload: { taskId: worker.id } })} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openDockItem({ id: `task:${worker.id}`, kind: 'task', title: worker.title, payload: { taskId: worker.id } }) } }}><span className={`dot dot-${worker.status}`} /><span className="worker-title">{worker.title}</span><span className="mini">{worker.status === 'running' ? '执行中…' : worker.status === 'queued' ? (worker.parked ? PARKED_QUEUED_LABEL : '排队') : worker.status === 'cancelled' ? '已取消' : worker.status === 'failed' ? '✗ 失败' : worker.startedAt && worker.endedAt ? `✓ ${fmtDuration(worker.endedAt - worker.startedAt)}` : '✓'}</span>{worker.gitStat ? <span className="mini dim">· 有改动</span> : null}</div>)}</div>}
+      {activeWorkers.length > 0 && <div className="workers-pane"><div className="list-group-label">运行中的队员（{activeWorkers.length}）</div>{activeWorkers.map((worker) => <div key={worker.id} className={`worker-card ${worker.status === 'cancelled' ? 'is-cancelled' : ''}`} role="button" tabIndex={0} onClick={() => ui.dock.open({ id: `task:${worker.id}`, kind: 'task', title: worker.title, payload: { taskId: worker.id } })} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); ui.dock.open({ id: `task:${worker.id}`, kind: 'task', title: worker.title, payload: { taskId: worker.id } }) } }}><span className={`dot dot-${worker.status}`} /><span className="worker-title">{worker.title}</span><span className="mini">{worker.status === 'running' ? '执行中…' : worker.status === 'queued' ? (worker.parked ? PARKED_QUEUED_LABEL : '排队') : worker.status === 'cancelled' ? '已取消' : worker.status === 'failed' ? '✗ 失败' : worker.startedAt && worker.endedAt ? `✓ ${fmtDuration(worker.endedAt - worker.startedAt)}` : '✓'}</span>{worker.gitStat ? <span className="mini dim">· 有改动</span> : null}</div>)}</div>}
       {permission && <PermissionPrompt permission={permission} onAnswer={(decision) => void answerPermission(decision)} />}
       <div className="tabs"><button className={tab === 'activity' ? 'active' : ''} onClick={() => setTab('activity')}>动态</button><button className={tab === 'log' ? 'active' : ''} onClick={() => setTab('log')}>执行记录</button><button className={tab === 'result' ? 'active' : ''} onClick={() => setTab('result')}>结果</button><button className={tab === 'git' ? 'active' : ''} onClick={() => setTab('git')} disabled={!task.gitDiff && !task.gitStat}>Git 改动</button></div>
       <div className="detail-body">{tab === 'activity' && <ActivityTimeline task={task} issueIdentifier={issue?.identifier} runs={runs} comments={comments} onShowLog={() => setTab('log')} />}{tab === 'log' && <TurnTimeline task={task} turns={turns} activeNav={activeNav} onNavigate={scrollToTurn} onRewind={(index) => void doRewind(index)} logRef={logRef} onScroll={onLogScroll} />}{tab === 'result' && <div className="result">{task.result ? <Markdown text={task.result} /> : turnActive ? <div className="list-empty">执行中，暂无最终结果</div> : <div className="list-empty">（无结果）</div>}</div>}{tab === 'git' && <GitSummary task={task} />}</div>
@@ -299,7 +304,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     </div>
     </div>
     </div>
-    <SideDock key={task.id} tasks={tasks} onOpen={onSelect} />
+    <SideDock key={task.id} taskId={task.id} tasks={tasks} onOpen={onSelect} />
     {/* 目标/会议浮窗（队员任务不挂）：面板常驻挂载以持续上报状态，浮窗本体仅 open 时渲染 */}
     {!task.parentTaskId && <>
       <GoalPanel task={task} issueId={issueId} open={float === 'goal'} onToggle={(next) => setFloat((cur) => (next ? 'goal' : cur === 'goal' ? null : cur))} onGoal={setGoal} />

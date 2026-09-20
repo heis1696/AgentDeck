@@ -286,6 +286,8 @@ src/main/sidecar/index.ts    → sidecar, sidecar-server, sidecar-runtime, sidec
 
 ### 2.6 循环依赖判定（Tarjan SCC 全量扫描）
 
+> 2026-09-20 更正：下表是原始基线快照。UI 统一改造已解开第 2 项渲染层三角环，`TurnTimeline` 现改依赖 `ui/interaction-center.ts`；当前边以 `deps.json` 为准。`smoke-ui-interaction-center.mjs` 直接消费中心/层栈及兼容导出，`smoke-ui-focus.mjs` 经 `fixtures/ui-focus-harness.tsx` 消费 `useInteractionLayer`、Confirm/Menu/Palette/SideDock；这些新增测试入口同样受附录 A 的公共 API 保护规则约束。
+
 | # | 环 | 性质 | 风险与解耦点 |
 | --- | --- | --- | --- |
 | 1 | `src/main/delegate.ts` ↔ `src/main/runner.ts` | **类型级环**：delegate→runner 仅为 `import type { TaskRunner }`（`src/main/delegate.ts:6`，编译期擦除）；runner→delegate 为真实值导入（`src/main/runner.ts:7`） | 运行时无环，低风险。若想消除类型环：把 `TaskRunner` 的委派端口收窄成接口移入 `delegate.ts`（`RunnerPorts` 已有雏形） |

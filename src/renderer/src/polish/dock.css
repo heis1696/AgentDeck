@@ -4,9 +4,11 @@
    WorkerPane 强制只读（隐藏回退控件），内部时间线独立滚动，不抢主任务滚动容器。 */
 .side-dock {
   display: flex;
-  /* 可收缩（flex-shrink 1）：窗口变窄时优先收分栏到 320 下限，绝不溢出行外遮蔽窗口边缘（反馈三轮1） */
+  /* 可收缩（flex-shrink 1）：空间不足时分栏先让宽——CSS 下限 280（页签横向滚动、
+     面板内容竖向滚动仍可用；拖拽下限 320 由 TS 内联宽度保证），剩余空间不足
+     再由 .detail-left 收到 340 下限。内容满宽 967 时 256+340+371 恰好放下（布局修复） */
   flex: 0 1 auto;
-  min-width: 320px;
+  min-width: 280px;
   max-width: 720px;
   min-height: 0;
   margin-left: auto;
@@ -30,11 +32,11 @@
   align-items: stretch;
   gap: 2px;
   overflow-x: auto;
-  padding: 7px 8px 0;
+  padding: var(--space-2) var(--space-2) 0;
   border-bottom: 1px solid var(--border);
   background: var(--bg-inset);
 }
-.dock-tab-row { display: flex; align-items: center; max-width: 220px; min-height: 34px; border: 1px solid transparent; border-bottom: 0; border-radius: 7px 7px 0 0; }
+.dock-tab-row { display: flex; align-items: center; max-width: 220px; min-height: 34px; border: 1px solid transparent; border-bottom: 0; border-radius: var(--radius-sm) var(--radius-sm) 0 0; }
 .dock-tab-row:hover { background: var(--bg-hover); }
 .dock-tab-row.is-active { border-color: var(--border); background: var(--bg); box-shadow: inset 0 2px 0 var(--accent); }
 .dock-tab, .dock-tab-close { border: 0; background: transparent; color: var(--text-dim); cursor: pointer; }
@@ -56,7 +58,7 @@
   margin: 3px 0 3px 7px;
   padding: 2px 6px;
   border: 1px solid var(--border-strong);
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: var(--bg-raised);
   color: var(--text);
   font-family: var(--font-mono);
@@ -70,7 +72,7 @@
 .edit-deleted { color: var(--err); white-space: nowrap; }
 
 .code-viewer { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; background: var(--bg); color: var(--text); font-size: var(--text-caption); }
-.code-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 9px 10px; border-bottom: 1px solid var(--border); background: var(--bg-raised); }
+.code-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--border); background: var(--bg-raised); }
 .code-filename { max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .code-language { color: var(--text-dim); font-size: var(--text-micro); }
 .code-counts { display: inline-flex; gap: 5px; font-family: var(--font-mono); }
@@ -98,7 +100,7 @@ html.light .code-token { color: var(--shiki-light); font-style: var(--shiki-ligh
 .code-line.is-added { background: var(--status-done-bg); }
 .code-line.is-deleted .code-line-sign { color: var(--err); }
 .code-line.is-added .code-line-sign { color: var(--ok); }
-.code-line.is-match { box-shadow: inset 3px 0 var(--warn); background-image: linear-gradient(var(--status-queued-bg), var(--status-queued-bg)); }
+.code-line.is-match { box-shadow: inset 3px 0 var(--warn); background: var(--status-queued-bg); }
 .code-line.is-current-match { outline: 1px solid var(--warn); outline-offset: -1px; }
 .code-viewer .code-load-more { display: block; margin: 14px auto 8px; border-color: var(--accent); color: var(--accent); }
 .code-status { display: flex; flex-wrap: wrap; gap: 4px 12px; justify-content: space-between; padding: 5px 10px; background: var(--bg-raised); border-top: 1px solid var(--border); color: var(--text-dim); font-size: var(--text-micro); }
@@ -130,6 +132,24 @@ html.light .code-token { color: var(--shiki-light); font-style: var(--shiki-ligh
 .worker-pane-error { flex-shrink: 0; max-height: 90px; overflow: auto; padding: 8px 12px; background: var(--status-failed-bg); color: var(--err); font-size: var(--text-caption); overflow-wrap: anywhere; }
 .worker-pane-empty { justify-content: center; padding: 24px; text-align: center; color: var(--text-dim); }
 @media (max-width: 1100px) { .dock-tab-row { max-width: 150px; } }
+/* 窄视口（低于横排下限 256+340+280=876，如 DevTools 拉窄或未来调低窗口 minWidth）：
+   分栏转为整宽堆叠到主区下方——内联宽度/上限用 !important 压过 TS 的 style width，
+   行内分割线退场，两块各自内部滚动，是明确可用的窄屏布局而非隐藏溢出 */
+@media (max-width: 880px) {
+  .detail { flex-direction: column; overflow-y: auto; }
+  .detail-left { flex: 1 1 0; min-width: 0; min-height: 220px; }
+  .side-dock {
+    flex: 1 1 0;
+    width: auto !important;
+    max-width: none !important;
+    min-width: 0;
+    min-height: 220px;
+    margin-left: 0;
+    border-left: 0;
+    border-top: 1px solid var(--border);
+  }
+  .dock-splitter { display: none; }
+}
 @media (prefers-reduced-motion: reduce) { .code-skeleton i { animation: none; } }
 
 /* ---- 统一 diff 模式（反馈4）：双行号列 + hunk 头，GitHub 风格 ---- */

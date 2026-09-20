@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useInteractionLayer } from '../hooks/useInteractionLayer'
 
 export interface PaletteCommand {
   id: string
@@ -42,6 +43,8 @@ export function Palette({ open, onClose, commands, placeholder }: PaletteProps) 
   const [active, setActive] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
+  // 统一浮层：Escape 由交互层接管（最上层），打开时聚焦输入框，关闭后焦点归还
+  const layerRef = useInteractionLayer<HTMLDivElement>({ open, onClose, kind: 'modal', name: 'palette', trap: true, initialFocusRef: inputRef })
 
   const results = useMemo(() => {
     const scored = commands
@@ -59,7 +62,6 @@ export function Palette({ open, onClose, commands, placeholder }: PaletteProps) 
     if (open) {
       setQuery('')
       setActive(0)
-      setTimeout(() => inputRef.current?.focus(), 0)
     }
   }, [open])
 
@@ -74,9 +76,9 @@ export function Palette({ open, onClose, commands, placeholder }: PaletteProps) 
     c.run()
   }
 
+  // Escape（含关闭）交给统一交互层；这里只处理列表导航
   const onKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Escape') { e.preventDefault(); onClose() }
-    else if (e.key === 'ArrowDown') { e.preventDefault(); setActive((a) => Math.min(results.length - 1, a + 1)) }
+    if (e.key === 'ArrowDown') { e.preventDefault(); setActive((a) => Math.min(results.length - 1, a + 1)) }
     else if (e.key === 'ArrowUp') { e.preventDefault(); setActive((a) => Math.max(0, a - 1)) }
     else if (e.key === 'Enter') { e.preventDefault(); runAt(active) }
   }
@@ -90,7 +92,7 @@ export function Palette({ open, onClose, commands, placeholder }: PaletteProps) 
   })
 
   return (
-    <div className="overlay palette-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+    <div className="overlay palette-overlay" ref={layerRef} onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="palette" onKeyDown={onKeyDown}>
         <input
           ref={inputRef}

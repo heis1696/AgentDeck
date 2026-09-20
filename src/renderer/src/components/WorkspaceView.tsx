@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { ListTodo, MessagesSquare, Target, ArrowUpRight, Clock3, FolderOpen, Sparkles } from 'lucide-react'
 import { bridge, type AgentInfo } from '../api'
-import { toast } from '../ui/Toasts'
+import { ui } from '../ui/interaction-center'
+import { useInteractionSelector } from '../hooks/useInteraction'
 import { captains } from './meeting/captains'
 import type { Task } from '../../../shared/types'
 import { isForgeAgent } from '../../../shared/forge'
@@ -25,7 +26,7 @@ const draft = {
   designer: ''
 }
 
-/** Ctrl+N 聚焦工作区输入框用的事件名 */
+/** 兼容保留：旧的「聚焦输入框」DOM 事件名已废弃——请求走 ui.focusComposer()（composerTick） */
 export const FOCUS_WORKSPACE = 'agentdeck:focus-workspace'
 
 /** 从首条消息自动起标题：取首行、剥掉 markdown 记号、压缩空白，截 72 字 */
@@ -104,12 +105,16 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
     setDesigner((current) => { const next = current && eligibleCaptains.some((a) => a.id === current) ? current : eligibleCaptains[2].id; draft.designer = next; return next })
   }, [eligibleCaptains])
 
+  const composerTick = useInteractionSelector((state) => state.composerTick)
+  const handledTickRef = useRef(0)
+  /**
+   * 输入框聚焦：请求方是交互中心的 composerTick（Ctrl+N / 裸 c / 命令面板「新建任务」）。
+   * 请求号存在中心里：组件没挂载时发出的请求不会丢，挂载后凭 tick 消费并立即聚焦。
+   */
   useEffect(() => {
-    const focus = () => promptRef.current?.focus()
-    window.addEventListener(FOCUS_WORKSPACE, focus)
-    focus()
-    return () => window.removeEventListener(FOCUS_WORKSPACE, focus)
-  }, [])
+    handledTickRef.current = composerTick
+    promptRef.current?.focus()
+  }, [composerTick])
 
   // 草稿回写（保持模块级副本最新）
   useEffect(() => { draft.kind = kind }, [kind])
@@ -182,7 +187,7 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
           backend: selectedAgent?.backend,
           startNow
         })
-        toast.success(startNow ? '目标模式已开启' : '目标已创建——在 Issue 详情侧栏可开始推进')
+        ui.toast.success(startNow ? '目标模式已开启' : '目标已创建——在 Issue 详情侧栏可开始推进')
         // 完成/停止条件不留在草稿里，防止下次误用旧条件
         draft.completion = ''
         setCompletion('')
@@ -201,21 +206,21 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
         if (startNow) {
           // meetings.start 要等整场会议结束才返回：挂后台跑，创建成功即跳转，失败 toast
           void bridge.meetings.start(meeting.id)
-            .then((result) => { if (!result.ok) toast.error(result.error ?? '会议启动失败') })
-            .catch((e) => toast.error('会议启动失败: ' + (e instanceof Error ? e.message : String(e))))
-          toast.success('会议已创建，正在开始——在 Issue 详情侧栏跟进')
+            .then((result) => { if (!result.ok) ui.toast.error(result.error ?? '会议启动失败') })
+            .catch((e) => ui.toast.error('会议启动失败: ' + (e instanceof Error ? e.message : String(e))))
+          ui.toast.success('会议已创建，正在开始——在 Issue 详情侧栏跟进')
         } else {
-          toast.success('会议已创建为草稿——在 Issue 详情侧栏可开始')
+          ui.toast.success('会议已创建为草稿——在 Issue 详情侧栏可开始')
         }
       } else if (!startNow) {
-        toast.info('已创建，暂不启动——在任务详情点「开始执行」')
+        ui.toast.info('已创建，暂不启动——在任务详情点「开始执行」')
       }
       const t = await bridge.tasks.get(issue.taskId)
       if (!t) throw new Error('Issue 创建成功，但执行记录尚未可用')
       clearPrompt()
       onCreated(t)
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e))
+      ui.toast.error(e instanceof Error ? e.message : String(e))
     } finally {
       setBusy(false)
     }

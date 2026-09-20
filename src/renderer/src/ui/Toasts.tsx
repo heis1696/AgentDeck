@@ -1,42 +1,34 @@
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
+import { ui, type ToastKind } from './interaction-center'
+import { useInteractionSelector } from '../hooks/useInteraction'
 
-export type ToastKind = 'info' | 'success' | 'error'
+export type { ToastKind }
 
-interface ToastItem {
-  id: number
-  kind: ToastKind
-  text: string
-}
-
-let nextId = 1
-let pushFn: ((kind: ToastKind, text: string) => void) | null = null
-
-/** 命令式推送（全局单例宿主挂载后可用） */
+/**
+ * 兼容转发：命令式推送改由交互中心托管。
+ * 宿主挂载前的推送会排队（不再丢），宿主卸载时中心清掉全部定时器。
+ */
 export const toast = {
-  info: (text: string) => pushFn?.('info', text),
-  success: (text: string) => pushFn?.('success', text),
-  error: (text: string) => pushFn?.('error', text)
+  info: (text: string) => ui.toast.info(text),
+  success: (text: string) => ui.toast.success(text),
+  error: (text: string) => ui.toast.error(text)
 }
 
 const ICON: Record<ToastKind, string> = { info: 'ℹ', success: '✓', error: '✕' }
 
-/** Toast 宿主：挂一次在 App 根部；替代原生 alert() */
+/** Toast 宿主：挂一次在 App 根部；条目与定时器都由交互中心托管 */
 export function ToastHost() {
-  const [items, setItems] = useState<ToastItem[]>([])
+  const items = useInteractionSelector((state) => state.toasts)
 
   useEffect(() => {
-    pushFn = (kind, text) => {
-      const id = nextId++
-      setItems((cur) => [...cur.slice(-3), { id, kind, text }])
-      setTimeout(() => setItems((cur) => cur.filter((t) => t.id !== id)), 4200)
-    }
-    return () => { pushFn = null }
+    ui.toast.attach()
+    return () => ui.toast.detach()
   }, [])
 
   return (
     <div className="toast-host">
       {items.map((t) => (
-        <div key={t.id} className={`toast toast-${t.kind}`} onClick={() => setItems((cur) => cur.filter((x) => x.id !== t.id))}>
+        <div key={t.id} className={`toast toast-${t.kind}`} onClick={() => ui.toast.dismiss(t.id)}>
           <span className="toast-icon">{ICON[t.kind]}</span>
           <span className="toast-text">{t.text}</span>
         </div>

@@ -5,24 +5,25 @@ import { taskService } from './task-service'
 import { TaskDetail } from './components/TaskDetail'
 import { SettingsView } from './components/SettingsView'
 import { UsageView } from './components/UsageView'
-import { WorkspaceView, FOCUS_WORKSPACE } from './components/WorkspaceView'
+import { WorkspaceView } from './components/WorkspaceView'
 import { TabBar } from './components/TabBar'
-import { openDockItem } from './ui/SideDock'
 import { BoardView } from './components/BoardView'
 import { AutomationView } from './components/AutomationView'
 import { ExtensionsView } from './components/ExtensionsView'
 import { IssuesView } from './components/IssuesView'
 import { AgentsView } from './components/AgentsView'
 import { ListTodo, Kanban, Gauge, Settings, Search, Plus, Command, FolderOpen, ChevronDown, AlarmClock, Layers, Users } from 'lucide-react'
-import { ToastHost, toast } from './ui/Toasts'
+import { ToastHost } from './ui/Toasts'
 import { ConfirmHost } from './ui/Confirm'
 import { Palette, type PaletteCommand } from './ui/Palette'
+import { ui, rootTabsOf, type UiView } from './ui/interaction-center'
+import { useInteractionSelector } from './hooks/useInteraction'
+import { useInteractionLayer } from './hooks/useInteractionLayer'
 import { PetStage } from './pet/PetStage'
 import { PetSettingsPage } from './pet/PetSettingsPage'
 import type { Task } from '../../shared/types'
 
-type View = 'issues' | 'detail' | 'usage' | 'settings' | 'automation' | 'skills' | 'board' | 'agents'
-const MAX_TABS = 8
+type View = UiView
 /** 最近工作区列表的上限（切换器下拉里展示） */
 const MAX_RECENT_WORKSPACES = 8
 
@@ -34,16 +35,21 @@ export function App() {
   if (/^#\/?pet-settings$/.test(window.location.hash)) return <PetSettingsPage />
   const { tasks } = useTasks()
   const { settings, update } = useSettings()
-  const [view, setView] = useState<View>('board')
-  const [paletteOpen, setPaletteOpen] = useState(false)
+  // 界面交互状态（视图/页签/面板/设置分区）全部来自交互中心：宿主只订阅，不再各持一份
+  const view = useInteractionSelector((state) => state.view)
+  const activeId = useInteractionSelector((state) => state.activeId)
+  const tabs = useInteractionSelector((state) => state.tabs)
+  const paletteOpen = useInteractionSelector((state) => state.paletteOpen)
+  const settingsSection = useInteractionSelector((state) => state.settingsSection)
   const [workspaceDir, setWorkspaceDir] = useState(() => localStorage.getItem('agentdeck:workspace-dir') ?? '')
   const [recentWorkspaces, setRecentWorkspaces] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem('agentdeck:recent-workspaces') ?? '[]') as string[] } catch { return [] }
   })
-  const [settingsSection, setSettingsSection] = useState('general')
-  const [tabs, setTabs] = useState<string[]>([])
-  const [activeId, setActiveId] = useState<string | null>(null)
   const selected = tasks.find((task) => task.id === activeId) ?? null
+  // 顶部页签条只列「普通页签」：子任务（祖先链完整）在领队详情的右侧分页里。
+  // 判定与 openTask 的路由同源（rootTabsOf）：祖先链断裂的任务是普通页签，不能再按
+  // parentTaskId 一刀切过滤——那会把它们从页签条上藏掉，只剩一个看不见的激活项。
+  const rootTabs = useMemo(() => rootTabsOf(tasks, tabs), [tasks, tabs])
 
   useEffect(() => {
     const theme = settings?.theme ?? 'light'
@@ -53,31 +59,14 @@ export function App() {
     if (theme === 'system') { mq.addEventListener('change', apply); return () => mq.removeEventListener('change', apply) }
   }, [settings?.theme])
 
-  /** 子派单不开顶部 Tab：路由到其领队（根祖先）详情页，并在右侧分页（SideDock）里打开 */
-  const openWorkerInDock = (id: string, title: string) => {
-    let root = tasks.find((item) => item.id === id)
-    const seen = new Set([id])
-    while (root?.parentTaskId && !seen.has(root.parentTaskId)) {
-      seen.add(root.id)
-      const parent = tasks.find((item) => item.id === root!.parentTaskId)
-      if (!parent) break
-      root = parent
-    }
-    if (!root || root.parentTaskId) return false // 祖先链断裂：退回普通 Tab 打开
-    setTabs((current) => current.includes(root!.id) ? current : [...current, root!.id].slice(-MAX_TABS))
-    setActiveId(root.id); setView('detail')
-    // 等 TaskDetail 挂载出 SideDock 后再派发 dock 事件（容器不存在时事件会丢）
-    window.setTimeout(() => openDockItem({ id: `task:${id}`, kind: 'task', title, payload: { taskId: id } }), 60)
-    return true
-  }
-  const openTask = (id: string) => {
-    const target = tasks.find((task) => task.id === id)
-    if (target?.parentTaskId && openWorkerInDock(id, target.title)) return
-    setTabs((current) => current.includes(id) ? current : [...current, id].slice(-MAX_TABS)); setActiveId(id); setView('detail')
-  }
-  const closeTab = (id: string) => { const next = tabs.filter((tab) => tab !== id); setTabs(next); if (activeId === id) setActiveId(next[next.length - 1] ?? null) }
-  /** Ctrl+N/侧栏「新建任务」：导航到 Issue 主页（新建表单即主页主体）并聚焦输入框 */
-  const goWorkspace = () => { setView('issues'); window.dispatchEvent(new Event(FOCUS_WORKSPACE)) }
+  // 中心持有最新任务目录：祖先链解析（子任务→领队）、删除清理、dock 桶剪枝都以它为准
+  useEffect(() => {
+    ui.setTasks(tasks.map((task) => ({ id: task.id, title: task.title, parentTaskId: task.parentTaskId })))
+  }, [tasks])
+
+  const openTask = (id: string) => { ui.openTask(id) }
+  /** Ctrl+N/侧栏「新建任务」：导航到 Issue 主页（新建表单即主页主体）并请求聚焦输入框 */
+  const goWorkspace = () => { ui.focusComposer() }
   /** 切到某个最近用过的工作区：新任务默认目录随之变化 */
   const chooseWorkspace = (dir: string) => {
     if (!dir) return
@@ -104,24 +93,30 @@ export function App() {
       return capped
     })
   }, [tasks])
-  useEffect(() => bridge.tasks.onDeleted((id) => closeTab(id)), [tabs, activeId])
-  useEffect(() => bridge.tasks.onFocusTask((id) => openTask(id)), [])
+  useEffect(() => bridge.tasks.onDeleted((id) => ui.closeTab(id)), [])
+  useEffect(() => bridge.tasks.onFocusTask((id) => ui.openTask(id)), [])
+  // 全局快捷键：解析与执行都在交互中心（输入法组合中/可编辑元素/浮层打开时让路）
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      const mod = event.ctrlKey || event.metaKey
-      if (mod && event.key.toLowerCase() === 'k') { event.preventDefault(); setPaletteOpen((value) => !value) }
-      else if (mod && event.key.toLowerCase() === 'n') { event.preventDefault(); goWorkspace() }
-      else if (!mod && !event.altKey && event.key.toLowerCase() === 'c' && !['INPUT', 'TEXTAREA', 'SELECT'].includes((event.target as HTMLElement)?.tagName ?? '')) { event.preventDefault(); goWorkspace() }
-      else if (mod && event.key.toLowerCase() === 'w' && activeId) { event.preventDefault(); closeTab(activeId) }
-      else if (mod && event.key === 'Tab' && tabs.length > 1) { event.preventDefault(); const index = tabs.indexOf(activeId ?? ''); setActiveId(tabs[((index + (event.shiftKey ? -1 : 1)) + tabs.length) % tabs.length]) }
+      const action = ui.handleKey({
+        key: event.key,
+        ctrlKey: event.ctrlKey,
+        metaKey: event.metaKey,
+        altKey: event.altKey,
+        shiftKey: event.shiftKey,
+        isComposing: event.isComposing,
+        keyCode: event.keyCode,
+        target: event.target as HTMLElement | null
+      })
+      if (action) event.preventDefault()
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [activeId, tabs])
+  }, [])
 
-  const nav = (next: View) => { setView(next) }
-  const navIssues = () => setView('issues')
-  const openSettings = (section?: string) => { if (section) setSettingsSection(section); setView('settings') }
+  const nav = (next: View) => { ui.navigate(next) }
+  const navIssues = () => ui.navigate('issues')
+  const openSettings = (section?: string) => { ui.openSettings(section) }
 
   const commands: PaletteCommand[] = useMemo(() => [
     ...[['Issue', navIssues], ['看板', () => nav('board')], ['Agent 管理', () => nav('agents')], ['自动化', () => nav('automation')], ['扩展', () => nav('skills')], ['用量', () => nav('usage')], ['设置', () => openSettings('general')], ['设置 · 运行时', () => openSettings('runtime')]].map(([label, run]) => ({ id: String(label), group: '跳转', label: String(label), run: run as () => void })),
@@ -136,17 +131,18 @@ export function App() {
         hint: parked ? PARKED_QUEUED_LABEL : TASK_STATUS_LABELS[task.status],
         keywords: parked ? '启动' : undefined,
         run: () => {
-          // parked 任务 Enter/点击 = 一键启动（tasks:start 清停放并入队），并打开详情跟进
+          // parked 任务 Enter/点击 = 一键启动（tasks:start 清停放并入队），并打开详情跟进。
+          // 任务执行仍走 task-service，交互中心只管导航/反馈。
           openTask(task.id)
           if (!parked) return
-          void taskService.start(task.id).then((result) => { if (!result.ok) toast.error(result.error ?? '启动失败') })
+          void taskService.start(task.id).then((result) => { if (!result.ok) ui.toast.error(result.error ?? '启动失败') })
         }
       }
     })
   ], [tasks, settings?.theme])
 
   return <div className="app">
-    <ToastHost /><ConfirmHost /><Palette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={commands} />
+    <ToastHost /><ConfirmHost /><Palette open={paletteOpen} onClose={() => ui.palette.close()} commands={commands} />
     <aside className="sidebar">
       <div className="brand" aria-label="AgentDeck"><span className="brand-mark">A</span><span className="brand-name">AgentDeck</span><span className="brand-status" title="本地工作区已连接" /></div>
       <WorkspaceSwitcher dir={workspaceDir} recent={recentWorkspaces} onChoose={chooseWorkspace} onPick={pickWorkspace} />
@@ -163,7 +159,7 @@ export function App() {
       <div className="sidebar-footer"><span className="connection-dot" /> 本地引擎就绪</div>
     </aside>
     <main className="main">
-      {view === 'agents' ? <AgentsView /> : view === 'automation' ? <AutomationView /> : view === 'skills' ? <ExtensionsView /> : view === 'settings' ? <SettingsView section={settingsSection} onSection={setSettingsSection} /> : view === 'usage' ? <UsageView /> : view === 'board' ? <Page title="看板" count={tasks.length}><BoardView tasks={tasks} onOpen={openTask} /></Page> : view === 'detail' && selected ? <div className="tasks-column detail-page"><Chrome title={selected.title} onBack={() => { setActiveId(null); setView('issues') }} />{tabs.length > 0 && <TabBar tabs={tabs.filter((id) => !tasks.find((task) => task.id === id)?.parentTaskId)} tasks={tasks} activeId={activeId} onSelect={openTask} onClose={closeTab} />}<TaskDetail task={selected} tasks={tasks} onSelect={openTask} /></div> : <IssuesView tasks={tasks} tabs={tabs} onOpen={openTask} onClose={closeTab}><WorkspaceView onCreated={(task) => openTask(task.id)} workspaceDir={workspaceDir} onPickWorkspace={pickWorkspace} /></IssuesView>}
+      {view === 'agents' ? <AgentsView /> : view === 'automation' ? <AutomationView /> : view === 'skills' ? <ExtensionsView /> : view === 'settings' ? <SettingsView section={settingsSection} onSection={(section) => ui.openSettings(section)} /> : view === 'usage' ? <UsageView /> : view === 'board' ? <Page title="看板" count={tasks.length}><BoardView tasks={tasks} onOpen={openTask} /></Page> : view === 'detail' && selected ? <div className="tasks-column detail-page"><Chrome title={selected.title} onBack={() => ui.navigate('issues')} />{rootTabs.length > 0 && <TabBar tabs={rootTabs} tasks={tasks} activeId={activeId} onSelect={openTask} onClose={(id) => ui.closeTab(id)} />}<TaskDetail task={selected} tasks={tasks} onSelect={openTask} /></div> : <IssuesView tasks={tasks} tabs={tabs} onOpen={openTask} onClose={(id) => ui.closeTab(id)}><WorkspaceView onCreated={(task) => openTask(task.id)} workspaceDir={workspaceDir} onPickWorkspace={pickWorkspace} /></IssuesView>}
     </main>
   </div>
 }
@@ -172,12 +168,8 @@ export function App() {
 function WorkspaceSwitcher({ dir, recent, onChoose, onPick }: { dir: string; recent: string[]; onChoose: (dir: string) => void; onPick: () => void }) {
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (!open) return
-    const onDown = (event: MouseEvent) => { if (!rootRef.current?.contains(event.target as Node)) setOpen(false) }
-    window.addEventListener('mousedown', onDown)
-    return () => window.removeEventListener('mousedown', onDown)
-  }, [open])
+  // 统一浮层：外点关闭 + 最上层 Escape + 焦点归还（原自挂 window mousedown 已收敛）
+  useInteractionLayer<HTMLDivElement>({ open, onClose: () => setOpen(false), kind: 'popover', name: 'workspace-switcher', closeOnOutside: true, autoFocus: false, layerRef: rootRef })
   const name = (d: string) => d.split(/[\\/]/).filter(Boolean).pop() ?? d
   return (
     <div className="ws-switch" ref={rootRef}>
@@ -209,4 +201,4 @@ function WorkspaceSwitcher({ dir, recent, onChoose, onPick }: { dir: string; rec
 }
 
 function Chrome({ title, onBack }: { title: string; onBack: () => void }) { return <div className="workspace-topbar"><div className="breadcrumb"><span>个人工作区</span><i>/</i><strong>{title}</strong></div><button className="icon-btn" onClick={onBack} title="返回任务列表"><ListTodo size={16} /></button></div> }
-function Page({ title, count, children }: { title: string; count: number; children: React.ReactNode }) { return <div className="tasks-column"><div className="workspace-topbar"><div className="breadcrumb"><span>个人工作区</span><i>/</i><strong>{title}</strong></div><div className="topbar-actions"><button className="command-trigger" onClick={() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true }))}><Search size={14} /> 搜索任务 <kbd><Command size={10} /> K</kbd></button></div></div><div className="tasks-toolbar"><div className="toolbar-title"><span className="toolbar-kicker">{title}</span><span className="toolbar-count">{count}</span></div></div>{children}</div> }
+function Page({ title, count, children }: { title: string; count: number; children: React.ReactNode }) { return <div className="tasks-column"><div className="workspace-topbar"><div className="breadcrumb"><span>个人工作区</span><i>/</i><strong>{title}</strong></div><div className="topbar-actions"><button className="command-trigger" onClick={() => ui.palette.open()}><Search size={14} /> 搜索任务 <kbd><Command size={10} /> K</kbd></button></div></div><div className="tasks-toolbar"><div className="toolbar-title"><span className="toolbar-kicker">{title}</span><span className="toolbar-count">{count}</span></div></div>{children}</div> }

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { bridge } from '../../api'
-import { toast } from '../../ui/Toasts'
+import { ui } from '../../ui/interaction-center'
+import { useInteractionLayer } from '../../hooks/useInteractionLayer'
 import { Menu } from '../../ui/Menu'
 import type { AgentInfo } from '../../../../shared/contracts'
 
@@ -29,6 +30,8 @@ export function GoalCreateDialog({ issueId, prefill, onClose }: { issueId: strin
   const [agents, setAgents] = useState<AgentInfo[]>([])
   const [busy, setBusy] = useState(false)
   const [draft, setDraft] = useState<CreateDraft>({ text: prefill.text, completion: '', stop: '', maxRuns: 8, hours: 8, agentId: prefill.agentId ?? '', startNow: true })
+  // 统一浮层：Escape 关闭 + Tab 焦点陷阱 + 焦点归还
+  const layerRef = useInteractionLayer<HTMLDivElement>({ open: true, onClose, kind: 'modal', name: 'goal-create', trap: true })
 
   useEffect(() => { bridge.agents.list().then(setAgents).catch(() => {}) }, [])
 
@@ -50,15 +53,15 @@ export function GoalCreateDialog({ issueId, prefill, onClose }: { issueId: strin
         backend: agent?.backend ?? prefill.backend,
         startNow: draft.startNow
       })
-      toast.success('目标模式已开启')
+      ui.toast.success('目标模式已开启')
       onClose()
     } catch (e) {
-      toast.error('开启失败: ' + (e instanceof Error ? e.message : String(e)))
+      ui.toast.error('开启失败: ' + (e instanceof Error ? e.message : String(e)))
     }
     setBusy(false)
   }
 
-  return <div className="overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+  return <div className="overlay" ref={layerRef} onClick={(e) => e.target === e.currentTarget && onClose()}>
     <div className="dialog">
       <h2>开启目标模式</h2>
       <p className="hint">在本 Issue 上开启自动推进：agent 每轮自评并继续，直到完成条件全部达成（完成条件须可验证）。</p>

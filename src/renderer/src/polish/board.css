@@ -6,10 +6,10 @@
    按钮全局体系归 foundation.css 管。
    ============================================================ */
 
-/* ---------- 卡片：head / title / meta 三层分明 ---------- */
-.board-card { transition: border-color var(--duration-base) var(--ease-in-out), box-shadow var(--duration-base) var(--ease-in-out), transform var(--duration-base) var(--ease-out); }
-.board-card:hover { border-color: var(--border-strong); transform: translateY(-1px); box-shadow: var(--menu-shadow); }
-.board-card[draggable='true']:active { cursor: grab; transform: translateY(0); box-shadow: var(--shadow-pop); }
+/* ---------- 卡片：head / title / meta 三层分明（平面，无位移无投影） ---------- */
+.board-card { transition: border-color var(--duration-base) var(--ease-in-out); }
+.board-card:hover { border-color: var(--border-strong); }
+.board-card[draggable='true']:active { cursor: grab; }
 
 /* head：identifier + 语义徽章，不再混入标题文本流 */
 .board-card .board-card-head {
@@ -22,14 +22,14 @@
   margin: 0;
   color: var(--text-faint);
   font: var(--text-micro)/1 var(--mono);
-  letter-spacing: 0.3px;
+  letter-spacing: 0;
   white-space: nowrap;
 }
 .board-card .board-card-head .badge {
   flex-shrink: 0;
   padding: 1px 7px;
   border-radius: var(--radius-pill);
-  font-size: 10px;
+  font-size: var(--text-micro);
   white-space: nowrap;
 }
 
@@ -38,7 +38,7 @@
   margin: 0 0 8px;
   color: var(--text);
   font-size: var(--text-label);
-  font-weight: 560;
+  font-weight: 600;
   line-height: 1.45;
   overflow: hidden;
   display: -webkit-box;
@@ -61,7 +61,7 @@
   border-radius: var(--radius-pill);
   background: var(--bg-inset);
   color: var(--text-faint);
-  font-size: 10px;
+  font-size: var(--text-micro);
   font-weight: 500;
   white-space: nowrap;
 }
@@ -79,12 +79,12 @@
   text-overflow: ellipsis;
 }
 .board-card .board-card-time.workdir { margin-left: 0; }
-.board-card .board-card-time.is-running { color: var(--status-running); font-weight: 620; }
+.board-card .board-card-time.is-running { color: var(--status-running); font-weight: 600; }
 
-/* ---------- 运行语义着色：红只属于失败，青色属于电弧 ---------- */
+/* ---------- 运行语义着色：红只属于失败，青色属于电弧（平底，以描边表达状态） ---------- */
 .board-card.issue-card.status-running {
   border-color: color-mix(in srgb, var(--status-running) 36%, transparent);
-  background: linear-gradient(180deg, var(--status-running-bg) 0%, transparent 60%), var(--bg-raised);
+  background: var(--bg-raised);
 }
 .board-card.issue-card.status-queued {
   border-color: color-mix(in srgb, var(--status-queued) 30%, transparent);
@@ -113,13 +113,13 @@
 /* ---------- parked（等你启动）：停放队列外，区别于系统自动调度的排队 ---------- */
 .board-card.issue-card.is-parked {
   border-style: dashed;
-  background: linear-gradient(180deg, var(--status-queued-bg) 0%, transparent 60%), var(--bg-raised);
+  background: var(--bg-raised);
 }
 .board-card .badge-parked {
   background: var(--status-queued-bg);
   border-color: color-mix(in srgb, var(--status-queued) 42%, transparent);
   color: var(--warn);
-  font-weight: 650;
+  font-weight: 600;
 }
 .board-card .board-card-start {
   flex-shrink: 0;
@@ -130,14 +130,14 @@
   border-radius: var(--radius-pill);
   background: var(--status-queued-bg);
   color: var(--warn);
-  font-size: 10px;
-  font-weight: 650;
+  font-size: var(--text-micro);
+  font-weight: 600;
   white-space: nowrap;
   cursor: pointer;
 }
 .board-card .board-card-start:hover {
   border-color: var(--status-queued);
-  background: var(--status-queued-glow);
+  background: var(--status-queued-bg);
 }
 .board-card .board-card-start:disabled { opacity: 0.55; cursor: default; }
 
@@ -156,8 +156,8 @@
 .board-day-nav-btn { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-dim); cursor: pointer; }
 .board-day-nav-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
 .board-day-nav-btn:disabled { opacity: 0.4; cursor: default; }
-.board-day-nav-label { min-width: 92px; color: var(--text); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; text-align: center; white-space: nowrap; }
-.board-day-nav-today { min-height: 22px; padding: 0 8px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: transparent; color: var(--text-dim); font-size: 10px; font-weight: 600; cursor: pointer; }
+.board-day-nav-label { min-width: 92px; color: var(--text); font-size: var(--text-caption); font-weight: 600; font-variant-numeric: tabular-nums; text-align: center; white-space: nowrap; }
+.board-day-nav-today { min-height: 22px; padding: 0 8px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: transparent; color: var(--text-dim); font-size: var(--text-micro); font-weight: 600; cursor: pointer; }
 .board-day-nav-today:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
 .board-day-nav-today:disabled { opacity: 0.4; cursor: default; }
 /* 实底背景（反馈三轮5）：透明底在 Windows 原生 select 失焦/离开时会闪白 */
@@ -167,22 +167,20 @@
 
 /* ---------- 日节头：全局唯一选中日的节头；超龄保留日的「将自动清理」角标只出现这一处 ---------- */
 .board-day-head { display: flex; flex-shrink: 0; align-items: center; gap: 8px; padding: 8px 14px 0; }
-.board-day-head-date { color: var(--text); font-size: 13px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.board-day-head-date { color: var(--text); font-size: var(--text-label); font-weight: 600; font-variant-numeric: tabular-nums; }
 .board-day-head-count { color: var(--text-faint); font-size: var(--text-micro); }
-.board-day-head .board-expiring-badge { padding: 1px 7px; border: 1px solid var(--border); border-radius: 999px; color: var(--warn); font-size: 10px; cursor: help; }
+.board-day-head .board-expiring-badge { padding: 1px 7px; border: 1px solid var(--border); border-radius: var(--radius-pill); color: var(--warn); font-size: var(--text-micro); cursor: help; }
 
 .board-card.issue-card { --card-accent: var(--text-faint); }
 .board-page .board-card.issue-card { border-left: 4px solid var(--card-accent); }
 .board-card.kind-delegate { --card-accent: var(--violet); }
 .board-card.kind-handoff { --card-accent: var(--accent); }
 .board-card.kind-goal { --card-accent: var(--status-queued); }
-.board-card.kind-meeting { --card-accent: var(--board-meeting); }
-.board-page { --board-meeting: #6a9fea; }
-html.light .board-page { --board-meeting: #326dc2; }
+.board-card.kind-meeting { --card-accent: var(--type-meeting); }
 .board-card.issue-card.is-parked { border-left-style: solid; }
 .board-card .board-card-head { flex-wrap: wrap; }
 .board-card .board-card-head .issue-identifier { overflow: hidden; text-overflow: ellipsis; max-width: 160px; }
-.board-card .board-priority { margin-left: auto; border-radius: var(--radius-sm); font-weight: 700; }
+.board-card .board-priority { margin-left: auto; border-radius: var(--radius-sm); font-weight: 600; }
 .board-card .board-priority.priority-urgent { background: var(--status-failed); color: var(--bg-inset); }
 .board-card .board-priority.priority-high { background: var(--status-queued); color: var(--bg-inset); }
 .board-card-open { display: block; width: 100%; padding: 0; border: 0; background: transparent; text-align: left; cursor: pointer; }
@@ -195,25 +193,27 @@ html.light .board-page { --board-meeting: #326dc2; }
 .board-elapsed { font-family: var(--mono); }
 .board-updated { margin-left: auto; white-space: nowrap; }
 .board-card .board-card-start { margin-top: 8px; }
-/* ---------- 子单收纳：有界容器（浅底/圆角/左连接竖线）+ 两行迷你卡 ---------- */
-.board-workers { margin-top: 10px; padding: 7px 8px 8px; border: 1px solid var(--border); border-left: 3px solid var(--card-accent); border-radius: var(--radius-md); background: color-mix(in srgb, var(--bg-inset) 45%, transparent); }
+/* ---------- 子单收纳：行式层级（任务内的行，不是卡中卡） ----------
+   外层是有界容器（浅底/左连接竖线），内部子单一律为行：
+   无边框无底色，靠缩进引导线与行悬停表达层级。 */
+.board-workers { margin-top: 10px; padding: 6px 8px 7px; border: 1px solid var(--border); border-left: 3px solid var(--card-accent); border-radius: var(--radius-md); background: var(--bg-inset); }
 .board-workers-toggle { display: flex; align-items: center; width: 100%; gap: 5px; padding: 2px 0; border: 0; background: transparent; color: var(--text-dim); font-size: var(--text-micro); cursor: pointer; }
 .board-workers-toggle:disabled { cursor: default; }
 .board-workers-toggle strong { color: var(--text); font-family: var(--mono); }
 .board-worker-progress { flex: 1; height: 4px; margin-left: 5px; overflow: hidden; border-radius: var(--radius-pill); background: var(--border); }
 .board-worker-progress > span { display: block; height: 100%; background: var(--status-done); }
-.board-child-root { margin-top: 7px; }
-.board-child-list { display: flex; flex-direction: column; gap: 5px; }
-/* 深层子单沿左连接竖线缩进 */
-.board-child-list .board-child-list { margin: 5px 0 0 10px; padding-left: 9px; border-left: 1px solid var(--border-strong); }
-.board-child-card { display: flex; flex-direction: column; gap: 4px; width: 100%; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-raised); color: var(--text-dim); font-size: var(--text-micro); text-align: left; cursor: pointer; transition: border-color var(--duration-base) var(--ease-in-out), background var(--duration-base) var(--ease-in-out); }
-.board-child-card:hover { border-color: var(--border-strong); background: var(--bg-hover); color: var(--text); }
-.board-child-card[data-status='running'] { border-color: color-mix(in srgb, var(--status-running) 40%, transparent); background: linear-gradient(180deg, var(--status-running-bg) 0%, transparent 70%), var(--bg-raised); }
+.board-child-root { margin-top: 6px; }
+.board-child-list { display: flex; flex-direction: column; gap: 2px; }
+/* 深层子单沿左连接竖线缩进（行式层级的缩进引导线） */
+.board-child-list .board-child-list { margin: 2px 0 0 10px; padding-left: 9px; border-left: 1px solid var(--border-strong); }
+.board-child-card { display: flex; flex-direction: column; gap: 3px; width: 100%; padding: 4px 6px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-dim); font-size: var(--text-micro); text-align: left; cursor: pointer; transition: background var(--duration-base) var(--ease-in-out), color var(--duration-base) var(--ease-in-out); }
+.board-child-card:hover { background: var(--bg-hover); color: var(--text); }
+.board-child-card[data-status='running'] { border-color: transparent; background: transparent; }
 .board-child-line1 { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .board-child-line1 .dot { flex-shrink: 0; }
-.board-child-dot-running { animation: board-child-breathe 1.8s ease-in-out infinite; }
-.board-child-title { flex: 1; min-width: 0; overflow: hidden; color: var(--text); font-weight: 560; text-overflow: ellipsis; white-space: nowrap; }
-.board-child-state { flex-shrink: 0; font-size: 10px; }
+.board-child-dot-running { animation: pulse 1.2s ease-in-out infinite; }
+.board-child-title { flex: 1; min-width: 0; overflow: hidden; color: var(--text); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.board-child-state { flex-shrink: 0; font-size: var(--text-micro); }
 .board-child-card[data-status='queued'] .board-child-state { color: var(--warn); }
 .board-child-card[data-status='running'] .board-child-state { color: var(--status-running); }
 .board-child-card[data-status='done'] .board-child-state { color: var(--ok); }
@@ -221,14 +221,13 @@ html.light .board-page { --board-meeting: #326dc2; }
 .board-child-card[data-status='cancelled'] .board-child-state { color: var(--text-dim); }
 .board-child-time { flex-shrink: 0; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .board-child-line2 { display: flex; align-items: center; gap: 5px; min-width: 0; }
-.board-child-backend { flex-shrink: 0; padding: 0 6px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--bg-inset); color: var(--text-faint); font-family: var(--mono); font-size: 9px; line-height: 15px; }
-.board-child-diff { display: inline-flex; gap: 5px; flex-shrink: 0; margin-left: auto; padding: 0 6px; border: 1px solid var(--border); border-radius: var(--radius-pill); font-family: var(--mono); font-size: 9px; line-height: 15px; color: var(--text-dim); }
+.board-child-backend { flex-shrink: 0; padding: 0 6px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--bg-inset); color: var(--text-faint); font-family: var(--mono); font-size: 11px; line-height: 15px; }
+.board-child-diff { display: inline-flex; gap: 5px; flex-shrink: 0; margin-left: auto; padding: 0 6px; border: 1px solid var(--border); border-radius: var(--radius-pill); font-family: var(--mono); font-size: 11px; line-height: 15px; color: var(--text-dim); }
 .board-child-diff .diff-add { color: var(--ok); }
 .board-child-diff .diff-del { color: var(--err); }
-.board-card.issue-card.status-running { animation: board-breathe 2.4s ease-in-out infinite; }
-@keyframes board-breathe { 0%, 100% { box-shadow: 0 0 0 0 transparent; } 50% { box-shadow: 0 0 0 1px var(--status-running-glow), 0 0 15px var(--status-running-bg); } }
-@keyframes board-child-breathe { 0%, 100% { box-shadow: 0 0 0 0 transparent; } 50% { box-shadow: 0 0 0 3px var(--status-running-glow); } }
-@media (prefers-reduced-motion: reduce) { .board-card.issue-card.status-running { animation: none; } .board-child-dot-running { animation: none; } .board-card { transition: none; } }
+/* 运行中状态：静态描边 + 脉冲圆点表达（呼吸光环/整卡脉冲已按规范移除） */
+.board-card.issue-card.status-running { border-color: color-mix(in srgb, var(--status-running) 36%, transparent); }
+@media (prefers-reduced-motion: reduce) { .board-child-dot-running { animation: none; } .board-card { transition: none; } }
 
 /* 文字溢出兜底（反馈二轮5）：长路径/长命令/无空格串不再撑破卡片容器 */
 .board-card, .board-card * { min-width: 0; }
@@ -244,6 +243,6 @@ html.light .board-page { --board-meeting: #326dc2; }
 .board-child-backend { max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .board-child-diff { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .board-child-state, .board-child-time { white-space: nowrap; }
-.board-day-nav-all { min-height: 22px; padding: 0 8px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: transparent; color: var(--text-dim); font-size: 10px; font-weight: 600; cursor: pointer; }
+.board-day-nav-all { min-height: 22px; padding: 0 8px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: transparent; color: var(--text-dim); font-size: var(--text-micro); font-weight: 600; cursor: pointer; }
 .board-day-nav-all:hover { border-color: var(--accent); color: var(--accent); }
 .board-day-nav-all.is-active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }

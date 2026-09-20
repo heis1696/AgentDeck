@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Target, Play, Pause, XCircle, RotateCw, CircleCheck, CircleDashed, Zap, Trash2 } from 'lucide-react'
 import { bridge, fmtDuration, fmtTime } from '../../api'
-import { toast } from '../../ui/Toasts'
-import { confirmDialog } from '../../ui/Confirm'
+import { ui } from '../../ui/interaction-center'
 import { FloatWindow } from '../../ui/FloatWindow'
 import { GOAL_STATUS_COLORS, GOAL_STATUS_LABELS } from '../../labels'
 import type { Goal, GoalCheckpoint, GoalRun, Task } from '../../../../shared/types'
@@ -78,7 +77,7 @@ export function GoalPanel({ task, issueId, open, onToggle, onGoal }: {
     setBusy(true)
     const call = key === 'start' ? bridge.goals.start : key === 'pause' ? bridge.goals.pause : bridge.goals.continue
     const res = await call(goal.id).catch((e) => ({ ok: false, error: e instanceof Error ? e.message : String(e) }))
-    if (!res.ok) toast.error(`目标操作失败: ${res.error ?? '未知错误'}`)
+    if (!res.ok) ui.toast.error(`目标操作失败: ${res.error ?? '未知错误'}`)
     setBusy(false)
   }
 
@@ -86,14 +85,14 @@ export function GoalPanel({ task, issueId, open, onToggle, onGoal }: {
     if (!goal || busy) return
     setBusy(true)
     const res = await bridge.goals.cancel(goal.id).catch((e) => ({ ok: false, error: e instanceof Error ? e.message : String(e) }))
-    if (!res.ok) toast.error(`取消失败: ${res.error ?? '未知错误'}`)
+    if (!res.ok) ui.toast.error(`取消失败: ${res.error ?? '未知错误'}`)
     setBusy(false)
   }
 
   /** 清除目标模式：删掉目标及其 checkpoint（运行中任务连带取消），回到可重新开启的空态 */
   const removeGoal = async () => {
     if (!goal || busy) return
-    const yes = await confirmDialog({
+    const yes = await ui.confirm({
       title: '清除目标模式',
       body: '将删除该目标及其全部 checkpoint 记录，运行中的任务会被取消。清除后本 Issue 不再被目标模式锁定，可重新开启。',
       danger: true,
@@ -107,7 +106,7 @@ export function GoalPanel({ task, issueId, open, onToggle, onGoal }: {
       setCheckpoints([])
       setRuns([])
     } else {
-      toast.error(`清除失败: ${res.error ?? '未知错误'}`)
+      ui.toast.error(`清除失败: ${res.error ?? '未知错误'}`)
     }
     setBusy(false)
   }
