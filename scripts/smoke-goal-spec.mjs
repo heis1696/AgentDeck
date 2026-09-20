@@ -26,6 +26,29 @@ const verifierFixtureGoal = { workdir: root, acceptanceCriteria: [{ id: 'file', 
 const verifierEvidence = verifyAcceptance(verifierFixtureGoal, { workdir: root, gitDiff: '' })
 ok(verifierEvidence?.find((item) => item.criterionId === 'file')?.passed === true && verifierEvidence?.find((item) => item.criterionId === 'natural')?.passed === false, 'host verifier checks explicit machine rules and fails closed for natural language')
 
+// diff 验收证据必须绑定「当前执行 + available 快照」：其他 Run / 其他阶段 / 无来源旧数据
+// 以及失败、取消后残留的 diff 都不能认证本轮。
+const acceptanceGoal = { workdir: root, acceptanceCriteria: [{ id: 'diff', text: 'git diff contains: hello', status: 'pending' }] }
+const acceptanceTask = {
+  id: 'task_acceptance', status: 'done', workdir: root, runId: 'run_accept_1', phaseIndex: 1, startedAt: 1000,
+  gitDiff: 'diff --git a/x.txt b/x.txt\n+hello\n', gitStat: ' x.txt | 1 +',
+  gitSnapshot: { scope: 'workspace', state: 'available', capturedAt: Date.now(), runId: 'run_accept_1', phaseIndex: 1, startedAt: 1000 }
+}
+const acceptDiff = (patch) => verifyAcceptance(acceptanceGoal, { ...acceptanceTask, ...patch })[0]
+ok(acceptDiff({}).passed === true, 'diff criterion passes on the current run available snapshot')
+for (const [label, patch] of [
+  ['another runId', { runId: 'run_accept_2' }],
+  ['another phaseIndex', { phaseIndex: 2 }],
+  ['another startedAt', { startedAt: 1001 }],
+  ['legacy diff without provenance', { gitSnapshot: undefined }],
+  ['clean snapshot', { gitSnapshot: { ...acceptanceTask.gitSnapshot, state: 'clean' } }],
+  ['failed run after a follow-up run', { status: 'failed', runId: 'run_accept_3', startedAt: 2000 }],
+  ['cancelled run with an earlier snapshot', { status: 'cancelled', runId: 'run_accept_4', startedAt: 3000 }]
+]) {
+  ok(acceptDiff(patch).passed === false, `diff criterion rejects ${label}`)
+}
+ok(acceptDiff({ gitSnapshot: undefined }).evidence.includes('no available Git snapshot'), 'rejected stale diff explains the missing provenance')
+
 const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-goal-spec-data-'))
 const tasks = []
 const goalStore = new GoalStore(userData)

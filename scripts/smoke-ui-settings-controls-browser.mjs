@@ -179,6 +179,7 @@ const checkSliderLabelSafety = async () => {
   await settle()
   assert.equal(await slider.inputValue(), before, 'clicking the slider label must not move the slider')
   const box = await slider.boundingBox()
+  assert.equal(box.height, 24, 'range keeps its own height instead of inheriting the text-input minimum')
   await page.mouse.click(Math.round(box.x + box.width / 2), Math.round(box.y + box.height / 2))
   await settle()
   const moved = Number(await slider.inputValue())
@@ -189,12 +190,29 @@ const checkSliderLabelSafety = async () => {
 const checkToggleLabelSafety = async () => {
   const box = page.locator('.settings-page input[type=checkbox]').first()
   await box.scrollIntoViewIfNeeded()
+  const geometry = await box.boundingBox()
+  assert.equal(geometry.width, 36, 'toggle track keeps its fixed width')
+  assert.equal(geometry.height, 20, 'toggle track keeps its fixed height instead of becoming circular')
   const before = await box.isChecked()
   const labelText = page.locator('.settings-page .row-field:has(input[type=checkbox]) > span').first()
   const textBox = await labelText.boundingBox()
   await page.mouse.click(Math.round(textBox.x + textBox.width / 2), Math.round(textBox.y + textBox.height / 2))
   await settle()
   assert.equal(await box.isChecked(), !before, 'clicking a checkbox label toggles it (ordinary label semantics preserved)')
+  const afterGeometry = await box.boundingBox()
+  assert.equal(afterGeometry.height, geometry.height, 'changing toggle state does not resize its track')
+  const thumb = await box.evaluate((input) => {
+    const track = getComputedStyle(input)
+    const style = getComputedStyle(input, '::after')
+    const transform = new DOMMatrixReadOnly(style.transform === 'none' ? undefined : style.transform)
+    return {
+      top: parseFloat(track.borderTopWidth) + parseFloat(style.top) + transform.m42,
+      left: parseFloat(track.borderLeftWidth) + parseFloat(style.left) + transform.m41,
+      width: parseFloat(style.width), height: parseFloat(style.height)
+    }
+  })
+  assert.equal(thumb.top + thumb.height / 2, afterGeometry.height / 2, 'toggle thumb stays vertically centered')
+  assert(thumb.left >= 2 && thumb.left + thumb.width <= afterGeometry.width - 2, 'toggle thumb remains inside the track')
   const rowBox = await page.locator('.settings-page .row-field:has(input[type=checkbox])').first().boundingBox()
   await page.mouse.click(Math.round(rowBox.x + rowBox.width / 2), Math.round(rowBox.y + rowBox.height + 14))
   await settle()

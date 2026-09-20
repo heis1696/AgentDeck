@@ -40,9 +40,9 @@ const MANAGED_BRANCH_PREFIX = 'agentdeck/'
 const AGENT_GIT_IDENTITY = ['-c', 'user.email=agentdeck@local', '-c', 'user.name=AgentDeck Worker'] as const
 
 /** Preserve process exit status and stderr. Empty stdout is a valid result. */
-export function runGit(workdir: string, args: string[], timeout = 15000): Promise<GitCommandResult> {
+export function runGit(workdir: string, args: string[], timeout = 15000, env?: NodeJS.ProcessEnv): Promise<GitCommandResult> {
   return new Promise((resolve) => {
-    execFile('git', ['-C', workdir, ...args], { timeout, windowsHide: true }, (err, stdout, stderr) => {
+    execFile('git', ['-C', workdir, ...args], { timeout, windowsHide: true, env }, (err, stdout, stderr) => {
       const error = err as NodeJS.ErrnoException | null
       resolve({
         ok: !error,
@@ -100,9 +100,12 @@ function snapshotSuccess(scope: TaskGitSnapshot['scope'], diff: string, stat: st
 
 export async function snapshotGitAfter(workdir: string): Promise<GitSnapshotResult> {
   if (!workdir) return snapshotFailure('workspace', 'unavailable', '此任务未绑定工作目录。')
-  const repo = await runGit(workdir, ['rev-parse', '--is-inside-work-tree'])
+  // Let Git resolve worktrees, ceilings and filesystem boundaries itself.
+  // Fix only this probe's diagnostic language; do not change the host locale.
+  const repo = await runGit(workdir, ['rev-parse', '--is-inside-work-tree'], 15000,
+    { ...process.env, LC_ALL: 'C', LANG: 'C', LANGUAGE: 'C' })
   if (!repo.ok) {
-    return /not a git repository/i.test(repo.stderr)
+    return repo.code === 128 && /^fatal: not a git repository \(or any\b/m.test(repo.stderr)
       ? snapshotFailure('workspace', 'unavailable', '工作目录不是 Git 仓库。')
       : snapshotFailure('workspace', 'error', gitError(repo))
   }

@@ -21,6 +21,7 @@ import {
   leftoverRejectsComment
 } from './prompts'
 import { isGitRepo, mergeBranchInto, branchDiffSummary, currentBranch, commitAll, branchExists, reclaimWorktree, deleteBranch, markWorktreeCleanup } from './git'
+import { currentGitChanges } from '../shared/git-snapshot'
 
 export interface DelegateCall {
   to: string
@@ -351,6 +352,20 @@ export function ancestorBudget(store: DelegationContext['store'], taskId: string
 }
 
 /**
+ * 子任务需要合入的分支：worktree 自己的分支优先；没有 worktree 元数据时，只有该
+ * 子任务**本轮执行**留下了 available 快照，才按派生约定推断分支名。旧 gitStat
+ * （上一轮/无来源/失败取消残留）不构成证据——照它推断会去合一个不存在的幻影分支。
+ */
+export function delegateChildBranch(
+  child: Pick<Task, 'worktree' | 'runId' | 'phaseIndex' | 'startedAt' | 'gitSnapshot' | 'gitDiff' | 'gitStat'>,
+  leaderTaskId: string,
+  index: number
+): string {
+  if (child.worktree?.branch) return child.worktree.branch
+  return currentGitChanges(child) ? `agentdeck/${leaderTaskId}_c${index}` : ''
+}
+
+/**
  * 委派循环：在领队回合结束后执行。
  * session 已就绪；每轮解析 delegate 标记 → 生成子任务 → 等终态 → 结果回灌 session.send。
  * 标记解析用回合文本的全部来源（终态全文/流式累计并集 + 最后一条消息，多源去重——
@@ -584,7 +599,7 @@ export async function runDelegationLoop(
       const c = store.get(cid)!
       if (!c.workdir) continue
       // 该子任务需要合入的分支：自己的工作分支（有改动时）+ 它作为子领队的集成分支（二层委派递归交付）
-      const ownBranch = c.worktree?.branch || (c.gitStat ? `agentdeck/${taskId}_c${idx}` : '')
+      const ownBranch = delegateChildBranch(c, taskId, idx)
       const subIntegration = await branchExists(task.workdir, `agentdeck/task-${cid}`) ? `agentdeck/task-${cid}` : ''
       if (!active()) return abandoned()
       if (!ownBranch && !subIntegration) {

@@ -5,6 +5,9 @@ import path from 'node:path'
 import fs from 'node:fs'
 import os from 'node:os'
 import { execSync } from 'node:child_process'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { JSDOM } from 'jsdom'
 
 const root = path.resolve(import.meta.dirname, '..')
 for (const [src, out] of [
@@ -16,7 +19,24 @@ for (const [src, out] of [
 }
 const { TaskRunner } = await import(pathToFileURL(path.join(root, 'out/sd-runner.cjs')).href)
 const { TaskStore } = await import(pathToFileURL(path.join(root, 'out/sd-store.cjs')).href)
-const { parseDelegates, stripDelegates, parseReviews, stripReviews } = await import(pathToFileURL(path.join(root, 'out/sd-delegate.cjs')).href)
+const { parseDelegates, stripDelegates, parseReviews, stripReviews, delegateChildBranch } = await import(pathToFileURL(path.join(root, 'out/sd-delegate.cjs')).href)
+
+// 渲染层链路（GitSummary）单独构建：快照状态由渲染层消费
+globalThis.window = { agentdeck: {} }
+const summaryOut = path.join(root, 'out/sd-summary.cjs')
+await build({
+  stdin: {
+    contents: [
+      "export { currentGitChanges } from './src/shared/git-snapshot'",
+      "export { GitSummary } from './src/renderer/src/components/task/GitSummary'"
+    ].join('\n'),
+    resolveDir: root,
+    loader: 'tsx'
+  },
+  outfile: summaryOut, bundle: true, platform: 'node', format: 'cjs', jsx: 'automatic',
+  external: ['electron', 'react', 'react/jsx-runtime', 'lucide-react']
+})
+const { currentGitChanges, GitSummary } = await import(pathToFileURL(summaryOut).href)
 
 // ---- 假后端：领队 zcode 风格（send 续聊），worker claude 风格 ----
 function makeLeaderBackend() {
@@ -125,6 +145,25 @@ assert(r2.of === 'Alpha' && r2.verdict === 'fail', 'review 兜底按名字匹配
 assert(parseReviews('<review of="#1" verdict="maybe"/>').length === 0, 'review 非 pass/fail 不匹配')
 assert(stripReviews('前<review of="#1" verdict="pass" note="x"/>后') === '前后', 'stripReviews 剥离标记')
 
+// delegateChildBranch 单测：无 worktree 元数据时只有「本轮 available 快照」才推断分支
+const childRun = { runId: 'run_child_1', phaseIndex: 1, startedAt: 1000 }
+const childAvailable = { scope: 'workspace', state: 'available', capturedAt: 1, ...childRun }
+const childTask = { ...childRun, gitDiff: 'diff', gitStat: ' a.txt | 1 +', gitSnapshot: childAvailable }
+assert(delegateChildBranch({ ...childTask, worktree: { branch: 'agentdeck/L_c1' } }, 'L', 1) === 'agentdeck/L_c1', 'worktree 自有分支优先')
+assert(delegateChildBranch(childTask, 'L', 2) === 'agentdeck/L_c2', '本轮 available 快照按约定推断分支')
+for (const [label, stale] of [
+  ['another runId', { runId: 'run_child_2' }],
+  ['another phaseIndex', { phaseIndex: 2 }],
+  ['another startedAt', { startedAt: 2000 }],
+  ['legacy gitStat without provenance', { gitSnapshot: undefined }],
+  ['clean snapshot', { gitSnapshot: { ...childAvailable, state: 'clean' } }],
+  ['error snapshot', { gitSnapshot: { ...childAvailable, state: 'error' } }],
+  ['failed rerun', { status: 'failed', runId: 'run_child_3', startedAt: 3000 }],
+  ['cancelled rerun', { status: 'cancelled', runId: 'run_child_4', startedAt: 4000 }]
+]) {
+  assert(delegateChildBranch({ ...childTask, ...stale }, 'L', 3) === '', `旧 gitStat 不推断分支：${label}`)
+}
+
 // 主流程
 const leader = store.create({ title: '升级两文件', prompt: '升级 a 和 b', workdir: repo, backend: 'zcode', agentId: 'L1' })
 runner.enqueue(leader)
@@ -147,6 +186,43 @@ const ib = fin.integration.branch
 assert(execSync(`git show ${ib}:a.txt`, { cwd: repo, encoding: 'utf8' }).includes('by Alpha'), 'a.txt 由 Alpha 合入')
 assert(execSync(`git show ${ib}:b.txt`, { cwd: repo, encoding: 'utf8' }).includes('by Beta'), 'b.txt 由 Beta 合入')
 assert(fs.readFileSync(path.join(repo, 'a.txt'), 'utf8').trim() === 'a v1', '用户工作区未动')
+
+// ================= 全链路：委派 → finalizer → 重启读回 → GitSummary =================
+assert(!!fin.gitSnapshot, `领队快照由 finalizer 落盘（${fin.gitSnapshot?.state ?? '无'}）`)
+assert(fin.gitSnapshot.scope === 'integration' && fin.gitSnapshot.state === 'available', '快照=集成分支 available（finalizer 保留同轮集成快照）')
+assert(fin.gitSnapshot.runId === fin.runId && fin.gitSnapshot.phaseIndex === fin.phaseIndex && fin.gitSnapshot.startedAt === fin.startedAt, '快照来源=本次执行（runId/phaseIndex/startedAt）')
+assert(!!fin.gitStat?.trim(), `gitStat 随快照落盘（${JSON.stringify(fin.gitStat?.split('\n')[0])}）`)
+assert(currentGitChanges(fin)?.diff === fin.gitDiff && currentGitChanges(fin).diff.includes('by Alpha'), '集成分支 diff 可作为本轮证据')
+const childTasks = children.map((c) => store.get(c.id))
+assert(childTasks.every((c) => c.gitSnapshot?.state === 'available' && c.gitSnapshot.runId === c.runId && c.gitSnapshot.startedAt === c.startedAt), '子任务快照同样绑定各自本轮执行')
+
+// 重启读回：索引/快照从磁盘恢复后，证据链与渲染结论不变
+store.flush()
+const reopened = new TaskStore(tmpStore)
+const reloaded = reopened.get(leader.id)
+assert(!!reloaded?.gitSnapshot && reloaded.gitSnapshot.scope === 'integration' && reloaded.gitSnapshot.state === 'available', '重启读回后集成分支快照仍在')
+assert(reloaded.gitSnapshot.runId === reloaded.runId && reloaded.gitSnapshot.phaseIndex === reloaded.phaseIndex && reloaded.gitSnapshot.startedAt === reloaded.startedAt, '重启读回后来源字段仍匹配')
+const reloadedChanges = currentGitChanges(reloaded)
+assert(reloadedChanges?.diff.includes('by Alpha') && reloadedChanges?.stat.includes('a.txt'), '重启读回后 diff/stat 仍可作本轮证据')
+
+const renderSummary = (task) => {
+  const page = new JSDOM(renderToStaticMarkup(createElement(GitSummary, { task })))
+  const pane = page.window.document.querySelector('.git-pane')
+  const state = pane.dataset.snapshotState
+  const text = pane.textContent
+  const files = pane.querySelectorAll('.diff-file').length
+  // 没有复制按钮 / 按钮 disabled 都表示「不可作为当前证据复制」
+  const copyDisabled = pane.querySelector('.git-copy')?.disabled ?? true
+  page.window.close()
+  return { state, text, files, copyDisabled }
+}
+const summary = renderSummary(reloaded)
+assert(summary.state === 'available' && summary.files > 0 && !summary.copyDisabled, `GitSummary 渲染集成分支改动（${summary.state}/${summary.files} 个文件）`)
+assert(summary.text.includes('集成分支快照') && summary.text.includes('⎇'), 'GitSummary 标注集成分支与分支 chip')
+const staleSummary = renderSummary({ ...reloaded, runId: 'run_other' })
+assert(staleSummary.state !== 'available' && staleSummary.copyDisabled, `GitSummary 不把非本轮快照当作当前证据（${staleSummary.state}）`)
+const cancelledSummary = renderSummary({ ...reloaded, status: 'cancelled', startedAt: reloaded.startedAt + 1 })
+assert(cancelledSummary.state !== 'available' && cancelledSummary.copyDisabled, `GitSummary 不把失败/取消轮的残留快照当作当前证据（${cancelledSummary.state}）`)
 
 // Follow-up turns must use the same delegation path as the initial turn.
 const follow = await runner.followUp(leader.id, '追问派工')

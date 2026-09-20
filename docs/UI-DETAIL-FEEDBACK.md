@@ -215,8 +215,8 @@ detail surfaces have already been applied before delegation.
   Escape and covers ArrowDown opening and ArrowUp navigation.
 - Review of `8f83bb2` found that only GitSummary rejected stale snapshots;
   acceptance verification, counts, copied summaries and badges still consumed
-  raw fields. This remains blocking until every current-execution consumer is
-  routed through the shared helpers below. Raw historical fields are retained.
+  raw fields. The consumer follow-up below closes this blocker using one shared
+  provenance predicate. Raw historical fields are retained.
 
 ### Current Snapshot Consumer Follow-up
 
@@ -238,3 +238,43 @@ detail surfaces have already been applied before delegation.
   independent persistence/update WIP. The shared helper, package registration,
   plan and dependency graphs remain lead-owned; source-module graph refresh
   already succeeds at 185 modules on the combined working tree.
+
+## Final Acceptance
+
+- All five feedback items are implemented: ordinary user-bubble scrolling,
+  visible detail canvas, floating per-turn worker groups with every terminal
+  worker archived, primary execution/Git navigation, and aligned Settings
+  controls with matching visible and clickable boundaries.
+- Current Git counts, worker/board badges, copied result/PR summaries and
+  deterministic Goal acceptance all use `currentGitChanges`. GitSummary also
+  uses the shared identity check; legacy content is explicitly historical and
+  cannot be copied as current evidence. Integration branch chips, banners and
+  exported branch references are likewise limited to current provenance.
+- The finalizer/delegate/store/renderer chain is tested with real temporary Git
+  repositories and fake agents, including real integration-branch preservation
+  and restart recovery. Mismatched run/phase/start identities never certify
+  current acceptance. No real agents or production settings were used.
+- Lead review replaced manual filesystem repository discovery with Git's own
+  probe using command-local C diagnostics. Localized environments, explicit
+  invalid GIT_DIR, ceiling boundaries, missing paths and Git startup failures
+  are covered. The application's environment is unchanged.
+- Main-checkout verification passed: typecheck, build, stage6, complete UI
+  smoke, runner, lifecycle, delegate, worktrees, sidecar, goal-spec, git-errors
+  (including git-snapshot), and whitespace validation. Build retains its
+  existing static/dynamic Git import warning.
+- The complete browser command passed: main renderer 283 checks across 28
+  page/theme/viewport cases; Agent picker 9 checks; assistant window 4 geometry
+  cases; Settings 384 checks across 20 section/theme/viewport cases. No renderer
+  exceptions or failed geometry/interaction checks were recorded. Screenshot
+  review includes desktop floating workers, narrow detail scrolling, and
+  Settings control geometry.
+- Screenshot inspection also caught the legacy text-input minimum height
+  stretching Settings toggles into circles. Settings-scoped explicit minimum
+  dimensions restore 36x20 switch tracks and 24px sliders; the browser suite
+  now asserts track geometry, centered thumb position and stable state changes.
+- Local screenshots: `gui-test-screenshots/detail-feedback-final/` and
+  `gui-test-screenshots/settings-controls/`. The isolated sample-data preview
+  remains available at `http://127.0.0.1:4175` (HTTP 200 verified).
+- `graph:deps` succeeds at 185 modules on the combined working tree. Generated
+  graph files also contain the independent persistence-audit WIP, so they remain
+  unstaged with that work. Source commits include only this feedback task.

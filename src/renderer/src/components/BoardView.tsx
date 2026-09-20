@@ -9,6 +9,7 @@ import { useInteractionLayer } from '../hooks/useInteractionLayer'
 import { IssueIdChip } from '../ui/IssueIdChip'
 import { EmptyState } from '../ui/EmptyState'
 import { Ban, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, CircleDot, Clock3, Eye, ListTodo, LoaderCircle, RefreshCw, Search, X } from 'lucide-react'
+import { currentGitChanges } from '../../../shared/git-snapshot'
 
 type Scope = 'all' | 'mine' | 'agents'
 type CardKind = 'normal' | 'delegate' | 'handoff' | 'goal' | 'meeting'
@@ -235,9 +236,9 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
     } catch { ui.toast.error('启动失败') } finally { setStarting(null) }
   }
   const toggle = (id: string) => setExpanded((current) => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next })
-  /** 子单两行迷你卡：首行状态点+标题+状态文字/耗时，次行 backend 芯片+改动徽标（有 gitStat 才出现） */
-  const diffBadge = (gitStat: string | undefined) => {
-    const stat = boardDiffStat(gitStat)
+  /** 子单两行迷你卡：改动徽标只来自本次执行的有效 Git 快照。 */
+  const diffBadge = (task: Task) => {
+    const stat = boardDiffStat(currentGitChanges(task)?.stat)
     if (!stat) return null
     return <span className="badge board-child-diff" title="完成时抓取的 git 改动统计">{stat.files > 0 && <span>{stat.files}文件</span>}{stat.plus !== undefined && <span className="diff-add">+{stat.plus}</span>}{stat.minus !== undefined && <span className="diff-del">−{stat.minus}</span>}</span>
   }
@@ -251,7 +252,7 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
       </span>
       <span className="board-child-line2">
         <span className="badge board-child-backend">{node.task.backend}</span>
-        {diffBadge(node.task.gitStat)}
+        {diffBadge(node.task)}
       </span>
     </button>
     {node.children.length > 0 && childCards(node.children)}

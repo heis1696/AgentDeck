@@ -52,6 +52,8 @@ globalThis.cancelAnimationFrame = window.cancelAnimationFrame.bind(window)
 globalThis.localStorage = window.localStorage
 try { Object.defineProperty(globalThis, 'navigator', { value: window.navigator, configurable: true }) } catch { /* Node 自带 navigator 只读时忽略 */ }
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
+const clipboardWrites = []
+Object.defineProperty(window.navigator, 'clipboard', { value: { writeText: async (text) => { clipboardWrites.push(text) } }, configurable: true })
 
 // jsdom 没有排版：getClientRects 恒为空会让「层内第一个可聚焦元素」判定为不可见。
 // 打桩成「有一个矩形」，等价于浏览器里的可见元素（生产代码的可见性判据本身不改）。
@@ -566,6 +568,49 @@ section('Git access and focus persist when switching to a task without a snapsho
   ok(tab('git').getAttribute('aria-selected') === 'true' && panel().getAttribute('aria-labelledby') === 'detail-tab-git', 'Switching tasks keeps the selected Git view')
   ok(tab('git').tabIndex === 0 && active() === tab('git'), 'The selected Git tab retains keyboard focus')
   ok(panel().querySelector('[data-snapshot-state="unavailable"]'), 'Missing snapshots render an explicit unavailable state')
+  await unmount()
+}
+
+section('Current Git snapshot consumers ignore rerun history in TaskDetail')
+{
+  const patch = 'diff --git a/old.ts b/old.ts\n--- a/old.ts\n+++ b/old.ts\n@@ -1 +1 @@\n-old\n+new\n'
+  const current = makeTask({
+    id: 'current-git-task', title: '当前快照', result: 'current result', runId: 'run-current', phaseIndex: 0, startedAt: 3000,
+    gitStat: 'src/current.ts | 1 +', gitDiff: patch.replaceAll('old.ts', 'current.ts'),
+    gitSnapshot: { state: 'available', scope: 'integration', capturedAt: 4000, runId: 'run-current', phaseIndex: 0, startedAt: 3000 },
+    integration: { branch: 'agentdeck/current-branch' }
+  })
+  const stale = makeTask({
+    id: 'stale-git-task', title: '重跑后快照', result: 'rerun result', runId: 'run-rerun', phaseIndex: 0, startedAt: 5000,
+    gitStat: 'src/old.ts | 1 +', gitDiff: patch,
+    gitSnapshot: { state: 'available', scope: 'integration', capturedAt: 2000, runId: 'run-before-rerun', phaseIndex: 0, startedAt: 1000 },
+    integration: { branch: 'agentdeck/old-branch', note: 'Old integration result' }
+  })
+  const tab = (key) => container.querySelector(`#detail-tab-${key}`)
+  const buttonWith = (text) => [...container.querySelectorAll('button')].find((button) => button.textContent.includes(text))
+
+  clipboardWrites.length = 0
+  await render(createElement(TaskDetail, { task: current, tasks: [current], onSelect: () => {} }))
+  ok(tab('git').querySelector('.tab-count')?.textContent === '1', 'TaskDetail Git count uses the current snapshot')
+  await click(buttonWith('复制结果'))
+  ok(clipboardWrites.at(-1)?.includes('src/current.ts'), 'result copy includes current Git stat')
+  ok(clipboardWrites.at(-1)?.includes('agentdeck/current-branch'), 'result copy includes current integration branch')
+  ok(!clipboardWrites.at(-1)?.includes('src/old.ts'), 'result copy does not include stale Git stat')
+  await click(container.querySelector('.action-menu-trigger'))
+  await click([...container.querySelectorAll('.action-menu-item')].find((button) => button.textContent.includes('PR')))
+  ok(clipboardWrites.at(-1)?.includes('1 个文件有改动'), 'PR copy counts current Git files')
+
+  clipboardWrites.length = 0
+  await rerender(createElement(TaskDetail, { task: stale, tasks: [stale], onSelect: () => {} }))
+  ok(!tab('git').querySelector('.tab-count'), 'TaskDetail omits stale Git count after rerun')
+  ok(!container.textContent.includes('agentdeck/old-branch') && !container.querySelector('.integration-banner'), 'TaskDetail omits stale integration chips and banners')
+  await click(buttonWith('复制结果'))
+  ok(!clipboardWrites.at(-1)?.includes('src/old.ts'), 'result copy omits stale Git stat after rerun')
+  ok(!clipboardWrites.at(-1)?.includes('agentdeck/old-branch'), 'result copy omits stale integration branch')
+  await click(container.querySelector('.action-menu-trigger'))
+  await click([...container.querySelectorAll('.action-menu-item')].find((button) => button.textContent.includes('PR')))
+  ok(clipboardWrites.at(-1)?.includes('见提交记录'), 'PR copy falls back without a current Git snapshot')
+  ok(!clipboardWrites.at(-1)?.includes('agentdeck/old-branch'), 'PR copy omits stale integration branch')
   await unmount()
 }
 

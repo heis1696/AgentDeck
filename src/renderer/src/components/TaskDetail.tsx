@@ -33,6 +33,7 @@ import { MEETING_STATUS_LABEL } from './meeting/MeetingCard'
 import type { Goal, IssueStatus, Task } from '../../../shared/types'
 import type { Meeting } from '../../../shared/meeting'
 import type { SkillMeta } from '../../../shared/skills'
+import { currentGitChanges, currentGitSnapshot } from '../../../shared/git-snapshot'
 
 type Tab = 'activity' | 'log' | 'result' | 'git'
 const TAB_ITEMS: ReadonlyArray<{ key: Tab; label: string; hint: string }> = [
@@ -127,7 +128,9 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   const elapsed = task.startedAt ? Math.max(0, (task.endedAt ?? now) - task.startedAt) : 0
   const lastEventAt = events.length ? events[events.length - 1].ts : 0
   const agentCommentCount = comments.filter((comment) => comment.author.type === 'agent').length
-  const gitFileCount = (task.gitStat ?? '').split('\n').filter((line) => line.includes('|')).length
+  const gitChanges = currentGitChanges(task)
+  const integration = currentGitSnapshot(task)?.scope === 'integration' ? task.integration : undefined
+  const gitFileCount = (gitChanges?.stat ?? '').split('\n').filter((line) => line.includes('|')).length
   const tabCount = (key: Tab): number | null => key === 'activity' ? runs.length + agentCommentCount : key === 'log' ? turns.length : key === 'git' ? gitFileCount : null
   const enabledTabs = TAB_ITEMS.map((item) => item.key)
   const canDelete = task.status !== 'running' && task.status !== 'queued'
@@ -330,13 +333,13 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   }
   const copyResult = async () => {
     const parts = [`# ${task.title}`, '', task.result ?? '']
-    if (task.gitStat) parts.push('', '## 改动', '```', task.gitStat, '```')
-    if (task.integration?.branch) parts.push('', `集成分支：\`${task.integration.branch}\``)
+    if (gitChanges?.stat) parts.push('', '## 改动', '```', gitChanges.stat, '```')
+    if (integration?.branch) parts.push('', `集成分支：\`${integration.branch}\``)
     await navigator.clipboard.writeText(parts.join('\n')); ui.toast.success('结果已复制为 Markdown')
   }
   const copyPrBody = async () => {
-    const branch = task.integration?.branch
-    const files = (task.gitStat || '').split('\n').filter((line) => line.includes('|')).length
+    const branch = integration?.branch
+    const files = (gitChanges?.stat ?? '').split('\n').filter((line) => line.includes('|')).length
     const body = ['## 摘要', '', (task.result ?? '').slice(0, 2000), '', '## 改动', '', files ? `${files} 个文件有改动。` : '见提交记录。', branch ? `\n> 由 AgentDeck 队员在隔离分支 \`${branch}\` 上完成。` : ''].join('\n')
     await navigator.clipboard.writeText(`**${task.title}**\n\n${body}`); ui.toast.success('PR 描述已复制（标题 + 摘要 + 改动）')
   }
@@ -379,7 +382,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
         </select>
         <span className="meta-group meta-status"><span className={`status-chip status-${task.status}`}>{stateLabel}</span>{turnActive && <span className="active-duration" aria-hidden="true">工作中 · {fmtDuration(elapsed)}</span>}</span>
         <span className="meta-divider" aria-hidden="true" />
-        <span className="meta-group meta-source"><span className="badge backend-chip" title={`执行后端 ${task.backend}`}>{task.backend}</span>{workdir && <button className="workspace-chip" type="button" title={workdir} onClick={() => void bridge.openPath(workdir)}><FolderOpen size={13} aria-hidden="true" /><span>{workdir.split(/[\\/]/).filter(Boolean).pop()}</span></button>}<span className="meta-chip" title={`${task.startedAt ? fmtTime(task.startedAt) : '未开始'} → ${task.endedAt ? fmtTime(task.endedAt) : turnActive ? '进行中' : '—'}`}>⏱ {elapsed > 0 ? fmtDuration(elapsed) : '—'}</span>{task.usage && <span className="meta-chip" title={`输入 ${task.usage.inputTokens.toLocaleString()} · 输出 ${task.usage.outputTokens.toLocaleString()} · 回合 ${task.usage.turns}${task.usage.costUsd > 0 ? ` · 成本 $${task.usage.costUsd.toFixed(4)}` : ''}`}>{fmtTokens(task.usage.inputTokens + task.usage.outputTokens)} tokens{task.usage.costUsd > 0 ? ` · $${task.usage.costUsd.toFixed(4)}` : ''}</span>}{task.integration?.branch && <span className="meta-chip mono" title={`集成分支 ${task.integration.branch}`}>⎇ {task.integration.branch.replace('agentdeck/task-', '#')}</span>}{!!task.attempt && <span className="retry-chip" title={`自动重试 ${task.attempt}/2`}>⟳ 重试 {task.attempt}/2</span>}</span>
+        <span className="meta-group meta-source"><span className="badge backend-chip" title={`执行后端 ${task.backend}`}>{task.backend}</span>{workdir && <button className="workspace-chip" type="button" title={workdir} onClick={() => void bridge.openPath(workdir)}><FolderOpen size={13} aria-hidden="true" /><span>{workdir.split(/[\\/]/).filter(Boolean).pop()}</span></button>}<span className="meta-chip" title={`${task.startedAt ? fmtTime(task.startedAt) : '未开始'} → ${task.endedAt ? fmtTime(task.endedAt) : turnActive ? '进行中' : '—'}`}>⏱ {elapsed > 0 ? fmtDuration(elapsed) : '—'}</span>{task.usage && <span className="meta-chip" title={`输入 ${task.usage.inputTokens.toLocaleString()} · 输出 ${task.usage.outputTokens.toLocaleString()} · 回合 ${task.usage.turns}${task.usage.costUsd > 0 ? ` · 成本 $${task.usage.costUsd.toFixed(4)}` : ''}`}>{fmtTokens(task.usage.inputTokens + task.usage.outputTokens)} tokens{task.usage.costUsd > 0 ? ` · $${task.usage.costUsd.toFixed(4)}` : ''}</span>}{integration?.branch && <span className="meta-chip mono" title={`集成分支 ${integration.branch}`}>⎇ {integration.branch.replace('agentdeck/task-', '#')}</span>}{!!task.attempt && <span className="retry-chip" title={`自动重试 ${task.attempt}/2`}>⟳ 重试 {task.attempt}/2</span>}</span>
         <div className="meta-info-wrap" ref={infoRef}>
           <button type="button" className={`meta-chip meta-info-btn ${infoOpen ? 'open' : ''}`} title="原始指令、交接备注与详细信息" aria-expanded={infoOpen} onClick={() => setInfoOpen((value) => !value)}><Info size={12} aria-hidden="true" /></button>
           {infoOpen && <div className="meta-info-pop" ref={infoPopRef}>
@@ -408,7 +411,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
 
     <div className="detail-columns"><div className="detail-main" onScroll={onLogScroll}>
       {task.status === 'failed' && task.error && <div className="error-banner"><div className="error-head"><span className="error-icon" aria-hidden="true">⚠</span><span className="error-title">{task.failure?.title ?? '执行失败'}</span>{task.failure?.code && <span className="failure-code">{task.failure.code}</span>}{task.failure?.retryable && <span className="failure-retryable">可重试</span>}<button type="button" className="error-copy" onClick={() => { void navigator.clipboard.writeText(task.error ?? ''); ui.toast.success('错误原文已复制') }}>复制错误</button></div>{task.failure?.hint && <div className="error-hint">{task.failure.hint}</div>}<details className="failure-raw"><summary>错误原文</summary><pre>{task.error}</pre></details></div>}
-      {task.integration?.note && <div className={`integration-banner ${task.integration.note.includes('未完成') ? 'warn' : ''}`}>🔀 {task.integration.note}{task.integration.branch && workdir && <a className="mini link" role="button" tabIndex={0} onClick={() => void bridge.openPath(workdir)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void bridge.openPath(workdir) } }}>打开仓库</a>}</div>}
+      {integration?.note && <div className={`integration-banner ${integration.note.includes('未完成') ? 'warn' : ''}`}>🔀 {integration.note}{integration.branch && workdir && <a className="mini link" role="button" tabIndex={0} onClick={() => void bridge.openPath(workdir)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void bridge.openPath(workdir) } }}>打开仓库</a>}</div>}
       {permission && <PermissionPrompt key={permission.requestToken ?? permission.requestId} permission={permission} busy={permissionBusy} onAnswer={(choice) => void answerPermission(choice)} />}
       {permissionError && <div className="data-state-banner" role="alert"><span>{permissionError}</span><button type="button" className="btn" onClick={() => void refreshPermissions()}><RefreshCw size={13} /> 刷新审批</button></div>}
       {permissionNotice && <div className="data-state-banner" role="status">{permissionNotice}</div>}

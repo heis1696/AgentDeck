@@ -3,6 +3,7 @@ import { fmtDuration } from '../../api'
 import { PARKED_QUEUED_LABEL } from '../../labels'
 import type { Task } from '../../../../shared/types'
 import type { WorkerRound } from './workerRounds'
+import { currentGitChanges } from '../../../../shared/git-snapshot'
 
 export interface WorkerOverviewProps {
   rounds: WorkerRound[]
@@ -31,7 +32,7 @@ function WorkerRow({ task, now, onOpen }: { task: Task; now: number; onOpen: (id
     <span className="worker-title">{task.title}</span>
     <span className="worker-state mini">{workerState(task, now)}</span>
     {!!task.attempt && <span className="mini dim">⟳{task.attempt}</span>}
-    {task.gitStat !== undefined && <span className="mini dim" title="已记录 Git 快照">· Git</span>}
+    {currentGitChanges(task) && <span className="mini dim" title="已记录本次执行的 Git 快照">· Git</span>}
     <ExternalLink size={12} aria-hidden="true" />
   </button>
 }

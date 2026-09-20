@@ -104,8 +104,8 @@ const patch = 'diff --git a/test.ts b/test.ts\n--- a/test.ts\n+++ b/test.ts\n@@ 
 for (const [status, extra, expected] of [
   ['running', {}, 'executing'], ['queued', { parked: true }, 'executing'], ['done', {}, 'unavailable'],
   ['done', { gitDiff: null, gitStat: null }, 'unavailable'],
-  ['done', { gitDiff: '', gitStat: '' }, 'unavailable'], ['done', { gitDiff: patch }, 'available'],
-  ['running', { gitDiff: patch }, 'available'], ['done', { gitStat: 'test.ts | 1 +' }, 'available']
+  ['done', { gitDiff: '', gitStat: '' }, 'unavailable'], ['done', { gitDiff: patch }, 'historical'],
+  ['running', { gitDiff: patch }, 'executing'], ['done', { gitStat: 'test.ts | 1 +' }, 'historical']
 ]) {
   const page = new JSDOM(renderToStaticMarkup(createElement(GitSummary, { task: task('git', 1000, status, extra) })))
   const pane = page.window.document.querySelector('.git-pane')
@@ -115,4 +115,53 @@ for (const [status, extra, expected] of [
   if (extra.gitDiff) assert(page.window.document.querySelector('.diff-file'))
   page.window.close()
 }
+
+const currentSnapshot = (runId, startedAt, state = 'available') => ({
+  state, scope: 'workspace', capturedAt: startedAt + 1000, runId, phaseIndex: 0, startedAt
+})
+const oldSnapshot = currentSnapshot('run-before-follow-up', 1000)
+for (const status of ['done', 'failed', 'cancelled']) {
+  const stale = task(`stale-${status}`, 1000, status, {
+    runId: status === 'done' ? 'run-retry' : 'run-follow-up',
+    startedAt: 3000,
+    gitDiff: patch,
+    gitStat: 'test.ts | 1 +',
+    gitSnapshot: oldSnapshot
+  })
+  const page = new JSDOM(renderToStaticMarkup(createElement(GitSummary, { task: stale })))
+  const pane = page.window.document.querySelector('.git-pane')
+  assert.equal(pane.dataset.snapshotState, 'unavailable', `${status} after a new execution has no current snapshot`)
+  assert.equal(pane.querySelector('.diff-file'), null, `${status} hides the stale diff`)
+  assert.equal(pane.querySelector('.git-copy'), null, `${status} does not offer stale copy actions`)
+  page.window.close()
+}
+
+const current = task('current-git', 1000, 'done', {
+  runId: 'run-current',
+  phaseIndex: 0,
+  startedAt: 3000,
+  gitDiff: patch,
+  gitStat: 'test.ts | 1 +',
+  gitSnapshot: currentSnapshot('run-current', 3000)
+})
+const currentPage = new JSDOM(renderToStaticMarkup(createElement(GitSummary, { task: current })))
+const currentPane = currentPage.window.document.querySelector('.git-pane')
+assert.equal(currentPane.dataset.snapshotState, 'available', 'current execution snapshot is available')
+assert.equal(currentPane.querySelector('.git-copy').disabled, false, 'current diff remains copyable')
+assert(currentPane.querySelector('.diff-file'), 'current diff renders in the real GitSummary component')
+currentPage.window.close()
+
+const workerCurrent = task('worker-current', 1000, 'done', {
+  runId: 'worker-run', phaseIndex: 0, startedAt: 3000, gitStat: 'test.ts | 1 +', gitSnapshot: currentSnapshot('worker-run', 3000)
+})
+const workerStale = task('worker-stale', 1000, 'done', {
+  runId: 'worker-rerun', startedAt: 3000, gitStat: 'test.ts | 1 +', gitSnapshot: oldSnapshot
+})
+const workerPage = new JSDOM(renderToStaticMarkup(createElement(WorkerOverview, {
+  rounds: [{ id: 'round', label: 'Round', unclassified: false, workers: [workerCurrent, workerStale], active: [], queued: [], parked: [], ended: [workerCurrent, workerStale] }],
+  onOpen() {}
+})))
+assert(workerPage.window.document.querySelector('[data-worker-id="worker-current"]')?.textContent.includes('Git'), 'worker Git badge uses the current snapshot')
+assert(!workerPage.window.document.querySelector('[data-worker-id="worker-stale"]')?.textContent.includes('Git'), 'worker Git badge ignores the stale snapshot')
+workerPage.window.close()
 console.log('WORKER ROUND SMOKE PASSED: turn grouping, final completion, unknown boundaries, duplicate ids, clock ambiguity and Git snapshot states')

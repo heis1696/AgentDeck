@@ -39,7 +39,7 @@ const render = (task, expected) => {
   const page = new JSDOM(renderToStaticMarkup(createElement(GitSummary, { task })))
   const pane = page.window.document.querySelector('.git-pane')
   assert.equal(pane.dataset.snapshotState, expected)
-  if (expected !== 'available') assert.equal(pane.querySelector('.diff-file'), null, 'stale/failed snapshots must not render old diff')
+  if (expected !== 'available' && expected !== 'historical') assert.equal(pane.querySelector('.diff-file'), null, 'stale/failed snapshots must not render old diff')
   if (expected !== 'clean' && expected !== 'available') assert(!pane.textContent.includes('无改动'))
   const text = pane.textContent
   page.window.close()
@@ -182,7 +182,7 @@ try {
 
   // Legacy snapshots stay inspectable but cannot certify a current clean run.
   render({ ...dirtySnapshot, gitSnapshot: undefined, gitDiff: '', gitStat: '' }, 'unavailable')
-  assert(render({ ...dirtySnapshot, gitSnapshot: undefined }, 'available').includes('无法确认是否来自本轮'))
+  assert(render({ ...dirtySnapshot, gitSnapshot: undefined }, 'historical').includes('无法确认是否来自本轮'))
   console.log('GIT SNAPSHOT SMOKE PASSED: real collector -> finalizer -> store reload -> renderer; clean, staged, untracked, errors, integration and stale runs')
 } finally {
   store.flush()
