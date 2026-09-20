@@ -9,6 +9,7 @@ export class PermissionBroker {
   private pending = new Map<string, Pending>()
   private taskVersions = new Map<string, WorkVersion>()
   private requestSequence = 0
+  private closed = false
 
   constructor(
     private readonly onRequest: (taskId: string, request: PermissionRequest) => void,
@@ -25,12 +26,17 @@ export class PermissionBroker {
     return [...this.pending.values()].filter((pending) => pending.taskId === taskId).map((pending) => pending.request)
   }
 
+  private publish(taskId: string, request: PermissionRequest) {
+    try { this.onRequest(taskId, request) }
+    catch { /* A missing renderer can recover pending requests through the snapshot API. */ }
+  }
+
   private settle(key: string, pending: Pending, decision: Decision, resolution: NonNullable<PermissionRequest['resolution']>) {
     clearTimeout(pending.timer)
     if (this.pending.get(key) === pending) this.pending.delete(key)
     pending.resolve(decision)
-    try { this.onRequest(pending.taskId, { ...pending.request, resolution }) }
-    catch { /* Renderer teardown must not interrupt settlement of other requests. */ }
+    // Finish replacement/cancellation before observers can reenter the broker.
+    queueMicrotask(() => this.publish(pending.taskId, { ...pending.request, resolution }))
   }
 
   /** Update the current content version and invalidate older pending requests. */
@@ -51,7 +57,7 @@ export class PermissionBroker {
   /** Alias used by lifecycle callers when a task snapshot changes. */
   invalidateTask(taskId: string, version?: WorkVersion) {
     if (version !== undefined) this.taskVersions.set(taskId, version)
-    for (const [key, pending] of this.pending) {
+    for (const [key, pending] of [...this.pending]) {
       if (pending.taskId !== taskId) continue
       if (version !== undefined && pending.workVersion === version) continue
       this.settle(key, pending, { decision: 'deny' }, 'invalidated')
@@ -59,6 +65,7 @@ export class PermissionBroker {
   }
 
   ask(taskId: string, request: PermissionRequest, workVersion?: WorkVersion): Promise<Decision> {
+    if (this.closed) return Promise.resolve({ decision: 'deny' })
     const key = String(request.requestId)
     const snapshot = workVersion ?? request.workVersion ?? this.getWorkVersion?.(taskId) ?? this.taskVersions.get(taskId) ?? '0'
     this.setWorkVersion(taskId, snapshot)
@@ -83,7 +90,7 @@ export class PermissionBroker {
         if (pending?.request === published) this.settle(key, pending, { decision: 'deny' }, 'expired')
       }, timeout)
       this.pending.set(key, { taskId, workVersion: snapshot, request: published, resolve, timer })
-      this.onRequest(taskId, published)
+      this.publish(taskId, published)
     })
   }
 
@@ -108,14 +115,15 @@ export class PermissionBroker {
   }
 
   cancelTask(taskId: string) {
-    for (const [key, pending] of this.pending) {
+    for (const [key, pending] of [...this.pending]) {
       if (pending.taskId !== taskId) continue
       this.settle(key, pending, { decision: 'deny' }, 'cancelled')
     }
   }
 
   shutdown() {
-    for (const [key, pending] of this.pending) {
+    this.closed = true
+    for (const [key, pending] of [...this.pending]) {
       this.settle(key, pending, { decision: 'deny' }, 'cancelled')
     }
   }

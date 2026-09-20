@@ -26,7 +26,7 @@ const GOAL_STOP_REASON_LABELS: Record<string, string> = {
 }
 
 function goalBudgetExhausted(goal?: Pick<Goal, 'status' | 'runCount' | 'maxRuns' | 'totalDurationMs' | 'maxDurationMs' | 'stopReason' | 'blockedReason'>): boolean {
-  if (!goal || !['blocked', 'failed'].includes(goal.status)) return false
+  if (!goal) return false
   return goal.stopReason === 'run_budget' || goal.stopReason === 'duration_budget'
     || goal.blockedReason?.toLowerCase().includes('budget exhausted') === true
     || goal.runCount >= goal.maxRuns
@@ -38,7 +38,7 @@ export function goalActions(status: Goal['status'], goal?: Pick<Goal, 'status' |
   switch (status) {
     case 'draft': return [{ key: 'start', label: '启动', icon: Play }]
     case 'active': return [{ key: 'pause', label: '暂停', icon: Pause }]
-    case 'waiting_user': return [{ key: 'continue', label: '继续', icon: Play }]
+    case 'waiting_user': return goalBudgetExhausted(goal) ? [] : [{ key: 'continue', label: '继续', icon: Play }]
     case 'blocked': case 'failed': return goalBudgetExhausted(goal) ? [] : [{ key: 'continue', label: '重试', icon: RotateCw }]
     default: return []
   }
@@ -82,7 +82,9 @@ export function GoalPanel({ task, issueId, open, onToggle, onGoal }: {
   const [detailState, setDetailState] = useState<GoalDataState>('ready')
   const [detailError, setDetailError] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
-  const [busy, setBusy] = useState(false)
+  const [busy, setBusyState] = useState(false)
+  const busyRef = useRef(false)
+  const setBusy = (next: boolean) => { busyRef.current = next; setBusyState(next) }
   const readSeq = useRef(0)
   const detailSeq = useRef(0)
 
@@ -106,11 +108,12 @@ export function GoalPanel({ task, issueId, open, onToggle, onGoal }: {
     void refreshGoals()
     const off = bridge.goals.onUpdated((g) => {
       if (g.issueId !== issueId) return
+      readSeq.current++
       setReadState('ready')
       setReadError(null)
       setGoal((cur) => (!cur || g.id === cur.id || g.updatedAt >= cur.updatedAt) ? g : cur)
     })
-    const offDeleted = bridge.goals.onDeleted((goalId) => setGoal((cur) => (cur?.id === goalId ? null : cur)))
+    const offDeleted = bridge.goals.onDeleted((goalId) => { setGoal((cur) => (cur?.id === goalId ? null : cur)); void refreshGoals() })
     void bridge.agents.list().then(setAgents).catch(() => {})
     return () => { readSeq.current++; off(); offDeleted() }
   }, [issueId, refreshGoals])
@@ -141,7 +144,7 @@ export function GoalPanel({ task, issueId, open, onToggle, onGoal }: {
   }, [open, goal, readState, loadDetail])
 
   const act = async (key: 'start' | 'pause' | 'continue') => {
-    if (!goal || busy || !goalActions(goal.status, goal).some((action) => action.key === key)) return
+    if (!goal || busyRef.current || !goalActions(goal.status, goal).some((action) => action.key === key)) return
     setBusy(true)
     try {
       const call = key === 'start' ? bridge.goals.start : key === 'pause' ? bridge.goals.pause : bridge.goals.continue
@@ -151,7 +154,7 @@ export function GoalPanel({ task, issueId, open, onToggle, onGoal }: {
   }
 
   const cancelGoal = async () => {
-    if (!goal || busy) return
+    if (!goal || busyRef.current) return
     setBusy(true)
     try {
       const yes = await ui.confirm({
@@ -170,7 +173,7 @@ export function GoalPanel({ task, issueId, open, onToggle, onGoal }: {
 
   /** 清除目标模式：删掉目标及其 checkpoint（运行中任务连带取消），回到可重新开启的空态 */
   const removeGoal = async () => {
-    if (!goal || busy) return
+    if (!goal || busyRef.current) return
     setBusy(true)
     try {
       const yes = await ui.confirm({
@@ -235,7 +238,7 @@ export function GoalPanel({ task, issueId, open, onToggle, onGoal }: {
             {goalActions(goal.status, goal).map(({ key, label, icon: Icon }) => (
               <button key={key} className="btn" disabled={busy} onClick={() => void act(key)}><Icon size={12} /> {label}</button>
             ))}
-            {goalBudgetExhausted(goal) && <span className="hint">预算已耗尽，继续/重试会被控制器拒绝</span>}
+            {goalBudgetExhausted(goal) && <span className="hint">预算已耗尽，当前目标不能继续</span>}
           </div>
         </div>}
         {goal && <div className="goal-panel-detail">

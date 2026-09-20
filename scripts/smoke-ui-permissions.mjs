@@ -77,6 +77,41 @@ try {
   assert.equal(host.querySelector('.permission-banner'), null)
   assert(host.querySelector('[data-notice]').textContent.includes('超时'), 'Expiration is reported')
 
+  const queuedA = request('queue-a', [option('Allow', 'allow')])
+  const queuedB = request('queue-b', [option('Allow', 'allow')])
+  pending.set('queue', [queuedA, queuedB])
+  await render('queue')
+  response = async () => ({ ok: true })
+  await click('Allow')
+  assert.equal(host.querySelector('.permission-id').textContent, 'queue-b', 'Multiple requests advance without dropping the next one')
+  await click('Allow')
+  assert.equal(host.querySelector('.permission-banner'), null)
+
+  pending.set('replaced', [queuedA])
+  await render('replaced')
+  response = () => new Promise((resolve) => { settle = resolve })
+  await click('Allow')
+  const newer = { ...queuedA, requestToken: 'new-generation' }
+  pending.set('replaced', [newer])
+  await fire('replaced', newer)
+  await act(async () => { settle({ ok: false, error: 'Old generation rejected' }) })
+  assert(host.querySelector('.permission-banner'), 'Old same-id answer cannot clear its replacement')
+  assert.equal(host.querySelector('[data-error]'), null, 'Old same-id answer does not attach an error to a new request')
+  response = async () => { pending.set('replaced', []); return { ok: false, error: 'Already handled elsewhere' } }
+  await click('Allow')
+  assert.equal(host.querySelector('.permission-banner'), null)
+  assert.equal(host.querySelector('[data-error]'), null, 'Authoritative empty snapshot clears a retired reply error')
+
+  const snapshotApi = window.agentdeck.tasks.pendingPermissions
+  delete window.agentdeck.tasks.pendingPermissions
+  await render('legacy')
+  await fire('legacy', queuedA)
+  assert(host.querySelector('.permission-banner'), 'Old preload without snapshots still receives live approvals')
+  response = async () => ({ ok: true })
+  await click('Allow')
+  assert.equal(host.querySelector('.permission-banner'), null, 'Live approvals work without the optional snapshot API')
+  window.agentdeck.tasks.pendingPermissions = snapshotApi
+
   let oldSnapshot
   read = (id) => id === 'slow' ? new Promise((resolve) => { oldSnapshot = resolve }) : Promise.resolve(pending.get(id) ?? [])
   await render('slow')

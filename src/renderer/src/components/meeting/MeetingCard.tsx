@@ -23,6 +23,8 @@ type PendingAction = string | null
 /** 单场会议的展示与管控：状态行、参与者、最新纪要、暂停/继续/取消/插话与行动项审批（Issue 侧栏与全局会议页共用） */
 export function MeetingCard({ meeting, agents, run }: { meeting: Meeting; agents: AgentInfo[]; run: MeetingRun }) {
   const [note, setNote] = useState('')
+  const noteRevision = useRef(0)
+  const actionSequence = useRef(0)
   const [noteError, setNoteError] = useState<string | null>(null)
   const [pendingAction, setPendingActionState] = useState<PendingAction>(null)
   const [pendingApproval, setPendingApproval] = useState<number | null>(null)
@@ -47,6 +49,7 @@ export function MeetingCard({ meeting, agents, run }: { meeting: Meeting; agents
 
   const guard = async (name: string, action: () => Promise<{ ok: boolean; error?: string }>) => {
     if (pendingActionRef.current) return null
+    const sequence = ++actionSequence.current
     setPendingAction(name)
     try {
       return await run(action)
@@ -54,7 +57,7 @@ export function MeetingCard({ meeting, agents, run }: { meeting: Meeting; agents
       ui.toast.error(error instanceof Error ? error.message : String(error))
       return null
     } finally {
-      if (pendingActionRef.current === name) setPendingAction(null)
+      if (sequence === actionSequence.current && pendingActionRef.current === name) setPendingAction(null)
     }
   }
   const selectedName = (id: string) => agents.find((agent) => agent.id === id)?.name ?? id
@@ -66,13 +69,14 @@ export function MeetingCard({ meeting, agents, run }: { meeting: Meeting; agents
     if (meeting.status !== 'active' || pendingActionRef.current) return
     const text = note.trim()
     if (!text) return
+    const submittedRevision = noteRevision.current
     void (async () => {
       const result = await guard(`interject:${meeting.id}`, () => bridge.meetings.interject(meeting.id, text))
       if (!result?.ok) {
         setNoteError(result?.error ?? '插话发送失败')
         return
       }
-      setNote((current) => current === text ? '' : current)
+      if (submittedRevision === noteRevision.current) { noteRevision.current++; setNote('') }
       setNoteError(null)
     })()
   }
@@ -121,7 +125,7 @@ export function MeetingCard({ meeting, agents, run }: { meeting: Meeting; agents
       {meeting.status === 'waiting_user' && <button className="icon-btn" title="继续会议" disabled={pendingAction === 'resume'} onClick={() => void guard('resume', () => bridge.meetings.resume(meeting.id))}><Play size={14} /></button>}
       {(meeting.status === 'active' || meeting.status === 'waiting_user') && <button className="icon-btn danger-icon" title="取消会议：停止任务并保留会议记录" disabled={pendingAction === 'cancel'} onClick={() => void cancelMeeting()}><Square size={14} /></button>}
       <div className="meeting-interject">
-        <input value={note} placeholder="主席插话" aria-label="主席插话" onChange={(event) => { setNote(event.target.value); setNoteError(null) }} onKeyDown={(event) => { if (isComposingKey(event.nativeEvent)) return; if (event.key === 'Enter' && meeting.status === 'active' && !pendingActionRef.current && note.trim()) { event.preventDefault(); sendNote() } }} />
+        <input value={note} placeholder="主席插话" aria-label="主席插话" onChange={(event) => { noteRevision.current++; setNote(event.target.value); setNoteError(null) }} onKeyDown={(event) => { if (isComposingKey(event.nativeEvent)) return; if (event.key === 'Enter' && meeting.status === 'active' && !pendingActionRef.current && note.trim()) { event.preventDefault(); sendNote() } }} />
         <button className="icon-btn" title={pendingAction === `interject:${meeting.id}` ? '插话发送中' : '发送插话'} disabled={pendingAction === `interject:${meeting.id}` || !note.trim() || meeting.status !== 'active'} onClick={sendNote}><Send size={13} /></button>
       </div>
     </div>

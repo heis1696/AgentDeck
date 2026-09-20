@@ -162,11 +162,11 @@ export function UsageView() {
   const [snapshot, setSnapshot] = useState<UsageSnapshot | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const since = useMemo(() => range === 'all' ? undefined : Date.now() - (range === '7d' ? 7 : 30) * 86_400_000, [range])
   const requestSeq = useRef(0)
   const refresh = useCallback(async () => {
     const request = ++requestSeq.current
     const requested = range
+    const since = range === 'all' ? undefined : Date.now() - (range === '7d' ? 7 : 30) * 86_400_000
     setLoading(true)
     try {
       const next = await bridge.analytics.summary({ since })
@@ -178,7 +178,7 @@ export function UsageView() {
     } finally {
       if (request === requestSeq.current) setLoading(false)
     }
-  }, [range, since])
+  }, [range])
   useEffect(() => {
     void refresh()
     const off = bridge.tasks.onUpdated(() => { void refresh() })

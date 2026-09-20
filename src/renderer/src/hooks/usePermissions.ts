@@ -4,7 +4,7 @@ import { permissionChoices, permissionKey, type PermissionChoice } from '../../.
 import { bridge } from '../api'
 import { useTaskScopedState } from './taskDrafts'
 
-type State = { requests: PermissionRequest[]; answering: string | null; error: string | null; loadError: string | null; notice: string | null }
+type State = { requests: PermissionRequest[]; answering: string | null; error: { key: string; message: string } | null; loadError: string | null; notice: string | null }
 const describe = (cause: unknown) => cause instanceof Error ? cause.message : String(cause)
 
 export function usePermissions(taskId: string) {
@@ -19,7 +19,7 @@ export function usePermissions(taskId: string) {
       const requests = await bridge.tasks.pendingPermissions(taskId)
       if (!Array.isArray(requests)) throw new Error('待审批快照格式无效')
       const active = requests.filter((request) => !request.resolution)
-      if (sequence === readSequence.current) setState((current) => ({ ...current, requests: active, loadError: null }))
+      if (sequence === readSequence.current) setState((current) => ({ ...current, requests: active, error: current.error && active.some((request) => permissionKey(request) === current.error?.key) ? current.error : null, loadError: null }))
     } catch (cause) {
       if (sequence === readSequence.current) setState((current) => ({ ...current, loadError: `读取待审批请求失败：${describe(cause)}` }))
     }
@@ -31,12 +31,13 @@ export function usePermissions(taskId: string) {
       ++readSequence.current
       setState((current) => {
         const key = permissionKey(request)
+        const wasPresent = current.requests.some((item) => permissionKey(item) === key)
         const requests = request.resolution
           ? current.requests.filter((item) => permissionKey(item) !== key)
           : [...current.requests.filter((item) => String(item.requestId) !== String(request.requestId)), request]
-        const notice = request.resolution === 'expired' ? '权限请求已超时并拒绝。'
+        const notice = !wasPresent && request.resolution ? current.notice : request.resolution === 'expired' ? '权限请求已超时并拒绝。'
           : request.resolution === 'cancelled' || request.resolution === 'invalidated' ? '权限请求已失效。' : null
-        return { ...current, requests, error: null, notice }
+        return { ...current, requests, error: current.error && requests.some((item) => permissionKey(item) === current.error?.key) ? current.error : null, notice }
       })
       void refreshPermissions()
     })
@@ -58,18 +59,18 @@ export function usePermissions(taskId: string) {
     try {
       const result = await bridge.tasks.respondPermission(request.requestId, choice.optionId, choice.decision, request.requestToken)
       if (!result.ok) {
-        setState((current) => ({ ...current, error: result.error ?? '权限回复失败，请重试。' }))
+        setState((current) => current.requests.some((item) => permissionKey(item) === key) ? { ...current, error: { key, message: result.error ?? '权限回复失败，请重试。' } } : current)
         await refreshPermissions()
       } else {
         setState((current) => ({ ...current, requests: current.requests.filter((item) => permissionKey(item) !== key) }))
       }
     } catch (cause) {
-      setState((current) => ({ ...current, error: `权限回复失败：${describe(cause)}` }))
+      setState((current) => current.requests.some((item) => permissionKey(item) === key) ? { ...current, error: { key, message: `权限回复失败：${describe(cause)}` } } : current)
     } finally {
       inFlight.current.delete(flightKey)
       setState((current) => ({ ...current, answering: current.answering === key ? null : current.answering }))
     }
   }
 
-  return { permission, permissionCount: state.requests.length, permissionBusy: !!permission && state.answering === permissionKey(permission), permissionError: state.error ?? state.loadError, permissionNotice: state.notice, refreshPermissions, answerPermission }
+  return { permission, permissionCount: state.requests.length, permissionBusy: !!permission && state.answering === permissionKey(permission), permissionError: state.error?.message ?? state.loadError, permissionNotice: state.notice, refreshPermissions, answerPermission }
 }

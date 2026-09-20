@@ -248,6 +248,54 @@ if (process.argv.includes('--serve')) {
         await page.evaluate(() => window.__visual.ui.dock.close('task:approval-worker', { rootId: 'visual-0' }))
       }
     }
+    await page.evaluate(() => {
+      const { mock } = window.__visual
+      const issueId = mock.store.tasks.find((task) => task.id === 'visual-0').issueId
+      const now = Date.now()
+      window.__workflowMutations = 0
+      window.agentdeck.tasks.pendingPermissions = async () => []
+      window.agentdeck.goals.list = async () => [{ id: 'visual-goal', issueId, text: '完成当前工作区的回归验收', status: 'blocked', runCount: 3, maxRuns: 3, totalDurationMs: 120000, maxDurationMs: 3600000, completionConditions: ['测试通过'], stopConditions: [], stopReason: 'run_budget', createdAt: now, updatedAt: now, backend: 'zcode' }]
+      window.agentdeck.goals.cancel = async () => { window.__workflowMutations++; return { ok: true } }
+      window.agentdeck.meetings.list = async () => [{
+        id: 'visual-meeting', issueId, topic: '交付验收会议', status: 'concluded', round: 2, maxRounds: 3, maxInnerTurns: 3, maxDurationMs: 3600000,
+        participants: [{ agentId: 'lead', role: 'reporter' }, { agentId: 'build', role: 'critic' }, { agentId: 'review', role: 'designer' }],
+        minutes: [{ round: 2, summary: '验收方案已确认', decisions: [], objections: [], openQuestions: [], actionItems: [{ title: '核对长路径与窄窗口下的操作可达性', ownerAgentId: 'lead', acceptance: ['类型检查和构建通过', '全部必要操作均可在最小窗口中完成，长文本不能覆盖后续内容'], approval: 'pending', taskId: 'visual-1' }] }],
+        noProgress: 0, noProgressCap: 2, failures: 0, pendingChairNotes: [], stopReason: 'converged', createdAt: now, updatedAt: now
+      }]
+      window.agentdeck.meetings.approveAction = async () => { window.__workflowMutations++; return { ok: true } }
+    })
+    const popupFits = async (selector) => page.locator(selector).evaluate((popup) => {
+      const box = popup.getBoundingClientRect()
+      return box.left >= 0 && box.right <= innerWidth + 1 && box.top >= 0 && box.bottom <= innerHeight + 1
+        && [...popup.querySelectorAll('button')].every((button) => { const r = button.getBoundingClientRect(); return r.left >= box.left && r.right <= box.right + 1 && button.scrollWidth <= button.clientWidth + 1 })
+    })
+    for (const width of [1440, 980]) {
+      await page.setViewportSize({ width, height: width === 1440 ? 900 : 560 })
+      for (const theme of ['light', 'dark']) {
+        await page.evaluate(async (theme) => { await window.agentdeck.settings.set({ theme }); window.__visual.ui.navigate('board') }, theme)
+        await page.locator('.board-page').waitFor()
+        await page.evaluate(() => window.__visual.ui.openTask('visual-0'))
+        await page.locator('.float-chip.is-goal').click()
+        await page.locator('.goal-panel').waitFor()
+        check(await popupFits('.float-window'), `${width}/${theme}: goal controls fit the floating window`)
+        await page.screenshot({ path: path.join(shots, `${width}-${theme}-goal.png`) })
+        await page.locator('.goal-panel [title^="取消目标"]').click()
+        check(await popupFits('.confirm-dialog'), `${width}/${theme}: goal cancellation consequence fits the dialog`)
+        await page.locator('.confirm-dialog').getByRole('button', { name: '取消', exact: true }).click()
+        await page.keyboard.press('Escape')
+        await page.locator('.followup textarea').fill('/meeting')
+        await page.locator('.followup textarea').press('Enter')
+        await page.locator('.meeting-action-item').waitFor()
+        check(await popupFits('.float-window'), `${width}/${theme}: meeting action context and approval controls fit`)
+        await page.screenshot({ path: path.join(shots, `${width}-${theme}-meeting.png`) })
+        await page.locator('.float-window').getByRole('button', { name: '批准并开始执行', exact: true }).click()
+        check(await popupFits('.confirm-dialog'), `${width}/${theme}: approval consequence fits the dialog`)
+        await page.screenshot({ path: path.join(shots, `${width}-${theme}-meeting-approval.png`) })
+        await page.locator('.confirm-dialog').getByRole('button', { name: '取消', exact: true }).click()
+        check(await page.evaluate(() => window.__workflowMutations === 0), `${width}/${theme}: cancelling confirmations makes no execution calls`)
+        await page.keyboard.press('Escape')
+      }
+    }
     await fs.writeFile(path.join(shots, 'metrics.json'), JSON.stringify({ metrics, checks, errors }, null, 2))
     const ordered = pages.flatMap(([view]) => images.filter((item) => item.width === 1440 && item.view === view))
     const cells = await Promise.all(ordered.map(async (item) => `<figure><figcaption>${item.theme} / ${item.view}</figcaption><img src="data:image/png;base64,${(await fs.readFile(path.join(shots, item.name))).toString('base64')}"></figure>`))

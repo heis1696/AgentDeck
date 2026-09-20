@@ -62,14 +62,11 @@ These are candidates, not an approved implementation list:
 
 ## Delivery Sequence
 
-1. Reviewed: navigation/composer/board and task-following audits are accepted.
-   Management findings are useful, but the delivered report omitted Agents,
-   Usage, and assistant settings; that audit requires a supplement.
-2. Complete: the first implementation batches and product decisions are below.
-3. In progress: implement independent renderer changes with explicit file
-   ownership, then integrate shared navigation and styling changes.
-4. Pending: independent read-only review, focused interaction checks, required
-   gates, and visual inspection with representative sample data.
+1. Complete: all functional areas audited; management omissions supplemented.
+2. Complete: implementation boundaries and product decisions are below.
+3. Complete: batches A-D and lead fixes are integrated into the main checkout.
+4. Complete: combined gates passed, independent review findings are fixed,
+   and browser checks include the standalone assistant settings window.
 
 ## Implementation Decisions
 
@@ -351,6 +348,62 @@ sidecar and IPC validation passed after the additive approval API change.
 The real-browser suite passes 210 checks with root and worker approval layouts
 in both themes and the minimum window; local screenshots are under
 `gui-test-screenshots/workflow-permissions/`. Dependency graph: 181 modules.
+
+## Final Integration
+
+Batch C/D source is integrated at `7fd57c7`. The lead additionally closed the
+last review findings: initial approval notification failure no longer rejects
+an otherwise pending request, resolution notifications occur after state
+changes, cancellation iterates stable snapshots, shutdown rejects new asks,
+and reply errors disappear when their specific request is no longer pending.
+Regression coverage includes observer reentry, missing preload snapshot API,
+multiple pending requests, same-id replacement and empty authoritative reads.
+
+Goal/meeting integration also protects live updates from older list reads,
+uses revisions for interjection drafts and action completion, isolates meeting
+instances, and hides continue when a waiting goal has exhausted its budget.
+Usage refresh recomputes its requested range at refresh time.
+
+The standalone assistant settings browser test uses the real renderer at
+400x540 (its actual default window size) and 640x720, light and dark. All four
+cases passed with zero horizontal overflow, clipped controls or renderer
+exceptions. It also checks failed-read recovery, acknowledged persona saving,
+and that screenshot checks never invoke generation. Screenshots:
+`gui-test-screenshots/workflow-pet-final/` (local, ignored).
+
+The complete main browser walk now has 230 passing checks, including goal and
+meeting floating windows and consequence confirmations in both themes and
+1440x900/980x560. Cancelling each confirmation makes zero execution calls.
+Screenshots: `gui-test-screenshots/workflow-final/` (local, ignored).
+
+`npm run smoke:ui` includes all four implementation batches plus permission
+regressions. `npm run smoke:ui:browser` registers the main browser walk, the
+20-Agent/narrow picker checks, and standalone assistant settings checks.
+Browser scripts use the existing local Playwright installation under
+`out/visual-tools/` and Microsoft Edge; no new application dependency was added.
+
+Preserved boundaries: no real Agent or image-generation service was invoked,
+no production data was changed, no scheduling/budget policy was redesigned,
+and no release was published. Older preloads retain live approval handling but
+need the new preload to restore pending snapshots after reentry. Sidecar
+approval transport, automation history redesign, and new analytics drill-down
+APIs remain outside this request's implementation.
+
+### Final Gate Results
+
+- Passed on the integrated source: typecheck, build, stage6, the complete
+  12-suite UI command, runner, lifecycle, sidecar, and Electron overlap clicks.
+- Passed targeted checks: permission broker/routing, OpenCode protocol, diff,
+  IPC validation, goal/meeting UI, and usage/assistant UI. Model-name writes
+  now serialize repeated blur saves and retain the latest draft until its own
+  acknowledgement; this follow-up has an explicit deferred-write regression.
+- `npm run smoke:ui:browser` passed: 230 main-workbench checks, 9 picker checks,
+  and all 4 assistant settings viewport/theme cases; no renderer exceptions.
+- `git diff --check` passed. The build retains the existing mixed git import
+  warning; the standalone picker test build also reports a bundle-size warning.
+- The full unrelated `smoke:all` chain and real model/image services were not
+  run. All task, permission and generation behavior tests used isolated data or
+  protocol fixtures. No deploy or production restart was performed.
 
 ## Acceptance
 

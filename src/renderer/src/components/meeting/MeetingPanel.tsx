@@ -33,6 +33,7 @@ export function MeetingPanel({ issueId, open, onToggle, onMeeting }: {
   const [busy, setBusy] = useState(false)
   const [newMeeting, setNewMeeting] = useState(false)
   const readSeq = useRef(0)
+  const creatingRef = useRef(false)
 
   const refresh = useCallback(async () => {
     const seq = ++readSeq.current
@@ -67,8 +68,9 @@ export function MeetingPanel({ issueId, open, onToggle, onMeeting }: {
   useEffect(() => {
     void refresh()
     void refreshAgents()
-    return bridge.meetings.onUpdated((meeting) => {
+    const off = bridge.meetings.onUpdated((meeting) => {
       if (meeting.issueId !== issueId) return
+      readSeq.current++
       // start/resume 的 IPC 要等整场会议结束才返回；会议转入 active 即释放 busy，
       // 别让暂停/取消/插话禁用到散会（切换视图才恢复的同款缺陷；单卡管控由 MeetingCard 自行释放）
       if (meeting.status === 'active') setBusy(false)
@@ -78,6 +80,8 @@ export function MeetingPanel({ issueId, open, onToggle, onMeeting }: {
         ? currentMeetings.map((current) => current.id === meeting.id ? meeting : current)
         : [meeting, ...currentMeetings])
     })
+    const offDeleted = bridge.meetings.onDeleted((id) => { setMeetings((items) => items.filter((meeting) => meeting.id !== id)); void refresh() })
+    return () => { readSeq.current++; off(); offDeleted() }
   }, [issueId, refresh, refreshAgents])
 
   // 上报当前会议给宿主（头部 💬 芯片）：仅活跃（进行中/等你处理）才算
@@ -97,10 +101,12 @@ export function MeetingPanel({ issueId, open, onToggle, onMeeting }: {
     }
   }
   const create = async () => {
+    if (creatingRef.current || readState !== 'ready' || agentError) return
     if (!topic.trim() || !reporter || !critic || !designer || new Set([reporter, critic, designer]).size < 3) {
       ui.toast.error('请填写议题并选择三位不同队长')
       return
     }
+    creatingRef.current = true
     setBusy(true)
     try {
       const meeting = await bridge.meetings.create({ issueId, topic: topic.trim(), participants: [
@@ -111,7 +117,7 @@ export function MeetingPanel({ issueId, open, onToggle, onMeeting }: {
       setNewMeeting(false)
       await run(() => bridge.meetings.start(meeting.id))
     } catch (error) { ui.toast.error(error instanceof Error ? error.message : '创建会议失败') }
-    finally { setBusy(false) }
+    finally { creatingRef.current = false; setBusy(false) }
   }
   const active = current ?? (newMeeting ? undefined : meetings[0])
   const showCreate = readState === 'ready' && !active
@@ -137,7 +143,7 @@ export function MeetingPanel({ issueId, open, onToggle, onMeeting }: {
           </div>
           <button className="btn primary meeting-create-btn" disabled={busy || !!agentError || eligible.length < 3} onClick={() => void create()}><Plus size={14} /> 创建并开始会议</button>
         </div>}
-        {active && <MeetingCard meeting={active} agents={agents} run={run} />}
+        {active && <MeetingCard key={active.id} meeting={active} agents={agents} run={run} />}
       </section>
     </FloatWindow>}
   </>

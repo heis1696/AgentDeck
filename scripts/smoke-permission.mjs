@@ -23,6 +23,7 @@ const duplicate = broker.ask('task-b', request('two'))
 const replacement = broker.ask('task-b', request('two'))
 if ((await duplicate).decision !== 'deny') throw new Error('duplicate request was not denied')
 if ((await replacement).decision !== 'deny') throw new Error('replacement request did not time out')
+await Promise.resolve()
 if (sent.at(-1).req.resolution !== 'expired') throw new Error('timeout was not published to the UI')
 
 const cancelled = broker.ask('task-c', request('three'))
@@ -54,6 +55,40 @@ const closeA = closingBroker.ask('closing-a', request('closing-a'))
 const closeB = closingBroker.ask('closing-b', request('closing-b'))
 closingBroker.shutdown()
 if ((await closeA).decision !== 'deny' || (await closeB).decision !== 'deny') throw new Error('renderer teardown interrupted permission settlement')
+const unavailableBroker = new PermissionBroker(() => { throw new Error('renderer closed') }, 1000)
+let askRejected = false
+const unavailable = unavailableBroker.ask('unavailable', request('unavailable')).catch(() => { askRejected = true })
+await Promise.resolve()
+if (askRejected || unavailableBroker.pendingFor('unavailable').length !== 1) throw new Error('first notification failure broke a recoverable pending request')
+unavailableBroker.resolve('unavailable', '__agentdeck_deny__', 'deny')
+if ((await unavailable)?.decision !== 'deny') throw new Error('unavailable renderer request could not be settled through snapshot recovery')
+unavailableBroker.shutdown()
+
+let reentrant
+let triggered = false
+const reentrantBroker = new PermissionBroker((_id, value) => {
+  if (value.resolution === 'invalidated' && !triggered) {
+    triggered = true
+    reentrant = reentrantBroker.ask('reentrant', request('reused'))
+  }
+}, 25)
+const original = reentrantBroker.ask('reentrant', request('reused'))
+const outer = reentrantBroker.ask('reentrant', request('reused'))
+if ((await original).decision !== 'deny') throw new Error('original replacement was not denied')
+const reentrantResult = await Promise.race([
+  Promise.all([outer, reentrant]),
+  wait(150).then(() => { throw new Error('reentrant permission replacement hung') })
+])
+if (!reentrantResult.every((value) => value?.decision === 'deny') || reentrantBroker.pendingFor('reentrant').length) throw new Error('reentrant replacement left an orphan request')
+let duringShutdown
+const shutdownBroker = new PermissionBroker((_id, value) => {
+  if (value.resolution) duringShutdown = shutdownBroker.ask('shutdown', request('again'))
+}, 1000)
+const beforeShutdown = shutdownBroker.ask('shutdown', request('before'))
+shutdownBroker.shutdown()
+await beforeShutdown
+await Promise.resolve()
+if ((await duringShutdown)?.decision !== 'deny' || shutdownBroker.pendingFor('shutdown').length) throw new Error('shutdown observer revived a request')
 await wait(5)
 console.log('✓ response, duplicate, timeout, cancellation, workVersion and task binding boundaries')
 console.log('✅ PERMISSION SMOKE PASSED')

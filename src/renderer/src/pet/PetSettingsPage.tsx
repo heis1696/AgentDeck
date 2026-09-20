@@ -312,9 +312,18 @@ function PersonaCard({ state, onRefresh }: CardProps) {
 
 /** 模型预设 + 模型名 + AI 脑状态 */
 function ModelCard({ state, onRefresh }: CardProps) {
-  // 预设与模型名各用一个写入器：任一在途都不能吞掉另一个控件的提交
+  // Both controls update the same preset/model pair, so writes share one queue.
   const presetWriter = useSettingWriter(onRefresh)
   const modelWriter = useSettingWriter(onRefresh)
+  const writes = useRef<Promise<void>>(Promise.resolve())
+  const latestModelWrite = useRef<{ text: string; revision: number; result: Promise<void> } | null>(null)
+  const presetRef = useRef(state.presetId)
+  useEffect(() => { presetRef.current = state.presetId }, [state.presetId])
+  const enqueue = (action: () => Promise<void>) => {
+    const next = writes.current.then(action)
+    writes.current = next.catch(() => {})
+    return next
+  }
   // 模型名走受控草稿：state.model 因预设切换/外部写入变化时草稿跟随，不再是一个永不跟预设走的 defaultValue
   const [modelDraft, setModelDraft] = useState<string | null>(null)
   const modelRevision = useRef(0)
@@ -330,12 +339,19 @@ function ModelCard({ state, onRefresh }: CardProps) {
   const model = modelDraft ?? state.model
   const commitModel = async () => {
     const submitted = model.trim()
-    if (submitted === state.model) { modelRevision.current++; setModelDraft(null); return }
+    if (!latestModelWrite.current && !presetWriter.pending && submitted === state.model) { modelRevision.current++; setModelDraft(null); return }
     const revision = modelRevision.current
-    ownEcho.current = submitted
-    const outcome = await modelWriter.run('模型名保存', () => bridge.pet.setPreset(state.presetId, submitted))
-    if (outcome === 'failed') { ownEcho.current = null; return }
-    if (outcome === 'ok' && modelRevision.current === revision) setModelDraft(null)
+    if (latestModelWrite.current?.text === submitted && latestModelWrite.current.revision === revision) return latestModelWrite.current.result
+    const result = enqueue(async () => {
+      ownEcho.current = submitted
+      const outcome = await modelWriter.run('模型名保存', () => bridge.pet.setPreset(presetRef.current, submitted))
+      if (outcome === 'failed') { ownEcho.current = null; return }
+      if (outcome === 'ok' && modelRevision.current === revision) setModelDraft(null)
+    })
+    const submittedWrite = { text: submitted, revision, result }
+    latestModelWrite.current = submittedWrite
+    await result
+    if (latestModelWrite.current === submittedWrite) latestModelWrite.current = null
   }
   return (
     <section className="settings-card">
@@ -346,12 +362,21 @@ function ModelCard({ state, onRefresh }: CardProps) {
           items={[{ value: PET_PRESET_NONE, label: '不接 AI（用本地台词）' }, ...state.presets.map((preset) => ({ value: preset.id, label: `${preset.name}（${preset.protocol}）` }))]}
           value={state.presetId}
           onChange={(v) => {
+            if (presetWriter.pending || modelWriter.pending) return
             // 带上输入框里看得见的值：预设切换不该把刚填/刚存的模型名回退成旧值
             const nextModel = model.trim() || state.model
-            void presetWriter.run('模型预设切换', () => bridge.pet.setPreset(v, nextModel))
+            const revision = modelRevision.current
+            const previousPreset = state.presetId
+            presetRef.current = v
+            void enqueue(async () => {
+              ownEcho.current = nextModel
+              const outcome = await presetWriter.run('模型预设切换', () => bridge.pet.setPreset(v, nextModel))
+              if (outcome === 'failed') { presetRef.current = previousPreset; ownEcho.current = null }
+              else if (outcome === 'ok' && modelRevision.current === revision) setModelDraft(null)
+            })
           }}
           trigger={(cur, open) => (
-            <button className="btn menu-trigger" type="button">
+            <button className="btn menu-trigger" type="button" disabled={presetWriter.pending || modelWriter.pending}>
               {cur?.label ?? (state.activePresetId ? `${state.presets.find((preset) => preset.id === state.activePresetId)?.name ?? state.activePresetId}（自动）` : '选择预设')} <span className="menu-caret">{open ? '▴' : '▾'}</span>
             </button>
           )}

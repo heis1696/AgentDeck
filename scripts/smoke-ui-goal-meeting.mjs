@@ -142,11 +142,25 @@ try {
   await unmount()
   ui.reset()
 
-  goalRows = [makeGoal({ runCount: 3, maxRuns: 3, currentRunId: undefined, stopReason: 'run_budget', blockedReason: 'Goal run budget exhausted (3/3)' })]
+  const readGoalList = api.goals.list
+  let finishGoalRead
+  api.goals.list = () => new Promise((resolve) => { finishGoalRead = resolve })
+  await mount(GoalPanel, { task, issueId: 'issue-c', open: true, onToggle() {}, onGoal() {} })
+  await act(async () => { for (const listener of goalListeners) listener(makeGoal({ text: 'Live goal update' })) })
+  finishGoalRead([])
+  await settle()
+  check(host.textContent.includes('Live goal update') && !host.querySelector('.dialog'), 'older empty goal read cannot overwrite live goal or open creation')
+  api.goals.list = readGoalList
+  await unmount()
+  ui.reset()
+
+  goalRows = [makeGoal({ status: 'blocked', runCount: 3, maxRuns: 3, currentRunId: undefined, stopReason: 'run_budget', blockedReason: 'Goal run budget exhausted (3/3)' })]
   await mount(GoalPanel, { task, issueId: 'issue-c', open: true, onToggle() {}, onGoal() {} })
   await settle()
   check(host.textContent.includes('已达到最大轮数'), 'goal stop reason is readable')
   check(![...host.querySelectorAll('button')].some((button) => button.textContent.includes('重试')), 'exhausted goal has no retry action')
+  await act(async () => { for (const listener of goalListeners) listener({ ...goalRows[0], status: 'waiting_user' }) })
+  check(!host.querySelector('.goal-panel-actions button'), 'Waiting goals with exhausted budgets cannot offer continue')
   await click(host.querySelector('[title^="取消目标"]'))
   check(document.querySelector('.confirm-dialog')?.textContent.includes('保留'), 'goal cancellation explains retained records')
   check(goalCalls.cancel === 0, 'cancel is not called before confirmation')
@@ -170,6 +184,18 @@ try {
   await unmount()
   ui.reset()
 
+  const readMeetingList = api.meetings.list
+  let finishMeetingRead
+  api.meetings.list = () => new Promise((resolve) => { finishMeetingRead = resolve })
+  await mount(MeetingPanel, { issueId: 'issue-c', open: true, onToggle() {}, onMeeting() {} })
+  await act(async () => { for (const listener of meetingListeners) listener(makeMeeting()) })
+  finishMeetingRead([])
+  await settle()
+  check(host.querySelector('.meeting-participants') && !host.querySelector('.meeting-create'), 'older empty meeting read cannot overwrite a live meeting')
+  api.meetings.list = readMeetingList
+  await unmount()
+  ui.reset()
+
   const activeMeeting = makeMeeting()
   let resolveInterject
   api.meetings.interject = () => {
@@ -188,6 +214,12 @@ try {
   await settle()
   check(noteInput.value === '用户后来改写的意见', 'successful interjection does not erase newer draft edits')
   check(meetingCalls.interject === 1, 'duplicate interjection click is guarded')
+  await click(host.querySelector('.meeting-interject button'))
+  await fill(noteInput, '中间修改')
+  await fill(noteInput, '用户后来改写的意见')
+  resolveInterject({ ok: true })
+  await settle()
+  check(noteInput.value === '用户后来改写的意见', 'same-text interjection ABA preserves the newer draft')
   await unmount()
 
   api.meetings.interject = async () => { meetingCalls.interject++; return { ok: false, error: '主席意见被会议状态拒绝' } }

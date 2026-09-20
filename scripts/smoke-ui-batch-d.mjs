@@ -397,6 +397,25 @@ try {
   await settle()
   assert.equal(modelInput().value, 'second-model', '保存期间的新草稿保留')
 
+  const queuedModels = []
+  const finishQueued = []
+  api.pet.setPreset = (presetId, model) => {
+    queuedModels.push({ presetId, model })
+    return new Promise((resolve) => { finishQueued.push(() => resolve(realSetPreset(presetId, model))) })
+  }
+  await fill(modelInput(), 'queued-first')
+  await blur(modelInput(), 'first queued save')
+  await fill(modelInput(), 'second-model')
+  await blur(modelInput(), 'second blur while saving')
+  assert.equal(queuedModels.length, 1, 'Model saves remain serialized')
+  await act(async () => finishQueued.shift()())
+  await settle()
+  assert.equal(queuedModels.length, 2, 'A newer blurred draft is saved after the first acknowledgement')
+  assert.equal(modelInput().value, 'second-model', 'Earlier echo cannot erase the queued draft')
+  await act(async () => finishQueued.shift()())
+  await settle()
+  assert.equal(bridge.snapshot().model, 'second-model', 'Last blurred model is ultimately persisted')
+
   // 预设切换带上输入框里看得见的值，而不是被取代的旧 state.model
   api.pet.setPreset = realSetPreset
   await click(modelCard().querySelector('.menu-trigger'), '打开预设菜单')
