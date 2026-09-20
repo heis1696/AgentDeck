@@ -2,7 +2,7 @@ import type { AcceptanceCriterion, Automation, AppSettings, AnalyticsSummary, Co
 import type { SkillDetail, SkillMeta, SkillTarget, SyncState } from './skills'
 import type { AgentDraft, DraftResult, ExportResult, ImproveResult, ImportResult, EvaluateResult } from './forge'
 import type { Meeting, MeetingCreateInput } from './meeting'
-import type { PackAssets, PetGenProgress, PetGenStartInput } from './pet'
+import type { PackAssets, PetGenDone, PetGenProgress, PetGenStartInput } from './pet'
 import type { PetDragPosition, PetSayPayload, PetStateSnapshot, PetThrowVelocity, PetWindowEvent } from './pet'
 export type { MeetingCreateInput } from './meeting'
 import type {
@@ -352,7 +352,7 @@ export interface AgentDeckApi {
     /** 主进程 → 渲染层：素材包生成进度 */
     onGenProgress: (cb: (progress: PetGenProgress) => void) => () => void
     /** 主进程 → 渲染层：素材包生成完成（素材包下拉即见） */
-    onGenDone: (cb: (result: { packId: string; frameCount: number }) => void) => () => void
+    onGenDone: (cb: (result: PetGenDone) => void) => () => void
     /** 主进程 → 渲染层：素材包生成失败（reason 不含 apiKey） */
     onGenError: (cb: (result: { packId: string; reason: string }) => void) => () => void
   }

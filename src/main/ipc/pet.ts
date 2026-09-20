@@ -106,12 +106,15 @@ export function parsePetGenStartInput(value: unknown): { ok: true; input: PetGen
   if (!presetId) return { ok: false, error: '请先选择模型预设' }
   const model = typeof raw.model === 'string' ? raw.model.trim() : ''
   const paramsRaw = (raw.params ?? {}) as Record<string, unknown>
+  // sheets 模式 size 由网格比例推导（petSheetSizeForGrid），这里的默认只对 per-frame 生效
   const size = typeof paramsRaw.size === 'string' && /^\d+x\d+$/.test(paramsRaw.size) ? paramsRaw.size : '1024x1024'
   const quality = typeof paramsRaw.quality === 'string' ? paramsRaw.quality : ''
   const n = typeof paramsRaw.n === 'number' && Number.isInteger(paramsRaw.n) && paramsRaw.n >= 1 && paramsRaw.n <= 4 ? paramsRaw.n : 1
   const background = paramsRaw.background === 'opaque' ? 'opaque' : 'transparent'
+  // 角色描述（原 stylePrompt 语义）：嵌入按态分表模板
   const stylePrompt = typeof raw.stylePrompt === 'string' ? raw.stylePrompt.trim().slice(0, 2000) : ''
-  if (!stylePrompt) return { ok: false, error: '风格提示词不能为空' }
+  if (!stylePrompt) return { ok: false, error: '角色描述不能为空' }
+  const styleTags = typeof raw.styleTags === 'string' ? raw.styleTags.trim().slice(0, 500) : ''
   const states: Record<string, number> = {}
   let total = 0
   if (!raw.states || typeof raw.states !== 'object') return { ok: false, error: '帧数表缺失' }
@@ -123,15 +126,7 @@ export function parsePetGenStartInput(value: unknown): { ok: true; input: PetGen
   }
   if (total === 0) return { ok: false, error: '至少要生成一个状态' }
   if (total > 64) return { ok: false, error: '总帧数超过上限 64' }
-  const mode = raw.mode === 'sheet' ? 'sheet' : 'per-frame'
-  let sheet: { cols: number; rows: number } | undefined
-  if (mode === 'sheet') {
-    const sheetRaw = (raw.sheet ?? {}) as Record<string, unknown>
-    const cols = typeof sheetRaw.cols === 'number' && Number.isInteger(sheetRaw.cols) && sheetRaw.cols >= 1 && sheetRaw.cols <= 8 ? sheetRaw.cols : 0
-    const rows = typeof sheetRaw.rows === 'number' && Number.isInteger(sheetRaw.rows) && sheetRaw.rows >= 1 && sheetRaw.rows <= 8 ? sheetRaw.rows : 0
-    if (!cols || !rows) return { ok: false, error: 'sheet 模式需要 1–8 的列数与行数' }
-    if (cols * rows < total) return { ok: false, error: `网格 ${cols}×${rows} 放不下 ${total} 帧` }
-    sheet = { cols, rows }
-  }
-  return { ok: true, input: { packId, presetId, model, params: { size, quality, n, background }, stylePrompt, states, mode, sheet } }
+  // 默认按态分表（sheets）；per-frame 保留为可选。旧版发来的 'sheet'（单张切帧，已删）一并落回 sheets。
+  const mode = raw.mode === 'per-frame' ? 'per-frame' : 'sheets'
+  return { ok: true, input: { packId, presetId, model, params: { size, quality, n, background }, stylePrompt, ...(styleTags ? { styleTags } : {}), states, mode } }
 }

@@ -25,7 +25,7 @@ import type {
   SkillsShEntry
 } from '../shared/extensions'
 import type { AgentDeckApi, AgentInfo, AgentModelCatalog, FileDiffResult, GoalCheckpointInput, GoalCreateInput, MeetingCreateInput, PermissionRequest, PresetInfo, SidecarSnapshot, TaskCreateInput, UpdateChannel, UpdateStateSnapshot } from '../shared/contracts'
-import type { PackAssets, PetDragPosition, PetGenProgress, PetGenStartInput, PetSayPayload, PetStateSnapshot, PetThrowVelocity, PetWindowEvent } from '../shared/pet'
+import type { PackAssets, PetDragPosition, PetGenDone, PetGenProgress, PetGenStartInput, PetSayPayload, PetStateSnapshot, PetThrowVelocity, PetWindowEvent } from '../shared/pet'
 
 const api: AgentDeckApi = {
   worktrees: {
@@ -255,8 +255,8 @@ const api: AgentDeckApi = {
       ipcRenderer.on('pet:gen-progress', h)
       return () => ipcRenderer.removeListener('pet:gen-progress', h)
     },
-    onGenDone: (cb: (result: { packId: string; frameCount: number }) => void) => {
-      const h = (_e: unknown, result: { packId: string; frameCount: number }) => cb(result)
+    onGenDone: (cb: (result: PetGenDone) => void) => {
+      const h = (_e: unknown, result: PetGenDone) => cb(result)
       ipcRenderer.on('pet:gen-done', h)
       return () => ipcRenderer.removeListener('pet:gen-done', h)
     },
