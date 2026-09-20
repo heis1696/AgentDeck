@@ -50,7 +50,8 @@ preload 以 `contextBridge` 暴露，全部经 `ipcRenderer.invoke/on` 与主进
 | `move` | `(id, status) => Promise<IpcResult>` | 看板拖动的状态流转；`validateMove`（shared/taskflow）校验合法性，→ running 仅限 queued 且解除 parked |
 | `rewind` | `(id, toSeq) => Promise<IpcResult>` | 截断 toSeq 之后的事件（truncateEvents），重算 result/usage，重新入队执行；广播 `task:events-invalidated` |
 | `rename` | `(id, title) => Promise<Task \| null>` | 重命名（≤120 字符，titleAuto 失效） |
-| `respondPermission` | `(requestId, optionId, decision: 'allow'\|'deny') => Promise<IpcResult>` | 应答权限确认；超时 5 分钟自动 deny |
+| `pendingPermissions` | `(taskId) => Promise<PermissionRequest[]>` | 只读待审批快照；旧 preload 可无此方法，渲染层能力检测后使用 |
+| `respondPermission` | `(requestId, optionId, decision: 'allow'\|'deny', requestToken?) => Promise<IpcResult>` | 应答确切权限选项；token 防止旧请求回复命中新请求；超时按设置自动 deny |
 
 订阅类（返回取消函数）：
 
@@ -61,7 +62,9 @@ preload 以 `contextBridge` 暴露，全部经 `ipcRenderer.invoke/on` 与主进
 | `onEvent` | `(taskId, event: TaskEvent)` | 实时执行日志推送 |
 | `onEventsInvalidated` | `(taskId: string)` | rewind 等导致本地事件缓存失效，需全量重拉 |
 | `onFocusTask` | `(id: string)` | 系统通知点击 → 聚焦该任务 |
-| `onPermission` | `(taskId, req: PermissionRequest)` | 非 yolo 模式下 agent 请求放行工具 |
+| `onPermission` | `(taskId, req: PermissionRequest)` | 请求及结束通知；`requestedAt` / `expiresAt` 为代理时钟，`requestToken` 标识本次请求，`resolution` 为 answered / expired / cancelled / invalidated 时撤下对应请求 |
+
+权限选项按后端提供的标识、文案及范围展示。无拒绝选项时仍可明确拒绝；未知或矛盾的允许选项不能获得授权。渲染层保留提交失败的请求、恢复重新打开任务后的待审批快照，并在子任务侧栏提供相同的审批入口。时间、token、resolution 均为兼容旧协议的可选字段。
 
 ### 1.2 队伍 `bridge.agents` 与预设 `bridge.presets`
 

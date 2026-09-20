@@ -1,12 +1,14 @@
 import type { PermissionRequest } from '../shared/contracts'
+import { permissionDecision } from '../shared/permission'
 
 type Decision = { optionId?: string; decision: 'allow' | 'deny' }
 export type WorkVersion = string | number
-type Pending = { taskId: string; workVersion: WorkVersion; resolve: (decision: Decision) => void; timer: NodeJS.Timeout }
+type Pending = { taskId: string; workVersion: WorkVersion; request: PermissionRequest; resolve: (decision: Decision) => void; timer: NodeJS.Timeout }
 
 export class PermissionBroker {
   private pending = new Map<string, Pending>()
   private taskVersions = new Map<string, WorkVersion>()
+  private requestSequence = 0
 
   constructor(
     private readonly onRequest: (taskId: string, request: PermissionRequest) => void,
@@ -17,6 +19,18 @@ export class PermissionBroker {
 
   private timeout(): number {
     return typeof this.timeoutMs === 'function' ? this.timeoutMs() : this.timeoutMs
+  }
+
+  pendingFor(taskId: string): PermissionRequest[] {
+    return [...this.pending.values()].filter((pending) => pending.taskId === taskId).map((pending) => pending.request)
+  }
+
+  private settle(key: string, pending: Pending, decision: Decision, resolution: NonNullable<PermissionRequest['resolution']>) {
+    clearTimeout(pending.timer)
+    if (this.pending.get(key) === pending) this.pending.delete(key)
+    pending.resolve(decision)
+    try { this.onRequest(pending.taskId, { ...pending.request, resolution }) }
+    catch { /* Renderer teardown must not interrupt settlement of other requests. */ }
   }
 
   /** Update the current content version and invalidate older pending requests. */
@@ -40,9 +54,7 @@ export class PermissionBroker {
     for (const [key, pending] of this.pending) {
       if (pending.taskId !== taskId) continue
       if (version !== undefined && pending.workVersion === version) continue
-      clearTimeout(pending.timer)
-      this.pending.delete(key)
-      pending.resolve({ decision: 'deny' })
+      this.settle(key, pending, { decision: 'deny' }, 'invalidated')
     }
   }
 
@@ -57,55 +69,54 @@ export class PermissionBroker {
       // so fail closed instead of allowing a stale response to authorize the
       // other task. Same-task replacements retain the historical behavior.
       if (previous.taskId !== taskId) {
-        clearTimeout(previous.timer)
-        this.pending.delete(key)
-        previous.resolve({ decision: 'deny' })
+        this.settle(key, previous, { decision: 'deny' }, 'invalidated')
         return Promise.resolve({ decision: 'deny' })
       }
-      clearTimeout(previous.timer)
-      previous.resolve({ decision: 'deny' })
+      this.settle(key, previous, { decision: 'deny' }, 'invalidated')
     }
     return new Promise((resolve) => {
+      const requestedAt = Date.now()
+      const timeout = this.timeout()
+      const published = { ...request, workVersion: snapshot, requestedAt, expiresAt: requestedAt + timeout, requestToken: `${requestedAt}:${++this.requestSequence}`, resolution: undefined }
       const timer = setTimeout(() => {
-        this.pending.delete(key)
-        resolve({ decision: 'deny' })
-      }, this.timeout())
-      this.pending.set(key, { taskId, workVersion: snapshot, resolve, timer })
-      this.onRequest(taskId, { ...request, workVersion: snapshot })
+        const pending = this.pending.get(key)
+        if (pending?.request === published) this.settle(key, pending, { decision: 'deny' }, 'expired')
+      }, timeout)
+      this.pending.set(key, { taskId, workVersion: snapshot, request: published, resolve, timer })
+      this.onRequest(taskId, published)
     })
   }
 
-  resolve(requestId: string | number, optionId: string, decision: 'allow' | 'deny', workVersion?: WorkVersion) {
+  resolve(requestId: string | number, optionId: string, decision: 'allow' | 'deny', workVersion?: WorkVersion, requestToken?: string) {
     const key = String(requestId)
     const pending = this.pending.get(key)
     if (!pending) return { ok: false, error: '请求不存在或已超时' }
+    if (requestToken !== undefined && requestToken !== pending.request.requestToken) return { ok: false, error: '权限请求已更新，请重新选择' }
+    if (pending.request.expiresAt! <= Date.now()) {
+      this.settle(key, pending, { decision: 'deny' }, 'expired')
+      return { ok: false, error: '权限请求已超时并拒绝' }
+    }
     const current = this.getWorkVersion?.(pending.taskId) ?? this.taskVersions.get(pending.taskId) ?? pending.workVersion
     if ((workVersion !== undefined && workVersion !== pending.workVersion) || current !== pending.workVersion) {
-      clearTimeout(pending.timer)
-      this.pending.delete(key)
-      pending.resolve({ decision: 'deny' })
+      this.settle(key, pending, { decision: 'deny' }, 'invalidated')
       return { ok: false, error: '权限请求已因任务内容变化失效' }
     }
-    clearTimeout(pending.timer)
-    this.pending.delete(key)
-    pending.resolve({ optionId, decision })
+    const option = pending.request.options.find((item) => item.optionId === optionId && permissionDecision(item.response.decision) === decision)
+    if (decision === 'allow' && !option) return { ok: false, error: '授权选项无效，请重新选择' }
+    this.settle(key, pending, { ...(option ? { optionId } : {}), decision }, 'answered')
     return { ok: true }
   }
 
   cancelTask(taskId: string) {
     for (const [key, pending] of this.pending) {
       if (pending.taskId !== taskId) continue
-      clearTimeout(pending.timer)
-      pending.resolve({ decision: 'deny' })
-      this.pending.delete(key)
+      this.settle(key, pending, { decision: 'deny' }, 'cancelled')
     }
   }
 
   shutdown() {
     for (const [key, pending] of this.pending) {
-      clearTimeout(pending.timer)
-      pending.resolve({ decision: 'deny' })
-      this.pending.delete(key)
+      this.settle(key, pending, { decision: 'deny' }, 'cancelled')
     }
   }
 }

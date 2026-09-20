@@ -341,8 +341,12 @@ export class TaskRunner {
   }
 
   /** UI 应答权限请求 */
-  resolvePermission(requestId: string, optionId: string, decision: 'allow' | 'deny') {
-    return this.permissionBroker.resolve(requestId, optionId, decision)
+  resolvePermission(requestId: string, optionId: string, decision: 'allow' | 'deny', requestToken?: string) {
+    return this.permissionBroker.resolve(requestId, optionId, decision, undefined, requestToken)
+  }
+
+  pendingPermissions(taskId: string): PermissionRequest[] {
+    return this.permissionBroker.pendingFor(taskId)
   }
 
   /**

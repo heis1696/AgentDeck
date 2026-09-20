@@ -50,7 +50,8 @@ export function registerTaskIpc(ctx: IpcContext) {
     return result
   })
   ipcMain.handle('tasks:followup', (_e, id: unknown, content: unknown, options: unknown) => ctx.runner.followUp(parseId(id), parseContent(content, '追问'), parseFollowUpOptions(options)))
-  ipcMain.handle('tasks:permission-respond', (_e, requestId: unknown, optionId: unknown, decision: unknown) => ctx.runner.resolvePermission(parseId(requestId, 'requestId'), parseContent(optionId, 'optionId'), parsePermissionDecision(decision)))
+  ipcMain.handle('tasks:permission-respond', (_e, requestId: unknown, optionId: unknown, decision: unknown, requestToken: unknown) => ctx.runner.resolvePermission(parseId(requestId, 'requestId'), parseContent(optionId, 'optionId'), parsePermissionDecision(decision), requestToken === undefined ? undefined : parseId(requestToken, 'requestToken')))
+  ipcMain.handle('tasks:permission-pending', (_e, taskId: unknown) => ctx.runner.pendingPermissions(parseId(taskId)))
   ipcMain.handle('tasks:delete', async (_e, id: unknown) => {
     const taskId = parseId(id)
     const task = ctx.store.get(taskId)

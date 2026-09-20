@@ -20,7 +20,9 @@ const MAX_RENDER_LINES = 3000
 export function parseDiff(diff: string): DiffFile[] {
   const files: DiffFile[] = []
   let cur: DiffFile | null = null
-  for (const raw of diff.split('\n')) {
+  const sourceLines = diff.split('\n')
+  if (sourceLines[sourceLines.length - 1] === '') sourceLines.pop()
+  for (const raw of sourceLines) {
     if (!raw && !cur) continue // 前导/尾随空行不建虚拟文件
     if (raw.startsWith('diff --git ') || /^diff --cc /.test(raw)) {
       const m = raw.match(/^diff --(?:git|cc) a\/(.*) b\/(.*)$/)

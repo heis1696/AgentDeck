@@ -1,7 +1,7 @@
 /**
  * R3 契约：<WorkerPane taskId={id} tasks={tasks} onOpen={onSelect} /> 为 Dock 内紧凑只读详情。
  * tasks 由宿主持续传入最新列表；内部按 taskId 订阅 useTaskEvents/useTurnModel，切换任务重建订阅。
- * onOpen(id) 仅在「打开完整详情」按钮触发；无运行/追问/权限审批/回退操作——最终回复
+ * onOpen(id) 仅在「打开完整详情」按钮触发；无运行/追问/回退操作，待审批工具请求就地处理。最终回复
  * 本身就在时间线末尾，不再额外挂底部执行结果区（反馈二轮7）。
  * 样式依赖 polish/dock.css；独立使用时回退按钮由 CSS 隐藏且回调为空操作。
  *
@@ -9,7 +9,7 @@
  * 执行中显示不定量进度檐与实时用时；回合数/tokens/最近事件时间一次看全。
  */
 import { useEffect, useRef, useState } from 'react'
-import { ExternalLink } from 'lucide-react'
+import { ExternalLink, RefreshCw } from 'lucide-react'
 import type { Task } from '../../../../shared/types'
 import { fmtDuration, fmtTime, fmtTokens } from '../../api'
 import { PARKED_QUEUED_LABEL, TASK_STATUS_LABELS, isParkedQueued } from '../../labels'
@@ -17,6 +17,7 @@ import { useTaskEvents } from '../../hooks/useTaskEvents'
 import { useTurnModel } from '../../hooks/turnModel'
 import { scrollElementTo } from '../../ui/motion'
 import { FOLLOW_EPSILON, TurnTimeline } from './TurnTimeline'
+import { PermissionPrompt } from './PermissionPrompt'
 
 export interface WorkerPaneProps {
   taskId: string
@@ -32,7 +33,7 @@ export function WorkerPane({ taskId, tasks, onOpen }: WorkerPaneProps) {
 }
 
 function WorkerDetail({ task, onOpen }: { task: Task; onOpen: (id: string) => void }) {
-  const { events } = useTaskEvents(task.id)
+  const { events, permission, permissionBusy, permissionError, permissionNotice, refreshPermissions, answerPermission } = useTaskEvents(task.id)
   const turns = useTurnModel(events, task.prompt)
   const logRef = useRef<HTMLDivElement>(null)
   const followRef = useRef(true)
@@ -87,7 +88,7 @@ function WorkerDetail({ task, onOpen }: { task: Task; onOpen: (id: string) => vo
   const lastEventAt = events.length ? events[events.length - 1].ts : 0
   const state = isParkedQueued(task) ? PARKED_QUEUED_LABEL : TASK_STATUS_LABELS[task.status]
   const running = task.status === 'running'
-  return <section className={`worker-pane status-${task.status}${running ? ' is-live' : ''}`} aria-label="子任务只读详情">
+  return <section className={`worker-pane status-${task.status}${running ? ' is-live' : ''}`} aria-label="子任务详情">
     <header className="worker-pane-header">
       <div className="worker-pane-title">
         <h2 title={task.title}>{task.title}</h2>
@@ -100,11 +101,14 @@ function WorkerDetail({ task, onOpen }: { task: Task; onOpen: (id: string) => vo
         <span className="worker-pane-item">{turns.length} 回合</span>
         {task.usage && <span className="worker-pane-item" title={`输入 ${task.usage.inputTokens.toLocaleString()} · 输出 ${task.usage.outputTokens.toLocaleString()}`}>{fmtTokens(task.usage.inputTokens + task.usage.outputTokens)} tokens</span>}
         {lastEventAt > 0 && <span className="worker-pane-item">最近 {fmtTime(lastEventAt)}</span>}
-        <span className="worker-pane-readonly">只读</span>
+        <span className="worker-pane-readonly">{permission ? '等待审批' : '只读'}</span>
       </div>
       {running && <span className="worker-pane-progress" aria-hidden="true" />}
     </header>
     {task.error && <div className="worker-pane-error" role="status">{task.failure?.title ?? task.error}</div>}
+    {permission && <PermissionPrompt key={permission.requestToken ?? permission.requestId} permission={permission} busy={permissionBusy} onAnswer={(choice) => void answerPermission(choice)} />}
+    {permissionError && <div className="data-state-banner" role="alert"><span>{permissionError}</span><button type="button" className="btn" onClick={() => void refreshPermissions()}><RefreshCw size={13} /> 刷新审批</button></div>}
+    {permissionNotice && <div className="data-state-banner" role="status">{permissionNotice}</div>}
     <div className="worker-pane-timeline"><TurnTimeline task={task} turns={turns} activeNav={activeNav} following={following} onFollowLatest={followLatest} onNavigate={navigate} onRewind={noRewind} logRef={logRef} onScroll={onScroll} /></div>
   </section>
 }

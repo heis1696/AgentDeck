@@ -279,9 +279,11 @@ export function createOpencodeServerBackend(options: OpencodeServerBackendOption
           const choice = mode === 'yolo'
             ? { decision: 'allow' as const }
             : await events.onPermission?.(request) ?? { decision: 'deny' as const }
-          const selected = request.options.find((option) => option.optionId === choice.optionId)
-          const selectedReply = selected?.response.decision === 'always' ? 'always' : selected?.response.decision === 'reject' ? 'reject' : undefined
-          try { await client.permissionReply(request.requestId, choice.decision, directory, selectedReply) } catch (error) { emit({ kind: 'error', type: 'permission.error', durability: 'durable', durable: true, text: error instanceof Error ? error.message : String(error) }) }
+          const selected = request.options.find((option) => ['allow', 'once', 'always'].includes(option.response.decision)
+            && (choice.optionId === undefined || option.optionId === choice.optionId))
+          const allow = choice.decision === 'allow' && (mode === 'yolo' || !!selected)
+          const selectedReply = allow ? selected?.response.decision === 'always' ? 'always' : 'once' : 'reject'
+          try { await client.permissionReply(request.requestId, allow ? 'allow' : 'deny', directory, selectedReply) } catch (error) { emit({ kind: 'error', type: 'permission.error', durability: 'durable', durable: true, text: error instanceof Error ? error.message : String(error) }) }
           return
         }
         if (type === 'message.part.delta') {

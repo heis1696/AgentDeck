@@ -97,7 +97,7 @@ function installBridgeStub() {
   const calls = []
   const resolveValue = (callPath) => {
     if (callPath === 'skills.list') return { skills: [] }
-    if (/\.(list|events|comments|runs|checkpoints)$/.test(callPath)) return []
+    if (/\.(list|events|comments|runs|checkpoints|pendingPermissions)$/.test(callPath)) return []
     if (/\.(followUp|rename|start|cancel|retry|delete|rewind|create|update)$/.test(callPath)) return { ok: true }
     return null
   }

@@ -248,6 +248,11 @@ section('忙碌状态按任务隔离：A 在途时切到 B，B 不跟着禁用')
   await typeInto(followBox(), '发送期间的新草稿')
   await act(async () => { bridge.settleFollowUps({ ok: true }); await sleep(20) })
   ok(followBox().value === '发送期间的新草稿', '成功响应不会擦除在途期间的新编辑')
+  await keyOn(followBox(), 'Enter')
+  await typeInto(followBox(), '中间编辑')
+  await typeInto(followBox(), '发送期间的新草稿')
+  await act(async () => { bridge.settleFollowUps({ ok: true }); await sleep(20) })
+  ok(followBox().value === '发送期间的新草稿', '编辑后回到相同文本仍是新草稿，不被旧响应清空')
   await unmount()
 }
 
@@ -266,7 +271,31 @@ section('Follow-up guards and complete worker-result access')
   await openTask('taskA')
   ok(container.querySelectorAll('.workers-pane > .workers-list .worker-card').length === 3, 'Finished worker preview stays compact')
   ok(container.querySelectorAll('.workers-more .worker-card').length === 2, 'Every additional finished worker remains available in the disclosure')
+  await click(byQuery('.workers-more summary'))
+  ok(byQuery('.workers-more').open, 'Finished-worker disclosure can be expanded')
+  await click(byQuery('.workers-more .worker-card:last-child'))
+  ok(byQuery('.worker-pane')?.textContent.includes('Worker 4'), 'Opening a hidden finished worker reaches its result pane')
   await unmount()
+}
+
+section('Activity read failures remain distinct from empty history')
+{
+  const readComments = window.agentdeck.issues.comments
+  try {
+    window.agentdeck.issues.comments = async () => { throw new Error('activity unavailable') }
+    await mount()
+    await openTask('taskA')
+    ok(byQuery('.issue-timeline [role=alert]')?.textContent.includes('activity unavailable'), 'Activity failure is visible and recoverable')
+    ok(!byQuery('.issue-timeline')?.textContent.includes('暂无动态'), 'Read failure does not look like empty history')
+    window.agentdeck.issues.comments = async () => [
+      { id: 'old-comment', author: { type: 'agent', id: 'fixture' }, content: 'older update', createdAt: 1000 },
+      { id: 'new-comment', author: { type: 'agent', id: 'fixture' }, content: 'newest update', createdAt: 2000 }
+    ]
+    await click(byQuery('.issue-timeline [role=alert] button'))
+    ok(!byQuery('.issue-timeline [role=alert]'), 'Successful retry clears the activity error')
+    ok(byQuery('.timeline-comment')?.textContent.includes('newest update'), 'Activity opens on the newest update')
+    await unmount()
+  } finally { window.agentdeck.issues.comments = readComments }
 }
 
 /* ------------------------------------------------- 3. 重命名：编辑会话不串任务 */

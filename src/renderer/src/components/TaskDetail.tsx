@@ -79,7 +79,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   const titleDraft = titleEdit?.draft ?? ''
   const navFrameRef = useRef(0)
   const tabRefs = useRef(new Map<Tab, HTMLButtonElement>())
-  const { events, permission, refreshEvents, answerPermission } = useTaskEvents(task.id)
+  const { events, permission, permissionBusy, permissionError, permissionNotice, refreshPermissions, refreshEvents, answerPermission } = useTaskEvents(task.id)
   const turns = useTurnModel(events, task.prompt)
   // 追问框：↑↓ 历史重写 + / 命令菜单（本地命令 + 技能；技能列表首按 / 时懒加载一次）
   const history = usePromptHistory(task.id)
@@ -102,7 +102,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     void bridge.skills.list().then((result) => setSkills(result.skills)).catch(() => { skillsLoadedRef.current = false })
   }, [skillMenuOpen])
   const issueId = task.issueId ?? `iss_${task.id}`
-  const { issue, comments, runs, updateWorkflow } = useIssueDetails(issueId, `${task.status}:${task.result ?? ''}:${task.eventCount}`)
+  const { issue, comments, runs, loading: issueLoading, error: issueError, refreshIssue, updateWorkflow } = useIssueDetails(issueId, `${task.status}:${task.result ?? ''}:${task.eventCount}`)
   const workers = tasks.filter((item) => item.parentTaskId === task.id).sort((a, b) => (a.workerIndex ?? 0) - (b.workerIndex ?? 0))
   const activeWorkers = workers.filter((item) => item.status === 'running' || item.status === 'queued')
   const idleWorkers = workers.filter((item) => item.status !== 'running' && item.status !== 'queued')
@@ -329,6 +329,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     // zcode 会话支持 Skill 工具：/技能名 开头的输入包装成显式技能指令再下发
     const directive = isZcode ? parseSkillDirective(raw, skills) : null
     const content = directive ? wrapSkillDirective(directive.skill, directive.rest) : raw
+    const submittedRevision = taskDraftSlot(task.id).promptRevision
     setBusy(true)
     try {
       // wait:false：IPC 在回合开跑即返回，busy 不锁整轮追问——否则「停止」会禁用到回合结束
@@ -337,7 +338,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
       else {
         history.push(raw)
         // A late acknowledgement cannot erase edits made while sending.
-        if (preset === undefined && taskDraftSlot(task.id).prompt === followUp) setFollowUp('')
+        if (preset === undefined && taskDraftSlot(task.id).promptRevision === submittedRevision) setFollowUp('')
       }
     } catch (cause) {
       ui.toast.error(cause instanceof Error ? cause.message : '续聊失败')
@@ -446,7 +447,9 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
           <span className="worker-state mini">{worker.status === 'cancelled' ? '已取消' : worker.status === 'failed' ? '✗ 失败' : worker.startedAt && worker.endedAt ? `✓ ${fmtDuration(worker.endedAt - worker.startedAt)}` : '✓'}</span>
         </button>)}</div></details>}
       </div>}
-      {permission && <PermissionPrompt permission={permission} onAnswer={(decision) => void answerPermission(decision)} />}
+      {permission && <PermissionPrompt key={permission.requestToken ?? permission.requestId} permission={permission} busy={permissionBusy} onAnswer={(choice) => void answerPermission(choice)} />}
+      {permissionError && <div className="data-state-banner" role="alert"><span>{permissionError}</span><button type="button" className="btn" onClick={() => void refreshPermissions()}><RefreshCw size={13} /> 刷新审批</button></div>}
+      {permissionNotice && <div className="data-state-banner" role="status">{permissionNotice}</div>}
       <div className="tabs" role="tablist" aria-label="任务详情视图" aria-orientation="horizontal" onKeyDown={(event) => {
         // IME 组合中不抢 ←/→（候选选择）
         if (isComposingKey(event.nativeEvent)) return
@@ -482,7 +485,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
           </button>
         })}
       </div>
-      <div className="detail-body" role="tabpanel" id="detail-tabpanel" aria-labelledby={`detail-tab-${tab}`}>{tab === 'activity' && <ActivityTimeline task={task} issueIdentifier={issue?.identifier} runs={runs} comments={comments} onShowLog={() => setTab('log')} />}{tab === 'log' && <TurnTimeline task={task} turns={turns} activeNav={activeNav} following={following} onFollowLatest={followLatest} onNavigate={scrollToTurn} onRewind={(index) => void doRewind(index)} logRef={logRef} onScroll={onLogScroll} />}{tab === 'result' && <div className="result" tabIndex={0} aria-label="最终结果">{task.result ? <Markdown text={task.result} /> : turnActive ? <div className="list-empty">执行中，暂无最终结果</div> : <div className="list-empty">（无结果）</div>}</div>}{tab === 'git' && <GitSummary task={task} />}</div>
+      <div className="detail-body" role="tabpanel" id="detail-tabpanel" aria-labelledby={`detail-tab-${tab}`}>{tab === 'activity' && <ActivityTimeline task={task} issueIdentifier={issue?.identifier} runs={runs} comments={comments} loading={issueLoading} error={issueError} onRetry={() => void refreshIssue()} onShowLog={() => setTab('log')} />}{tab === 'log' && <TurnTimeline task={task} turns={turns} activeNav={activeNav} following={following} onFollowLatest={followLatest} onNavigate={scrollToTurn} onRewind={(index) => void doRewind(index)} logRef={logRef} onScroll={onLogScroll} />}{tab === 'result' && <div className="result" tabIndex={0} aria-label="最终结果">{task.result ? <Markdown text={task.result} /> : turnActive ? <div className="list-empty">执行中，暂无最终结果</div> : <div className="list-empty">（无结果）</div>}</div>}{tab === 'git' && <GitSummary task={task} />}</div>
       {task.sessionId && task.status !== 'queued' && <footer className="followup">
         {skillMenuOpen && <SkillMenu items={menuItems} activeIndex={skillIndex} onHover={setSkillIndex} onPickCommand={openLocalCommand} onPickSkill={(skill) => { setFollowUp(`/${skill.name} `); setSkillMenuOpen(false); followRef.current?.focus() }} />}
         <div className="followup-row">

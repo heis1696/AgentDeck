@@ -4187,9 +4187,38 @@
     },
     {
       "source": "src/main/permission-broker.ts",
-      "dependencies": [],
+      "dependencies": [
+        {
+          "module": "../shared/permission",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/shared/permission.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
       "dependents": [
         "src/main/runner.ts"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
+      "source": "src/shared/permission.ts",
+      "dependencies": [],
+      "dependents": [
+        "src/main/permission-broker.ts",
+        "src/renderer/src/hooks/usePermissions.ts",
+        "src/renderer/src/components/task/PermissionPrompt.tsx"
       ],
       "orphan": false,
       "valid": true
@@ -5109,14 +5138,15 @@
         "src/renderer/src/components/TaskDetail.tsx",
         "src/renderer/src/hooks/useIssueDetails.ts",
         "src/renderer/src/hooks/useTaskEvents.ts",
+        "src/renderer/src/hooks/usePermissions.ts",
         "src/renderer/src/components/task/WorkerPane.tsx",
+        "src/renderer/src/components/task/PermissionPrompt.tsx",
         "src/renderer/src/components/task/TurnTimeline.tsx",
         "src/renderer/src/components/goal/GoalPanel.tsx",
         "src/renderer/src/components/goal/GoalCreateDialog.tsx",
         "src/renderer/src/components/meeting/MeetingCard.tsx",
         "src/renderer/src/components/meeting/MeetingPanel.tsx",
         "src/renderer/src/components/task/ActivityTimeline.tsx",
-        "src/renderer/src/components/task/PermissionPrompt.tsx",
         "src/renderer/src/components/UsageView.tsx",
         "src/renderer/src/components/WorkspaceView.tsx",
         "src/renderer/src/pet/PetSettingsPage.tsx",
@@ -6772,7 +6802,8 @@
       "dependencies": [],
       "dependents": [
         "src/renderer/src/components/TaskDetail.tsx",
-        "src/renderer/src/hooks/usePromptHistory.ts"
+        "src/renderer/src/hooks/usePromptHistory.ts",
+        "src/renderer/src/hooks/usePermissions.ts"
       ],
       "orphan": false,
       "valid": true
@@ -6878,6 +6909,23 @@
           "matchesDoNotFollow": false,
           "circular": false,
           "valid": true
+        },
+        {
+          "module": "./usePermissions",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/hooks/usePermissions.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
         }
       ],
       "dependents": [
@@ -6890,6 +6938,67 @@
     {
       "source": "src/renderer/src/hooks/eventMerge.ts",
       "dependencies": [],
+      "dependents": [
+        "src/renderer/src/hooks/useTaskEvents.ts"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
+      "source": "src/renderer/src/hooks/usePermissions.ts",
+      "dependencies": [
+        {
+          "module": "../../../shared/permission",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/shared/permission.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "../api",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/api.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "./taskDrafts",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/hooks/taskDrafts.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
       "dependents": [
         "src/renderer/src/hooks/useTaskEvents.ts"
       ],
@@ -7074,6 +7183,23 @@
           "valid": true
         },
         {
+          "module": "./PermissionPrompt",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/components/task/PermissionPrompt.tsx",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "./TurnTimeline",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -7093,6 +7219,51 @@
       ],
       "dependents": [
         "src/renderer/src/ui/SideDock.tsx"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
+      "source": "src/renderer/src/components/task/PermissionPrompt.tsx",
+      "dependencies": [
+        {
+          "module": "../../../../shared/permission",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/shared/permission.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "../../api",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/api.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
+      "dependents": [
+        "src/renderer/src/components/TaskDetail.tsx",
+        "src/renderer/src/components/task/WorkerPane.tsx"
       ],
       "orphan": false,
       "valid": true
@@ -7818,33 +7989,6 @@
       "dependencies": [],
       "dependents": [
         "src/renderer/src/components/task/GitSummary.tsx"
-      ],
-      "orphan": false,
-      "valid": true
-    },
-    {
-      "source": "src/renderer/src/components/task/PermissionPrompt.tsx",
-      "dependencies": [
-        {
-          "module": "../../api",
-          "moduleSystem": "es6",
-          "dynamic": false,
-          "exoticallyRequired": false,
-          "dependencyTypes": [
-            "local",
-            "import"
-          ],
-          "resolved": "src/renderer/src/api.ts",
-          "coreModule": false,
-          "followable": true,
-          "couldNotResolve": false,
-          "matchesDoNotFollow": false,
-          "circular": false,
-          "valid": true
-        }
-      ],
-      "dependents": [
-        "src/renderer/src/components/TaskDetail.tsx"
       ],
       "orphan": false,
       "valid": true
@@ -8867,8 +9011,8 @@
     "info": 0,
     "ignore": 0,
     "advisedExitCode": 0,
-    "totalCruised": 179,
-    "totalDependenciesCruised": 401,
+    "totalCruised": 181,
+    "totalDependenciesCruised": 408,
     "optionsUsed": {
       "baseDir": "C:\\Projects\\AgentDeck",
       "combinedDependencies": false,

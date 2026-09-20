@@ -20,16 +20,16 @@ function EditBadge({ edit, seq }: { edit: DockEditMetadata; seq: number }) {
   // 二段式：先以工具入参快照立即开页（流式即可点），git 权威 diff 回来后凭打开请求标识回写——
   // token 只认这一次打开：页签被关掉（或另开一次）后旧结果直接作废，绝不重开分页
   const open = () => {
-    const handle = ui.dock.open({ id: dockId, kind: 'file', title: name, payload: { ...edit, taskId } })
+    const handle = ui.dock.open({ id: dockId, kind: 'file', title: name, payload: { ...edit, taskId, diffNote: '工具入参快照，正在读取 git 改动…' } })
     void bridge.tasks.fileDiff(taskId, edit.file).then((r) => {
-      if (!r) return
+      if (!r) { ui.dock.update(handle, { payload: { diffNote: 'git diff 未返回数据，当前为工具入参快照' } }); return }
       const patch = r.ok
         ? r.diff
           ? { diff: r.diff, additions: r.additions ?? edit.additions, deletions: r.deletions ?? edit.deletions, binary: r.binary, diffNote: r.binary ? '二进制文件，仅统计' : 'git 未提交 diff（工作区 + 暂存）' }
           : { diffNote: `git 显示无未提交改动（${r.note ?? 'clean'}）——回退为工具入参快照` }
         : { diffNote: `git diff 不可用（${r.error ?? r.code ?? '失败'}）——回退为工具入参快照` }
       ui.dock.update(handle, { payload: patch })
-    }).catch(() => {})
+    }).catch((cause) => { ui.dock.update(handle, { payload: { diffNote: `git diff 读取失败：${cause instanceof Error ? cause.message : String(cause)}；当前为工具入参快照` } }) })
   }
   return <button type="button" className="timeline-edit-badge" title={edit.file} aria-label={`查看 ${edit.file}，新增 ${edit.additions} 行，删除 ${edit.deletions} 行`} onClick={open}><span className="timeline-edit-name">{name}</span><span className="edit-added">+{edit.additions}</span><span className="edit-deleted">-{edit.deletions}</span></button>
 }

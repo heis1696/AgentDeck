@@ -56,6 +56,8 @@ ok(largeHtml.includes('+3001') && largeHtml.includes('diff 过长') && !largeHtm
 const boundary = ['diff --git a/exact.ts b/exact.ts', ...Array.from({ length: 2999 }, (_, index) => `+exact-${index}`)].join('\n')
 const exactHtml = renderToStaticMarkup(createElement(DiffView, { diff: boundary }))
 ok(!exactHtml.includes('diff 过长'), 'Exactly 3000 lines are not reported as truncated')
+const terminatedHtml = renderToStaticMarkup(createElement(DiffView, { diff: `${boundary}\n` }))
+ok(!terminatedHtml.includes('diff 过长') && (terminatedHtml.match(/class="dl /g) ?? []).length === 3000, 'A trailing newline does not create a phantom diff line at the rendering limit')
 const multiHtml = renderToStaticMarkup(createElement(DiffView, { diff: `diff --git a/small.ts b/small.ts\n+small\n${oversized}` }))
 ok(multiHtml.includes('small.ts') && multiHtml.includes('large.ts') && (multiHtml.match(/class="dl /g) ?? []).length === 3000, 'Multi-file truncation keeps a partial final file within the shared budget')
 

@@ -922,10 +922,10 @@ html.light .tab.active {
 .detail-body .timeline-comment-line[aria-expanded='true'] .timeline-caret { color: var(--accent); }
 
 /* ---------- F. 权限审批：说清「要你决定什么」 ---------- */
-.detail .permission-banner { align-items: flex-start; gap: 12px; padding: 10px 12px; }
-.detail .permission-info { display: flex; flex: 1; flex-direction: column; gap: 5px; min-width: 0; }
+.detail .permission-banner { align-items: flex-start; flex-wrap: wrap; gap: 12px; padding: 10px 12px; }
+.detail .permission-info { display: flex; flex: 1 1 220px; flex-direction: column; gap: 5px; min-width: 0; overflow-wrap: anywhere; }
 .permission-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.permission-tool { display: inline-flex; align-items: center; gap: 5px; color: var(--text); font-size: var(--text-label); }
+.permission-tool { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; color: var(--text); font-size: var(--text-label); }
 .permission-wait { color: var(--text-faint); font: var(--text-micro) var(--mono); font-variant-numeric: tabular-nums; }
 .permission-id { color: var(--text-faint); font-size: var(--text-micro); }
 .permission-input summary { color: var(--text-faint); font-size: var(--text-micro); cursor: pointer; user-select: none; }
@@ -943,8 +943,8 @@ html.light .tab.active {
   white-space: pre-wrap;
   word-break: break-word;
 }
-.permission-actions { flex: 0 0 auto; display: flex; gap: 8px; }
-.detail .permission-actions .btn { display: inline-flex; align-items: center; gap: 5px; }
+.permission-actions { flex: 0 1 auto; display: flex; flex-wrap: wrap; max-width: 100%; gap: 8px; }
+.detail .permission-actions .btn { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 
 /* ---------- G. Git 改动 / 结果：摘要吸顶 + 长内容可聚焦 ---------- */
 .detail-body > .git-pane { display: flex; flex-direction: column; gap: 8px; }

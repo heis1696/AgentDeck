@@ -211,6 +211,43 @@ if (process.argv.includes('--serve')) {
     check(palette.visible && palette.focused && palette.linked, 'Palette keyboard selection stays visible, focused through the input and linked by ARIA')
     await page.screenshot({ path: path.join(shots, '980-dark-palette.png') })
     await page.keyboard.press('Escape')
+
+    await page.evaluate(() => {
+      const { ui, mock } = window.__visual
+      const child = mock.seedTask({ id: 'approval-worker', title: '需要权限的子任务', prompt: 'Permission fixture', status: 'running' })
+      child.parentTaskId = 'visual-0'
+      mock.fireTaskUpdated(child.id)
+      ui.setTasks(mock.store.tasks)
+      window.agentdeck.tasks.pendingPermissions = async (id) => [{
+        requestId: `approval-${id}`, requestToken: id, requestedAt: Date.now() - 30000, expiresAt: Date.now() + 300000,
+        toolName: '读取当前工作区中的配置文件', riskLevel: 'medium', reason: '本次调用将读取指定文件。',
+        options: [
+          { optionId: 'once', name: '仅允许本次调用', response: { decision: 'allow' } },
+          { optionId: 'always', name: '允许此会话中的后续同类调用', response: { decision: 'always' } },
+          { optionId: 'deny', name: '拒绝', response: { decision: 'deny' } }
+        ]
+      }]
+    })
+    for (const width of [1440, 980]) {
+      await page.setViewportSize({ width, height: width === 1440 ? 900 : 560 })
+      for (const theme of ['light', 'dark']) {
+        await page.evaluate(async (theme) => { await window.agentdeck.settings.set({ theme }); window.__visual.ui.navigate('board') }, theme)
+        await page.locator('.board-page').waitFor()
+        await page.evaluate(() => { window.__visual.ui.openTask('visual-0'); window.__visual.ui.dock.open({ id: 'task:approval-worker', kind: 'task', title: '需要权限的子任务', payload: { taskId: 'approval-worker' } }) })
+        await page.locator('.worker-pane .permission-banner').waitFor()
+        const approvals = await page.locator('.permission-banner').evaluateAll((banners) => banners.map((banner) => {
+          const bounds = banner.getBoundingClientRect()
+          return { width: bounds.width, buttons: [...banner.querySelectorAll('button')].map((button) => {
+            const rect = button.getBoundingClientRect()
+            return rect.width > 0 && rect.left >= bounds.left && rect.right <= bounds.right + 1 && button.scrollWidth <= button.clientWidth + 1
+          }) }
+        }))
+        check(approvals.length === 2 && approvals.every((item) => item.buttons.length === 3 && item.buttons.every(Boolean)), `${width}/${theme}: root and worker approval choices fit their columns`, approvals)
+        await page.locator('.worker-pane .permission-banner').scrollIntoViewIfNeeded()
+        await page.screenshot({ path: path.join(shots, `${width}-${theme}-permissions.png`) })
+        await page.evaluate(() => window.__visual.ui.dock.close('task:approval-worker', { rootId: 'visual-0' }))
+      }
+    }
     await fs.writeFile(path.join(shots, 'metrics.json'), JSON.stringify({ metrics, checks, errors }, null, 2))
     const ordered = pages.flatMap(([view]) => images.filter((item) => item.width === 1440 && item.view === view))
     const cells = await Promise.all(ordered.map(async (item) => `<figure><figcaption>${item.theme} / ${item.view}</figcaption><img src="data:image/png;base64,${(await fs.readFile(path.join(shots, item.name))).toString('base64')}"></figure>`))

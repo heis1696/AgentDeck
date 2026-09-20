@@ -81,8 +81,9 @@ const api: AgentDeckApi = {
       ipcRenderer.on('task:permission', h)
       return () => ipcRenderer.removeListener('task:permission', h)
     },
-    respondPermission: (requestId: string | number, optionId: string, decision: 'allow' | 'deny') =>
-      ipcRenderer.invoke('tasks:permission-respond', String(requestId), optionId, decision) as Promise<{ ok: boolean; error?: string }>
+    pendingPermissions: (taskId: string): Promise<PermissionRequest[]> => ipcRenderer.invoke('tasks:permission-pending', taskId),
+    respondPermission: (requestId: string | number, optionId: string, decision: 'allow' | 'deny', requestToken?: string) =>
+      ipcRenderer.invoke('tasks:permission-respond', String(requestId), optionId, decision, requestToken) as Promise<{ ok: boolean; error?: string }>
   },
   issues: {
     list: (): Promise<Issue[]> => ipcRenderer.invoke('issues:list'),

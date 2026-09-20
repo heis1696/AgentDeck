@@ -74,10 +74,15 @@ console.log('✓ OpenCode server session, permission, event mapping, interrupt/c
 wireEvents[0].properties.options = [
   { optionId: 'once', response: { decision: 'allow' } },
   { optionId: 'always', response: { decision: 'always' } },
+  { optionId: 'deny', response: { decision: 'deny' } },
   { optionId: 'reject', response: { decision: 'reject' } }
 ]
 for (const [choice, expected] of [
   [{ optionId: 'always', decision: 'deny' }, 'reject'],
+  [{ optionId: 'deny', decision: 'allow' }, 'reject'],
+  [{ optionId: 'reject', decision: 'allow' }, 'reject'],
+  [{ optionId: 'missing', decision: 'allow' }, 'reject'],
+  [{ decision: 'allow' }, 'once'],
   [{ optionId: 'always', decision: 'allow' }, 'always'],
   [{ optionId: 'once', decision: 'allow' }, 'once']
 ]) {

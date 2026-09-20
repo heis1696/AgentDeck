@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { bridge } from '../api'
-import type { PermissionRequest } from '../../../shared/contracts'
 import type { TaskEvent } from '../../../shared/types'
 import { mergeTaskEvents } from './eventMerge'
+import { usePermissions } from './usePermissions'
 
 export { mergeTaskEvents } from './eventMerge'
 
 export function useTaskEvents(taskId: string) {
   const [events, setEvents] = useState<TaskEvent[]>([])
-  const [permission, setPermission] = useState<PermissionRequest | null>(null)
+  const permissions = usePermissions(taskId)
   // 任务隔离：TaskDetail 是同一个实例在任务之间复用，events 又是**跨 await 落地**的。
   // 没有这段结算，切到任务 B 的那一帧会先用 A 的事件（与 B 的 prompt 一起喂给 turnModel）
   // 渲染出 A 的对话，直到 B 的快照回来才被换掉。这里在渲染期直接清空：
@@ -17,7 +17,6 @@ export function useTaskEvents(taskId: string) {
   if (scope !== taskId) {
     setScope(taskId)
     setEvents([])
-    setPermission(null)
   }
   const mountedRef = useRef(false)
   const requestRef = useRef(0)
@@ -39,7 +38,6 @@ export function useTaskEvents(taskId: string) {
 
   useEffect(() => {
     mountedRef.current = true
-    setPermission(null)
     void refresh()
     const offEvent = bridge.tasks.onEvent((id, event) => {
       if (id !== taskId) return
@@ -50,9 +48,6 @@ export function useTaskEvents(taskId: string) {
     })
     const offInvalidated = bridge.tasks.onEventsInvalidated((id) => {
       if (id === taskId) void refresh()
-    })
-    const offPermission = bridge.tasks.onPermission((id, request) => {
-      if (id === taskId) setPermission(request)
     })
     // A sidecar reconnect is an authoritative boundary: replay the durable
     // snapshot before accepting the next live event, retaining any event
@@ -67,18 +62,9 @@ export function useTaskEvents(taskId: string) {
       pendingRef.current = []
       offEvent()
       offInvalidated()
-      offPermission()
       offSidecar()
     }
   }, [refresh, taskId])
 
-  const answerPermission = useCallback(async (decision: 'allow' | 'deny') => {
-    if (!permission) return
-    const request = permission
-    setPermission(null)
-    const option = request.options.find((item) => item.response.decision === decision) ?? request.options[0]
-    if (option) await bridge.tasks.respondPermission(request.requestId, option.optionId, decision)
-  }, [permission])
-
-  return { events, permission, refreshEvents: refresh, answerPermission }
+  return { events, refreshEvents: refresh, ...permissions }
 }

@@ -1,5 +1,5 @@
 import { Fragment, useState } from 'react'
-import { ChevronDown, ChevronRight, ScrollText } from 'lucide-react'
+import { ChevronDown, ChevronRight, RefreshCw, ScrollText } from 'lucide-react'
 import { Markdown } from '../Markdown'
 import { fmtDuration, fmtTime, fmtTokens } from '../../api'
 import { isComposingKey } from '../../ui/interaction-center'
@@ -38,13 +38,13 @@ function dayKey(at: number): string {
  * 默认单行截断，点击展开全文。用户评论入口已下线，仅 agent 评论可见。
  * 本轮升级：按天分节、状态图标化、展开态箭头与 aria-expanded、窄窗自动换行。
  */
-export function ActivityTimeline({ task, issueIdentifier, runs, comments, onShowLog }: { task: Task; issueIdentifier?: string; runs: Run[]; comments: Comment[]; onShowLog: () => void }) {
+export function ActivityTimeline({ task, issueIdentifier, runs, comments, onShowLog, loading = false, error, onRetry }: { task: Task; issueIdentifier?: string; runs: Run[]; comments: Comment[]; onShowLog: () => void; loading?: boolean; error?: string | null; onRetry?: () => void }) {
   const agentComments = comments.filter((comment) => comment.author.type === 'agent')
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const items = [
     ...runs.map((run) => ({ kind: 'run' as const, at: run.startedAt ?? 0, run })),
     ...agentComments.map((comment) => ({ kind: 'comment' as const, at: comment.createdAt, comment }))
-  ].sort((a, b) => a.at - b.at)
+  ].sort((a, b) => b.at - a.at)
   const toggle = (id: string) => setExpandedId((current) => (current === id ? null : id))
   const runningRuns = runs.filter((run) => run.status === 'running').length
 
@@ -55,7 +55,8 @@ export function ActivityTimeline({ task, issueIdentifier, runs, comments, onShow
         <strong>工作动态</strong>
         <span className="mini">{runs.length} 次 Run · {agentComments.length} 条通知{runningRuns > 0 ? ` · ${runningRuns} 进行中` : ''}</span>
       </div>
-      {items.length === 0 && <div className="list-empty">暂无动态。执行开始后，Run 和 Agent 汇报会出现在这里。</div>}
+      {error && <div className="data-state-banner" role="alert"><span>{items.length ? '显示上次读取的动态：' : '动态加载失败：'}{error}</span>{onRetry && <button className="btn" type="button" disabled={loading} onClick={onRetry}><RefreshCw size={13} /> 重试</button>}</div>}
+      {items.length === 0 && !error && <div className="list-empty" role="status">{loading ? '动态加载中…' : '暂无动态'}</div>}
       {items.map((item, index) => {
         const day = dayKey(item.at)
         const showDay = index === 0 || dayKey(items[index - 1].at) !== day

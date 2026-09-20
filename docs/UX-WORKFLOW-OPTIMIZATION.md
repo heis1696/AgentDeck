@@ -258,6 +258,100 @@ General teammate retains Batch B files and additionally owns
   state, goal/meeting consequence and read states, usage snapshot consistency,
   assistant settings reliability, final integration and visual acceptance.
 
+## Accepted Follow-ups And Final Batches
+
+The A/B follow-up source is integrated at `ed4420d`. Lead verification passed
+typecheck, build, stage6, UI smoke and extension smoke. The real browser walk
+now passes all 206 checks in 28 page/theme/viewport combinations; the separate
+20-Agent picker and narrow-viewport walk passes 9 geometry/interaction checks.
+Screenshots are in the local ignored `gui-test-screenshots/workflow-followup/`
+and `gui-test-screenshots/workflow-batch-a-browser/` directories.
+
+The independent review of the prior lead commit found three valid defects:
+OpenCode mismatched/unknown allow ids, same-text draft ABA, and trailing-newline
+diff counting. The lead fixed them and added corresponding regression cases,
+including expanding and opening a previously hidden finished worker.
+
+Permission implementation is now owned by the lead: broker timestamps,
+resolution notifications, replacement tokens, optional pending snapshot IPC,
+exact provider choices, failed-response retention, expiration and task-scoped
+async handling. Worker panels expose the same pending tool approval. Existing
+execution policy remains; no new sidecar permission transport is introduced.
+Activity reads now distinguish failures from empty history, offer retry, and
+show newest updates first; file-diff failures identify the fallback snapshot.
+
+### Batch C: Goal And Meeting Actions
+
+Owner: quick implementation teammate. Own only
+`src/renderer/src/components/goal/GoalPanel.tsx`,
+`src/renderer/src/components/goal/GoalCreateDialog.tsx`,
+`src/renderer/src/components/meeting/MeetingPanel.tsx`,
+`src/renderer/src/components/meeting/MeetingCard.tsx`, and scoped goal/meeting
+selectors in `src/renderer/src/polish/detail.css` if required. Add separate
+focused smoke/fixtures; do not edit TaskDetail, permission files, hooks, api.ts,
+package scripts, main/shared execution code, or other batches.
+
+- Distinguish initial loading, failed reads, known empty and stale goal/meeting
+  data. Initial failure must not open a creation form or enable creation.
+  Retry must recover and late responses must remain scoped to their Issue.
+- Confirm goal/meeting cancellation with its actual effect on active tasks,
+  continuation and retained records. Guard duplicate actions and catch errors.
+  Preserve current pause/resume and start-IPC behavior; do not lock all meeting
+  controls for the entire meeting while a start/resume promise remains pending.
+- Show meeting action assignee and acceptance criteria. Explicitly label and
+  confirm approval as approving AND starting the task. Reject must not start.
+- Guard interjection both on click and Enter by status and pending state,
+  respect IME, retain failed drafts, and do not erase newer edits on success.
+- Show readable goal stop reasons and disable continue/retry when the existing
+  controller will reject exhausted run/time budgets. Preserve `goalActions`
+  public export and any smoke consumers; do not change budget policy.
+- Verify failed reads/retry, cancelled confirmations, double clicks, waiting
+  and concluded Enter, rejected interjection, and approval-to-start semantics
+  using isolated bridge fixtures. Run required gates and existing UI smoke.
+
+### Batch D: Usage And Assistant Settings
+
+Owner: general teammate. Own `src/renderer/src/components/UsageView.tsx`,
+`src/renderer/src/pet/PetSettingsPage.tsx`, and ONLY the `usePetState` hook in
+`src/renderer/src/api.ts`; scoped rules in `pet/pet.css` or `polish/usage.css`
+are allowed if necessary. Add dedicated smoke/fixtures. Do not edit shared
+contracts, other api hooks, main-process pet behavior, execution code, package
+scripts, or other batches. Preserve the existing assistant assets and style.
+
+- Usage data and trend buckets must retain the range of their successful
+  snapshot. Switching range must not relabel/rebucket old data as a new range.
+  Handle deferred and failed reads explicitly, preserve stale data with its
+  real scope, and retain newest-request protection.
+- Correct success/failure text for zero runs, cancellations, pending work and
+  partial successes. Remove the unsupported promise of a failure "to-do"
+  queue; do not invent task links when aggregate data cannot identify tasks.
+- Assistant state reads need loading/error/retry/stale states and protection
+  against old reads overwriting broadcasts, while disabled remains a valid
+  loaded state. Keep existing hook users working.
+- Save persona only after acknowledgement, preserve failed/newer drafts
+  (including same-text ABA), prevent duplicate submissions, and catch all
+  settings mutation failures. Model draft must follow the selected preset
+  without retaining a stale uncontrolled input.
+- Generation start rejection must release busy and preserve configuration.
+  Keep cost-bearing actions explicit; tests must stub generation and all real
+  model/API calls. Do not generate or replace actual bitmap assets.
+- Verify delayed saves, errors, retry, preset changes, range races and honest
+  empty/cancelled counts. Run required gates and relevant UI smoke.
+
+Final review remains read-only. No additional product areas or backend policy
+changes should be added beyond these batches and corrections found in review.
+
+### Current Lead Verification
+
+Permission broker/UI tests cover exact provider scopes, failed and duplicate
+answers, no-deny fallback, authoritative timestamps, expiry, request replacement
+tokens, task switching, stale snapshots and renderer teardown. The shared UI
+suite now includes extension and permission regressions. Runner, lifecycle,
+sidecar and IPC validation passed after the additive approval API change.
+The real-browser suite passes 210 checks with root and worker approval layouts
+in both themes and the minimum window; local screenshots are under
+`gui-test-screenshots/workflow-permissions/`. Dependency graph: 181 modules.
+
 ## Acceptance
 
 - A user can find previous and active work, understand filter scope, and clear

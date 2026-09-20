@@ -39,6 +39,10 @@ export interface GoalEvolveInput {
 
 export interface PermissionRequest {
   requestId: string | number
+  requestedAt?: number
+  expiresAt?: number
+  requestToken?: string
+  resolution?: 'answered' | 'expired' | 'cancelled' | 'invalidated'
   /** Snapshot of the task content this approval was issued for. */
   workVersion?: string | number
   toolName: string
@@ -221,7 +225,9 @@ export interface AgentDeckApi {
     onFocusTask: (cb: (id: string) => void) => () => void
     onEvent: (cb: (taskId: string, event: TaskEvent) => void) => () => void
     onPermission: (cb: (taskId: string, request: PermissionRequest) => void) => () => void
-    respondPermission: (requestId: string | number, optionId: string, decision: 'allow' | 'deny') => Promise<IpcResult>
+    /** Optional for compatibility with an older preload during renderer hot updates. */
+    pendingPermissions?: (taskId: string) => Promise<PermissionRequest[]>
+    respondPermission: (requestId: string | number, optionId: string, decision: 'allow' | 'deny', requestToken?: string) => Promise<IpcResult>
   }
   issues: {
     list: () => Promise<Issue[]>

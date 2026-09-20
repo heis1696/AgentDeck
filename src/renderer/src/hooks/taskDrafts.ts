@@ -58,6 +58,8 @@ const historyKey = (taskId: string) => `agentdeck:followup-history:${taskId}`
 export interface TaskDraftSlot {
   /** 未发送的追问草稿。只活在当前会话内存里（不新增持久化），但重挂载也不会丢 */
   prompt: string
+  /** Changes on every prompt edit, including edits that restore earlier text. */
+  promptRevision: number
   /** 追问历史（最新在前）：首次建槽时按任务读 localStorage，之后以内存为准并继续写回 localStorage */
   history: string[]
   /** 历史浏览位置：-1 = 不在历史里（当前草稿）；0 = 最新一条 */
@@ -82,7 +84,7 @@ function readStoredHistory(taskId: string): string[] {
 export function taskDraftSlot(taskId: string): TaskDraftSlot {
   const existing = slots.get(taskId)
   if (existing) return existing
-  const created: TaskDraftSlot = { prompt: '', history: readStoredHistory(taskId), historyIndex: -1, browseDraft: '', busy: false }
+  const created: TaskDraftSlot = { prompt: '', promptRevision: 0, history: readStoredHistory(taskId), historyIndex: -1, browseDraft: '', busy: false }
   slots.set(taskId, created)
   return created
 }
@@ -91,7 +93,9 @@ export function taskDraftSlot(taskId: string): TaskDraftSlot {
 export function patchTaskDraft(taskId: string, patch: Partial<TaskDraftSlot>): void {
   const current = taskDraftSlot(taskId)
   const next = { ...current, ...patch }
-  const changed = (Object.keys(patch) as Array<keyof TaskDraftSlot>).some((key) => !Object.is(current[key], next[key]))
+  if (Object.prototype.hasOwnProperty.call(patch, 'prompt')) next.promptRevision = current.promptRevision + 1
+  const changed = next.promptRevision !== current.promptRevision
+    || (Object.keys(patch) as Array<keyof TaskDraftSlot>).some((key) => !Object.is(current[key], next[key]))
   if (!changed) return
   slots.set(taskId, next)
   for (const listener of listeners) listener()
