@@ -5,9 +5,25 @@
  * 约定：
  * - Escape 只由**最上层**消费（多个浮层叠加时按后进先出）；
  * - 外点关闭只作用于最上层且声明了 onOutside 的层；
- * - 焦点陷阱只由**最上层声明 trap 的层**执行（菜单浮在模态之上时，模态仍负责 Tab 循环）。
+ * - 焦点陷阱只由**最上层声明 trap 的层**执行（菜单浮在模态之上时，模态仍负责 Tab 循环）；
+ * - 视觉 z 轴 = 层序（`layerZIndex`），模态屏障（`blocks`）挡住它下面的指针与焦点。
  */
 export type LayerKind = 'modal' | 'popover' | 'window'
+
+/* ------------------------------------------------------- 视觉 z 轴 = 层序 */
+
+/**
+ * 层序 → 视觉 z-index：**后开的层一定画在先生开的之上**。
+ * 基准 70 高于页面内所有非浮层装饰（.ws-menu / .menu-panel 60、页头 2、页签 7 等），
+ * 低于 .toast-host(90)——通知不是浮层，模态开着也该看得见。
+ * 模态与「浮在模态之上的嵌套菜单」的相对关系因此自动成立，不需要为 kind 分档。
+ */
+export const LAYER_Z_BASE = 70
+export const LAYER_Z_STEP = 1
+
+export function layerZIndex(order: number): number {
+  return LAYER_Z_BASE + Math.max(0, Math.trunc(order)) * LAYER_Z_STEP
+}
 
 export interface LayerRecord {
   id: number
@@ -26,6 +42,7 @@ export interface LayerRecord {
 export type LayerInput = Omit<LayerRecord, 'id' | 'trap'> & { trap?: boolean }
 
 export interface LayerStack {
+  subscribe(listener: () => void): () => void
   /** 压入一层，返回层 id（release 用） */
   push(layer: LayerInput): number
   /** 卸载一层；不存在返回 false */
@@ -45,6 +62,16 @@ export interface LayerStack {
   outside(node: unknown): boolean
   /** node 是否落在任一浮层内（层外焦点历史、焦点归还判定用） */
   containsNode(node: unknown): boolean
+  /** 层在栈里的下标（0 最底）；层不存在返回 -1 */
+  orderOf(id: number): number
+  /** 该层该写的视觉 z-index（层不存在返回 0 = 不接管） */
+  zIndexOf(id: number): number
+  /**
+   * 模态屏障：node 是否被「最上层模态」挡住。
+   * 有模态、且 node 既不在该模态内、也不在它**之上**的浮层内 → true（背景不可交互）。
+   * 指针拦截与焦点看守共用这一条判据，保证「逻辑层序 = 视觉层序 = 可交互层序」。
+   */
+  blocks(node: unknown): boolean
   reset(): void
 }
 
@@ -61,25 +88,39 @@ export function pickRestoreTarget<T>(candidates: readonly (T | null | undefined)
 
 export function createLayerStack(): LayerStack {
   const layers: LayerRecord[] = []
+  const listeners = new Set<() => void>()
+  const notify = () => { for (const listener of listeners) listener() }
   let nextId = 1
   const find = (id: number) => layers.findIndex((layer) => layer.id === id)
+  /** 最上层模态的下标（模态之上可能还压着嵌套菜单）；无模态返回 -1 */
+  const findTopModal = (): number => {
+    for (let i = layers.length - 1; i >= 0; i--) if (layers[i].kind === 'modal') return i
+    return -1
+  }
   return {
+    subscribe(listener) {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
     push(layer) {
       const record: LayerRecord = { id: nextId++, kind: layer.kind, name: layer.name, trap: layer.trap === true, onEscape: layer.onEscape, onOutside: layer.onOutside, contains: layer.contains, root: layer.root }
       layers.push(record)
+      notify()
       return record.id
     },
     release(id) {
       const index = find(id)
       if (index < 0) return false
       layers.splice(index, 1)
+      notify()
       return true
     },
     top() {
       return layers[layers.length - 1] ?? null
     },
     topModal() {
-      return [...layers].reverse().find((layer) => layer.kind === 'modal') ?? null
+      const index = findTopModal()
+      return index < 0 ? null : layers[index]
     },
     topName() {
       return layers[layers.length - 1]?.name ?? null
@@ -115,8 +156,24 @@ export function createLayerStack(): LayerStack {
     containsNode(node) {
       return layers.some((layer) => layer.root != null && layer.contains?.(node) === true)
     },
+    orderOf(id) {
+      return find(id)
+    },
+    zIndexOf(id) {
+      const index = find(id)
+      return index < 0 ? 0 : layerZIndex(index)
+    },
+    blocks(node) {
+      const modal = findTopModal()
+      if (modal < 0) return false
+      for (let i = modal; i < layers.length; i++) {
+        if (layers[i].contains?.(node) === true) return false
+      }
+      return true
+    },
     reset() {
       layers.length = 0
+      notify()
     }
   }
 }

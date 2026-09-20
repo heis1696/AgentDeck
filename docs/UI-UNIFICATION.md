@@ -53,10 +53,19 @@ Existing unrelated work must be preserved: `docs/features/desktop-pet.md`, `scri
 
 - Repository and UI entry-point inspection complete.
 - Visual tokens and all eight polish sections are implemented; minimum-window dock layout and focus restoration fixes are integrated.
-- `npm run smoke:ui` runs the interaction-center and React DOM focus suites, using the normal jsdom devDependency. The command is also included in `smoke:all`.
-- Independent review found remaining work: refresh the task catalog after draft creation; reconcile deferred task/dock routing when the catalog arrives; align visual and logical layer order; allow application shortcuts through nonmodal windows; guard local Enter handlers during IME composition. These remain acceptance blockers until fixed and verified.
+- `npm run smoke:ui` runs the interaction-center, React DOM focus/IME and real App draft/catalog suites, using the normal jsdom devDependency. The command is also included in `smoke:all`. `npm run smoke:ui:electron` separately verifies actual Chromium hit testing and floating-window dragging with isolated data.
+- Independent review findings are resolved: draft creation refreshes the task directory before navigation; deferred child routes and dock entries migrate to the root; modal stacking agrees with pointer/focus barriers; nonmodal windows allow application shortcuts; local keyboard handlers respect IME composition. Standard test registration and graph documentation are updated.
+- Integration checks additionally cover failed/overlapping catalog requests, navigation changes while the directory is loading, evicted pending tabs and removal of an intermediate layer without stale visual stacking.
 
-## Review Follow-up Ownership
+## Final Verification (2026-09-20)
+
+- Passed: `npm run typecheck`, `npm run build`, `npm run smoke:stage6`, `npm run smoke:ui`, `npm run smoke:ui:electron`, `npm run graph:deps`, and `git diff --check`.
+- Playwright drove the actual Electron application with isolated user data. All seven primary pages plus detail/dock were captured in both themes at 1440x900 and 980x560; additional checks covered 1280x800, approximately 967x523 (Windows DPI rounding), 860x600 and 390x844. Forty current screenshots are in the local ignored `gui-test-screenshots/final/` directory. No renderer console errors were recorded.
+- A real draft was created without starting an agent, navigated to its detail, and verified as parked. Agent editor Escape returned focus to the trigger; the command palette switched themes. Chromium coordinate-based tests verified modal/background hit targets and window dragging; DOM tests cover composition and nested focus behavior.
+- Board columns intentionally scroll horizontally when their total minimum width exceeds the viewport. Narrow detail views stack the preview beneath the main content and scroll vertically, keeping long headers and both content areas reachable.
+- No production data was used or modified, no agent task was started, and no runtime dependency was added to the main process. The build retains the existing warning about mixed static/dynamic imports of `src/main/git.ts`. `smoke:all` was not run because orchestration, sidecar, worktree and backend logic were unchanged.
+
+## Review Follow-up Ownership (Completed)
 
 The integrated baseline contains the visual work, minimum-window layout fix, interaction center, focus restoration fix and standard `smoke:ui` command. Main-branch assistant settings/generation changes are preserved. The lead reran build, stage6 (including typecheck), UI smoke and an isolated Electron check: 980px dock right edge is 980px; Agent modal Escape returns focus to its trigger; no renderer exceptions.
 

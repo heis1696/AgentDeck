@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Markdown } from '../Markdown'
 import { fmtDuration, fmtTime, fmtTokens } from '../../api'
+import { isComposingKey } from '../../ui/interaction-center'
 import type { Comment, Run, Task } from '../../../../shared/types'
 
 const RUN_TRIGGER_TEXT: Record<Run['trigger'], string> = {
@@ -42,7 +43,7 @@ export function ActivityTimeline({ task, issueIdentifier, runs, comments, onShow
       ) : (
         <article className={`timeline-item timeline-comment ${item.comment.author.type}`} key={`comment-${item.comment.id}`}>
           <span className="timeline-marker timeline-avatar">A</span>
-          <div className="timeline-content timeline-line timeline-comment-line" role="button" tabIndex={0} title={expandedId === item.comment.id ? '收起' : '展开全文'} onClick={() => setExpandedId((current) => (current === item.comment.id ? null : item.comment.id))} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setExpandedId((current) => (current === item.comment.id ? null : item.comment.id)) } }}>
+          <div className="timeline-content timeline-line timeline-comment-line" role="button" tabIndex={0} title={expandedId === item.comment.id ? '收起' : '展开全文'} onClick={() => setExpandedId((current) => (current === item.comment.id ? null : item.comment.id))} onKeyDown={(event) => { if (isComposingKey(event.nativeEvent)) return; if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setExpandedId((current) => (current === item.comment.id ? null : item.comment.id)) } }}>
             <strong>Agent · {item.comment.author.id}</strong>
             <span className={`timeline-sentence ${expandedId === item.comment.id ? 'is-expanded' : ''}`}>{item.comment.content}</span>
             <time>{fmtTime(item.comment.createdAt)}</time>

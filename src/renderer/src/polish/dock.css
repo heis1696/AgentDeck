@@ -137,9 +137,10 @@ html.light .code-token { color: var(--shiki-light); font-style: var(--shiki-ligh
    行内分割线退场，两块各自内部滚动，是明确可用的窄屏布局而非隐藏溢出 */
 @media (max-width: 880px) {
   .detail { flex-direction: column; overflow-y: auto; }
-  .detail-left { flex: 1 1 0; min-width: 0; min-height: 220px; }
+  .detail-left { flex: 0 0 auto; min-width: 0; min-height: 0; }
+  .detail-columns { flex: 0 0 320px; height: 320px; }
   .side-dock {
-    flex: 1 1 0;
+    flex: 0 0 320px;
     width: auto !important;
     max-width: none !important;
     min-width: 0;

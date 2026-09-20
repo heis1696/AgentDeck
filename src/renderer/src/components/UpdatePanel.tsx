@@ -3,7 +3,7 @@ import { Download, RefreshCw, RotateCcw, Rocket } from 'lucide-react'
 import { bridge, useSettings } from '../api'
 import type { UpdateStateSnapshot } from '../../../shared/contracts'
 import { EmptyState } from '../ui/EmptyState'
-import { ui } from '../ui/interaction-center'
+import { ui, isComposingKey } from '../ui/interaction-center'
 
 const PHASE_LABEL: Record<UpdateStateSnapshot['phase'], string> = {
   idle: '空闲',
@@ -160,7 +160,7 @@ export function UpdatePanel() {
             placeholder="https://updates.example.com/agentdeck"
             onChange={(e) => setFeedDraft(e.target.value)}
             onBlur={commitFeed}
-            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLInputElement).blur() } }}
+            onKeyDown={(e) => { if (isComposingKey(e.nativeEvent)) return; if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLInputElement).blur() } }}
           />
         </label>
       </section>

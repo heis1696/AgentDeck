@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Check, Pause, Play, Send, Square, X } from 'lucide-react'
 import { bridge } from '../../api'
+import { isComposingKey } from '../../ui/interaction-center'
 import type { AgentInfo } from '../../../../shared/contracts'
 import type { Meeting, MeetingRole, MeetingTurnPhase } from '../../../../shared/meeting'
 
@@ -46,7 +47,7 @@ export function MeetingCard({ meeting, agents, run }: { meeting: Meeting; agents
       {meeting.status === 'active' && <button className="icon-btn" title="暂停会议" disabled={busy} onClick={() => void guard(() => bridge.meetings.pause(meeting.id))}><Pause size={14} /></button>}
       {meeting.status === 'waiting_user' && <button className="icon-btn" title="继续会议" disabled={busy} onClick={() => void guard(() => bridge.meetings.resume(meeting.id))}><Play size={14} /></button>}
       {(meeting.status === 'active' || meeting.status === 'waiting_user') && <button className="icon-btn danger-icon" title="取消会议" disabled={busy} onClick={() => void guard(() => bridge.meetings.cancel(meeting.id))}><Square size={14} /></button>}
-      <div className="meeting-interject"><input value={note} placeholder="主席插话" onChange={(event) => setNote(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && note.trim()) sendNote() }} /><button className="icon-btn" title="发送插话" disabled={busy || !note.trim() || meeting.status !== 'active'} onClick={sendNote}><Send size={13} /></button></div>
+      <div className="meeting-interject"><input value={note} placeholder="主席插话" onChange={(event) => setNote(event.target.value)} onKeyDown={(event) => { if (isComposingKey(event.nativeEvent)) return; if (event.key === 'Enter' && note.trim()) sendNote() }} /><button className="icon-btn" title="发送插话" disabled={busy || !note.trim() || meeting.status !== 'active'} onClick={sendNote}><Send size={13} /></button></div>
     </div>
     {meeting.status === 'concluded' && meeting.minutes.at(-1)?.actionItems.map((item, index) => <div className="meeting-action-item" key={`${item.title}-${index}`}><span>{item.title}</span>{item.approval === 'pending' ? <span className="meeting-approval"><button className="icon-btn" title="批准行动项" onClick={() => void guard(() => bridge.meetings.approveAction(meeting.id, index, 'approved'))}><Check size={13} /></button><button className="icon-btn danger-icon" title="拒绝行动项" onClick={() => void guard(() => bridge.meetings.approveAction(meeting.id, index, 'rejected'))}><X size={13} /></button></span> : <span className="badge">{item.approval === 'approved' ? '已批准' : '已拒绝'}</span>}</div>)}
   </>

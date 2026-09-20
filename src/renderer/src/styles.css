@@ -613,6 +613,9 @@ body {
 }
 
 /* ---------- 对话框 ---------- */
+/* 视觉层序兜底：真正模态必须压住非模态浮层（.float-window 38 / .meta-info-pop 40）。
+   实际打开时由 useInteractionLayer 按层栈写内联 z-index（基准 70，见 ui/interaction-layer.ts），
+   这里的 70 只是「层根还没接管」时的兜底值，也是模态层的下限。 */
 .overlay {
   position: fixed;
   inset: 0;
@@ -620,7 +623,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 10;
+  z-index: 70;
 }
 .dialog {
   width: 560px;
@@ -1563,7 +1566,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .followup textarea { border-color: var(--border); background: var(--app-shell); }
 
 .board { gap: var(--space-3); padding: var(--space-4) var(--space-5) var(--space-6); background: var(--app-shell); }
-.board-col { min-width: 220px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-raised); }
+.board-col { min-width: 220px; border: 0; border-radius: 0; background: transparent; }
 .board-col-head { min-height: 44px; padding: 0 12px; border-bottom: 1px solid var(--border); }
 .board-col-title { color: var(--text); }
 .board-col-count { color: var(--text-dim); }

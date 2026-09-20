@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { bridge, useSettings, useTasks } from './api'
+import { bridge, useSettings, useTasks, waitForTaskListed } from './api'
 import { TASK_STATUS_LABELS, isParkedQueued, PARKED_QUEUED_LABEL } from './labels'
 import { taskService } from './task-service'
 import { TaskDetail } from './components/TaskDetail'
@@ -33,7 +33,7 @@ export function App() {
   // 兼容 #/pet（dev 拼接与新版 loadFile '/pet'）与 #pet（旧主进程 loadFile 'pet'——热更错峰期防主 UI 误入宠物窗）
   if (/^#\/?pet$/.test(window.location.hash)) return <PetStage />
   if (/^#\/?pet-settings$/.test(window.location.hash)) return <PetSettingsPage />
-  const { tasks } = useTasks()
+  const { tasks, refresh, ready, error: tasksError } = useTasks()
   const { settings, update } = useSettings()
   // 界面交互状态（视图/页签/面板/设置分区）全部来自交互中心：宿主只订阅，不再各持一份
   const view = useInteractionSelector((state) => state.view)
@@ -59,12 +59,26 @@ export function App() {
     if (theme === 'system') { mq.addEventListener('change', apply); return () => mq.removeEventListener('change', apply) }
   }, [settings?.theme])
 
-  // 中心持有最新任务目录：祖先链解析（子任务→领队）、删除清理、dock 桶剪枝都以它为准
+  // 中心持有最新任务目录：祖先链解析（子任务→领队）、删除清理、dock 桶剪枝都以它为准。
+  // 首份真实列表到达前不喂（ready 门控）：启动瞬间的空目录是「未加载」不是「没有任务」，
+  // 喂进去会把待决路由乐观页签全部剪掉。
   useEffect(() => {
-    ui.setTasks(tasks.map((task) => ({ id: task.id, title: task.title, parentTaskId: task.parentTaskId })))
-  }, [tasks])
+    if (ready) ui.setTasks(tasks.map((task) => ({ id: task.id, title: task.title, parentTaskId: task.parentTaskId })))
+  }, [tasks, ready])
+  useEffect(() => { if (tasksError) ui.toast.error(`读取任务失败：${tasksError}`) }, [tasksError])
 
   const openTask = (id: string) => { ui.openTask(id) }
+  /** 草稿创建只广播 Issue 更新，必须把新任务写入页面目录后再导航。 */
+  const openCreatedTask = async (id: string) => {
+    await waitForTaskListed(id)
+    const list = await refresh()
+    if (!list?.some((task) => task.id === id)) {
+      ui.toast.error('任务已创建，目录暂未刷新，请稍后从看板打开')
+      return
+    }
+    ui.setTasks(list)
+    ui.openTask(id)
+  }
   /** Ctrl+N/侧栏「新建任务」：导航到 Issue 主页（新建表单即主页主体）并请求聚焦输入框 */
   const goWorkspace = () => { ui.focusComposer() }
   /** 切到某个最近用过的工作区：新任务默认目录随之变化 */
@@ -159,7 +173,7 @@ export function App() {
       <div className="sidebar-footer"><span className="connection-dot" /> 本地引擎就绪</div>
     </aside>
     <main className="main">
-      {view === 'agents' ? <AgentsView /> : view === 'automation' ? <AutomationView /> : view === 'skills' ? <ExtensionsView /> : view === 'settings' ? <SettingsView section={settingsSection} onSection={(section) => ui.openSettings(section)} /> : view === 'usage' ? <UsageView /> : view === 'board' ? <Page title="看板" count={tasks.length}><BoardView tasks={tasks} onOpen={openTask} /></Page> : view === 'detail' && selected ? <div className="tasks-column detail-page"><Chrome title={selected.title} onBack={() => ui.navigate('issues')} />{rootTabs.length > 0 && <TabBar tabs={rootTabs} tasks={tasks} activeId={activeId} onSelect={openTask} onClose={(id) => ui.closeTab(id)} />}<TaskDetail task={selected} tasks={tasks} onSelect={openTask} /></div> : <IssuesView tasks={tasks} tabs={tabs} onOpen={openTask} onClose={(id) => ui.closeTab(id)}><WorkspaceView onCreated={(task) => openTask(task.id)} workspaceDir={workspaceDir} onPickWorkspace={pickWorkspace} /></IssuesView>}
+      {view === 'agents' ? <AgentsView /> : view === 'automation' ? <AutomationView /> : view === 'skills' ? <ExtensionsView /> : view === 'settings' ? <SettingsView section={settingsSection} onSection={(section) => ui.openSettings(section)} /> : view === 'usage' ? <UsageView /> : view === 'board' ? <Page title="看板" count={tasks.length}><BoardView tasks={tasks} onOpen={openTask} /></Page> : view === 'detail' && selected ? <div className="tasks-column detail-page"><Chrome title={selected.title} onBack={() => ui.navigate('issues')} />{rootTabs.length > 0 && <TabBar tabs={rootTabs} tasks={tasks} activeId={activeId} onSelect={openTask} onClose={(id) => ui.closeTab(id)} />}<TaskDetail task={selected} tasks={tasks} onSelect={openTask} /></div> : <IssuesView tasks={tasks} tabs={tabs} onOpen={openTask} onClose={(id) => ui.closeTab(id)}><WorkspaceView onCreated={(task) => openCreatedTask(task.id)} workspaceDir={workspaceDir} onPickWorkspace={pickWorkspace} /></IssuesView>}
     </main>
   </div>
 }

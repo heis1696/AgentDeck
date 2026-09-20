@@ -44,6 +44,8 @@ npx dependency-cruiser src --include-only "^src" --output-type json  --no-config
 
 ## 数据基线
 
+- **UI 统一改造刷新（2026-09-20）**：当前 `deps.mmd` / `deps.json` 已经 `npm run graph:deps` 刷新，为 173 个模块；`interaction-center`、`interaction-layer` 与订阅/焦点 hook 已纳入。下方数字及 INVENTORY 主体仍保留原始盘点时的历史口径，当前依赖以机器图为准。
+
 - **commit `6b2f038`**（`chore(ship): 热更发布 0.22.0-hot.19 …`，生成图谱时 main 侧最新提交），快照取自检自该提交的干净 worktree。
 - **机读图刷新注记（2026-09-19）**：`deps.mmd` / `deps.json` / `deps.md` / `deps-3d` 系列后经 `npm run graph:view` 在主检出重生成，因 `src/main/prompts/` WIP 当时已在工作区，机读图现为 **151 模块 / 305 边**（多了 prompts 组 8 文件）；INVENTORY 与 ARCHITECTURE-GRAPH 仍为基线口径 **143/292**，两套数字之差即该 WIP。WIP 合入后重跑 `npm run graph:deps` 即自然归一。
 - 主检出当时存在未提交 WIP：7 个已修改文件（`scripts/smoke-meeting-consult.mjs`、`src/main/{agent-forge,agents,delegate,goal-controller,meeting-controller,runner}.ts`）+ 未跟踪目录 `src/main/prompts/`。**这批 WIP 不在本图谱内**——图谱描述的是已提交基线。

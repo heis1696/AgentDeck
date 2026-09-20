@@ -5247,6 +5247,23 @@
       "source": "src/renderer/src/hooks/useInteractionLayer.ts",
       "dependencies": [
         {
+          "module": "../ui/interaction-center",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "../ui/interaction-layer",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -5280,16 +5297,6 @@
       "valid": true
     },
     {
-      "source": "src/renderer/src/ui/interaction-layer.ts",
-      "dependencies": [],
-      "dependents": [
-        "src/renderer/src/hooks/useInteractionLayer.ts",
-        "src/renderer/src/ui/interaction-center.ts"
-      ],
-      "orphan": false,
-      "valid": true
-    },
-    {
       "source": "src/renderer/src/ui/interaction-center.ts",
       "dependencies": [
         {
@@ -5313,6 +5320,8 @@
       "dependents": [
         "src/renderer/src/App.tsx",
         "src/renderer/src/components/AgentsView.tsx",
+        "src/renderer/src/hooks/useInteractionLayer.ts",
+        "src/renderer/src/ui/Menu.tsx",
         "src/renderer/src/components/AutomationView.tsx",
         "src/renderer/src/components/BoardView.tsx",
         "src/renderer/src/ui/IssueIdChip.tsx",
@@ -5324,12 +5333,26 @@
         "src/renderer/src/ui/SideDock.tsx",
         "src/renderer/src/components/task/TurnTimeline.tsx",
         "src/renderer/src/hooks/useInteraction.ts",
+        "src/renderer/src/ui/CodeViewer.tsx",
         "src/renderer/src/components/goal/GoalPanel.tsx",
         "src/renderer/src/components/goal/GoalCreateDialog.tsx",
+        "src/renderer/src/components/meeting/MeetingCard.tsx",
         "src/renderer/src/components/meeting/MeetingPanel.tsx",
+        "src/renderer/src/components/task/ActivityTimeline.tsx",
         "src/renderer/src/components/WorkspaceView.tsx",
         "src/renderer/src/ui/Toasts.tsx",
-        "src/renderer/src/ui/Confirm.tsx"
+        "src/renderer/src/ui/Confirm.tsx",
+        "src/renderer/src/ui/Palette.tsx"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
+      "source": "src/renderer/src/ui/interaction-layer.ts",
+      "dependencies": [],
+      "dependents": [
+        "src/renderer/src/hooks/useInteractionLayer.ts",
+        "src/renderer/src/ui/interaction-center.ts"
       ],
       "orphan": false,
       "valid": true
@@ -5347,6 +5370,23 @@
             "import"
           ],
           "resolved": "src/renderer/src/hooks/useInteractionLayer.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "./interaction-center",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -6811,7 +6851,25 @@
     },
     {
       "source": "src/renderer/src/ui/CodeViewer.tsx",
-      "dependencies": [],
+      "dependencies": [
+        {
+          "module": "./interaction-center",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
       "dependents": [
         "src/renderer/src/ui/SideDock.tsx"
       ],
@@ -7038,6 +7096,23 @@
           "matchesDoNotFollow": false,
           "circular": false,
           "valid": true
+        },
+        {
+          "module": "../../ui/interaction-center",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
         }
       ],
       "dependents": [
@@ -7182,6 +7257,23 @@
             "import"
           ],
           "resolved": "src/renderer/src/api.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "../../ui/interaction-center",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -7738,6 +7830,23 @@
           "matchesDoNotFollow": false,
           "circular": false,
           "valid": true
+        },
+        {
+          "module": "./interaction-center",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
         }
       ],
       "dependents": [
@@ -8147,7 +8256,7 @@
     "info": 0,
     "ignore": 0,
     "totalCruised": 173,
-    "totalDependenciesCruised": 365,
+    "totalDependenciesCruised": 371,
     "optionsUsed": {
       "baseDir": "D:\\agentdeck",
       "combinedDependencies": false,

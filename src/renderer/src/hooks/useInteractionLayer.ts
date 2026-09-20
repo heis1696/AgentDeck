@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef, type MutableRefObject, type RefObject } from 'react'
 import { FOCUSABLE_SELECTOR, interactionLayers, pickRestoreTarget, trapTargetIndex, type LayerKind } from '../ui/interaction-layer'
+import { isComposingKey } from '../ui/interaction-center'
 
 export interface InteractionLayerOptions<T extends HTMLElement = HTMLElement> {
   open: boolean
@@ -37,6 +38,18 @@ const isElement = (node: unknown): node is HTMLElement => node instanceof HTMLEl
 /** 能当归还目标：还挂在文档里，且不是 body/html 这种「焦点无处可去」的兜底 */
 const isRestorable = (node: HTMLElement): boolean =>
   node.isConnected && node !== document.body && node !== document.documentElement
+
+/**
+ * 视觉 z 轴跟随层序：把层栈算出的 z-index 写成层根的内联样式（压过样式表里的静态值）。
+ * 约定：层根必须是**定位元素**（.overlay/fixed、.float-window/absolute、.menu-root/relative…），
+ * 静态元素本来就不参与 z 轴排序；这里刻意不动 position，免得把样式表的 fixed/absolute 改坏。
+ */
+function applyLayerZIndex(root: HTMLElement | null, z: number): void {
+  if (root && z > 0) root.style.zIndex = String(z)
+}
+
+/** 指针屏障要拦的事件：按下、点击、右键、双击——覆盖所有「点到背景」的路径 */
+const POINTER_BARRIER_EVENTS = ['pointerdown', 'mousedown', 'click', 'dblclick', 'contextmenu'] as const
 
 /* --------------------------------------------------- 层外焦点历史（兜底） */
 
@@ -79,6 +92,13 @@ function captureTrigger(layerRoot: HTMLElement | null): HTMLElement | null {
  * 所有浮层（Confirm / Palette / Menu / FloatWindow / 页面内模态）共用同一套语义，
  * 叠加时只有最上层响应 Escape，Tab 循环归「最上层声明 trap 的层」。
  *
+ * 层栈一致性（视觉 / Escape / 指针 / 焦点同一条序）：
+ * - 视觉：入栈时把层序换算成 z-index 写进层根内联样式，后开的层一定画在先生开的之上；
+ * - Escape / 外点：仍只由最上层消费；
+ * - 指针 / 焦点：有模态时，落在「最上层模态及其上方浮层」之外的事件被捕获阶段截断，
+ *   背景（含非模态浮窗、信息弹层）在模态开着时收不到点击，也拿不到焦点；
+ * - IME：组合中的 Escape/Tab（isComposing 或 keyCode 229）一律放行给输入法。
+ *
  * 触发焦点记录（本 hook 的关键约定）：
  * 1. 在**渲染期**（open 由 false→true 的那次 render）读 `document.activeElement`——
  *    React 这时还没提交 DOM、更没跑 `autoFocus`（发生在 commitMount 布局阶段），
@@ -120,6 +140,16 @@ export function useInteractionLayer<T extends HTMLElement = HTMLElement>(options
       onOutside: latest.current.closeOnOutside ? () => latest.current.onClose?.() : undefined,
       contains: (node) => !!layerRef.current && node instanceof Node && layerRef.current.contains(node)
     })
+    // 视觉层序 = 逻辑层序：后开的层画在先生开的之上（模态自然压住浮窗/信息弹层）
+    const root = layerRef.current
+    const previousZ = root?.style.zIndex ?? ''
+    let zIndex = 0
+    const updateZ = () => {
+      zIndex = interactionLayers.zIndexOf(layerId)
+      applyLayerZIndex(root, zIndex)
+    }
+    const unsubscribe = interactionLayers.subscribe(updateZ)
+    updateZ()
 
     // 首焦点：显式指定优先，否则层内第一个可聚焦元素
     if (latest.current.autoFocus !== false) {
@@ -134,8 +164,9 @@ export function useInteractionLayer<T extends HTMLElement = HTMLElement>(options
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return
+      // IME 组合中（isComposing / keyCode 229）：Escape 用于取消候选、Tab 用于上屏，都不该被浮层抢走
+      if (isComposingKey(event)) return
       if (event.key === 'Escape') {
-        if (event.isComposing) return
         if (!interactionLayers.isTop(layerId) || !latest.current.onClose) return
         event.preventDefault()
         event.stopPropagation()
@@ -160,12 +191,41 @@ export function useInteractionLayer<T extends HTMLElement = HTMLElement>(options
       if (layerRef.current && target instanceof Node && layerRef.current.contains(target)) return
       latest.current.onClose?.()
     }
+    /**
+     * 模态屏障（指针）：真正模态必须阻断背景操作。
+     * 视觉 z 轴已经把模态压在最上面，但浏览器命中测试只认绘制结果；
+     * 这里在捕获阶段把「落在最上层模态及其上方浮层之外」的指针事件截断，
+     * 背景的按钮/浮窗拖拽/右键菜单在模态开着时一律收不到事件。
+     */
+    const onPointerBarrier = (event: Event) => {
+      if (!interactionLayers.blocks(event.target)) return
+      event.preventDefault()
+      event.stopPropagation()
+    }
+    /**
+     * 模态屏障（焦点）：背景元素不得在模态开着时拿到焦点。
+     * 点击已被指针屏障挡下；这里兜住程序化 focus / 遗留的焦点迁移，
+     * 把焦点拉回最上层模态内的第一个可聚焦元素。
+     */
+    const onFocusBarrier = (event: FocusEvent) => {
+      if (!interactionLayers.blocks(event.target)) return
+      const root = interactionLayers.topModal()?.root
+      if (!(root instanceof HTMLElement)) return
+      focusableWithin(root)[0]?.focus()
+    }
     document.addEventListener('keydown', onKeyDown, true)
     document.addEventListener('mousedown', onMouseDown, true)
+    for (const type of POINTER_BARRIER_EVENTS) document.addEventListener(type, onPointerBarrier, true)
+    document.addEventListener('focusin', onFocusBarrier, true)
     return () => {
       document.removeEventListener('keydown', onKeyDown, true)
       document.removeEventListener('mousedown', onMouseDown, true)
+      for (const type of POINTER_BARRIER_EVENTS) document.removeEventListener(type, onPointerBarrier, true)
+      document.removeEventListener('focusin', onFocusBarrier, true)
+      unsubscribe()
       interactionLayers.release(layerId)
+      // 归还 z 轴：只在还是本层写下的值时才清，避免抹掉调用方自己的内联样式
+      if (root && zIndex > 0 && root.style.zIndex === String(zIndex)) root.style.zIndex = previousZ
       if (latest.current.restoreFocus === false) return
       restore()
     }

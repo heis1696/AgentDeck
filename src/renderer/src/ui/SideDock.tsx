@@ -16,7 +16,7 @@ import { FileCode2, ListTodo, X } from 'lucide-react'
 import type { Task } from '../../../shared/types'
 import { CodeViewer } from './CodeViewer'
 import { WorkerPane } from '../components/task/WorkerPane'
-import { ui, type DockHandle, type DockItem } from './interaction-center'
+import { ui, isComposingKey, type DockHandle, type DockItem } from './interaction-center'
 import { useInteractionSelector } from '../hooks/useInteraction'
 
 export type { DockEditMetadata, DockFileDiff, DockItem } from './interaction-center'
@@ -98,6 +98,7 @@ export function SideDock({ taskId, tasks, onOpen }: { taskId: string; tasks: Tas
       <div className="dock-tabs" role="tablist" aria-label="右侧分页" aria-orientation="horizontal">
         {items.map((item, index) => <div className={`dock-tab-row${item.id === active.id ? ' is-active' : ''}`} key={item.id}>
           <button type="button" role="tab" id={`${prefix}-tab-${index}`} aria-controls={`${prefix}-panel`} aria-selected={item.id === active.id} tabIndex={item.id === active.id ? 0 : -1} title={item.kind === 'file' ? item.payload.file : item.title} className="dock-tab" ref={(node) => { if (node) tabRefs.current.set(item.id, node); else tabRefs.current.delete(item.id) }} onClick={() => activate(index)} onKeyDown={(event) => {
+            if (isComposingKey(event.nativeEvent)) return
             if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') { event.preventDefault(); activate((index + (event.key === 'ArrowRight' ? 1 : -1) + items.length) % items.length) }
             if (event.key === 'Home' || event.key === 'End') { event.preventDefault(); activate(event.key === 'Home' ? 0 : items.length - 1) }
             if (event.key === 'Delete') { event.preventDefault(); closeTab(index) }
