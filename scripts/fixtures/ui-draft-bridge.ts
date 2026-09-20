@@ -34,7 +34,7 @@ interface IssueListener { (payload: { taskId: string; issueId: string; issue: Is
 
 export interface DraftBridge {
   store: { tasks: Task[]; issues: Issue[]; agents: AgentInfo[] }
-  calls: { list: number; get: number }
+  calls: { list: number; get: number; start: number }
   /** tasks.list 全局延迟（ms）；listScript 优先 */
   listDelayMs: number
   /** 按调用次序脚本化的 tasks.list 响应（shift 消费；snapshot 缺省取当时 store 快照）；用尽后回退全局延迟 */
@@ -70,7 +70,7 @@ const store = {
   ] as AgentInfo[]
 }
 
-const calls = { list: 0, get: 0 }
+const calls = { list: 0, get: 0, start: 0 }
 let listDelayMs = 0
 const listScript: Array<{ snapshot?: Task[]; delayMs?: number; error?: string }> = []
 
@@ -159,6 +159,7 @@ const bridgeMock: DraftBridge = {
     seq = 0
     calls.list = 0
     calls.get = 0
+    calls.start = 0
     listDelayMs = 0
     listScript.length = 0
     listeners.taskUpdated.clear()
@@ -198,7 +199,7 @@ const api = {
     delete: () => settle({ ok: true }),
     retry: () => settle({ ok: true }),
     move: () => settle({ ok: true }),
-    start: () => settle({ ok: true }),
+    start: () => { calls.start++; return settle({ ok: true }) },
     rewind: () => settle({ ok: true }),
     rename: (id: string, title: string) => {
       const task = store.tasks.find((candidate) => candidate.id === id)

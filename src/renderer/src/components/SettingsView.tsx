@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import type { AppSettings } from '../../../shared/types'
 import { bridge, usePetState, useSettings } from '../api'
 import { LoaderCircle, RefreshCw, Settings } from 'lucide-react'
@@ -8,6 +8,8 @@ import { EmptyState } from '../ui/EmptyState'
 import { RuntimeView } from './RuntimeView'
 import { UpdatePanel } from './UpdatePanel'
 import { ui, isComposingKey } from '../ui/interaction-center'
+
+const describe = (cause: unknown): string => (cause instanceof Error ? cause.message : String(cause))
 
 /** 设置分区（侧栏导航用）；队伍已提级为顶级 Agent tab，运行时页并入设置 */
 type Section = 'general' | 'runtime' | 'advanced' | 'storage' | 'updates'
@@ -66,6 +68,13 @@ function SettingsState({ loading, error, onRetry }: { loading: boolean; error: s
 
 function GeneralSection() {
   const { settings, update, refresh, error } = useSettings()
+  /**
+   * 设置写盘统一兜错：失败必须看得见（toast + 调优项的 aria 反馈），
+   * 绝不静默吞掉 rejection。各控件仍保持「本地草稿 + 即时提交」的既有模式。
+   */
+  const save = (patch: Partial<AppSettings>) => {
+    update(patch).catch((cause) => ui.toast.error(`设置保存失败：${describe(cause)}`))
+  }
   if (!settings && error) return <SettingsState loading={false} error={error} onRetry={() => { void refresh() }} />
   if (!settings) return <EmptyState title="设置加载中" />
   return (
@@ -81,7 +90,7 @@ function GeneralSection() {
               { value: 'system', label: '跟随系统' }
             ]}
             value={settings.theme ?? 'light'}
-            onChange={(v) => update({ theme: v as any })}
+            onChange={(v) => save({ theme: v as AppSettings['theme'] })}
             trigger={(cur, open) => (
               <button className="btn menu-trigger" type="button">
                 {cur?.label ?? '深色'} <span className="menu-caret">{open ? '▴' : '▾'}</span>
@@ -100,7 +109,7 @@ function GeneralSection() {
             min={1}
             max={4}
             value={settings.concurrency}
-            onChange={(e) => update({ concurrency: Number(e.target.value) })}
+            onChange={(e) => save({ concurrency: Number(e.target.value) })}
           />
         </label>
         <label className="field">
@@ -113,7 +122,7 @@ function GeneralSection() {
               { value: 'plan', label: 'plan', hint: '只读规划*' }
             ]}
             value={settings.mode}
-            onChange={(v) => update({ mode: v as any })}
+            onChange={(v) => save({ mode: v as AppSettings['mode'] })}
             trigger={(cur, open) => (
               <button className="btn menu-trigger" type="button">
                 {cur?.label ?? settings.mode} <span className="menu-caret">{open ? '▴' : '▾'}</span>
@@ -123,7 +132,7 @@ function GeneralSection() {
           <span className="hint">* 当前版本确认请求也会自动放行，交互式确认在路线图上</span>
         </label>
         <label className="field row-field">
-          <input type="checkbox" checked={settings.notifyOnDone} onChange={(e) => update({ notifyOnDone: e.target.checked })} />
+          <input type="checkbox" checked={settings.notifyOnDone} onChange={(e) => save({ notifyOnDone: e.target.checked })} />
           <span>任务完成/失败时弹系统通知</span>
         </label>
       </section>
@@ -275,14 +284,24 @@ function AdvancedSection() {
   )
 }
 
-/** 运行时：后端路径配置 + provider 健康（原独立 Runtimes 页并入） */
+/**
+ * 运行时：后端路径配置 + provider 健康（原独立 Runtimes 页并入）。
+ *
+ * 路径编辑契约（Batch B）：输入框是本地草稿，显式「保存路径」才写盘；
+ * 脏值 / 保存中 / 保存失败三态都要看得见，失败时草稿原样保留；
+ * 「检测路径可用性」先等这次保存落盘再探测——否则探测的是旧路径，反馈会骗人。
+ */
 function RuntimeSection() {
   const { settings, update, refresh, error } = useSettings()
   const [probe, setProbe] = useState<{ ok: boolean; detail: string } | null>(null)
   const [probing, setProbing] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const [savedAt, setSavedAt] = useState<number | null>(null)
   const [zcodePath, setZcodePath] = useState('')
   const [nodePath, setNodePath] = useState('')
   const [dshPath, setDshPath] = useState('')
+  const saveRef = useRef(false)
 
   useEffect(() => {
     if (settings) {
@@ -291,19 +310,49 @@ function RuntimeSection() {
       setDshPath(settings.dshPath ?? '')
     }
   }, [settings?.zcodePath, settings?.nodePath, settings?.dshPath])
+
+  // 生效值（已落盘）与草稿比对；settings 还没到时不算脏，避免刚挂载就报未保存
+  const dirty = !!settings && (
+    zcodePath.trim() !== settings.zcodePath ||
+    nodePath.trim() !== settings.nodePath ||
+    dshPath.trim() !== (settings.dshPath ?? '')
+  )
+
+  const save = async (): Promise<boolean> => {
+    if (saveRef.current) return false
+    saveRef.current = true
+    setSaving(true)
+    setSaveError(null)
+    try {
+      await update({ zcodePath: zcodePath.trim(), nodePath: nodePath.trim(), dshPath: dshPath.trim() })
+      setSavedAt(Date.now())
+      return true
+    } catch (cause) {
+      const detail = describe(cause)
+      setSaveError(detail)
+      ui.toast.error(`运行时路径保存失败：${detail}`)
+      return false
+    } finally {
+      saveRef.current = false
+      setSaving(false)
+    }
+  }
+
   if (!settings && error) return <SettingsState loading={false} error={error} onRetry={() => { void refresh() }} />
 
   if (!settings) return <EmptyState title="设置加载中" />
 
   const doProbe = async () => {
-    if (probing) return
+    if (probing || saving) return
+    // 检测必须基于已保存的路径：脏值先落盘，保存失败就不检测（错误已就地展示）
+    if (dirty && !(await save())) return
     setProbing(true)
+    setProbe(null)
     try {
-      await update({ zcodePath: zcodePath.trim(), nodePath: nodePath.trim(), dshPath: dshPath.trim() })
       const r = await bridge.settings.probe()
       setProbe({ ok: r.ok, detail: r.detail })
-    } catch (e) {
-      setProbe({ ok: false, detail: '检测失败: ' + (e instanceof Error ? e.message : String(e)) })
+    } catch (cause) {
+      setProbe({ ok: false, detail: '检测失败: ' + describe(cause) })
     } finally {
       setProbing(false)
     }
@@ -334,16 +383,27 @@ function RuntimeSection() {
           />
         </label>
         <div className="row">
-          <button className="btn" onClick={doProbe} disabled={probing}>
+          <button className="btn primary" type="button" onClick={() => void save()} disabled={!dirty || saving}>
+            {saving ? '保存中…' : '保存路径'}
+          </button>
+          <button className="btn" type="button" onClick={() => void doProbe()} disabled={probing || saving}>
             {probing ? '检测中…' : '检测路径可用性'}
           </button>
+          {saving && <span className="hint">正在保存路径…</span>}
+          {!saving && dirty && <span className="hint" data-paths-dirty>有未保存的修改；点「检测路径可用性」会先保存再探测。</span>}
+          {!saving && !dirty && savedAt !== null && <span className="probe-ok" data-paths-saved>路径已保存，可检测。</span>}
           {probe && (
-            <span className={probe.ok ? 'probe-ok' : 'probe-fail'}>
+            <span className={probe.ok ? 'probe-ok' : 'probe-fail'} data-paths-probe>
               {probe.ok ? '✓ ' : '✗ '}
               {probe.detail}
             </span>
           )}
         </div>
+        {saveError && (
+          <p className="probe-fail" role="alert" data-paths-error>
+            保存失败：{saveError}。改动仍保留在输入框，修正后可再次保存。
+          </p>
+        )}
       </section>
       <RuntimeView embedded />
     </div>
@@ -352,13 +412,16 @@ function RuntimeSection() {
 
 /** 存储说明 */
 function StorageSection() {
-  const { settings, refresh, error } = useSettings()
+  const { settings, update, refresh, error } = useSettings()
   const [sharedRoot, setSharedRoot] = useState('')
+  const [sharedError, setSharedError] = useState<string | null>(null)
 
   // 渲染层只读展示解析后的实际路径（settings.sharedDir 为空 = 主进程默认 ~/.agentdeck）
   useEffect(() => {
     let alive = true
-    bridge.skills.list().then((r) => { if (alive) setSharedRoot(r.root) }).catch(() => {})
+    bridge.skills.list()
+      .then((r) => { if (alive) { setSharedRoot(r.root); setSharedError(null) } })
+      .catch((cause) => { if (alive) setSharedError(describe(cause)) })
     return () => { alive = false }
   }, [settings?.sharedDir])
 
@@ -366,10 +429,18 @@ function StorageSection() {
   if (!settings) return <EmptyState title="设置加载中" icon={LoaderCircle} />
 
   const changeSharedDir = async () => {
-    const dir = await bridge.pickDir()
-    if (!dir) return
-    await bridge.settings.set({ sharedDir: dir })
-    ui.toast.success('共享目录已更新')
+    try {
+      const dir = await bridge.pickDir()
+      if (!dir) return
+      await update({ sharedDir: dir })
+      ui.toast.success('共享目录已更新')
+    } catch (cause) {
+      ui.toast.error(`共享目录更新失败：${describe(cause)}`)
+    }
+  }
+
+  const openSharedDir = () => {
+    bridge.skills.openDir().catch((cause) => ui.toast.error(`打开共享目录失败：${describe(cause)}`))
   }
 
   return (
@@ -381,9 +452,10 @@ function StorageSection() {
           应用状态（任务、设置、队伍）仍保存在 userData，两者互不混写。
         </p>
         <div className="mono storage-path">{sharedRoot || '…'}</div>
+        {sharedError && <p className="probe-fail" role="alert">读取共享目录失败：{sharedError}</p>}
         <div className="row">
-          <button className="btn" onClick={changeSharedDir}>更改…</button>
-          <button className="btn" onClick={() => void bridge.skills.openDir()}>打开目录</button>
+          <button className="btn" onClick={() => void changeSharedDir()}>更改…</button>
+          <button className="btn" onClick={openSharedDir}>打开目录</button>
         </div>
       </section>
       <section className="settings-card">
@@ -402,15 +474,18 @@ function StorageSection() {
 function PetCard() {
   const { state } = usePetState()
   if (!state) return null
+  const setEnabled = (on: boolean) => {
+    bridge.pet.setEnabled(on).catch((cause) => ui.toast.error(`小助理开关保存失败：${describe(cause)}`))
+  }
   return (
     <section className="settings-card">
       <h3>小助理</h3>
       <label className="field row-field">
-        <input type="checkbox" checked={state.enabled} onChange={(e) => void bridge.pet.setEnabled(e.target.checked)} />
+        <input type="checkbox" checked={state.enabled} onChange={(e) => setEnabled(e.target.checked)} />
         <span>启用小助理（透明置顶小窗，可拖拽、可聊天）</span>
       </label>
       <div className="row" style={{ gap: 6 }}>
-        <button className="btn" type="button" onClick={() => void bridge.pet.openSettingsWindow()}>打开小助理设置…</button>
+        <button className="btn" type="button" onClick={() => { bridge.pet.openSettingsWindow().catch((cause) => ui.toast.error(`打开小助理设置失败：${describe(cause)}`)) }}>打开小助理设置…</button>
         <span className="hint">素材包、人设、模型与生成素材包都在小助理设置窗里</span>
       </div>
     </section>

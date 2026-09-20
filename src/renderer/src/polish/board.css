@@ -155,6 +155,7 @@
 
 /* ---------- 单日视图：顶栏日期导航（‹ / 日期 / › / 今天 / 日期下拉） ---------- */
 .board-day-nav { display: inline-flex; align-items: center; gap: 2px; margin-left: auto; height: 30px; padding: 0 3px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-inset); }
+.board-day-nav-caption { padding: 0 5px 0 7px; color: var(--text-faint); font-size: var(--text-micro); white-space: nowrap; }
 .board-day-nav-btn { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-dim); cursor: pointer; }
 .board-day-nav-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
 .board-day-nav-btn:disabled { opacity: 0.4; cursor: default; }
@@ -276,6 +277,7 @@
   .board-toolbar .issues-search { order: 3; flex-basis: 100%; max-width: none; }
   .board-day-nav { order: 4; width: 100%; margin-left: 0; justify-content: center; }
   .board-day-nav-label { flex: 1; }
+  .board-day-nav-caption { padding-left: 3px; }
   .board-day-nav-select { max-width: 116px; }
   .board-day-head { flex-wrap: wrap; padding-inline: 12px; }
   .issue-board { padding-inline: 12px; }

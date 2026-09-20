@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { bridge, useSettings, useTasks, waitForTaskListed } from './api'
+import { bridge, useIssues, useSettings, useTasks, waitForTaskListed } from './api'
 import { TASK_STATUS_LABELS, isParkedQueued, PARKED_QUEUED_LABEL } from './labels'
-import { taskService } from './task-service'
 import { TaskDetail } from './components/TaskDetail'
 import { SettingsView } from './components/SettingsView'
 import { UsageView } from './components/UsageView'
@@ -36,6 +35,7 @@ export function App() {
   if (/^#\/?pet-settings$/.test(window.location.hash)) return <PetSettingsPage />
   const { tasks, refresh, ready, error: tasksError } = useTasks()
   const { settings, update } = useSettings()
+  const { issues } = useIssues()
   // 界面交互状态（视图/页签/面板/设置分区）全部来自交互中心：宿主只订阅，不再各持一份
   const view = useInteractionSelector((state) => state.view)
   const activeId = useInteractionSelector((state) => state.activeId)
@@ -137,24 +137,31 @@ export function App() {
     ...[['Issue', navIssues], ['看板', () => nav('board')], ['Agent 管理', () => nav('agents')], ['自动化', () => nav('automation')], ['扩展', () => nav('skills')], ['用量', () => nav('usage')], ['设置', () => openSettings('general')], ['设置 · 运行时', () => openSettings('runtime')]].map(([label, run]) => ({ id: String(label), group: '跳转', label: String(label), run: run as () => void })),
     { id: 'new', group: '操作', label: '新建任务', hint: 'Ctrl+N', run: goWorkspace },
     { id: 'theme', group: '操作', label: '切换深浅主题', run: () => void update({ theme: (settings?.theme ?? 'light') === 'dark' ? 'light' : 'dark' }) },
-    ...tasks.slice(0, 20).map((task) => {
+    ...tasks.map((task) => {
       const parked = isParkedQueued(task)
+      const issue = issues.find((item) => item.taskId === task.id || item.id === task.issueId)
       return {
         id: task.id,
         group: '任务',
         label: task.title,
-        hint: parked ? PARKED_QUEUED_LABEL : TASK_STATUS_LABELS[task.status],
-        keywords: parked ? '启动' : undefined,
-        run: () => {
-          // parked 任务 Enter/点击 = 一键启动（tasks:start 清停放并入队），并打开详情跟进。
-          // 任务执行仍走 task-service，交互中心只管导航/反馈。
-          openTask(task.id)
-          if (!parked) return
-          void taskService.start(task.id).then((result) => { if (!result.ok) ui.toast.error(result.error ?? '启动失败') })
-        }
+        hint: parked ? `${PARKED_QUEUED_LABEL} · 打开详情` : TASK_STATUS_LABELS[task.status],
+        keywords: [
+          task.id,
+          task.issueId,
+          issue?.id,
+          issue?.identifier,
+          task.prompt,
+          task.backend,
+          task.workdir,
+          task.status,
+          TASK_STATUS_LABELS[task.status],
+          issue?.status,
+          ...(issue?.labels ?? [])
+        ].filter(Boolean).join(' '),
+        run: () => openTask(task.id)
       }
     })
-  ], [tasks, settings?.theme])
+  ], [issues, tasks, settings?.theme])
 
   return <div className="app" data-view={view}>
     <ToastHost /><ConfirmHost /><Palette open={paletteOpen} onClose={() => ui.palette.close()} commands={commands} />
@@ -175,7 +182,7 @@ export function App() {
       <div className="sidebar-footer"><span className="connection-dot" aria-hidden="true" /> 本地引擎就绪</div>
     </aside>
     <main className="main">
-      {view === 'agents' ? <AgentsView /> : view === 'automation' ? <AutomationView /> : view === 'skills' ? <ExtensionsView /> : view === 'settings' ? <SettingsView section={settingsSection} onSection={(section) => ui.openSettings(section)} /> : view === 'usage' ? <UsageView /> : view === 'board' ? <div className="tasks-column"><PageHeader title="看板" icon={<Kanban size={16} />} count={tasks.length} actions={<button className="command-trigger" type="button" onClick={() => ui.palette.open()} title="搜索任务（Ctrl+K）" aria-label="搜索任务" aria-keyshortcuts="Control+K Meta+K"><Search size={14} /> 搜索任务 <kbd><Command size={10} /> K</kbd></button>} /><BoardView tasks={tasks} onOpen={openTask} /></div> : view === 'detail' && selected ? <div className="tasks-column detail-page"><Chrome title={selected.title} onBack={() => ui.navigate('issues')} />{rootTabs.length > 0 && <TabBar tabs={rootTabs} tasks={tasks} activeId={activeId} onSelect={openTask} onClose={(id) => ui.closeTab(id)} />}<TaskDetail task={selected} tasks={tasks} onSelect={openTask} /></div> : <IssuesView tasks={tasks} tabs={tabs} onOpen={openTask} onClose={(id) => ui.closeTab(id)}><WorkspaceView onCreated={(task) => openCreatedTask(task.id)} workspaceDir={workspaceDir} onPickWorkspace={pickWorkspace} /></IssuesView>}
+      {view === 'agents' ? <AgentsView /> : view === 'automation' ? <AutomationView /> : view === 'skills' ? <ExtensionsView /> : view === 'settings' ? <SettingsView section={settingsSection} onSection={(section) => ui.openSettings(section)} /> : view === 'usage' ? <UsageView /> : view === 'board' ? <div className="tasks-column"><PageHeader title="看板" icon={<Kanban size={16} />} actions={<button className="command-trigger" type="button" onClick={() => ui.palette.open()} title="搜索任务（Ctrl+K）" aria-label="搜索任务" aria-keyshortcuts="Control+K Meta+K"><Search size={14} /> 搜索任务 <kbd><Command size={10} /> K</kbd></button>} /><BoardView tasks={tasks} onOpen={openTask} /></div> : view === 'detail' && selected ? <div className="tasks-column detail-page"><Chrome title={selected.title} onBack={() => ui.navigate('issues')} />{rootTabs.length > 0 && <TabBar tabs={rootTabs} tasks={tasks} activeId={activeId} onSelect={openTask} onClose={(id) => ui.closeTab(id)} />}<TaskDetail task={selected} tasks={tasks} onSelect={openTask} /></div> : <IssuesView tasks={tasks} tabs={tabs} onOpen={openTask} onClose={(id) => ui.closeTab(id)} onBrowseAll={() => ui.navigate('board')}><WorkspaceView onCreated={(task) => openCreatedTask(task.id)} workspaceDir={workspaceDir} onPickWorkspace={pickWorkspace} /></IssuesView>}
     </main>
   </div>
 }

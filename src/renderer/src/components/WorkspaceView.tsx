@@ -4,6 +4,7 @@ import { bridge, getTaskWhenReady, type AgentInfo } from '../api'
 import { isComposingKey, ui } from '../ui/interaction-center'
 import { useInteractionSelector } from '../hooks/useInteraction'
 import { captains } from './meeting/captains'
+import { AgentPicker } from './AgentPicker'
 import type { Task } from '../../../shared/types'
 import { isForgeAgent } from '../../../shared/forge'
 
@@ -95,12 +96,11 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
       const list = await bridge.agents.list()
       if (request !== agentRequestRef.current) return
       setAgents(list)
-      if (list.length && !draft.agentId) {
-        // 默认执行者跳过锻造师（专职生成 Agent，不接任务）
-        const first = list.find((a) => !isForgeAgent(a)) ?? list[0]
-        draft.agentId = first.id
-        setAgentId(first.id)
-      }
+      // 锻造师只负责生成 Agent，不进入任务执行者或会议队长选择。
+      const available = list.filter((agent) => !isForgeAgent(agent))
+      const first = available.find((agent) => agent.id === draft.agentId) ?? available[0]
+      draft.agentId = first?.id ?? ''
+      setAgentId(first?.id ?? '')
     } catch (cause) {
       if (request === agentRequestRef.current) setAgentsError(cause instanceof Error ? cause.message : String(cause))
     } finally {
@@ -114,7 +114,8 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
   }, [loadAgents])
 
   // 会议型三队长预填：取前三位合格队长（不足三位留空，由校验提示兜底）
-  const eligibleCaptains = useMemo(() => captains(agents), [agents])
+  const availableAgents = useMemo(() => agents.filter((agent) => !isForgeAgent(agent)), [agents])
+  const eligibleCaptains = useMemo(() => captains(availableAgents), [availableAgents])
   useEffect(() => {
     if (eligibleCaptains.length < 3) return
     setReporter((current) => { const next = current && eligibleCaptains.some((a) => a.id === current) ? current : eligibleCaptains[0].id; draft.reporter = next; return next })
@@ -193,7 +194,7 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
         startNow: kind === 'task' ? startNow : false,
         trigger: 'assignment'
       })
-      const selectedAgent = agents.find((a) => a.id === agentId)
+      const selectedAgent = availableAgents.find((a) => a.id === agentId)
       if (kind === 'goal') {
         await bridge.goals.create({
           text: prompt.trim(),
@@ -256,7 +257,7 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
   }
 
   const canSubmit = !!prompt.trim() && kindValid && !busy
-  const selectedAgent = agents.find((a) => a.id === agentId)
+  const selectedAgent = availableAgents.find((a) => a.id === agentId)
   const isLeader = !!selectedAgent?.subordinates?.length && selectedAgent.backend !== 'dsh'
   /** 队长下拉排除另外两个角色已选的人，从源头杜绝重复 */
   const captainOptions = (self: string) => eligibleCaptains.filter((a) => a.id !== reporter && a.id !== critic && a.id !== designer || a.id === self)
@@ -287,30 +288,13 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
             <span>Agent 加载失败：{agentsError}</span>
             <button className="btn" type="button" onClick={() => void loadAgents()}><RefreshCw size={13} /> 重试</button>
           </div>
-        ) : agents.length > 0 ? (
+        ) : availableAgents.length > 0 ? (
           <div className="field">
             <span>执行 Agent{isLeader ? '（领队可按需拆分任务）' : ''}</span>
-            <div className="agent-picker">
-              {agents.filter((a) => !isForgeAgent(a)).map((a) => (
-                <button
-                  key={a.id}
-                  className={`agent-pick ${a.id === agentId ? 'active' : ''}`}
-                  aria-pressed={a.id === agentId}
-                  onClick={() => setAgentId(a.id)}
-                  title={`${a.role ? a.role + ' · ' : ''}${a.model ? a.model + ' · ' : ''}${a.note || a.backend}`}
-                >
-                  <span className="agent-avatar sm" style={{ background: a.color }}>
-                    {a.name.slice(0, 1)}
-                  </span>
-                  {a.name}
-                  <span className="badge">{a.backend}</span>
-                  {a.model ? <span className="badge">{a.model}</span> : null}
-                </button>
-              ))}
-            </div>
+            <AgentPicker agents={availableAgents} value={agentId} onChange={setAgentId} />
           </div>
         ) : (
-          <p className="hint hint">未配置 Agent，默认用 zcode 执行；可在左侧「Agent」页添加。</p>
+          <p className="hint hint">未配置可执行 Agent，默认用 zcode 执行；可在左侧「Agent」页添加。</p>
         ))}
         {kind === 'goal' && (
           <div className="workspace-mode-fields">

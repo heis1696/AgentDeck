@@ -100,6 +100,55 @@
   display: flex;
   flex-direction: column;
 }
+
+/* ---------- 最近任务：有限行式入口，不与新建表单争夺主视觉 ---------- */
+.issue-recent {
+  flex: 0 0 auto;
+  width: min(920px, calc(100% - 48px));
+  margin: 12px 24px 0;
+  padding: 10px 0 0;
+  border-top: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+}
+.issue-recent-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
+.issue-recent-heading > div { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.issue-recent-heading strong { color: var(--text); font-size: var(--text-caption); }
+.issue-recent-heading span { color: var(--text-faint); font-size: var(--text-micro); }
+.issue-recent-all { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; padding: 2px 0; border: 0; background: transparent; color: var(--accent); font-size: var(--text-micro); cursor: pointer; }
+.issue-recent-all:hover { color: var(--text); }
+.issue-recent-list { display: flex; flex-direction: column; gap: 2px; }
+.issue-recent-task { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 30px; padding: 3px 7px; border-radius: var(--radius-sm); color: var(--text-dim); }
+.issue-recent-task:hover { background: var(--bg-hover); }
+.issue-recent-task > .dot { flex: 0 0 auto; }
+.issue-recent-title { min-width: 0; overflow: hidden; color: var(--text); font-size: var(--text-caption); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.issue-recent-status { flex: 0 0 auto; max-width: 150px; overflow: hidden; padding: 2px 6px; border-radius: var(--radius-pill); font-size: var(--text-micro); text-overflow: ellipsis; white-space: nowrap; }
+.issue-recent-status-queued { background: var(--status-queued-bg); color: var(--status-queued); }
+.issue-recent-status-running { background: var(--status-running-bg); color: var(--status-running); }
+.issue-recent-status-done { background: var(--status-done-bg); color: var(--status-done); }
+.issue-recent-status-failed { background: var(--status-failed-bg); color: var(--status-failed); }
+.issue-recent-status-cancelled { background: var(--bg-inset); color: var(--text-faint); }
+.issue-recent-open { flex: 0 0 auto; margin-left: auto; padding: 2px 5px; border: 0; background: transparent; color: var(--accent); font-size: var(--text-micro); cursor: pointer; }
+.issue-recent-open:hover { text-decoration: underline; }
+
+/* ---------- 执行 Agent：紧凑选中值 + 有界搜索菜单 ---------- */
+.agent-picker-root { position: relative; min-width: 0; }
+.agent-picker-trigger { display: flex; align-items: center; width: min(100%, 620px); min-height: 40px; gap: 8px; padding: 5px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-raised); color: var(--text); text-align: left; cursor: pointer; }
+.agent-picker-trigger:hover, .agent-picker-trigger[aria-expanded='true'] { border-color: var(--accent); background: var(--bg-hover); }
+.agent-picker-trigger > svg { flex: 0 0 auto; margin-left: auto; color: var(--text-faint); }
+.agent-picker-selected { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+.agent-picker-selected strong { overflow: hidden; color: var(--text); font-size: var(--text-caption); text-overflow: ellipsis; white-space: nowrap; }
+.agent-picker-selected small, .agent-picker-option-text small { overflow: hidden; color: var(--text-faint); font-size: var(--text-micro); text-overflow: ellipsis; white-space: nowrap; }
+.agent-picker-empty { color: var(--text-faint); font-size: var(--text-caption); }
+.agent-picker-menu { position: absolute; z-index: 20; top: calc(100% + 5px); left: 0; width: min(100%, 620px); padding: 7px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--bg-raised); box-shadow: var(--shadow-panel); }
+.agent-picker-search { display: flex; align-items: center; gap: 7px; min-height: 32px; padding: 0 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-inset); color: var(--text-faint); }
+.agent-picker-search input { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; color: var(--text); font-size: var(--text-caption); }
+.agent-picker-options { max-height: 240px; margin-top: 6px; overflow-y: auto; }
+.agent-picker-option { display: flex; align-items: center; width: 100%; min-height: 42px; gap: 8px; padding: 5px 7px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.agent-picker-option:hover, .agent-picker-option.active { background: var(--bg-hover); }
+.agent-picker-option[aria-selected='true'] { color: var(--accent); }
+.agent-picker-option > svg { flex: 0 0 auto; margin-left: auto; color: var(--accent); }
+.agent-picker-option-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+.agent-picker-option-text strong { overflow: hidden; font-size: var(--text-caption); text-overflow: ellipsis; white-space: nowrap; }
+.agent-picker-empty-state { margin: 12px 6px; color: var(--text-faint); font-size: var(--text-micro); text-align: center; }
 .issue-home .workspace {
   flex: 1;
   min-height: 0;
@@ -146,6 +195,7 @@
 
 @media (max-width: 680px) {
   .issue-open-strip { padding-inline: 14px; }
+  .issue-recent { width: calc(100% - 28px); margin-inline: 14px; }
   .issue-home .workspace { padding: 20px 14px 32px; }
   .issue-home .workspace-types { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); width: 100%; }
   .issue-home .workspace-types button { justify-content: center; min-width: 0; padding-inline: 6px; }

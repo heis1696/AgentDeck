@@ -147,7 +147,8 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
   const [meetings, setMeetings] = useState<Meeting[]>([])
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [now, setNow] = useState(Date.now)
-  const [selectedDay, setSelectedDay] = useState<number | null>(() => boardDayFloor(Date.now()))
+  // 默认展示所有保留日期，避免用户首次打开看板只能看到今天。
+  const [selectedDay, setSelectedDay] = useState<number | null>(null)
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null)
   const [dropTarget, setDropTarget] = useState<IssueStatus | null>(null)
   const [draggingTask, setDraggingTask] = useState<string | null>(null)
@@ -204,6 +205,7 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
   const overAgeDay = selectedDay != null && isOverAgeDay(selectedDay, todayFloor) && dayHasCards
   const dayOptions = useMemo(() => boardDayOptions([...tree.roots, ...tree.orphans].map((node) => updatedAt(node))), [tree])
   const filtering = !!query.trim() || scope !== 'all' || status !== 'all'
+  const dateFiltered = selectedDay != null
   const matches = (node: BoardNode): boolean => {
     const { task, issue } = node
     const agent = issue?.createdBy === 'agent' || !!task.parentTaskId
@@ -276,31 +278,32 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
     </article>
   }
   const menuIssue = menu ? byTask.get(menu.id) : undefined
-  const clearFilters = () => { setQuery(''); setScope('all'); setStatus('all') }
+  const clearFilters = () => { setQuery(''); setScope('all'); setStatus('all'); setSelectedDay(null) }
   return <div className="board-page">
     <div className="issues-toolbar board-toolbar">
       <div className="board-toolbar-heading"><strong>工作流</strong><span>{loading ? '正在同步…' : `${visibleCount} / ${dayTotal} 个 Issue`}</span></div>
       <div className="issues-scopes" role="tablist" aria-label="看板范围">{([['all', '全部'], ['mine', '我的'], ['agents', '智能体']] as const).map(([key, label]) => <button key={key} className={scope === key ? 'active' : ''} role="tab" aria-selected={scope === key} onClick={() => setScope(key)}>{label}</button>)}</div>
       <label className="issues-search"><Search size={14} /><input aria-label="搜索 Issue" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索 Issue…" /></label>
       <select className="issues-status-select" value={status} onChange={(event) => setStatus(event.target.value as IssueStatus | 'all')} aria-label="按状态筛选"><option value="all">所有状态</option>{COLUMNS.map((column) => <option value={column.key} key={column.key}>{column.label}</option>)}</select>
-      {filtering && <button type="button" className="board-filter-reset" aria-label="清除筛选" title="清除筛选" onClick={clearFilters}><X size={13} /> 清除</button>}
-      <div className="board-day-nav" role="group" aria-label="看板日期导航">
-        <button type="button" className={`board-day-nav-all${selectedDay == null ? ' is-active' : ''}`} aria-pressed={selectedDay == null} title="显示保留窗内全部日期的 Issue" onClick={() => setSelectedDay(null)}>全部</button>
+      {(filtering || dateFiltered) && <button type="button" className="board-filter-reset" aria-label="重置看板筛选" title="重置看板筛选（包含日期）" onClick={clearFilters}><X size={13} /> 重置筛选</button>}
+      <div className="board-day-nav" role="group" aria-label="按最后更新时间筛选日期">
+        <span className="board-day-nav-caption">最后更新</span>
+        <button type="button" className={`board-day-nav-all${selectedDay == null ? ' is-active' : ''}`} aria-pressed={selectedDay == null} title="显示保留窗内全部日期的 Issue" onClick={() => setSelectedDay(null)}>全部日期</button>
         <button type="button" className="board-day-nav-btn" aria-label="前一天" title="前一天" disabled={selectedDay == null} onClick={() => setSelectedDay((day) => day == null ? day : shiftBoardDay(day, -1, todayFloor))}><ChevronLeft size={14} /></button>
         <span className="board-day-nav-label" aria-live="polite">{selectedDay == null ? '全部日期' : formatBoardDay(selectedDay, todayFloor)}</span>
         <button type="button" className="board-day-nav-btn" aria-label="后一天" title="后一天" disabled={selectedDay == null || selectedDay >= todayFloor} onClick={() => setSelectedDay((day) => day == null ? day : shiftBoardDay(day, 1, todayFloor))}><ChevronRight size={14} /></button>
         <button type="button" className="board-day-nav-today" disabled={selectedDay === todayFloor} onClick={() => setSelectedDay(todayFloor)}>今天</button>
-        <select className="board-day-nav-select" aria-label="跳转到有 Issue 的日期" value={selectedDay == null ? 'all' : String(selectedDay)} onChange={(event) => setSelectedDay(event.target.value === 'all' ? null : Number(event.target.value))}>
+        <select className="board-day-nav-select" aria-label="按最后更新时间跳转日期" value={selectedDay == null ? 'all' : String(selectedDay)} onChange={(event) => setSelectedDay(event.target.value === 'all' ? null : Number(event.target.value))}>
           <option value="all">全部日期</option>
           {selectedDay != null && !dayOptions.includes(selectedDay) && <option value={String(selectedDay)}>{formatBoardDay(selectedDay, todayFloor)}</option>}
           {dayOptions.map((floor) => <option key={floor} value={String(floor)}>{formatBoardDay(floor, todayFloor)}</option>)}
         </select>
       </div>
-      <span className="board-retention-note" title="仅清理超过30天、全部执行终结且无活跃目标/会议绑定的 Issue；未完成工作始终保留">终态保留 30 天</span>
+      <span className="board-retention-note" title="日期按 Issue 最后更新时间归类；仅清理超过30天、全部执行终结且无活跃目标/会议绑定的 Issue">按最后更新时间 · 终态保留 30 天</span>
     </div>
     {issuesError && <div className="data-state-banner data-state-stale" role="status"><CircleAlert size={14} /><span>{issuesLoaded ? '显示上次成功的 Issue 快照：' : '看板加载失败：'}{issuesError}</span><button className="btn" type="button" onClick={() => void refreshIssues()} disabled={loading}><RefreshCw size={13} className={loading ? 'spin' : ''} /> 重试</button></div>}
     <div className="board-day-head" data-day-key={selectedDay == null ? 'all' : boardDayKey(selectedDay)}>
-      <span className="board-day-head-date">{selectedDay == null ? '全部日期（30 天保留窗）' : formatBoardDay(selectedDay, todayFloor)}</span>
+      <span className="board-day-head-date">{selectedDay == null ? '最后更新：全部日期（30 天保留窗）' : `最后更新：${formatBoardDay(selectedDay, todayFloor)}`}</span>
       <span className="board-day-head-count">{loading ? '正在读取最新状态…' : dayTotal > 0 ? `共 ${dayTotal} 个 Issue` : selectedDay == null ? '还没有 Issue' : BOARD_EMPTY_DAY_HINT}</span>
       {overAgeDay && <span className="board-expiring-badge" title={EXPIRING_TITLE}>将自动清理</span>}
     </div>
