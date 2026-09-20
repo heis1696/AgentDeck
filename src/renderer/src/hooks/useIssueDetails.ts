@@ -18,6 +18,11 @@ export function useIssueDetails(issueId: string, refreshKey: string) {
   }
   const mountedRef = useRef(false)
   const requestRef = useRef(0)
+  const issueIdRef = useRef(issueId)
+  if (issueIdRef.current !== issueId) {
+    issueIdRef.current = issueId
+    ++requestRef.current
+  }
 
   const refresh = useCallback(async () => {
     const request = ++requestRef.current
@@ -41,10 +46,13 @@ export function useIssueDetails(issueId: string, refreshKey: string) {
     }
   }, [issueId, refresh, refreshKey])
 
-  const updateWorkflow = useCallback((status: IssueStatus) => bridge.issues.update(issueId, { status }).then((next) => {
-    if (next) setIssue(next)
-    return next
-  }), [issueId])
+  const updateWorkflow = useCallback((status: IssueStatus) => {
+    const request = ++requestRef.current
+    return bridge.issues.update(issueId, { status }).then((next) => {
+      if (next && mountedRef.current && request === requestRef.current && issueIdRef.current === issueId) setIssue(next)
+      return next
+    })
+  }, [issueId])
 
   return { issue, comments, runs, refreshIssue: refresh, updateWorkflow }
 }

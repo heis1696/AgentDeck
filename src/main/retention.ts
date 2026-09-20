@@ -28,6 +28,14 @@ export async function sweepExpiredIssues(deps: RetentionDeps, maxAgeDays = 30): 
   const protectedIds = () => new Set([...deps.activeGoalIssueIds(), ...deps.activeMeetingIssueIds()])
   const runTasks = new Map(issueStore.list().map((issue) => [issue.id, new Set(issueStore.runs(issue.id).map((run) => run.taskId))]))
   const belongs = (task: Task, issue: Issue) => task.issueId === issue.id || task.id === issue.taskId || (!task.issueId && issue.id === `iss_${task.id}`) || !!runTasks.get(issue.id)?.has(task.id)
+  // A run-only task owns no Issue, so the projection clock (issue.updatedAt,
+  // seeded from endedAt ?? createdAt) has no counterpart to reuse: compare the
+  // same two task stamps directly, and treat an unknown clock as "not expired"
+  // so a malformed record can never be swept by accident.
+  const taskExpired = (task: Task) => {
+    const clock = task.endedAt ?? task.createdAt
+    return Number.isFinite(clock) && clock < cutoff
+  }
 
   // Expand both ownership and descendants: a child's fresh sibling run must
   // protect the whole deletion cascade, not just its latest visible card.
@@ -51,12 +59,27 @@ export async function sweepExpiredIssues(deps: RetentionDeps, maxAgeDays = 30): 
     const group = issues.filter((issue) => selectedIssues.has(issue.id))
     const selected = tasks.filter((task) => selectedTasks.has(task.id))
     const protectedIssues = protectedIds()
+    // Run-only descendants (automation output, investigation workers) are the
+    // only tasks the sweep can reach without an Issue of their own: ownership
+    // plus the parentTaskId cascade is their whole paper trail. They may ride
+    // along with the ancestor that owns them once they are terminal *and*
+    // themselves expired; leaving one behind would strand a reachable task as a
+    // clockless orphan, so a fresh or still-running one keeps protecting the
+    // whole cascade exactly like a fresh sibling run of an Issue-bearing card.
+    // An unrelated orphan is never linked at all and stays untouched.
+    const ownedIds = new Set(tasks.filter((task) => group.some((issue) => belongs(task, issue))).map((task) => task.id))
+    const linkedIds = new Set(taskService.taskCascade([...ownedIds]).map((task) => task.id))
     const safe = group.length > 0
       && group.every((issue) => Number.isFinite(issue.updatedAt) && issue.updatedAt < cutoff && !protectedIssues.has(issue.id))
       && selected.every((task) => TERMINAL.has(task.status))
-      // An unrelated run-only/orphan task is not disposable just because its
-      // parent happens to be old; without an Issue it has no retention clock.
-      && selected.every((task) => group.some((issue) => belongs(task, issue)))
+      // Explicitly linked: the group owns it, or it descends from an owned task
+      // by parentTaskId. Also pins the plan to a cascade-closed set, so the
+      // re-expansion inside deleteTerminalCascade cannot delete anything the
+      // plan did not approve.
+      && selected.every((task) => linkedIds.has(task.id))
+      // Issue-less descendants carry no retention clock of their own, so they
+      // only count as expired once their own stamps fall outside the window.
+      && selected.every((task) => ownedIds.has(task.id) || taskExpired(task))
     return { issues: group, tasks: selected, safe }
   }
 

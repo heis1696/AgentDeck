@@ -4,6 +4,8 @@ import { pathToFileURL } from 'node:url'
 import path from 'node:path'
 import fs from 'node:fs'
 import os from 'node:os'
+import assert from 'node:assert/strict'
+import { spawn, spawnSync } from 'node:child_process'
 
 const root = path.resolve(import.meta.dirname, '..')
 const outfile = path.join(root, 'out', 'smoke-event-log-store.cjs')
@@ -174,7 +176,179 @@ if (noNewlineLog.read().length !== 1 || noNewlineLog.append({ ts: 2, kind: 'stat
   if (new EventLog(legFile).read().map((event) => event.seq).join(',') !== '1,2,3') throw new Error('replay diverged after valid no-newline tail append')
 }
 
+// Hold writer A between allocation and disk append. Writer B must either
+// report lock contention or (on the broken implementation) finish first.
+{
+  const file = path.join(tmp, 'concurrent-events.jsonl')
+  const release = path.join(tmp, 'release-writer')
+  const writerScript = String.raw`
+    const fs = require('node:fs')
+    const { EventLog } = require(process.argv[1])
+    const [file, role, release] = process.argv.slice(2)
+    const originalOpen = fs.openSync
+    const originalLink = fs.linkSync
+    const originalWrite = fs.writeSync
+    let eventFd
+    let paused = false
+    let reported = false
+    fs.openSync = function(target, flags, ...args) {
+      const fd = originalOpen.call(fs, target, flags, ...args)
+      if (target === file && flags === 'a') eventFd = fd
+      return fd
+    }
+    fs.writeSync = function(fd, buffer, offset, length, ...args) {
+      if (fd === eventFd && role === 'A' && !paused) {
+        paused = true
+        const written = originalWrite(fd, buffer, offset, Math.max(1, Math.floor(length / 2)), ...args)
+        process.send({ kind: 'paused' })
+        const until = Date.now() + 8000
+        while (!fs.existsSync(release)) {
+          if (Date.now() > until) throw new Error('writer release timed out')
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+        }
+        return written
+      }
+      return originalWrite(fd, buffer, offset, length, ...args)
+    }
+    fs.linkSync = function(source, target) {
+      try { return originalLink.call(fs, source, target) }
+      catch (error) {
+        if (target === file + '.lock' && error.code === 'EEXIST' && !reported) {
+          reported = true
+          process.send({ kind: 'contended' })
+        }
+        throw error
+      }
+    }
+    const log = new EventLog(file)
+    const event = { ts: 1, kind: 'status', text: role, eventId: role }
+    const result = role === 'T' ? log.truncate(1)?.at(-1) : role === 'B' ? log.appendBatch([event])[0] : log.append(event)
+    process.send({ kind: 'done', seq: result?.seq })
+    process.disconnect()
+  `
+  const launch = (role) => {
+    const child = spawn(process.execPath, ['-e', writerScript, logOutfile, file, role, release], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
+    const messages = []
+    let stderr = ''
+    child.stderr.on('data', (chunk) => { stderr += chunk })
+    child.on('message', (message) => messages.push(message))
+    const exited = new Promise((resolve) => child.once('exit', (code) => resolve(code)))
+    const waitMessage = async (kinds) => {
+      const deadline = Date.now() + 10_000
+      while (!messages.some((message) => kinds.includes(message.kind))) {
+        if (child.exitCode !== null || Date.now() > deadline) throw new Error(`writer ${role}: ${stderr || 'no expected message'}`)
+        await new Promise((resolve) => setTimeout(resolve, 5))
+      }
+    }
+    return { child, exited, waitMessage }
+  }
+  const a = launch('A')
+  let b
+  try {
+    await a.waitMessage(['paused'])
+    const inFlightBytes = fs.readFileSync(file)
+    assert.deepEqual(new EventLog(file).read(), [], 'concurrent readers ignore an incomplete append')
+    assert.deepEqual(fs.readFileSync(file), inFlightBytes, 'concurrent read does not truncate an active writer')
+    b = launch('B')
+    await b.waitMessage(['contended', 'done'])
+    fs.writeFileSync(release, '')
+    assert.deepEqual(await Promise.all([a.exited, b.exited]), [0, 0])
+    const disk = fs.readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse)
+    assert.deepEqual(disk.map((event) => event.seq), [1, 2], 'concurrent single/batch append allocates unique cursors')
+    assert.deepEqual(new Set(new EventLog(file).read().map((event) => event.text)), new Set(['A', 'B']), 'both process events survive replay')
+    assert.equal(fs.existsSync(file + '.lock'), false, 'successful writers release the lock')
+  } finally {
+    fs.writeFileSync(release, '')
+    if (a.child.exitCode === null) a.child.kill()
+    if (b?.child.exitCode === null) b.child.kill()
+    await Promise.all([a.exited, b?.exited])
+  }
+
+  fs.unlinkSync(release)
+  fs.writeFileSync(file, JSON.stringify({ seq: 1, ts: 0, kind: 'status', text: 'seed' }) + '\n')
+  const appending = launch('A')
+  let truncating
+  try {
+    await appending.waitMessage(['paused'])
+    truncating = launch('T')
+    await truncating.waitMessage(['contended', 'done'])
+    fs.writeFileSync(release, '')
+    assert.deepEqual(await Promise.all([appending.exited, truncating.exited]), [0, 0])
+    assert.deepEqual(new EventLog(file).read().map((event) => event.text), ['seed'], 'truncate serializes after an active append')
+  } finally {
+    fs.writeFileSync(release, '')
+    if (appending.child.exitCode === null) appending.child.kill()
+    if (truncating?.child.exitCode === null) truncating.child.kill()
+    await Promise.all([appending.exited, truncating?.exited])
+  }
+
+  const crashed = spawnSync(process.execPath, ['-e', 'require("node:fs").writeFileSync(process.argv[1], JSON.stringify({pid: process.pid, instance: "dead-instance"}))', file + '.lock'])
+  assert.equal(crashed.status, 0)
+  assert.equal(new EventLog(file).append({ ts: 2, kind: 'status', text: 'after crash' })?.seq, 2, 'dead writer lock is recoverable')
+  for (const owner of ['invalid-owner', JSON.stringify({ pid: process.pid, instance: 'a-different-process-start' })]) {
+    fs.writeFileSync(file + '.lock', owner)
+    assert.ok(new EventLog(file).append({ ts: 3, kind: 'status', text: 'recovered owner' }), 'malformed owner and reused live PID locks are recoverable')
+  }
+  const realLink = fs.linkSync
+  let validOwner
+  fs.linkSync = (source, target) => {
+    const result = realLink(source, target)
+    if (target === file + '.lock') validOwner = fs.readFileSync(target, 'utf8')
+    return result
+  }
+  try { new EventLog(file).append({ ts: 4, kind: 'status', text: 'capture owner' }) }
+  finally { fs.linkSync = realLink }
+  fs.writeFileSync(file + '.lock', validOwner)
+  const blockedAt = performance.now()
+  assert.throws(() => new EventLog(file).append({ ts: 5, kind: 'status', text: 'must not steal' }), /Timed out acquiring/)
+  assert.ok(performance.now() - blockedAt < 1000, 'live-owner contention is bounded rather than freezing for ten seconds')
+  assert.equal(fs.readFileSync(file + '.lock', 'utf8'), validOwner, 'a live process instance keeps ownership')
+  fs.unlinkSync(file + '.lock')
+}
+
+// Existing collision damage must remain visible and retain both payloads.
+{
+  const file = path.join(tmp, 'collision-events.jsonl')
+  fs.writeFileSync(file, [1, 2, 2, 3].map((seq, i) => JSON.stringify({ seq, ts: 1, kind: 'status', text: `record-${i}` })).join('\n') + '\n')
+  const log = new EventLog(file)
+  assert.equal(log.count(), 4)
+  assert.deepEqual(log.read().map((event) => event.text), ['record-0', 'record-1', 'record-2', 'record-3'])
+  assert.equal(log.verifyReplay(log.read()).ok, false, 'a corrupt log cannot verify itself as healthy')
+  assert.equal(log.verifyReplay(log.read()).divergence?.seq, 2)
+  assert.equal(log.verifyReplay(log.read()).checked, 1, 'records before the first collision are checked')
+  const earlierMismatch = log.read().map((event, i) => i === 0 ? { ...event, text: 'wrong first record' } : event)
+  assert.equal(log.verifyReplay(earlierMismatch).divergence?.seq, 1, 'an earlier candidate mismatch wins over a later disk collision')
+  assert.equal(log.append({ ts: 2, kind: 'status', text: 'next' })?.seq, 5)
+  assert.deepEqual(JSON.parse(JSON.stringify(new EventLog(file).read())), JSON.parse(JSON.stringify(log.read())), 'collision recovery has stable cursors after restart')
+}
+
+// Readers must not truncate bytes from a writer paused midway through JSON.
+{
+  const file = path.join(tmp, 'in-progress-events.jsonl')
+  const partial = '{"seq":1,"ts":1,"kind":"status","text":"in progress"'
+  fs.writeFileSync(file, partial)
+  const log = new EventLog(file)
+  assert.deepEqual(log.read(), [])
+  assert.equal(fs.readFileSync(file, 'utf8'), partial)
+  fs.appendFileSync(file, '}\n')
+  assert.equal(log.read()[0]?.text, 'in progress')
+}
+
+// OS writes can stop inside a UTF-8 character; offsets must count bytes.
+{
+  const file = path.join(tmp, 'partial-utf8-events.jsonl')
+  const originalWrite = fs.writeSync
+  fs.writeSync = (fd, buffer, offset, length, ...args) => Buffer.isBuffer(buffer)
+    ? originalWrite(fd, buffer, offset, Math.min(length, 7), ...args)
+    : originalWrite(fd, buffer, offset, length, ...args)
+  try {
+    assert.ok(new EventLog(file).append({ ts: 1, kind: 'status', text: '中文事件不能丢失' }))
+  } finally { fs.writeSync = originalWrite }
+  assert.equal(new EventLog(file).read()[0]?.text, '中文事件不能丢失')
+}
+
 console.log('✓ append, recovery, flush and incremental read')
 console.log('✓ versioning, live/durable boundary, idempotency, replay and torn-tail recovery')
 console.log('✓ memory-resident reads, external-append freshness, torn-tail reconciliation')
+console.log('✓ concurrent writers, crashed lock recovery, collision detection, read-only recovery and partial UTF-8 writes')
 console.log('✅ EVENT LOG SMOKE PASSED')

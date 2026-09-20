@@ -365,19 +365,29 @@ export async function runDelegationLoop(
 ): Promise<DelegationOutcome> {
   const { store, runner, pushTask, pushEvent } = ctx
   const task = store.get(taskId)!
+  const runId = task.runId
+  const active = () => {
+    const current = store.get(taskId)
+    return current?.status === 'running' && current.runId === runId
+  }
+  const abandoned = (): DelegationOutcome => ({ rounds: 0, children: [], finalText: '', scanTexts: [] })
+  if (!active()) return abandoned()
   const team = ctx.getTeam()
   const me = team.find((a) => a.id === task.agentId)
   const subs = (me?.subordinates ?? []).map((id) => team.find((a) => a.id === id)).filter(Boolean) as AgentLike[]
   if (!subs.length) return { rounds: 0, children: [], finalText: first.response, scanTexts: [first.delegationText ?? '', first.response] }
 
   const note = (text: string) => {
+    if (!active()) return
     const e = { ts: Date.now(), kind: 'status' as const, text }
     const full = store.appendEvent(taskId, e)
     if (full) pushEvent(taskId, full)
   }
 
   const hasRepo = task.workdir ? await isGitRepo(task.workdir) : false
+  if (!active()) return abandoned()
   const baseBranch = hasRepo && task.workdir ? await currentBranch(task.workdir) : ''
+  if (!active()) return abandoned()
 
   // ---- 二层委派的三道闸（0.7.0；建单路径的同类闸在 runner.spawnDelegateChild）----
   const { inherited, depth } = ancestorBudget(store, taskId)
@@ -408,12 +418,14 @@ export async function runDelegationLoop(
   let rejectedFeedbacks = 0
   const rosterText = subs.map((a) => `${a.name}（${a.backend}）`).join('、')
   const feedbackRejections = async (): Promise<boolean> => {
+    if (!active()) return false
     const rejects = runner.takeDelegateRejections(taskId)
     if (!rejects.length || rejectedFeedbacks >= 2) return false
     rejectedFeedbacks++
     note(`⚠ ${rejects.length} 条派单被拒（未建单），原因回灌给领队改派`)
     try {
-      const turn = await runner.sendTurn(taskId, session, buildRejectionFeedbackPrompt(rejects, rosterText))
+      const turn = await runner.sendTurn(taskId, session, buildRejectionFeedbackPrompt(rejects, rosterText), runId)
+      if (!active()) return false
       if (!turn.ok) throw new Error(turn.error || '回灌回合失败')
       for (const n of parseRoundNotes(turn.response)) {
         note(`领队评估：${n.outcome}${n.reason ? ' — ' + n.reason : ''}`)
@@ -428,10 +440,12 @@ export async function runDelegationLoop(
   }
 
   while (round < budget) {
+    if (!active()) return abandoned()
     const calls = parseDelegatesMerged(...scanTexts)
     // 收编流式期间提前建的单（等待未决建单完成）。seenKeys 是本会话出现过的全部派单
     // key（含已交付的）：领队在回灌/评估回合里复述旧派单标记时，绝不能当成新派单再建。
     const early = await runner.takeEarlySpawns(taskId)
+    if (!active()) return abandoned()
     const fresh = calls.filter((c) => !early.seenKeys.has(`${c.to}\n${c.prompt}`))
     if (!fresh.length && !early.entries.length) {
       // 全部派单已在流式阶段处理且无一建单：把拒单原因回灌，让领队当场改派
@@ -446,7 +460,8 @@ export async function runDelegationLoop(
     if (fresh.length) {
       note(`第 ${round} 轮派发：${fresh.map((c) => `${c.to}${c.reason ? `（${c.reason}）` : ''}`).join('、')}${early.entries.length ? `（另有 ${early.entries.length} 单已在流式中提前接单）` : ''}`)
       for (const call of fresh) {
-        const child = await runner.spawnDelegateChild(taskId, call)
+        const child = await runner.spawnDelegateChild(taskId, call, runId)
+        if (!active()) return abandoned()
         if (child) roundChildren.set(child.id, call)
       }
     } else {
@@ -465,17 +480,19 @@ export async function runDelegationLoop(
     await new Promise<void>((resolve) => {
       const check = () => {
         const states = childIds.map((id) => store.get(id)?.status)
-        if (states.every((s) => s === 'done' || s === 'failed' || s === 'cancelled')) resolve()
+        if (!active() || states.every((s) => s === undefined || s === 'done' || s === 'failed' || s === 'cancelled')) resolve()
         else setTimeout(check, 1500)
       }
       check()
     })
+    if (!active()) return abandoned()
 
     // 汇报回灌（带单号；审核协议追加）
     const childSeqMap = new Map<string, number>()
     const report = childIds
       .map((id, idx) => {
         const c = store.get(id)!
+        if (!c) return childReportEntry('worker', 'cancelled', idx + 1, 'Task was removed')
         const call = roundChildren.get(id)
         const seq = idx + 1
         childSeqMap.set(id, seq)
@@ -497,8 +514,9 @@ export async function runDelegationLoop(
     note(`第 ${round} 轮结果已回灌，等待领队继续`)
     try {
       const turn = await runner.sendTurn(taskId, session,
-        `${REPORT_PROMPT_HEADER}\n\n${report}${rejectNotice}\n\n${continueInstruction}${REVIEW_INSTRUCTION}`
+        `${REPORT_PROMPT_HEADER}\n\n${report}${rejectNotice}\n\n${continueInstruction}${REVIEW_INSTRUCTION}`, runId
       )
+      if (!active()) return abandoned()
       if (!turn.ok) throw new Error(turn.error || '回灌回合失败')
       for (const n of parseRoundNotes(turn.response)) {
         note(`第 ${round} 轮评估：${n.outcome}${n.reason ? ' — ' + n.reason : ''}`)
@@ -523,6 +541,7 @@ export async function runDelegationLoop(
       scanTexts = [turn.delegationText ?? '', turn.response]
       finalResponse = turn.response
     } catch (e) {
+      if (!active()) return abandoned()
       note(`⚠ 回灌失败: ${e instanceof Error ? e.message : String(e)}`)
       // 领队会话已死（如应用重启）时回灌无处可去——把队员报告摘要落到 Issue 评论，
       // 别让成果随领队静默丢失；不自动重启领队，是否续跑留给用户
@@ -539,6 +558,7 @@ export async function runDelegationLoop(
   }
 
   // 循环结束仍有未送达的拒单（预算耗尽等路径）：留痕 + Issue 评论，不让工作项静默消失
+  if (!active()) return abandoned()
   const leftoverRejects = runner.takeDelegateRejections(taskId)
   if (leftoverRejects.length) {
     note(`⚠ 委派结束仍有 ${leftoverRejects.length} 条派单被拒且未回灌：${leftoverRejects.map((r) => r.slice(0, 80)).join('；')}`)
@@ -565,9 +585,11 @@ export async function runDelegationLoop(
       // 该子任务需要合入的分支：自己的工作分支（有改动时）+ 它作为子领队的集成分支（二层委派递归交付）
       const ownBranch = c.worktree?.branch || (c.gitStat ? `agentdeck/${taskId}_c${idx}` : '')
       const subIntegration = await branchExists(task.workdir, `agentdeck/task-${cid}`) ? `agentdeck/task-${cid}` : ''
+      if (!active()) return abandoned()
       if (!ownBranch && !subIntegration) {
         // 没有任何可集成改动，worktree 里没有值得保留的东西：直接回收
         const reclaimed = await reclaimWorktree(c.workdir)
+        if (!active()) return abandoned()
         if (c.worktree) store.update(cid, {
           worktree: {
             ...c.worktree,
@@ -583,9 +605,11 @@ export async function runDelegationLoop(
         continue
       }
       if (ownBranch) await commitAll(c.workdir, `agentdeck: ${c.title}`)
+      if (!active()) return abandoned()
       let childOk = true
       for (const b of [ownBranch, subIntegration].filter(Boolean)) {
         const r = await mergeBranchInto(task.workdir, integrationBranch, b!)
+        if (!active()) return abandoned()
         if (!r.ok) {
           childOk = false
           allOk = false
@@ -602,6 +626,7 @@ export async function runDelegationLoop(
       // 顺带删掉已合并的工作分支；有失败/冲突则保留现场便于排查，留待任务删除时回收
       if (childOk) {
         const reclaimed = await reclaimWorktree(c.workdir)
+        if (!active()) return abandoned()
         if (c.worktree) store.update(cid, {
           worktree: {
             ...c.worktree,
@@ -616,6 +641,7 @@ export async function runDelegationLoop(
           problems.push(`worktree cleanup: ${reclaimed.reason ?? 'failed'}`)
         }
         if (childOk && ownBranch && !(await deleteBranch(task.workdir, ownBranch))) {
+          if (!active()) return abandoned()
           childOk = false
           allOk = false
           problems.push(`branch cleanup: ${ownBranch}`)
@@ -624,11 +650,13 @@ export async function runDelegationLoop(
           })
           await markWorktreeCleanup(c.workdir, 'retained', `branch ${ownBranch} could not be deleted`)
         }
+        if (!active()) return abandoned()
       }
       if (!allOk) break
     }
     if (allOk && mergedCount > 0) {
       const sum = await branchDiffSummary(task.workdir, baseBranch, integrationBranch)
+      if (!active()) return abandoned()
       gitDiff = sum.diff
       gitStat = sum.stat
       integrationNote = `改动已合入集成分支 ${integrationBranch}（基线 ${baseBranch}，${mergedCount} 个子任务），确认后可自行 merge`
@@ -636,6 +664,7 @@ export async function runDelegationLoop(
     } else if (allOk) {
       // 没有任何子任务产生可合并改动（可能都改在了主目录或无改动）
       const dirty = await import('./git').then((g) => g.snapshotGitAfter(task.workdir)).catch(() => ({ diff: '', stat: '' }))
+      if (!active()) return abandoned()
       gitDiff = dirty.diff || ""
       gitStat = dirty.stat || ""
       integrationNote = '子任务无独立分支改动；领队若自己改了文件，改动保留在主目录工作区（未提交）'
@@ -646,6 +675,7 @@ export async function runDelegationLoop(
     }
   }
 
+  if (!active()) return abandoned()
   store.update(taskId, {
     ...(integrationBranch ? { integration: { branch: integrationBranch, note: integrationNote } } : {}),
     gitDiff: gitDiff || undefined,

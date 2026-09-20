@@ -371,8 +371,58 @@ async function scenarioContinueGoal() {
   }
 }
 
+async function scenarioEpipeFollowUpRunIdentity() {
+  console.log('\n[4] EPIPE follow-up downgrade: one Issue Run and one Goal phase')
+  let starts = 0
+  const epipe = {
+    id: 'epipe-follow-up',
+    label: 'EPIPE follow-up',
+    async probe() { return { ok: true, detail: '' } },
+    start({ events, resumeSessionId }) {
+      starts++
+      const resumed = !!resumeSessionId
+      const response = JSON.stringify({ summary: 'stop', completedConditions: [], incompleteConditions: ['never'], nextPlan: '', blockers: [] })
+      setTimeout(() => {
+        events.onEvent({ ts: Date.now(), kind: 'final', text: response })
+        events.onTurnEnd({ response, ok: true })
+      }, 15)
+      return Promise.resolve({
+        sessionId: resumed ? 'epipe-resumed' : 'epipe-live',
+        async send() {
+          if (!resumed) throw new Error('write EPIPE')
+        },
+        async stop() {},
+        async close() {}
+      })
+    }
+  }
+  const team = [{ id: 'epipe-agent', name: 'EPIPE agent', backend: epipe.id, role: 'worker', systemPrompt: '' }]
+  const h = makeHarness({ team, backends: [epipe] })
+  try {
+    const goal = h.controller.create({
+      text: 'Recover one follow-up', issueId: 'iss_matrix_epipe', completionConditions: ['never'], stopConditions: ['stop'],
+      maxRuns: 3, maxDurationMs: 60_000, workdir: h.repo, agentId: 'epipe-agent', backend: epipe.id, startNow: true
+    })
+    const task = await waitFor(() => h.store.list().find((item) => item.goalId === goal.id))
+    await waitForTerminal(h.store, task.id)
+    await waitFor(() => h.controller.get(goal.id)?.status === 'waiting_user')
+    const priorRunId = h.store.get(task.id).runId
+    const followUp = await h.runner.followUp(task.id, 'resume after pipe break')
+    await waitForTerminal(h.store, task.id)
+    const current = h.store.get(task.id)
+    const issueRuns = h.issueStore.runs(goal.issueId)
+    const goalRuns = h.controller.runs(goal.id)
+    check('EPIPE follow-up succeeds through resume', followUp.ok && current?.status === 'done', current?.status)
+    check('EPIPE path starts live session then one resume session', starts === 2, String(starts))
+    check('same follow-up creates one new Issue Run', issueRuns.length === 2 && new Set(issueRuns.map((run) => run.id)).size === 2, String(issueRuns.length))
+    check('same follow-up advances Goal phase once', current?.runId !== priorRunId && current?.phaseIndex === 1 && goalRuns.length === 2 && goalRuns.some((run) => run.phaseIndex === 1), JSON.stringify({ phaseIndex: current?.phaseIndex, goalRuns: goalRuns.length }))
+  } finally {
+    await h.cleanup()
+  }
+}
+
 async function scenarioCancelEarlyDispatch() {
-  console.log('\n[4] cancel x early delegate: cancellation wins over late stream events')
+  console.log('\n[5] cancel x early delegate: cancellation wins over late stream events')
   const tag = '<delegate to="Worker" reason="cancel test">prepare cancel.txt</delegate>'
   const leader = scriptedBackend('cancel-leader', {
     starts: [{ response: 'late leader result', streamChunks: [tag], delayMs: 1_000 }],
@@ -414,7 +464,7 @@ async function scenarioCancelEarlyDispatch() {
 }
 
 async function scenarioDuplicateDelegate() {
-  console.log('\n[5] duplicate delegate: stream, replay, and evaluation text create one child')
+  console.log('\n[6] duplicate delegate: stream, replay, and evaluation text create one child')
   const tag = '<delegate to="Worker" reason="single logical request">update duplicate.txt</delegate>'
   const leader = scriptedBackend('duplicate-leader', {
     starts: [{ response: `${tag}\nleader waiting`, delegationText: `${tag}\n${tag}`, streamChunks: [tag] }],
@@ -449,6 +499,7 @@ try {
   await scenarioGoalDelegate()
   await scenarioRetryGoal()
   await scenarioContinueGoal()
+  await scenarioEpipeFollowUpRunIdentity()
   await scenarioCancelEarlyDispatch()
   await scenarioDuplicateDelegate()
 } finally {
@@ -459,6 +510,6 @@ if (failed) {
   console.error(`\nORCHESTRATION MATRIX FAILED (${failed})`)
   process.exit(1)
 } else {
-  console.log('\nORCHESTRATION MATRIX PASSED (5 scenarios)')
+  console.log('\nORCHESTRATION MATRIX PASSED (6 scenarios)')
   process.exit(0)
 }

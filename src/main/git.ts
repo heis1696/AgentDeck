@@ -37,6 +37,7 @@ export interface WorktreePruneResult {
 const DEFAULT_WORKTREE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
 const WORKTREE_METADATA_DIR = '.metadata'
 const MANAGED_BRANCH_PREFIX = 'agentdeck/'
+const AGENT_GIT_IDENTITY = ['-c', 'user.email=agentdeck@local', '-c', 'user.name=AgentDeck Worker'] as const
 
 /** Preserve process exit status and stderr. Empty stdout is a valid result. */
 export function runGit(workdir: string, args: string[], timeout = 15000): Promise<GitCommandResult> {
@@ -388,7 +389,7 @@ export async function commitAll(workdir: string, message: string): Promise<boole
   if (!added.ok) return false
   const staged = await runGit(workdir, ['diff', '--cached', '--name-only'])
   if (!staged.ok || !staged.stdout.trim()) return false
-  const committed = await runGit(workdir, ['-c', 'user.email=agentdeck@local', '-c', 'user.name=AgentDeck Worker', 'commit', '-m', message], 30000)
+  const committed = await runGit(workdir, [...AGENT_GIT_IDENTITY, 'commit', '-m', message], 30000)
   return committed.ok
 }
 
@@ -677,7 +678,7 @@ export async function mergeBranchInto(
   const added = await runGit(repoDir, ['worktree', 'add', wtPath, targetBranch], 60000)
   if (!added.ok) return { ok: false, conflict: false, message: `cannot create merge worktree: ${gitError(added)}` }
   try {
-    const merged = await runGit(wtPath, ['merge', '--no-ff', '-m', `merge ${sourceBranch} into ${targetBranch}`, sourceBranch], 60000)
+    const merged = await runGit(wtPath, [...AGENT_GIT_IDENTITY, 'merge', '--no-ff', '-m', `merge ${sourceBranch} into ${targetBranch}`, sourceBranch], 60000)
     const detail = `${merged.stderr}\n${merged.stdout}`.trim()
     const conflict = /conflict|automatic merge failed/i.test(detail)
     if (conflict) {

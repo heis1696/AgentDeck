@@ -1,5 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { execFileSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import type { TaskEvent } from '../shared/types'
 import {
   isTaskEventDurable,
@@ -118,6 +120,26 @@ function canonicalEvent(event: TaskEvent): string {
   return JSON.stringify(stable(copy))
 }
 
+let ownProcessStart: string | undefined
+function processStartIdentity(pid: number): string | undefined {
+  if (pid === process.pid && ownProcessStart) return ownProcessStart
+  try {
+    let value: string
+    const timeout = pid === process.pid ? 2_000 : 750
+    if (process.platform === 'linux') {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8')
+      value = `${fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim()}:${stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19]}`
+    } else if (process.platform === 'win32') {
+      value = execFileSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', `[Console]::Write((Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks)`], { encoding: 'utf8', windowsHide: true, timeout, stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+    } else {
+      value = execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], { encoding: 'utf8', timeout, stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+    }
+    if (!value) return undefined
+    if (pid === process.pid) ownProcessStart = value
+    return value
+  } catch { return undefined }
+}
+
 /**
  * Append-only event log for one task directory. Durable events are written to
  * JSONL; live-only fragments are returned to the caller for broadcast but do
@@ -139,8 +161,67 @@ export class EventLog {
    * fragment without its newline). Re-checked before any append, because
    * writing after it would concatenate onto the fragment. */
   private pendingTail = false
+  private sequenceDivergence?: ReplayDivergence
 
   constructor(private readonly file: string) {}
+
+  /** Atomic hard-link publication prevents incomplete lock metadata. Process
+   * start identity distinguishes a live owner from a reused PID. */
+  private withWriteLock<T>(action: () => T): T {
+    fs.mkdirSync(path.dirname(this.file), { recursive: true })
+    const lock = this.file + '.lock'
+    const instance = processStartIdentity(process.pid)
+    if (!instance) throw new Error('Cannot determine event log writer process identity')
+    const ownerFile = `${lock}.${process.pid}.${randomUUID()}`
+    fs.writeFileSync(ownerFile, JSON.stringify({ pid: process.pid, instance }), { encoding: 'utf8', flag: 'wx', mode: 0o600 })
+    const pause = new Int32Array(new SharedArrayBuffer(4))
+    const started = performance.now()
+    let acquired = false
+    let checkedOwner: string | undefined
+    try {
+      for (;;) {
+        try {
+          fs.linkSync(ownerFile, lock)
+          acquired = true
+          break
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+          try {
+            const before = fs.statSync(lock)
+            const ownerText = fs.readFileSync(lock, 'utf8')
+            let owner: unknown
+            try { owner = JSON.parse(ownerText) } catch {}
+            let abandoned = !isRecord(owner) || !Number.isSafeInteger(owner.pid) || Number(owner.pid) <= 0 || typeof owner.instance !== 'string'
+            if (!abandoned && isRecord(owner)) {
+              const pid = Number(owner.pid)
+              try { process.kill(pid, 0) }
+              catch (probeError) { abandoned = (probeError as NodeJS.ErrnoException).code === 'ESRCH' }
+              // Ordinary fsync contention needs no subprocess probe. Only a
+              // stalled lock is checked against OS process creation time.
+              if (!abandoned && (pid === process.pid || performance.now() - started >= 50) && checkedOwner !== ownerText) {
+                const currentInstance = processStartIdentity(pid)
+                if (currentInstance) abandoned = currentInstance !== owner.instance
+                checkedOwner = ownerText
+              }
+            }
+            if (abandoned) {
+              const current = fs.statSync(lock)
+              if (current.ino === before.ino && current.mtimeMs === before.mtimeMs && fs.readFileSync(lock, 'utf8') === ownerText) fs.unlinkSync(lock)
+              continue
+            }
+          } catch (probeError) {
+            if ((probeError as NodeJS.ErrnoException).code === 'ENOENT') continue
+          }
+          if (performance.now() - started >= 250) throw new Error(`Timed out acquiring event log lock: ${this.file}`)
+          Atomics.wait(pause, 0, 0, 5)
+        }
+      }
+      return action()
+    } finally {
+      if (acquired) fs.unlinkSync(lock)
+      fs.unlinkSync(ownerFile)
+    }
+  }
 
   /** Bring the cache up to date with the file before serving a read or
    * assigning a sequence. Without this an instance that indexed earlier
@@ -162,15 +243,27 @@ export class EventLog {
     this.eventsByIdentity.clear()
     this.maxSeq = 0
     this.pendingTail = false
+    this.sequenceDivergence = undefined
     let bytes: Buffer
     try {
-      bytes = this.recoverTail(fs.readFileSync(this.file))
+      bytes = fs.readFileSync(this.file)
     } catch {
       this.indexedSize = 0
       this.indexed = true
       return
     }
     this.indexedSize = this.consumeLines(bytes, 0)
+    // Reads never truncate a partial write from another process. A complete
+    // legacy object without its delimiter is safe to index without mutation.
+    if (this.pendingTail) {
+      try {
+        this.indexEvent(migrateTaskEvent(JSON.parse(bytes.subarray(this.indexedSize).toString('utf8'))))
+        this.indexedSize = bytes.length
+        this.pendingTail = false
+      } catch (error) {
+        if (error instanceof UnsupportedTaskEventVersionError) throw error
+      }
+    }
     this.indexed = true
   }
 
@@ -229,6 +322,15 @@ export class EventLog {
   private indexEvent(event: TaskEvent | null) {
     if (!event) return
     if (isTaskEventDurable(event)) {
+      const existing = this.events.get(event.seq)
+      if (existing) {
+        if (canonicalEvent(existing) === canonicalEvent(event)) return
+        this.sequenceDivergence ??= { seq: event.seq, reason: 'mismatch', expected: existing, actual: event }
+        // Retain historical collisions with deterministic replay cursors,
+        // while verifyReplay still reports the original corrupt sequence.
+        const seq = this.maxSeq + 1
+        event = { ...event, seq, durable: { ...(typeof event.durable === 'object' ? event.durable : { aggregate: 'task' as const, version: TASK_EVENT_SCHEMA_VERSION }), seq } }
+      }
       this.events.set(event.seq, event)
       if (event.seq > this.maxSeq) this.maxSeq = event.seq
     }
@@ -278,31 +380,6 @@ export class EventLog {
     this.pendingTail = false
   }
 
-  /** Remove a torn final line before any append can concatenate with it. */
-  private recoverTail(bytes: Buffer): Buffer {
-    if (bytes.length === 0 || bytes[bytes.length - 1] === 0x0a) return bytes
-    const end = bytes.lastIndexOf(0x0a)
-    // Some legacy writers emitted a valid final JSON object without a trailing
-    // newline. Preserve it and add the delimiter before future appends; only
-    // an unparsable final fragment is treated as a torn write.
-    if (end < 0) {
-      try {
-        JSON.parse(bytes.toString('utf8'))
-        fs.appendFileSync(this.file, '\n', 'utf8')
-        return Buffer.concat([bytes, Buffer.from('\n')])
-      } catch {}
-    }
-    const keep = end < 0 ? 0 : end + 1
-    try {
-      const fd = fs.openSync(this.file, 'r+')
-      fs.ftruncateSync(fd, keep)
-      fs.closeSync(fd)
-      return bytes.subarray(0, keep)
-    } catch {
-      return bytes
-    }
-  }
-
   private writeLines(lines: string[]) {
     if (lines.length === 0) return
     fs.mkdirSync(path.dirname(this.file), { recursive: true })
@@ -318,8 +395,13 @@ export class EventLog {
     }
     const fd = fs.openSync(this.file, 'a')
     try {
+      const bytes = Buffer.from(payload, 'utf8')
       let written = 0
-      while (written < payload.length) written += fs.writeSync(fd, payload.slice(written), null, 'utf8')
+      while (written < bytes.length) {
+        const count = fs.writeSync(fd, bytes, written, bytes.length - written)
+        if (count === 0) throw new Error('Event log write made no progress')
+        written += count
+      }
       // append() is the durable boundary; a successful return means bytes are
       // handed to the filesystem, not merely retained in a process buffer.
       fs.fsyncSync(fd)
@@ -330,6 +412,10 @@ export class EventLog {
 
   /** Append one event. Repeating an event with the same id/eventId is a no-op. */
   append(event: TaskEventInput): TaskEvent | null {
+    return this.withWriteLock(() => this.appendLocked(event))
+  }
+
+  private appendLocked(event: TaskEventInput): TaskEvent | null {
     const fullInput = migrateTaskEvent(event, 1)
     if (!fullInput) return null
     this.ensureFresh()
@@ -373,11 +459,16 @@ export class EventLog {
       return null
     }
     this.indexEvent(fullInput)
+    this.indexedSize = this.fileSize()
     return fullInput
   }
 
   /** Append multiple events in one fsync boundary while preserving ordering. */
   appendBatch(events: readonly TaskEventInput[]): TaskEvent[] {
+    return this.withWriteLock(() => this.appendBatchLocked(events))
+  }
+
+  private appendBatchLocked(events: readonly TaskEventInput[]): TaskEvent[] {
     const result: TaskEvent[] = []
     const durable: TaskEvent[] = []
     const lines: string[] = []
@@ -425,6 +516,7 @@ export class EventLog {
       return []
     }
     for (const event of durable) this.indexEvent(event)
+    this.indexedSize = this.fileSize()
     return result
   }
 
@@ -438,6 +530,10 @@ export class EventLog {
   }
 
   truncate(keepThroughSeq: number): TaskEvent[] | null {
+    return this.withWriteLock(() => this.truncateLocked(keepThroughSeq))
+  }
+
+  private truncateLocked(keepThroughSeq: number): TaskEvent[] | null {
     const kept: TaskEvent[] = []
     try {
       this.ensureFresh()
@@ -487,6 +583,9 @@ export class EventLog {
     for (let i = 0; i < total; i++) {
       const want = normalizedExpected[i]
       const got = actual[i]
+      if (this.sequenceDivergence && got && got.seq >= this.sequenceDivergence.seq) {
+        return { ok: false, checked: i, divergence: this.sequenceDivergence }
+      }
       if (!want) return { ok: false, checked: i, divergence: { seq: got.seq, reason: 'unexpected', actual: got } }
       if (!got) return { ok: false, checked: i, divergence: { seq: want.seq, reason: 'missing', expected: want } }
       if (want.seq !== got.seq || canonicalEvent(want) !== canonicalEvent(got)) {

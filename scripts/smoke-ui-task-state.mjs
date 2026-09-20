@@ -121,6 +121,7 @@ const skillMenu = () => byQuery('.skill-menu')
 const floatWindow = () => byQuery('.float-window')
 const goalChip = () => byQuery('.float-chip.is-goal')
 const renameInput = () => byQuery('.title-edit-input')
+const workflowSelect = () => byQuery('.meta-workflow')
 
 const typeInto = (node, value) => act(async () => {
   const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
@@ -132,6 +133,12 @@ const typeIntoInput = (node, value) => act(async () => {
   const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
   setter.call(node, value)
   node.dispatchEvent(new window.Event('input', { bubbles: true }))
+  await sleep(10)
+})
+const changeValue = (node, value) => act(async () => {
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set
+  setter.call(node, value)
+  node.dispatchEvent(new window.Event('change', { bubbles: true }))
   await sleep(10)
 })
 const click = (node) => act(async () => {
@@ -334,6 +341,35 @@ section('异步上报的面板数据不串任务：B 的目标读取还很慢时
   ok(!goalChip(), '切到 B：面板的陈旧回报不会挂成 B 的目标芯片')
   await act(async () => { await sleep(260) })
   ok(!goalChip(), 'B 自己的目标读取回来后依然没有芯片（B 没有目标）')
+  await unmount()
+}
+
+section('旧工作流响应不覆盖新任务：A 的 Issue 更新晚于切换时仍保持 B 的状态')
+{
+  await mount()
+  bridge.issueUpdateDelay.set('iss_taskA', 300)
+  await openTask('taskA')
+  await changeValue(workflowSelect(), 'done')
+  await openTask('taskB')
+  ok(workflowSelect().value === 'todo', '切到 B 后显示 B 自己的工作流状态')
+  await act(async () => { await sleep(360) })
+  ok(workflowSelect().value === 'todo', 'A 的延迟工作流响应落地后仍不覆盖 B')
+  await unmount()
+}
+
+section('会议创建失败可重试：失败后不把创建按钮永久置为忙碌')
+{
+  await mount()
+  bridge.meetingCreateError = '会议创建失败（烟测）'
+  await openTask('taskA')
+  await typeInto(followBox(), '/meeting')
+  await keyOn(followBox(), 'Enter')
+  await act(async () => { await sleep(20) })
+  const meetingTopic = () => byQuery('.meeting-create input')
+  const meetingButton = () => byQuery('.meeting-create-btn')
+  await typeIntoInput(meetingTopic(), '失败后重试')
+  await click(meetingButton())
+  ok(meetingButton().disabled === false, '会议创建失败后按钮恢复可用，可再次提交')
   await unmount()
 }
 

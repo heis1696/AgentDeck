@@ -34,6 +34,10 @@ export interface TaskStateBridge {
   eventsDelay: Map<string, number>
   /** goals.list 的响应延迟（ms）：制造「面板还拿着上一个任务的目标」的上报窗口 */
   goalsDelayMs: number
+  /** issues.update 的响应延迟（ms）：制造切任务后旧 Issue 工作流响应晚到 */
+  issueUpdateDelay: Map<string, number>
+  /** 非空时让会议创建失败，验证失败后表单仍可重试 */
+  meetingCreateError: string | null
   /** true 时追问响应挂起，等 settleFollowUps() 才结算（制造在途 busy） */
   holdFollowUps: boolean
   seedTask(seed: TaskStateTaskSeed): Task
@@ -73,9 +77,11 @@ const calls = {
 /** 任务 id → 事件列表（读取时返回副本） */
 const events = new Map<string, TaskEvent[]>()
 const eventsDelay = new Map<string, number>()
+const issueUpdateDelay = new Map<string, number>()
 const pendingFollowUps: Array<{ resolve: (value: { ok: boolean; error?: string }) => void }> = []
 let holdFollowUps = false
 let goalsDelayMs = 0
+let meetingCreateError: string | null = null
 
 const tasksOf = () => store.tasks
 
@@ -109,10 +115,19 @@ const makeIssue = (task: Task): Issue => ({
   taskId: task.id
 }) as unknown as Issue
 
+const meetingAgents = [
+  { id: 'captain-1', name: '汇报队长', backend: 'zcode', color: '#64748b', role: 'captain' },
+  { id: 'captain-2', name: '质疑队长', backend: 'zcode', color: '#64748b', role: 'captain' },
+  { id: 'captain-3', name: '答辩队长', backend: 'zcode', color: '#64748b', role: 'captain' }
+]
+
 const bridgeMock: TaskStateBridge = {
   store,
   calls,
   eventsDelay,
+  issueUpdateDelay,
+  get meetingCreateError() { return meetingCreateError },
+  set meetingCreateError(value) { meetingCreateError = value },
   get goalsDelayMs() { return goalsDelayMs },
   set goalsDelayMs(value: number) { goalsDelayMs = value },
   get holdFollowUps() { return holdFollowUps },
@@ -152,9 +167,11 @@ const bridgeMock: TaskStateBridge = {
     calls.rename.length = 0
     events.clear()
     eventsDelay.clear()
+    issueUpdateDelay.clear()
     pendingFollowUps.length = 0
     holdFollowUps = false
     goalsDelayMs = 0
+    meetingCreateError = null
     listeners.taskUpdated.clear()
     listeners.taskFocus.clear()
     listeners.taskEvent.clear()
@@ -215,7 +232,12 @@ const api = {
     get: (id: string) => settle(store.issues.find((issue) => issue.id === id) ?? null),
     runs: () => settle([]),
     comments: () => settle([]),
-    update: (id: string) => settle(store.issues.find((issue) => issue.id === id) ?? null),
+    update: (id: string, patch: Partial<Issue>) => {
+      const issue = store.issues.find((candidate) => candidate.id === id)
+      const next = issue ? { ...issue, ...patch, updatedAt: Date.now() } : null
+      const delay = issueUpdateDelay.get(id) ?? 0
+      return new Promise<Issue | null>((resolve) => setTimeout(() => resolve(next), delay))
+    },
     addComment: () => settle(null),
     create: missing('issues.create'),
     onUpdated: (listener: (payload: unknown) => void) => subscribe(listeners.issuesUpdated, listener)
@@ -241,11 +263,13 @@ const api = {
     list: () => settle(store.meetings.map((meeting) => ({ ...meeting }))),
     onUpdated: never,
     onDeleted: never,
-    create: missing('meetings.create'),
+    create: () => meetingCreateError
+      ? Promise.reject(new Error(meetingCreateError))
+      : Promise.reject(new Error('ui-task-state bridge 未实现：meetings.create')),
     get: () => settle(null)
   },
   agents: {
-    list: () => settle([]),
+    list: () => settle(meetingAgents.map((agent) => ({ ...agent }))),
     models: () => settle({ backend: 'zcode', source: 'freeform', models: [] })
   },
   skills: {

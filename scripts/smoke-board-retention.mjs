@@ -52,6 +52,21 @@ try {
   const sharedDone = make('shared old done', 'done', { issueId: 'iss_shared' })
   const sharedParked = make('shared parked', 'queued', { issueId: 'iss_shared', parked: true })
   const race = make('changes during forget')
+  // Run-only descendants (suppressIssue: automation output / investigation
+  // workers) never get an Issue projection, so ownership plus the parentTaskId
+  // cascade is the only paper trail retention can follow.
+  const runOnlyLeader = make('expired run-only leader')
+  const runOnlyWorker = make('expired run-only worker', 'done', { suppressIssue: true, parentTaskId: runOnlyLeader.id })
+  const runOnlyHelper = make('expired run-only helper', 'failed', { suppressIssue: true, parentTaskId: runOnlyWorker.id })
+  const freshRunOnlyLeader = make('leader with fresh run-only child')
+  const freshRunOnlyChild = make('fresh run-only child', 'done', { age: 2, suppressIssue: true, parentTaskId: freshRunOnlyLeader.id })
+  const busyRunOnlyLeader = make('leader with running run-only child')
+  const busyRunOnlyChild = make('running run-only child', 'running', { suppressIssue: true, parentTaskId: busyRunOnlyLeader.id })
+  const goalRunOnlyLeader = make('leader with goal-protected run-only child')
+  const goalRunOnlyChild = make('goal-protected run-only child', 'done', { suppressIssue: true, parentTaskId: goalRunOnlyLeader.id })
+  const meetingRunOnlyLeader = make('leader with meeting-protected run-only child')
+  const meetingRunOnlyChild = make('meeting-protected run-only child', 'failed', { suppressIssue: true, parentTaskId: meetingRunOnlyLeader.id })
+  const runOnlyRoot = make('run-only automation root', 'done', { suppressIssue: true })
   fixtureIssues.sync(store.list())
   fixtureIssues.addComment(`iss_${expired.id}`, 'old comment')
   store.flush()
@@ -66,8 +81,8 @@ try {
   const logFile = path.join(data, 'issues', 'retention.jsonl')
   const deps = {
     store, issueStore: issues, taskService: service, now: () => now,
-    activeGoalIssueIds: () => new Set([`iss_${activeGoal.id}`, `iss_${protectedChild.id}`]),
-    activeMeetingIssueIds: () => new Set([`iss_${activeMeeting.id}`]),
+    activeGoalIssueIds: () => new Set([`iss_${activeGoal.id}`, `iss_${protectedChild.id}`, `iss_${goalRunOnlyLeader.id}`]),
+    activeMeetingIssueIds: () => new Set([`iss_${activeMeeting.id}`, `iss_${meetingRunOnlyLeader.id}`]),
     forget: async (id) => { forgotten.push(id); if (id === race.id) store.update(id, { status: 'running' }) },
     onTaskDeleted: (id) => published.push(id), eventLog: new EventLog(logFile)
   }
@@ -78,19 +93,37 @@ try {
     assert.equal(fs.existsSync(path.join(data, 'tasks', task.id)), false, 'task directory and events removed')
     assert.ok(forgotten.includes(task.id) && published.includes(task.id), 'runner cleanup and deletion notification')
   }
-  for (const task of [running, parked, queued, recent, orphan, freshOrphan, activeGoal, activeMeeting, blockedLeader, busyChild, freshLeader, freshChild, protectedLeader, protectedChild, sharedDone, sharedParked, race]) assert.ok(store.get(task.id), `${task.title} preserved`)
-  assert.equal(report.deletedTasks, 6)
-  assert.equal(report.deletedIssues, 6)
+  // 无 Issue 的 run-only 子孙本身没有保留时钟：只有「明确挂在父任务下 + 自身也过期 + 终态」
+  // 才随父级联一起清理；清理它们要连目录、runner 状态、删除通知与 Issue 一起收口。
+  for (const task of [runOnlyLeader, runOnlyWorker, runOnlyHelper]) {
+    assert.equal(store.get(task.id), undefined, `${task.title} deleted with its parent cascade`)
+    assert.equal(fs.existsSync(path.join(data, 'tasks', task.id)), false, 'run-only task directory and events removed')
+    assert.ok(forgotten.includes(task.id) && published.includes(task.id), 'run-only runner cleanup and deletion notification')
+  }
+  assert.equal(issues.get(`iss_${runOnlyLeader.id}`), undefined, 'cascade owner Issue removed with its run-only descendants')
+  assert.equal(issues.get(`iss_${runOnlyWorker.id}`), undefined, 'run-only descendants project no Issue')
+  for (const task of [running, parked, queued, recent, orphan, freshOrphan, activeGoal, activeMeeting, blockedLeader, busyChild, freshLeader, freshChild, protectedLeader, protectedChild, sharedDone, sharedParked, race, freshRunOnlyLeader, freshRunOnlyChild, busyRunOnlyLeader, busyRunOnlyChild, goalRunOnlyLeader, goalRunOnlyChild, meetingRunOnlyLeader, meetingRunOnlyChild, runOnlyRoot]) assert.ok(store.get(task.id), `${task.title} preserved`)
+  assert.equal(report.deletedTasks, 9, 'six Issue cards plus three run-only descendants')
+  assert.equal(report.deletedIssues, 7, 'run-only descendants contribute no Issue')
   assert.ok(report.deletedComments > 0 && report.deletedRuns > 0)
   assert.deepEqual(issues.comments(`iss_${expired.id}`), [])
   assert.deepEqual(issues.runs(`iss_${expired.id}`), [])
   issues.sync(store.list())
   assert.equal(issues.get(`iss_${expired.id}`), undefined, 'sync does not resurrect Issue')
   assert.equal(new IssueStore(data).get(`iss_${expired.id}`), undefined, 'deletion is durable')
-  assert.equal(JSON.parse(fs.readFileSync(logFile, 'utf8').trim()).data.deletedTasks, 6, 'event-log audit')
+  assert.equal(new IssueStore(data).get(`iss_${runOnlyLeader.id}`), undefined, 'run-only cascade deletion is durable')
+  assert.equal(JSON.parse(fs.readFileSync(logFile, 'utf8').trim()).data.deletedTasks, 9, 'event-log audit')
   assert.equal((await sweepExpiredIssues(deps)).deletedTasks, 0, 'second sweep idempotent')
+  assert.equal(store.get(runOnlyWorker.id), undefined, 'run-only descendants stay deleted')
   await assert.rejects(() => sweepExpiredIssues(deps, 0), /positive/)
-  console.log('PASS retention: terminal/age/cascade/logs/protection/orphans/race/restart/idempotence')
+  // 近期子孙只是拖住级联，不是永久豁免：等它自己也过期后，父任务连同子孙必须一起被清理。
+  const aged = { ...deps, now: () => now + 60 * DAY }
+  const agedReport = await sweepExpiredIssues(aged)
+  for (const task of [freshRunOnlyLeader, freshRunOnlyChild, recent, freshLeader, freshChild, freshOrphan]) assert.equal(store.get(task.id), undefined, `${task.title} swept once it expired itself`)
+  assert.equal(agedReport.deletedTasks, 6, 'aged sweep: recent + issue-bearing fresh cards + the fresh run-only cascade')
+  assert.equal(agedReport.deletedIssues, 5)
+  for (const task of [orphan, runOnlyRoot, activeGoal, activeMeeting, protectedLeader, protectedChild, goalRunOnlyLeader, goalRunOnlyChild, meetingRunOnlyLeader, meetingRunOnlyChild, blockedLeader, busyChild, busyRunOnlyLeader, busyRunOnlyChild, sharedDone, sharedParked, race]) assert.ok(store.get(task.id), `${task.title} never swept while unreachable, running or protected`)
+  console.log('PASS retention: terminal/age/cascade/logs/protection/orphans/run-only descendants/race/restart/idempotence')
 
   const task = (id, extra = {}) => ({ id, title: id, prompt: id, backend: 'fake', status: 'done', createdAt: now, eventCount: 0, workdir: '', ...extra })
   const issue = (id, taskId) => ({ id, taskId, identifier: id, status: 'done', updatedAt: now, createdBy: 'user' })

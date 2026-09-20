@@ -214,6 +214,143 @@ assert(slowNotes.filter((n) => n === '失败').length === 1, `真实失败恰好
 await wait(500)
 assert(store.get(t5.id).status === 'failed' && (store.get(t5.id).error ?? '').includes('回合超时'), '迟到的启动 reject 未改写终态')
 
+// A failure may already be awaiting provider cleanup when cancellation lets
+// the user resume. Releasing the old cleanup must not fail the replacement.
+for (const mode of ['initial', 'follow-up']) {
+  let releaseStop
+  const stopped = new Promise((resolve) => { releaseStop = resolve })
+  let enteredStop
+  const stopping = new Promise((resolve) => { enteredStop = resolve })
+  const emitters = []
+  const backend = {
+    id: `cleanup-${mode}`, label: 'Cleanup race',
+    async probe() { return { ok: true, detail: '' } },
+    async start({ events }) {
+      const index = emitters.push(events)
+      return {
+        sessionId: `cleanup-${mode}-${index}`,
+        async send() { throw new Error('old turn failed') },
+        async stop() { if (index === 1) { enteredStop(); await stopped } },
+        async close() {}
+      }
+    }
+  }
+  const notes = []
+  const ownedRunner = new TaskRunner(store, new Map([[backend.id, backend]]), () => ({ concurrency: 1, mode: 'yolo', notify: true, maxRetryAttempts: 0 }), undefined, {
+    notify: (_task, what) => notes.push(what)
+  })
+  const task = store.create({ title: `cleanup ${mode}`, prompt: 'cleanup race', workdir: '', backend: backend.id })
+  ownedRunner.enqueue(task)
+  await until(() => store.get(task.id)?.sessionId)
+  let previousTurn
+  if (mode === 'follow-up') {
+    emitters[0].onTurnEnd({ ok: true, response: 'initial success' })
+    await until(() => store.get(task.id)?.status === 'done')
+    previousTurn = ownedRunner.followUp(task.id, 'fail this turn')
+  } else {
+    emitters[0].onTurnEnd({ ok: false, response: '', error: 'old turn failed' })
+  }
+  await stopping
+  assert((await ownedRunner.cancel(task.id)).ok, `${mode}: cancel returns while old failure cleanup is pending`)
+  const accepted = await ownedRunner.followUp(task.id, 'replacement turn', { wait: false })
+  assert(accepted.ok && await until(() => emitters.length === 2 && store.get(task.id)?.sessionId?.endsWith('-2')), `${mode}: replacement session starts`)
+  const newRunId = store.get(task.id).runId
+  releaseStop()
+  if (previousTurn) await previousTurn
+  await wait(30)
+  assert(store.get(task.id).status === 'running' && store.get(task.id).runId === newRunId && !store.get(task.id).error, `${mode}: old failure leaves replacement Run unchanged`)
+  assert(!notes.includes('失败') && !store.readEvents(task.id).some((event) => event.text?.includes('自动重试')), `${mode}: old failure produces no retry or failure notification`)
+  assert(ownedRunner.turnWatchdogs.has(task.id), `${mode}: replacement watchdog remains armed`)
+  emitters[1].onTurnEnd({ ok: true, response: 'replacement success' })
+  await until(() => store.get(task.id)?.status === 'done')
+  assert(store.get(task.id).result === 'replacement success', `${mode}: replacement completes normally`)
+  await ownedRunner.shutdown()
+}
+
+// Old investigation/consultation results can arrive while a replacement Run
+// is itself awaiting orchestration, with no pending provider turn as a guard.
+for (const kind of ['investigate', 'consult']) {
+  const hooks = []
+  const emitters = []
+  const sends = []
+  const backend = {
+    id: `orchestration-${kind}`, label: 'Orchestration race',
+    async probe() { return { ok: true, detail: '' } },
+    async start({ events }) {
+      const index = emitters.push(events)
+      return {
+        sessionId: `orchestration-${kind}-${index}`,
+        async send() { sends.push(index); events.onTurnEnd({ ok: true, response: 'replacement complete' }) },
+        async stop() {}, async close() {}
+      }
+    }
+  }
+  const ownedRunner = new TaskRunner(store, new Map([[backend.id, backend]]), () => ({ concurrency: 1, mode: 'yolo', notify: false }))
+  const handler = () => new Promise((resolve) => hooks.push(resolve))
+  if (kind === 'investigate') ownedRunner.attachInvestigate(handler)
+  else ownedRunner.attachConsult(handler)
+  const task = store.create({ title: kind, prompt: kind, workdir: '', backend: backend.id })
+  ownedRunner.enqueue(task)
+  await until(() => store.get(task.id)?.sessionId)
+  const tag = `<${kind} to="Worker">inspect</${kind}>`
+  emitters[0].onTurnEnd({ ok: true, response: `${tag}\n<${kind} to="Another">also inspect</${kind}>` })
+  assert(await until(() => hooks.length === 1), `${kind}: old Run is waiting for an external result`)
+  await ownedRunner.cancel(task.id)
+  const replacement = ownedRunner.followUp(task.id, 'replacement')
+  await until(() => emitters.length === 2 && store.get(task.id)?.sessionId?.endsWith('-2'))
+  emitters[1].onTurnEnd({ ok: true, response: tag })
+  assert(await until(() => hooks.length === 2), `${kind}: replacement waits for its own result`)
+  const generation = ownedRunner.turnLifecycles.get(task.id).generation
+  const eventCount = store.get(task.id).eventCount
+  hooks[0]('old result')
+  await wait(30)
+  assert(hooks.length === 2 && sends.length === 0, `${kind}: old result neither triggers another hook nor sends to the old session`)
+  assert(ownedRunner.turnLifecycles.get(task.id).generation === generation && store.get(task.id).eventCount === eventCount, `${kind}: replacement generation and transcript stay unchanged`)
+  hooks[1]('new result')
+  assert((await replacement).ok && store.get(task.id).result === 'replacement complete', `${kind}: replacement finishes using its own session`)
+  assert(sends.length === 1 && sends[0] === 2, `${kind}: only the replacement session receives feedback`)
+  await ownedRunner.shutdown()
+}
+
+// A cancelled delegation loop must leave a replacement waiting on a hook
+// alone, even after its original child becomes terminal and polling resumes.
+{
+  const emitters = []
+  let releaseInvestigation
+  const backend = {
+    id: 'delegate-replacement', label: 'Delegate replacement',
+    async probe() { return { ok: true, detail: '' } },
+    async start({ events }) {
+      const index = emitters.push(events)
+      return { sessionId: `delegate-session-${index}`, async send() { events.onTurnEnd({ ok: true, response: 'new leader done' }) }, async stop() {}, async close() {} }
+    }
+  }
+  const ownedRunner = new TaskRunner(store, new Map([[backend.id, backend]]), () => ({ concurrency: 1, workerConcurrency: 1, mode: 'yolo', notify: false }))
+  ownedRunner.attachTeam(() => [
+    { id: 'leader-race', name: 'Leader', backend: backend.id, subordinates: ['worker-race'] },
+    { id: 'worker-race', name: 'Worker', backend: backend.id }
+  ])
+  ownedRunner.attachInvestigate(() => new Promise((resolve) => { releaseInvestigation = resolve }))
+  const task = store.create({ title: 'delegate race', prompt: 'delegate race', workdir: '', backend: backend.id, agentId: 'leader-race' })
+  ownedRunner.enqueue(task)
+  await until(() => store.get(task.id)?.sessionId)
+  emitters[0].onTurnEnd({ ok: true, response: '<delegate to="Worker">wait for cancellation</delegate>' })
+  assert(await until(() => emitters.length === 2), 'delegate: original child has started')
+  await ownedRunner.cancel(task.id)
+  const replacement = ownedRunner.followUp(task.id, 'replacement leader')
+  await until(() => emitters.length === 3 && store.get(task.id)?.sessionId === 'delegate-session-3')
+  emitters[2].onTurnEnd({ ok: true, response: '<investigate to="Worker">replacement investigation</investigate>' })
+  assert(await until(() => releaseInvestigation), 'delegate: replacement is waiting for investigation')
+  const generation = ownedRunner.turnLifecycles.get(task.id).generation
+  const eventCount = store.get(task.id).eventCount
+  await wait(1600)
+  assert(ownedRunner.turnLifecycles.get(task.id).generation === generation && store.get(task.id).eventCount === eventCount, 'delegate: old child polling cannot send feedback or append status to replacement')
+  assert(!store.get(task.id).integration && !store.get(task.id).roundsUsed, 'delegate: old loop cannot publish integration or round counts')
+  releaseInvestigation('replacement facts')
+  assert((await replacement).ok && store.get(task.id).result === 'new leader done', 'delegate: replacement can complete')
+  await ownedRunner.shutdown()
+}
+
 await runner1.shutdown()
 await runner2.shutdown()
 await runner3.shutdown()

@@ -77,6 +77,7 @@ export function MeetingPanel({ issueId, open, onToggle, onMeeting }: {
       setNewMeeting(false)
       await run(() => bridge.meetings.start(meeting.id))
     } catch (error) { ui.toast.error(error instanceof Error ? error.message : '创建会议失败') }
+    finally { setBusy(false) }
   }
   const active = current ?? (newMeeting ? undefined : meetings[0])
 

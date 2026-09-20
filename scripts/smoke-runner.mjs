@@ -34,6 +34,16 @@ await build({
   external: ['electron']
 })
 const { TaskStore } = await import(pathToFileURL(path.join(root, 'out', 'smoke-store.cjs')).href)
+await build({
+  entryPoints: [path.join(root, 'src/main/task-finalizer.ts')],
+  outfile: path.join(root, 'out', 'smoke-task-finalizer.cjs'),
+  bundle: true,
+  platform: 'node',
+  format: 'cjs',
+  target: 'node18',
+  external: ['electron']
+})
+const { TaskFinalizer } = await import(pathToFileURL(path.join(root, 'out', 'smoke-task-finalizer.cjs')).href)
 
 const store = new TaskStore(tmp)
 
@@ -110,6 +120,22 @@ assert(cur.result === 'done:hello', '任务1 result 正确')
 assert(cur.eventCount >= 2, `任务1 事件落盘 (${cur.eventCount})`)
 const evs = store.readEvents(t1.id)
 assert(evs.some((e) => e.kind === 'final' && e.text === 'done:hello'), '事件文件可读回')
+
+// 1a. A delayed git snapshot from an old Run must not finalize a newer Run
+// on the same compatibility Task.
+const staleSnapshotTask = store.create({ title: '旧更新视图', prompt: 'stale snapshot', workdir: '', backend: 'fake' })
+const oldStartedAt = Date.now()
+store.update(staleSnapshotTask.id, { status: 'running', startedAt: oldStartedAt, runId: 'run_old', phaseIndex: 0 })
+let releaseSnapshot
+const snapshotReady = new Promise((resolve) => { releaseSnapshot = resolve })
+const delayedFinalizer = new TaskFinalizer(store, () => {}, async () => snapshotReady)
+const staleFinalize = delayedFinalizer.finalizeDone(staleSnapshotTask.id, 'old result')
+await wait(10)
+store.update(staleSnapshotTask.id, { status: 'running', startedAt: oldStartedAt + 1, runId: 'run_new', phaseIndex: 1 })
+releaseSnapshot({ diff: 'old diff', stat: 'old stat' })
+await staleFinalize
+cur = store.get(staleSnapshotTask.id)
+assert(cur.status === 'running' && cur.runId === 'run_new' && cur.phaseIndex === 1 && !cur.gitDiff && !cur.result, '旧视图回收后不收尾到新 Run')
 
 // 1b. 自动标题：titleAuto 任务首轮完成后由 agent 重起标题（隐藏回合，不进对话流）
 const t1b = store.create({ title: '把这个问题修复一下把这个问题修复一下把这个问题', prompt: '把这个问题修复一下', workdir: '', backend: 'fake', titleAuto: true })

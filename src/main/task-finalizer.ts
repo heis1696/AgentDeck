@@ -20,8 +20,21 @@ export class TaskFinalizer {
       const finals = events.filter((event) => event.kind === 'final')
       result = finals[finals.length - 1]?.text ?? ''
     }
+    const runId = task.runId
+    const phaseIndex = task.phaseIndex
+    const startedAt = task.startedAt
     const { diff, stat } = await this.snapshot(task.workdir)
     const current = this.store.get(taskId)
+    // Snapshotting is asynchronous. A follow-up can start the next Run while
+    // the old Run is waiting for git, so never let the old snapshot finalize it.
+    const sameRun = current
+      && current.runId === runId
+      && current.phaseIndex === phaseIndex
+      && (runId !== undefined || current.startedAt === startedAt)
+    if (!sameRun) {
+      this.pushTask(taskId)
+      return
+    }
     if (!current || !canTransition(current.status, 'done', 'runner')) {
       if (current) this.store.update(taskId, { result, gitDiff: diff || current.gitDiff, gitStat: stat || current.gitStat, usage: aggregateUsage(events) })
       this.pushTask(taskId)
@@ -31,8 +44,8 @@ export class TaskFinalizer {
       status: 'done',
       endedAt: Date.now(),
       result,
-      gitDiff: diff || task.gitDiff,
-      gitStat: stat || task.gitStat,
+      gitDiff: diff || current.gitDiff,
+      gitStat: stat || current.gitStat,
       usage: aggregateUsage(events)
     })
     this.pushTask(taskId)
