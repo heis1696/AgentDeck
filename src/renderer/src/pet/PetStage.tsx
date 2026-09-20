@@ -77,6 +77,7 @@ export function PetStage() {
   const manifestRef = useRef<PetManifest>(builtinManifest)
 
   const [frameSrc, setFrameSrc] = useState('')
+  const [spriteRendering, setSpriteRendering] = useState<'auto' | 'pixelated'>('pixelated')
   const [dragging, setDragging] = useState(false)
   const [bubble, setBubble] = useState<string | null>(null)
   const [chatOpen, setChatOpen] = useState(false)
@@ -107,6 +108,8 @@ export function PetStage() {
   const retuneManifest = useCallback(() => {
     const life = snapshotRef.current?.life
     manifestRef.current = tuneTransitions(assetsRef.current.manifest, { affection: life?.affection ?? 0, mood: life?.mood ?? 50 })
+    // 包级渲染提示：像素风包保持 pixelated，smooth 包交给浏览器高质量缩放
+    setSpriteRendering(manifestRef.current.rendering === 'smooth' ? 'auto' : 'pixelated')
   }, [])
 
   /** 切换素材包：内置包同步装配，用户包异步拉 data URL（期间继续用旧包播放） */
@@ -350,7 +353,7 @@ export function PetStage() {
         onPointerUp={onPointerUp}
         onDoubleClick={onDoubleClick}
       >
-        <img className="pet-sprite-img" src={frameSrc} draggable={false} alt="薄荷团子" />
+        <img className="pet-sprite-img" style={{ imageRendering: spriteRendering }} src={frameSrc} draggable={false} alt="薄荷团子" />
       </div>
       {bubble && !chatOpen && (
         <div className="pet-bubble" style={{ left: sprite.left + bubbleOffset[0], top: sprite.top + bubbleOffset[1] }}>

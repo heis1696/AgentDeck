@@ -231,9 +231,10 @@ console.log('—— comfyui 真通道（WS 被拒 → 退化轮询 /history → 
   ok(hits.filter((h) => h === 'POST /upload/image').length === 1, '首帧垫图上传恰好一次')
   ok(promptBodies.length === 7, `七帧七次 /prompt（got ${promptBodies.length}）`)
   if (promptBodies.length === 7) {
-    const wf0 = JSON.parse(promptBodies[0])
-    const wf1 = JSON.parse(promptBodies[1])
-    const wf6 = JSON.parse(promptBodies[6])
+    ok(typeof promptBodies[0] === 'object' && promptBodies[0] !== null, '/prompt 的 prompt 字段是 workflow 对象（ComfyUI 契约，非字符串）')
+    const wf0 = promptBodies[0]
+    const wf1 = promptBodies[1]
+    const wf6 = promptBodies[6]
     ok(wf0['3'].inputs.ref_image === '' && wf1['3'].inputs.ref_image === 'ref-0.png', '首帧无垫图、次帧起垫图名进 workflow')
     ok(wf0['3'].inputs.seed === 20260919 && wf6['3'].inputs.seed === 20260925, `{{SEED}} 逐帧派生为数值（got ${wf0['3'].inputs.seed}/${wf6['3'].inputs.seed}）`)
     ok(wf6['3'].inputs.width === 512 && wf6['3'].inputs.height === 512, '{{WIDTH}}/{{HEIGHT}}=genSize 512')

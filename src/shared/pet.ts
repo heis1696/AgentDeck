@@ -38,6 +38,8 @@ export interface PetManifest {
   }
   /** 气泡锚点相对精灵左上角的窗口像素偏移（y 负值 = 向上） */
   bubble: { offset: [number, number] }
+  /** 包级渲染提示：smooth = 平滑缩放（高清手绘/AI 帧），缺省 = 像素风 nearest 放大（内置 default） */
+  rendering?: 'pixelated' | 'smooth'
 }
 
 /** 单态定义解析（七态与扩展态同规则）：不合法返回 null */

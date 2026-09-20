@@ -705,7 +705,7 @@ function comfyBackend(config, log) {
     }
     if (refImageName !== null) refImage = refImageName
     const filled = fillWorkflow(config.workflow, { prompt, seed, width: size, height: size, refImage })
-    const res = await postJson(`${base}/prompt`, { prompt: JSON.stringify(filled), client_id: clientId })
+    const res = await postJson(`${base}/prompt`, { prompt: filled, client_id: clientId })
     if (res.status !== 200) throw new Error(`/prompt 失败：HTTP ${res.status} ${res.text.slice(0, 300)}`)
     const { prompt_id: promptId } = JSON.parse(res.text)
     if (!promptId) throw new Error('/prompt 响应缺 prompt_id')

@@ -80,22 +80,24 @@ AgentDeck 内置一只**像素风格桌宠**，常驻在应用窗口之上，把
 
 ### 4.1 目录结构
 
-一个素材包就是**一个文件夹**，放在：
+一个素材包就是**一个文件夹**，放在（userData 即 Electron 的 `app.getPath('userData')`，Windows 下为 `%APPDATA%/agentdeck[-dev]`）：
 
 ```
-src/renderer/src/pet/assets/<packId>/
+<pets>/<packId>/       # 用户包：userData 下的 pets/ 子目录，运行时扫描，即放即用
 ```
+
+内置包（当前只有 `default`）是构建时经 vite 内联进主进程 bundle 的（见 `src/main/pet/packs.ts`），不受运行时扫描影响——想让新包成为"内置"需要改代码并重新构建，普通使用走 userData 即可。
 
 `<packId>` 即文件夹名（同时也是设置面板「素材包」下拉项的取值）。包内至少包含一份 `pet.json`，以及它引用的所有图片帧：
 
 ```
-src/renderer/src/pet/assets/<packId>/
+<pets>/<packId>/
 ├── pet.json          # 行为与素材描述（必需）
 └── idle_0.png        # 图片帧（文件名由 pet.json 的 frames 决定）
 └── ...
 ```
 
-新增一个文件夹并刷新，设置面板里就会出现新的素材包选项。
+在 `pets/` 下新增一个文件夹并重开设置面板（素材包列表随状态快照实时扫描），下拉里就会出现新的选项；坏包会被跳过并在列表中标注。
 
 ### 4.2 `pet.json` 字段说明
 
@@ -153,7 +155,7 @@ src/renderer/src/pet/assets/<packId>/
 
 ### 4.4 换素材：三步
 
-1. 在 `src/renderer/src/pet/assets/` 下新建文件夹，名字就是新的 `<packId>`（如 `pixel-dog`）。
+1. 在 userData 的 `pets/` 下新建文件夹（Windows：`%APPDATA%/agentdeck[-dev]/pets/`），名字就是新的 `<packId>`（如 `pixel-dog`）。
 2. 把图片帧拷进去，按帧写一份 `pet.json`：改 `name`、`frameSize`，并让每个状态的 `frames` 指向真实文件名。**七态建议全部提供**，缺失的状态会退回 `idle`。
 3. 回到设置面板的「桌宠」卡片，在「素材包」里选中它。无需重启。
 
