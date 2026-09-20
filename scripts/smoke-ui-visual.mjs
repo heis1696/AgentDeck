@@ -72,6 +72,17 @@ if (process.argv.includes('--serve')) {
       check(geometry.closeWidth > 0 && geometry.closeLeft >= geometry.stripLeft - 1 && geometry.closeRight <= geometry.stripRight + 1, `${label}: active tab close button is fully visible`, geometry)
       check(geometry.parentTop === parentTop, `${label}: parent task scroll position is preserved`, geometry)
     }
+    const checkDockColumns = async (label) => {
+      const geometry = await page.locator('.detail').evaluate((detail) => {
+        const bounds = detail.getBoundingClientRect()
+        const left = detail.querySelector('.detail-left').getBoundingClientRect()
+        const dock = detail.querySelector('.side-dock').getBoundingClientRect()
+        return { top: bounds.top, bottom: bounds.bottom, right: bounds.right, leftWidth: left.width, leftRight: left.right, dockLeft: dock.left, dockTop: dock.top, dockBottom: dock.bottom, dockRight: dock.right, dockWidth: dock.width, overflow: detail.scrollWidth - detail.clientWidth }
+      })
+      check(Math.abs(geometry.dockTop - geometry.top) < 1 && geometry.dockLeft >= geometry.leftRight - 1, `${label}: dock stays beside the task instead of below it`, geometry)
+      check(geometry.leftWidth >= 339 && geometry.dockWidth >= 279 && geometry.dockRight <= geometry.right + 1 && geometry.overflow <= 1, `${label}: both columns fit without horizontal overflow`, geometry)
+      check(geometry.dockBottom <= geometry.bottom + 1, `${label}: dock remains within the task viewport`, geometry)
+    }
     for (const width of [1440, 980]) {
       await page.setViewportSize({ width, height: width === 1440 ? 900 : 560 })
       for (const theme of ['light', 'dark']) {
@@ -120,6 +131,7 @@ if (process.argv.includes('--serve')) {
         await page.waitForSelector('.side-dock')
         await page.waitForTimeout(100)
         check(await page.locator('.detail').evaluate((el, top) => el.scrollTop === top, scrollBefore), `${width}/${theme}: opening dock preserves task header position`)
+        await checkDockColumns(`${width}/${theme}/open`)
         await page.screenshot({ path: path.join(shots, `${width}-${theme}-dock.png`) })
         await page.locator('.meta-info-btn').click()
         await checkPopover(`${width}/${theme}/with-dock`)
@@ -137,12 +149,23 @@ if (process.argv.includes('--serve')) {
         await page.keyboard.press('End')
         await page.waitForTimeout(100)
         await checkDockRow(`${width}/${theme}/keyboard-last-tab`, parentTop)
-        // After asserting scroll preservation, reveal the stacked Dock for its evidence screenshot.
-        await page.locator('.dock-tabs').scrollIntoViewIfNeeded()
         await page.screenshot({ path: path.join(shots, `${width}-${theme}-many-tabs.png`) })
         await page.locator('.detail').evaluate((el, top) => { el.scrollTop = top }, parentTop)
         await page.evaluate(() => { for (let i = 0; i < 8; i++) window.__visual.ui.dock.close(`overflow-${i}`, { rootId: 'visual-0' }) })
+        await page.locator('.dock-splitter').focus()
+        await page.keyboard.press('Home')
+        await checkDockColumns(`${width}/${theme}/maximum-width`)
+        if (width === 980) {
+          await page.setViewportSize({ width: 967, height: 560 })
+          await page.waitForTimeout(100)
+          await checkDockColumns(`${width}/${theme}/window-frame-inset`)
+          await page.setViewportSize({ width, height: 560 })
+        }
+        await page.keyboard.press('End')
+        await checkDockColumns(`${width}/${theme}/minimum-width`)
+        await page.keyboard.press('Enter')
         await page.evaluate(() => window.__visual.ui.dock.close('preview-file', { rootId: 'visual-0' }))
+        check(await page.locator('.detail-left').evaluate((el) => Math.abs(el.getBoundingClientRect().width - el.closest('.detail').getBoundingClientRect().width) < 1), `${width}/${theme}: closing dock restores the full task width`)
       }
     }
     await page.setViewportSize({ width: 1440, height: 900 })

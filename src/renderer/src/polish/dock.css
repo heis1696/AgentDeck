@@ -4,12 +4,11 @@
    WorkerPane 强制只读（隐藏回退控件），内部时间线独立滚动，不抢主任务滚动容器。 */
 .side-dock {
   display: flex;
-  /* 可收缩（flex-shrink 1）：空间不足时分栏先让宽——CSS 下限 280（页签横向滚动、
-     面板内容竖向滚动仍可用；拖拽下限 320 由 TS 内联宽度保证），剩余空间不足
-     再由 .detail-left 收到 340 下限。内容满宽 967 时 256+340+371 恰好放下（布局修复） */
+  /* Reserve 420px for reading where possible; both columns can shrink to
+     their minimum widths before the below-app-minimum stacking fallback. */
   flex: 0 1 auto;
   min-width: 280px;
-  max-width: 720px;
+  max-width: clamp(280px, calc(100% - 420px), 720px);
   min-height: 0;
   margin-left: auto;
   border-left: 1px solid var(--border);
@@ -132,10 +131,9 @@ html.light .code-token { color: var(--shiki-light); font-style: var(--shiki-ligh
 .worker-pane-error { flex-shrink: 0; max-height: 90px; overflow: auto; padding: 8px 12px; background: var(--status-failed-bg); color: var(--err); font-size: var(--text-caption); overflow-wrap: anywhere; }
 .worker-pane-empty { justify-content: center; padding: 24px; text-align: center; color: var(--text-dim); }
 @container main (max-width: 1100px) { .dock-tab-row { max-width: 150px; } }
-/* 窄视口（低于横排下限 256+340+280=876，如 DevTools 拉窄或未来调低窗口 minWidth）：
-   分栏转为整宽堆叠到主区下方——内联宽度/上限用 !important 压过 TS 的 style width，
-   行内分割线退场，两块各自内部滚动，是明确可用的窄屏布局而非隐藏溢出 */
-@container main (max-width: 880px) {
+/* The main container already excludes navigation. Keep both columns until
+   their own minimum widths (340 + 280) no longer fit, below the app minimum. */
+@container main (max-width: 620px) {
   .detail:has(.side-dock) { flex-direction: column; overflow-y: auto; }
   .detail:has(.side-dock) .detail-left { flex: 0 0 auto; min-width: 0; min-height: 0; }
   .detail:has(.side-dock) .detail-columns { flex: 0 0 320px; height: 320px; }

@@ -198,8 +198,8 @@ body {
 /* ---------- 详情 ---------- */
 /* 行布局：左列（头+主体）+ 右侧 SideDock 分栏（常规布局列，与主内容共分宽度，v3）
    两列都可收缩：分栏先让宽（CSS 下限 280，见 dock.css），主区 340 下限兜底；
-   内容满宽 967（窗口 minWidth 980 扣边框）时 256+340+371 恰好放下不溢出，
-   更窄走 dock.css 的 ≤880px 堆叠布局（反馈三轮1 + 布局修复） */
+   空间足够时为主区保留 420px，避免窄窗下输入区过度压缩；
+   仅内容区不足 620px 时走 dock.css 的堆叠布局，容器断点不重复计入导航宽度。 */
 .detail { flex: 1; display: flex; flex-direction: row; min-height: 0; min-width: 0; }
 .detail-left { flex: 1; min-width: 340px; display: flex; flex-direction: column; min-height: 0; }
 .detail-header {

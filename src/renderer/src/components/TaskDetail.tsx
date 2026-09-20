@@ -602,6 +602,6 @@ function placeInfoPopover(anchor: HTMLElement, pop: HTMLElement) {
   const originTop = boxRect.top + (parseFloat(boxStyle?.borderTopWidth ?? '') || 0)
   pop.style.maxHeight = maxHeight
   pop.style.right = 'auto'
-  pop.style.left = `${Math.round(left - originLeft)}px`
-  pop.style.top = `${Math.round(top - originTop)}px`
+  pop.style.left = `${left - originLeft}px`
+  pop.style.top = `${top - originTop}px`
 }

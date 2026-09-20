@@ -278,3 +278,16 @@ detail surfaces have already been applied before delegation.
 - `graph:deps` succeeds at 185 modules on the combined working tree. Generated
   graph files also contain the independent persistence-audit WIP, so they remain
   unstaged with that work. Source commits include only this feedback task.
+
+## Narrow Dock Follow-up
+
+- The previous 880px main-container breakpoint counted navigation twice and
+  stacked the Dock below the task at the application's 980px minimum width.
+  The threshold now uses only the two content columns (340 + 280 = 620px).
+- Dock width reserves 420px for the primary reading area when space permits.
+  Opening, closing, resizing and overflowing tabs keep a horizontal layout at
+  980x560 and at 967px content width accounting for native window borders.
+- Kept subpixel offsets when positioning task-information popovers, so narrow
+  columns retain their exact edge inset. Focus smoke and the browser suite pass:
+  329 checks, 28 cases, no renderer errors. Screenshot evidence is in the local
+  ignored `gui-test-screenshots/narrow-side-dock/` directory.
