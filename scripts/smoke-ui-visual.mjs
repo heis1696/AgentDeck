@@ -304,6 +304,83 @@ if (process.argv.includes('--serve')) {
       }
     }
     await page.evaluate(() => {
+      const { mock, ui } = window.__visual
+      const start = Date.now() - 120000
+      window.__workerStart = start
+      window.agentdeck.goals.list = async () => []
+      window.agentdeck.meetings.list = async () => []
+      for (let i = 0; i < 7; i++) {
+        const task = mock.seedTask({ id: `feedback-worker-${i}`, title: `队员 ${i + 1}：检查多回合任务在窄窗口下的结果和状态展示`, prompt: `worker-${i}`, status: 'done' })
+        Object.assign(task, { parentTaskId: 'visual-0', workerIndex: i + 1, createdAt: i === 6 ? start - 1000 : start + (i < 2 ? 5000 + i * 1000 : 65000 + i * 1000), result: `Worker result ${i + 1}` })
+        mock.fireTaskUpdated(task.id)
+      }
+      ui.setTasks(mock.store.tasks)
+      window.agentdeck.tasks.events = async (id) => id === 'visual-0' ? [
+        { seq: 1, ts: start, kind: 'user', text: 'First round prompt' },
+        { seq: 2, ts: start + 10000, kind: 'final', text: 'First round result' },
+        { seq: 3, ts: start + 60000, kind: 'user', text: 'Second round prompt' },
+        { seq: 4, ts: start + 90000, kind: 'text', text: 'Second round progress' }
+      ] : [{ seq: 1, ts: start + 90000, kind: 'final', text: mock.store.tasks.find((task) => task.id === id)?.result ?? 'Worker output' }]
+    })
+    for (const width of [1440, 980]) {
+      await page.setViewportSize({ width, height: width === 1440 ? 900 : 560 })
+      for (const theme of ['light', 'dark']) {
+        await page.evaluate(async (theme) => {
+          await window.agentdeck.settings.set({ theme })
+          const { mock, ui } = window.__visual
+          mock.store.tasks.find((task) => task.id === 'visual-0').status = 'running'
+          for (let i = 0; i < 7; i++) {
+            const task = mock.store.tasks.find((item) => item.id === `feedback-worker-${i}`)
+            task.status = ['done', 'failed', 'running', 'queued', 'queued', 'done', 'done'][i]
+            task.parked = i === 4
+            mock.fireTaskUpdated(task.id)
+          }
+          mock.fireTaskUpdated('visual-0')
+          ui.navigate('board')
+        }, theme)
+        await page.locator('.board-page').waitFor()
+        await page.evaluate(() => window.__visual.ui.openTask('visual-0'))
+        await page.locator('.worker-overview-trigger').waitFor()
+        check(await page.locator('#detail-tab-log').getAttribute('aria-selected') === 'true', `${width}/${theme}: execution records are the default detail view`)
+        check(await page.locator('.detail-main .tab-primary').count() === 2 && await page.locator('.detail-main .tab-secondary').count() === 2, `${width}/${theme}: history and result use compact secondary view controls`)
+        const readingBox = () => page.locator('.detail-main').evaluate((element) => { const r = element.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height } })
+        const beforeWorkers = await readingBox()
+        await page.locator('.worker-overview-trigger').click()
+        await page.locator('.worker-overview').waitFor()
+        const afterWorkers = await readingBox()
+        check(Object.keys(beforeWorkers).every((key) => Math.abs(beforeWorkers[key] - afterWorkers[key]) <= 1), `${width}/${theme}: worker window does not resize or move the reading area`, { beforeWorkers, afterWorkers })
+        check(await popupFits('.float-window'), `${width}/${theme}: worker overview fits the viewport`)
+        const roundNames = await page.locator('.worker-round-head > strong').allTextContents()
+        check(roundNames.includes('回合 1') && roundNames.includes('回合 2') && roundNames.includes('未分类记录'), `${width}/${theme}: workers retain distinct turn and unknown groups`, roundNames)
+        await page.screenshot({ path: path.join(shots, `${width}-${theme}-worker-rounds.png`) })
+        await page.evaluate(() => {
+          const { mock } = window.__visual
+          for (const task of mock.store.tasks.filter((task) => task.parentTaskId === 'visual-0')) { task.status = 'done'; task.parked = false; mock.fireTaskUpdated(task.id) }
+        })
+        await page.waitForFunction(() => document.querySelectorAll('.worker-round-active [data-worker-id]').length === 0)
+        check(await page.locator('.worker-round-ended [data-worker-id^="feedback-worker-"]').count() === 7, `${width}/${theme}: the final finishing worker also moves into its ended group`)
+        check(await page.locator('.detail-main .workers-pane').count() === 0, `${width}/${theme}: no inline worker list consumes content space`)
+        await page.screenshot({ path: path.join(shots, `${width}-${theme}-workers-ended.png`) })
+        await page.locator('[data-worker-id="feedback-worker-5"]').click()
+        await page.locator('.worker-pane').waitFor()
+        check(await page.locator('.worker-pane').textContent().then((text) => text.includes('Worker result 6')), `${width}/${theme}: selecting a worker reaches its output`)
+        check(await page.locator('.worker-overview').count() === 0, `${width}/${theme}: selecting output dismisses the overview`)
+        await page.evaluate(() => {
+          const { mock, ui } = window.__visual
+          ui.dock.close('task:feedback-worker-5', { rootId: 'visual-0' })
+          const task = mock.store.tasks.find((task) => task.id === 'visual-0')
+          delete task.gitDiff; delete task.gitStat
+          mock.fireTaskUpdated(task.id)
+        })
+        await page.locator('#detail-tab-git').click()
+        check(await page.locator('.git-pane').getAttribute('data-snapshot-state') === 'executing', `${width}/${theme}: Git remains accessible before snapshot collection`)
+        await page.evaluate(() => { const { mock } = window.__visual; mock.store.tasks.find((task) => task.id === 'visual-0').status = 'done'; mock.fireTaskUpdated('visual-0') })
+        await page.waitForSelector('.git-pane[data-snapshot-state=unavailable]')
+        check(await page.locator('#detail-tab-git').isEnabled(), `${width}/${theme}: completed tasks without snapshots keep Git access`)
+        await page.screenshot({ path: path.join(shots, `${width}-${theme}-git-unavailable.png`) })
+      }
+    }
+    await page.evaluate(() => {
       const now = Date.now()
       window.agentdeck.tasks.events = async () => [
         { seq: 1, ts: now, kind: 'user', text: 'Long-response scroll regression' },

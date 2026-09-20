@@ -237,8 +237,8 @@ export function UpdatePanel() {
         {state?.progress && state.progress.totalBytes > 0 && (
           <div className="field">
             <span>下载进度（{fmtBytes(state.progress.receivedBytes)} / {fmtBytes(state.progress.totalBytes)} · {percent}%）</span>
-            <div style={{ height: 6, borderRadius: 3, background: 'var(--bg-inset)', overflow: 'hidden' }}>
-              <div style={{ height: '100%', width: `${percent}%`, background: 'var(--accent)', transition: 'width var(--duration-base)' }} />
+            <div className="progress-track" role="progressbar" aria-label="下载进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}>
+              <div className="progress-fill" style={{ width: `${percent}%` }} />
             </div>
           </div>
         )}

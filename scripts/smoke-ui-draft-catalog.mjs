@@ -41,6 +41,10 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true
 window.matchMedia = (query) => ({ matches: false, media: query, onchange: null, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}, dispatchEvent() { return false } })
 // jsdom 没有排版：浮层首焦点可见性判据打桩为「有一个矩形」
 window.Element.prototype.getClientRects = function () { return [{ x: 0, y: 0, width: 120, height: 20, top: 0, left: 0, right: 120, bottom: 20 }] }
+// The default execution view uses ResizeObserver; jsdom does not implement it.
+class ResizeObserverStub { observe() {} unobserve() {} disconnect() {} }
+window.ResizeObserver = ResizeObserverStub
+globalThis.ResizeObserver = ResizeObserverStub
 
 /* ----------------------------------------------------------------- 打包夹具 */
 

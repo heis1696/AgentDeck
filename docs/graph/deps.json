@@ -5147,6 +5147,7 @@
         "src/renderer/src/components/meeting/MeetingCard.tsx",
         "src/renderer/src/components/meeting/MeetingPanel.tsx",
         "src/renderer/src/components/task/ActivityTimeline.tsx",
+        "src/renderer/src/components/task/WorkerOverview.tsx",
         "src/renderer/src/components/UsageView.tsx",
         "src/renderer/src/components/WorkspaceView.tsx",
         "src/renderer/src/pet/PetSettingsPage.tsx",
@@ -5391,12 +5392,12 @@
         "src/renderer/src/components/UpdatePanel.tsx",
         "src/renderer/src/components/TabBar.tsx",
         "src/renderer/src/components/TaskDetail.tsx",
+        "src/renderer/src/ui/FloatWindow.tsx",
         "src/renderer/src/ui/SideDock.tsx",
         "src/renderer/src/components/task/TurnTimeline.tsx",
         "src/renderer/src/hooks/useInteraction.ts",
         "src/renderer/src/ui/CodeViewer.tsx",
         "src/renderer/src/components/goal/GoalPanel.tsx",
-        "src/renderer/src/ui/FloatWindow.tsx",
         "src/renderer/src/components/goal/GoalCreateDialog.tsx",
         "src/renderer/src/components/meeting/MeetingCard.tsx",
         "src/renderer/src/components/meeting/MeetingPanel.tsx",
@@ -5806,7 +5807,8 @@
         "src/renderer/src/components/TaskDetail.tsx",
         "src/renderer/src/components/task/WorkerPane.tsx",
         "src/renderer/src/components/task/TurnTimeline.tsx",
-        "src/renderer/src/components/goal/GoalPanel.tsx"
+        "src/renderer/src/components/goal/GoalPanel.tsx",
+        "src/renderer/src/components/task/WorkerOverview.tsx"
       ],
       "orphan": false,
       "valid": true
@@ -6536,6 +6538,23 @@
           "valid": true
         },
         {
+          "module": "../ui/FloatWindow",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/FloatWindow.tsx",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "../ui/interaction-center",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -6789,6 +6808,40 @@
           "matchesDoNotFollow": false,
           "circular": false,
           "valid": true
+        },
+        {
+          "module": "./task/WorkerOverview",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/components/task/WorkerOverview.tsx",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "./task/workerRounds",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/components/task/workerRounds.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
         }
       ],
       "dependents": [
@@ -7001,6 +7054,52 @@
       ],
       "dependents": [
         "src/renderer/src/hooks/useTaskEvents.ts"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
+      "source": "src/renderer/src/ui/FloatWindow.tsx",
+      "dependencies": [
+        {
+          "module": "../hooks/useInteractionLayer",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/hooks/useInteractionLayer.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "./interaction-center",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/ui/interaction-center.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
+      "dependents": [
+        "src/renderer/src/components/TaskDetail.tsx",
+        "src/renderer/src/components/goal/GoalPanel.tsx",
+        "src/renderer/src/components/meeting/MeetingPanel.tsx"
       ],
       "orphan": false,
       "valid": true
@@ -7546,51 +7645,6 @@
       "valid": true
     },
     {
-      "source": "src/renderer/src/ui/FloatWindow.tsx",
-      "dependencies": [
-        {
-          "module": "../hooks/useInteractionLayer",
-          "moduleSystem": "es6",
-          "dynamic": false,
-          "exoticallyRequired": false,
-          "dependencyTypes": [
-            "local",
-            "import"
-          ],
-          "resolved": "src/renderer/src/hooks/useInteractionLayer.ts",
-          "coreModule": false,
-          "followable": true,
-          "couldNotResolve": false,
-          "matchesDoNotFollow": false,
-          "circular": false,
-          "valid": true
-        },
-        {
-          "module": "./interaction-center",
-          "moduleSystem": "es6",
-          "dynamic": false,
-          "exoticallyRequired": false,
-          "dependencyTypes": [
-            "local",
-            "import"
-          ],
-          "resolved": "src/renderer/src/ui/interaction-center.ts",
-          "coreModule": false,
-          "followable": true,
-          "couldNotResolve": false,
-          "matchesDoNotFollow": false,
-          "circular": false,
-          "valid": true
-        }
-      ],
-      "dependents": [
-        "src/renderer/src/components/goal/GoalPanel.tsx",
-        "src/renderer/src/components/meeting/MeetingPanel.tsx"
-      ],
-      "orphan": false,
-      "valid": true
-    },
-    {
       "source": "src/renderer/src/components/goal/GoalCreateDialog.tsx",
       "dependencies": [
         {
@@ -7995,6 +8049,59 @@
     },
     {
       "source": "src/renderer/src/components/task/SkillMenu.tsx",
+      "dependencies": [],
+      "dependents": [
+        "src/renderer/src/components/TaskDetail.tsx"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
+      "source": "src/renderer/src/components/task/WorkerOverview.tsx",
+      "dependencies": [
+        {
+          "module": "../../api",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/api.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "../../labels",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/labels.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
+      "dependents": [
+        "src/renderer/src/components/TaskDetail.tsx"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
+      "source": "src/renderer/src/components/task/workerRounds.ts",
       "dependencies": [],
       "dependents": [
         "src/renderer/src/components/TaskDetail.tsx"
@@ -9011,8 +9118,8 @@
     "info": 0,
     "ignore": 0,
     "advisedExitCode": 0,
-    "totalCruised": 181,
-    "totalDependenciesCruised": 408,
+    "totalCruised": 183,
+    "totalDependenciesCruised": 413,
     "optionsUsed": {
       "baseDir": "C:\\Projects\\AgentDeck",
       "combinedDependencies": false,

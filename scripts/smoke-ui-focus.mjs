@@ -546,7 +546,7 @@ section('IME：真实组合事件下 Palette / Menu / 重命名 / 追问技能�
 
 /* ------------------------------------------- 9. 审查项 1：跨任务校正不可用页签 */
 
-section('审查项 1：跨任务校正不可用页签（Git 页签随任务消失 + 焦点接回）')
+section('Git access and focus persist when switching to a task without a snapshot')
 {
   const withGit = makeTask({ id: 'with-git', title: '有改动', status: 'done', gitStat: 'src/app.ts | 3 +++', gitDiff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,1 +1,2 @@\n ctx\n+added' })
   const noGit = makeTask({ id: 'no-git', title: '无改动', status: 'done' })
@@ -560,10 +560,10 @@ section('审查项 1：跨任务校正不可用页签（Git 页签随任务消�
   ok(tab('git').getAttribute('aria-selected') === 'true' && panel().getAttribute('aria-labelledby') === 'detail-tab-git', '切到 Git 页签（面板指向它）')
 
   await rerender(createElement(TaskDetail, { task: noGit, tasks: [withGit, noGit], onSelect: () => {} }))
-  ok(tab('git').disabled, '切到无改动任务：Git 页签变为不可用')
-  ok(tab('activity').getAttribute('aria-selected') === 'true' && panel().getAttribute('aria-labelledby') === 'detail-tab-activity', '停在不可用页签的视图被校正回首个可用页签（不再空白面板 + 无 active 页签）')
-  ok(tab('git').getAttribute('aria-selected') === 'false' && tab('git').tabIndex === -1, '不可用页签退出选中态与 Tab 序列')
-  ok(active() === tab('activity'), `焦点跟着校正后的页签走，没掉给 body（实测 ${nameOf(active())}）`)
+  ok(!tab('git').disabled, 'Git remains available without a stored snapshot')
+  ok(tab('git').getAttribute('aria-selected') === 'true' && panel().getAttribute('aria-labelledby') === 'detail-tab-git', 'Switching tasks keeps the selected Git view')
+  ok(tab('git').tabIndex === 0 && active() === tab('git'), 'The selected Git tab retains keyboard focus')
+  ok(panel().querySelector('[data-snapshot-state="unavailable"]'), 'Missing snapshots render an explicit unavailable state')
   await unmount()
 }
 

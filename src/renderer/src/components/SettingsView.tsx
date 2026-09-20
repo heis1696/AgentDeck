@@ -1,8 +1,8 @@
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import type { AppSettings } from '../../../shared/types'
 import { bridge, usePetState, useSettings } from '../api'
-import { LoaderCircle, RefreshCw, Settings } from 'lucide-react'
-import { Menu } from '../ui/Menu'
+import { FolderCog, FolderOpen, LoaderCircle, PlugZap, RefreshCw, Save, Settings, Settings2 } from 'lucide-react'
+import { Menu, type MenuItem } from '../ui/Menu'
 import { PageHeader } from '../ui/PageHeader'
 import { EmptyState } from '../ui/EmptyState'
 import { RuntimeView } from './RuntimeView'
@@ -10,6 +10,80 @@ import { UpdatePanel } from './UpdatePanel'
 import { ui, isComposingKey } from '../ui/interaction-center'
 
 const describe = (cause: unknown): string => (cause instanceof Error ? cause.message : String(cause))
+
+/**
+ * 下拉字段：标签与自定义按钮之间用显式关联（aria-labelledby），**不再用 <label> 包裹**。
+ *
+ * <label> 的激活行为会转发给内部第一个可标记元素（按钮也是），于是标签区——
+ * 包括按钮上方那段留白——全部变成按钮的命中区：视觉边界 36px，实际可点 60px+。
+ * 这里把标签降级为普通文本并显式关联，保证「可见边界 = 命中区」。
+ */
+function MenuField({ label, value, items, onChange, hint }: {
+  label: string
+  value: string
+  items: MenuItem[]
+  onChange: (value: string) => void
+  hint?: ReactNode
+}) {
+  const labelId = useId()
+  const valueId = useId()
+  const current = items.find((item) => item.value === value)
+  return (
+    <div className="field">
+      <span className="field-label" id={labelId}>{label}</span>
+      <Menu
+        items={items}
+        value={value}
+        onChange={onChange}
+        trigger={(cur, open) => (
+          <button
+            className="btn menu-trigger"
+            type="button"
+            aria-labelledby={`${labelId} ${valueId}`}
+            aria-haspopup="listbox"
+            aria-expanded={open}
+          >
+            <span className="menu-trigger-value" id={valueId}>{cur?.label ?? current?.label ?? value}</span>
+            <span className="menu-caret" aria-hidden="true">{open ? '▴' : '▾'}</span>
+          </button>
+        )}
+      />
+      {hint}
+    </div>
+  )
+}
+
+/** 滑杆字段：普通 label 只负责把焦点交给滑杆，点击标签不得改动当前值 */
+function RangeField({ label, value, min, max, hint, onChange }: {
+  label: string
+  value: number
+  min: number
+  max: number
+  hint?: string
+  onChange: (value: number) => void
+}) {
+  const id = useId()
+  return (
+    <div className="field">
+      <div className="field-label-row">
+        <label className="field-label" htmlFor={id}>{label}</label>
+        <span className="field-value mono" data-range-value>{value}</span>
+      </div>
+      <input
+        id={id}
+        type="range"
+        min={min}
+        max={max}
+        step={1}
+        value={value}
+        aria-valuetext={`${value}（范围 ${min} 到 ${max}）`}
+        onChange={(e) => onChange(Number(e.target.value))}
+      />
+      <div className="field-scale" aria-hidden="true"><span>{min}</span><span>{max}</span></div>
+      {hint && <span className="hint">{hint}</span>}
+    </div>
+  )
+}
 
 /** 设置分区（侧栏导航用）；队伍已提级为顶级 Agent tab，运行时页并入设置 */
 type Section = 'general' | 'runtime' | 'advanced' | 'storage' | 'updates'
@@ -81,57 +155,41 @@ function GeneralSection() {
     <div className="settings-stack">
       <section className="settings-card">
         <h3>外观</h3>
-        <label className="field">
-          <span>主题</span>
-          <Menu
-            items={[
-              { value: 'dark', label: '深色' },
-              { value: 'light', label: '浅色' },
-              { value: 'system', label: '跟随系统' }
-            ]}
-            value={settings.theme ?? 'light'}
-            onChange={(v) => save({ theme: v as AppSettings['theme'] })}
-            trigger={(cur, open) => (
-              <button className="btn menu-trigger" type="button">
-                {cur?.label ?? '深色'} <span className="menu-caret">{open ? '▴' : '▾'}</span>
-              </button>
-            )}
-          />
-        </label>
+        <MenuField
+          label="主题"
+          value={settings.theme ?? 'light'}
+          items={[
+            { value: 'dark', label: '深色' },
+            { value: 'light', label: '浅色' },
+            { value: 'system', label: '跟随系统' }
+          ]}
+          onChange={(v) => save({ theme: v as AppSettings['theme'] })}
+        />
       </section>
 
       <section className="settings-card">
         <h3>执行</h3>
-        <label className="field">
-          <span>并发任务数：{settings.concurrency}</span>
-          <input
-            type="range"
-            min={1}
-            max={4}
-            value={settings.concurrency}
-            onChange={(e) => save({ concurrency: Number(e.target.value) })}
-          />
-        </label>
-        <label className="field">
-          <span>权限模式</span>
-          <Menu
-            items={[
-              { value: 'yolo', label: 'yolo', hint: '全自动，推荐' },
-              { value: 'build', label: 'build', hint: '构建类操作自动放行' },
-              { value: 'edit', label: 'edit', hint: '编辑需确认*' },
-              { value: 'plan', label: 'plan', hint: '只读规划*' }
-            ]}
-            value={settings.mode}
-            onChange={(v) => save({ mode: v as AppSettings['mode'] })}
-            trigger={(cur, open) => (
-              <button className="btn menu-trigger" type="button">
-                {cur?.label ?? settings.mode} <span className="menu-caret">{open ? '▴' : '▾'}</span>
-              </button>
-            )}
-          />
-          <span className="hint">* 当前版本确认请求也会自动放行，交互式确认在路线图上</span>
-        </label>
-        <label className="field row-field">
+        <RangeField
+          label="并发任务数"
+          min={1}
+          max={4}
+          value={settings.concurrency}
+          hint="同时执行的任务数量；调大更吃本机资源。"
+          onChange={(v) => save({ concurrency: v })}
+        />
+        <MenuField
+          label="权限模式"
+          value={settings.mode}
+          items={[
+            { value: 'yolo', label: 'yolo', hint: '全自动，推荐' },
+            { value: 'build', label: 'build', hint: '构建类操作自动放行' },
+            { value: 'edit', label: 'edit', hint: '编辑需确认*' },
+            { value: 'plan', label: 'plan', hint: '只读规划*' }
+          ]}
+          onChange={(v) => save({ mode: v as AppSettings['mode'] })}
+          hint={<span className="hint">* 当前版本确认请求也会自动放行，交互式确认在路线图上</span>}
+        />
+        <label className="field row-field toggle-field">
           <input type="checkbox" checked={settings.notifyOnDone} onChange={(e) => save({ notifyOnDone: e.target.checked })} />
           <span>任务完成/失败时弹系统通知</span>
         </label>
@@ -424,10 +482,10 @@ function RuntimeSection() {
         </label>
         <div className="row">
           <button className="btn primary" type="button" onClick={() => void savePaths(draftPaths)} disabled={!dirty || saving}>
-            {saving ? '保存中…' : '保存路径'}
+            <Save size={14} /> {saving ? '保存中…' : '保存路径'}
           </button>
           <button className="btn" type="button" onClick={() => void doProbe()} disabled={probing || saving}>
-            {probing ? '检测中…' : '检测路径可用性'}
+            <PlugZap size={14} /> {probing ? '检测中…' : '检测路径可用性'}
           </button>
           {saving && <span className="hint">正在保存路径…</span>}
           {!saving && dirty && <span className="hint" data-paths-dirty>有未保存的修改；点「检测路径可用性」会先保存再探测。</span>}
@@ -500,8 +558,8 @@ function StorageSection() {
         <div className="mono storage-path">{sharedRoot || '…'}</div>
         {sharedError && <p className="probe-fail" role="alert">读取共享目录失败：{sharedError}</p>}
         <div className="row">
-          <button className="btn" onClick={() => void changeSharedDir()}>更改…</button>
-          <button className="btn" onClick={openSharedDir}>打开目录</button>
+          <button className="btn" type="button" onClick={() => void changeSharedDir()}><FolderCog size={14} /> 更改…</button>
+          <button className="btn" type="button" onClick={openSharedDir}><FolderOpen size={14} /> 打开目录</button>
         </div>
       </section>
       <section className="settings-card">
@@ -526,12 +584,12 @@ function PetCard() {
   return (
     <section className="settings-card">
       <h3>小助理</h3>
-      <label className="field row-field">
+      <label className="field row-field toggle-field">
         <input type="checkbox" checked={state.enabled} onChange={(e) => setEnabled(e.target.checked)} />
         <span>启用小助理（透明置顶小窗，可拖拽、可聊天）</span>
       </label>
-      <div className="row" style={{ gap: 6 }}>
-        <button className="btn" type="button" onClick={() => { bridge.pet.openSettingsWindow().catch((cause) => ui.toast.error(`打开小助理设置失败：${describe(cause)}`)) }}>打开小助理设置…</button>
+      <div className="row">
+        <button className="btn" type="button" onClick={() => { bridge.pet.openSettingsWindow().catch((cause) => ui.toast.error(`打开小助理设置失败：${describe(cause)}`)) }}><Settings2 size={14} /> 打开小助理设置…</button>
         <span className="hint">素材包、人设、模型与生成素材包都在小助理设置窗里</span>
       </div>
     </section>

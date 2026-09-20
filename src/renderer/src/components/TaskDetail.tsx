@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
-  ChevronDown, Copy, FolderOpen, Info, ListChecks,
+  ChevronDown, Copy, FileText, FolderOpen, History, Info, ListChecks,
   Pencil, Play, RefreshCw, Square, Trash2, Users, Waypoints
 } from 'lucide-react'
 import { bridge, fmtDuration, fmtTime, fmtTokens } from '../api'
@@ -24,6 +24,9 @@ import { scrollElementTo } from '../ui/motion'
 import { useInteractionLayer } from '../hooks/useInteractionLayer'
 import { ActivityTimeline } from './task/ActivityTimeline'
 import { GitSummary } from './task/GitSummary'
+import { WorkerOverview } from './task/WorkerOverview'
+import { buildWorkerRounds } from './task/workerRounds'
+import { FloatWindow } from '../ui/FloatWindow'
 import { GoalPanel } from './goal/GoalPanel'
 import { MeetingPanel } from './meeting/MeetingPanel'
 import { MEETING_STATUS_LABEL } from './meeting/MeetingCard'
@@ -33,10 +36,10 @@ import type { SkillMeta } from '../../../shared/skills'
 
 type Tab = 'activity' | 'log' | 'result' | 'git'
 const TAB_ITEMS: ReadonlyArray<{ key: Tab; label: string; hint: string }> = [
-  { key: 'activity', label: '动态', hint: 'Run 报告与 Agent 通知' },
   { key: 'log', label: '执行记录', hint: '回合对话与工具调用（←/→ 切换）' },
-  { key: 'result', label: '结果', hint: '最终结果 Markdown' },
-  { key: 'git', label: 'Git 改动', hint: 'git stat 与统一 diff' }
+  { key: 'git', label: 'Git 改动', hint: 'git stat 与统一 diff' },
+  { key: 'activity', label: '动态', hint: 'Run 报告与 Agent 通知' },
+  { key: 'result', label: '结果', hint: '最终结果 Markdown' }
 ]
 const WORKFLOW_OPTIONS: Array<{ value: IssueStatus; label: string }> = [
   { value: 'backlog', label: '待梳理' }, { value: 'todo', label: '待办' }, { value: 'in_progress', label: '进行中' },
@@ -50,7 +53,7 @@ const WORKFLOW_OPTIONS: Array<{ value: IssueStatus; label: string }> = [
  * 与底部追问区。所有状态机、桥调用与交互中心契约保持不变：动作仍走 taskService/ui。
  */
 export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[]; onSelect: (id: string) => void }) {
-  const [tab, setTab] = useState<Tab>('activity')
+  const [tab, setTab] = useState<Tab>('log')
   // 追问草稿与 busy 按任务分槽（会话内保留，不做持久化）：切任务立即换成新任务自己的值，
   // A→B→A 取回 A 的草稿；写入带任务归属，迟到的响应不会改到新任务的界面上。
   const [followUp, setFollowUp] = useTaskDraftField(task.id, 'prompt')
@@ -63,7 +66,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   const [infoOpen, setInfoOpen] = useTaskScopedState(task.id, false)
   // 目标/会议浮窗：同一时刻至多开一个；goal/meeting 数据由面板上报（驱动 header 状态芯片）。
   // 芯片数据也按任务分槽：面板是**异步**上报的，只用 effect 清会先画出上一个任务的芯片。
-  const [float, setFloat] = useTaskScopedState<'goal' | 'meeting' | null>(task.id, null)
+  const [float, setFloat] = useTaskScopedState<'goal' | 'meeting' | 'workers' | null>(task.id, null)
   const [goal, setGoal] = useTaskScopedState<Goal | null>(task.id, null)
   const [meeting, setMeeting] = useTaskScopedState<Meeting | null>(task.id, null)
   const logRef = useRef<HTMLDivElement>(null)
@@ -103,11 +106,10 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   }, [skillMenuOpen])
   const issueId = task.issueId ?? `iss_${task.id}`
   const { issue, comments, runs, loading: issueLoading, error: issueError, refreshIssue, updateWorkflow } = useIssueDetails(issueId, `${task.status}:${task.result ?? ''}:${task.eventCount}`)
-  const workers = tasks.filter((item) => item.parentTaskId === task.id).sort((a, b) => (a.workerIndex ?? 0) - (b.workerIndex ?? 0))
+  const workers = useMemo(() => tasks.filter((item) => item.parentTaskId === task.id), [tasks, task.id])
   const activeWorkers = workers.filter((item) => item.status === 'running' || item.status === 'queued')
-  const idleWorkers = workers.filter((item) => item.status !== 'running' && item.status !== 'queued')
-  const visibleWorkers = activeWorkers.length ? activeWorkers : idleWorkers.slice(0, 3)
-  const hiddenWorkers = activeWorkers.length ? idleWorkers : idleWorkers.slice(3)
+  const hasRunningWorkers = workers.some((item) => item.status === 'running')
+  const workerRounds = useMemo(() => buildWorkerRounds(workers, turns, events), [workers, turns, events])
   const workerStateSummary = [
     [workers.filter((worker) => worker.status === 'running').length, '执行中'],
     [workers.filter((worker) => worker.status === 'queued' && !worker.parked).length, '排队'],
@@ -127,7 +129,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   const agentCommentCount = comments.filter((comment) => comment.author.type === 'agent').length
   const gitFileCount = (task.gitStat ?? '').split('\n').filter((line) => line.includes('|')).length
   const tabCount = (key: Tab): number | null => key === 'activity' ? runs.length + agentCommentCount : key === 'log' ? turns.length : key === 'git' ? gitFileCount : null
-  const enabledTabs = TAB_ITEMS.filter((item) => item.key !== 'git' || !!task.gitDiff || !!task.gitStat).map((item) => item.key)
+  const enabledTabs = TAB_ITEMS.map((item) => item.key)
   const canDelete = task.status !== 'running' && task.status !== 'queued'
   const workdir = task.workdir
 
@@ -136,10 +138,10 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   }, [task.id, followUp])
 
   useEffect(() => {
-    if (!turnActive) return
+    if (!turnActive && !hasRunningWorkers) return
     const timer = window.setInterval(() => setNow(Date.now()), 1000)
     return () => window.clearInterval(timer)
-  }, [task.id, turnActive])
+  }, [task.id, turnActive, hasRunningWorkers])
 
   // 跨任务隔离收尾：切任务即作废重命名会话令牌（ref 表达不了「按任务作用域」，故在此显式清），
   // 并把贴底跟随复位到新任务的末尾。其余瞬态会话（ℹ 弹层、命令菜单、目标/会议浮窗与芯片、
@@ -174,26 +176,6 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
       window.removeEventListener('scroll', place, true)
     }
   }, [infoOpen])
-
-  // 跨任务校正不可用页签（审查项 1）：可用页签集合随任务变化（Git 改动只在有改动时可用）。
-  // 切到新任务后若还停在上一个任务才有的页签上，页签条会没有任何 active 项、正文空白，
-  // 且焦点会停在 disabled 按钮上掉给 body——这里把视图拉回首个可用页签，并把焦点接回来。
-  const enabledTabKey = enabledTabs.join(',')
-  const tabFocusPendingRef = useRef(false)
-  // 焦点在**渲染期**抓：disabled 是 commit 阶段落到 DOM 上的，等 effect 再读就已经丢了
-  const tabAvailable = enabledTabs.includes(tab)
-  if (!tabAvailable) tabFocusPendingRef.current = document.activeElement === tabRefs.current.get(tab)
-  useEffect(() => {
-    if (tabAvailable) return
-    setTab(enabledTabs[0] ?? 'activity')
-    // enabledTabs 每帧新建数组，用 join 出来的键做依赖（内容不变则不触发）
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [task.id, enabledTabKey])
-  useEffect(() => {
-    if (!tabFocusPendingRef.current) return
-    tabFocusPendingRef.current = false
-    tabRefs.current.get(tab)?.focus()
-  }, [tab])
 
   const scrollEl = () => {
     const element = logRef.current
@@ -389,7 +371,8 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     <PageHeader
       title={editingTitle ? <input ref={titleEditRef} className="title-edit-input" value={titleDraft} autoFocus onChange={(event) => setTitleEdit({ draft: event.target.value })} onKeyDown={(event) => { if (isComposingKey(event.nativeEvent)) return; if (event.key === 'Enter') { event.preventDefault(); void saveTitle() } }} onBlur={() => void saveTitle()} /> : <><span className="task-title-text" title={task.title}>{task.title}</span><button ref={titleEditBtnRef} className="title-edit" type="button" title="重命名" onClick={beginTitleEdit}><Pencil size={13} aria-hidden="true" /></button></>}
       metadata={<div className="detail-meta">
-        <span className="meta-group meta-identity"><span className="detail-eyebrow">{parent ? '队员任务' : '工作任务'}</span>{parent && <a className="mini link" role="button" tabIndex={0} onClick={() => onSelect(parent.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(parent.id) } }}>↩ 领队任务: {parent.title}</a>}{workers.length > 0 && <button type="button" className="badge badge-squad link-badge" title="在右侧分页打开子任务" onClick={() => { const target = workers.find((item) => item.status === 'running') ?? workers[0]; if (target) openWorker(target.id, target.title) }}>⚡ 子任务 {workers.filter((worker) => worker.status === 'done').length}/{workers.length}</button>}</span>
+        <span className="meta-group meta-identity"><span className="detail-eyebrow">{parent ? '队员任务' : '工作任务'}</span>{parent && <a className="mini link" role="button" tabIndex={0} onClick={() => onSelect(parent.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(parent.id) } }}>↩ 领队任务: {parent.title}</a>}</span>
+        {workers.length > 0 && <button type="button" className="worker-overview-trigger meta-chip" aria-haspopup="dialog" aria-expanded={float === 'workers'} aria-controls={float === 'workers' ? 'worker-overview' : undefined} title={`队员概览：${workerStateSummary || '全部已结束'}`} onClick={() => setFloat((current) => current === 'workers' ? null : 'workers')}><Users size={13} aria-hidden="true" /> 队员 {workers.length}<span className="worker-overview-count">{workers.length - activeWorkers.length} 已结束</span></button>}
         <IssueIdChip id={issueId} />
         <select className="meta-workflow" title="工作流" aria-label="工作流" value={issue?.status ?? 'todo'} onChange={(event) => void updateWorkflow(event.target.value as IssueStatus)}>
           {WORKFLOW_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
@@ -426,27 +409,6 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     <div className="detail-columns"><div className="detail-main" onScroll={onLogScroll}>
       {task.status === 'failed' && task.error && <div className="error-banner"><div className="error-head"><span className="error-icon" aria-hidden="true">⚠</span><span className="error-title">{task.failure?.title ?? '执行失败'}</span>{task.failure?.code && <span className="failure-code">{task.failure.code}</span>}{task.failure?.retryable && <span className="failure-retryable">可重试</span>}<button type="button" className="error-copy" onClick={() => { void navigator.clipboard.writeText(task.error ?? ''); ui.toast.success('错误原文已复制') }}>复制错误</button></div>{task.failure?.hint && <div className="error-hint">{task.failure.hint}</div>}<details className="failure-raw"><summary>错误原文</summary><pre>{task.error}</pre></details></div>}
       {task.integration?.note && <div className={`integration-banner ${task.integration.note.includes('未完成') ? 'warn' : ''}`}>🔀 {task.integration.note}{task.integration.branch && workdir && <a className="mini link" role="button" tabIndex={0} onClick={() => void bridge.openPath(workdir)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void bridge.openPath(workdir) } }}>打开仓库</a>}</div>}
-      {workers.length > 0 && <div className={`workers-pane${activeWorkers.length ? ' has-active' : ''}`}>
-        <div className="workers-head">
-          <span className="list-group-label"><Users size={12} aria-hidden="true" /> 队员 {workers.filter((worker) => worker.status === 'done').length}/{workers.length} 完成</span>
-          {activeWorkers.length > 0 && <span className="workers-live">{workerStateSummary}</span>}
-        </div>
-        <div className="workers-list">{visibleWorkers.map((worker) => <button key={worker.id} type="button" className={`worker-card status-${worker.status}${worker.status === 'cancelled' ? ' is-cancelled' : ''}`} onClick={() => openWorker(worker.id, worker.title)} title={`${worker.title}\n在右侧分页打开只读详情`}>
-          <span className={`dot dot-${worker.status}`} aria-hidden="true" />
-          {worker.workerIndex != null && <span className="worker-index">#{worker.workerIndex + 1}</span>}
-          <span className="worker-title">{worker.title}</span>
-          <span className="worker-state mini">{worker.status === 'running' ? `执行中 · ${fmtDuration(Math.max(0, now - (worker.startedAt ?? now)))}` : worker.status === 'queued' ? (worker.parked ? PARKED_QUEUED_LABEL : '排队') : worker.status === 'cancelled' ? '已取消' : worker.status === 'failed' ? '✗ 失败' : worker.startedAt && worker.endedAt ? `✓ ${fmtDuration(worker.endedAt - worker.startedAt)}` : '✓'}</span>
-          {!!worker.attempt && <span className="mini dim">⟳{worker.attempt}</span>}
-          {worker.gitStat ? <span className="mini dim" title="有改动">· 有改动</span> : null}
-          {worker.status === 'running' && <span className="worker-progress" aria-hidden="true" />}
-        </button>)}</div>
-        {hiddenWorkers.length > 0 && <details className="workers-more"><summary>另外 {hiddenWorkers.length} 个已结束队员</summary><div className="workers-list">{hiddenWorkers.map((worker) => <button key={worker.id} type="button" className={`worker-card status-${worker.status}${worker.status === 'cancelled' ? ' is-cancelled' : ''}`} onClick={() => openWorker(worker.id, worker.title)} title={`${worker.title}\n在右侧分页打开只读详情`}>
-          <span className={`dot dot-${worker.status}`} aria-hidden="true" />
-          {worker.workerIndex != null && <span className="worker-index">#{worker.workerIndex + 1}</span>}
-          <span className="worker-title">{worker.title}</span>
-          <span className="worker-state mini">{worker.status === 'cancelled' ? '已取消' : worker.status === 'failed' ? '✗ 失败' : worker.startedAt && worker.endedAt ? `✓ ${fmtDuration(worker.endedAt - worker.startedAt)}` : '✓'}</span>
-        </button>)}</div></details>}
-      </div>}
       {permission && <PermissionPrompt key={permission.requestToken ?? permission.requestId} permission={permission} busy={permissionBusy} onAnswer={(choice) => void answerPermission(choice)} />}
       {permissionError && <div className="data-state-banner" role="alert"><span>{permissionError}</span><button type="button" className="btn" onClick={() => void refreshPermissions()}><RefreshCw size={13} /> 刷新审批</button></div>}
       {permissionNotice && <div className="data-state-banner" role="status">{permissionNotice}</div>}
@@ -463,8 +425,8 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
         if (event.key === 'Home' || event.key === 'End') { event.preventDefault(); selectTab(event.key === 'Home' ? enabledTabs[0] : enabledTabs[enabledTabs.length - 1]) }
       }}>
         {TAB_ITEMS.map((item, index) => {
-          const disabled = item.key === 'git' && !task.gitDiff && !task.gitStat
           const count = tabCount(item.key)
+          const secondary = item.key === 'activity' || item.key === 'result'
           return <button
             key={item.key}
             ref={(node) => { if (node) tabRefs.current.set(item.key, node); else tabRefs.current.delete(item.key) }}
@@ -472,15 +434,15 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
             role="tab"
             id={`detail-tab-${item.key}`}
             aria-controls="detail-tabpanel"
+            aria-label={item.label}
             aria-selected={tab === item.key}
             tabIndex={tab === item.key ? 0 : -1}
-            className={`${tab === item.key ? 'active' : ''}${item.key === 'result' && task.result ? ' has-content' : ''}`}
-            disabled={disabled}
-            title={disabled ? '本次执行没有 Git 改动' : `${item.hint}${index < 4 ? `（Ctrl+${index + 1}）` : ''}`}
+            className={`${tab === item.key ? 'active' : ''}${item.key === 'result' && task.result ? ' has-content' : ''} ${item.key === 'activity' || item.key === 'result' ? 'tab-secondary' : 'tab-primary'}`}
+            title={`${item.label} · ${item.hint}（Ctrl+${index + 1}）`}
             onClick={() => setTab(item.key)}
           >
-            {item.label}
-            {count != null && count > 0 && <span className="tab-count">{count}</span>}
+            {item.key === 'activity' ? <History size={15} aria-hidden="true" /> : item.key === 'result' ? <FileText size={15} aria-hidden="true" /> : item.label}
+            {!secondary && count != null && count > 0 && <span className="tab-count">{count}</span>}
             {item.key === 'result' && task.result && <span className="tab-flag-dot" aria-hidden="true" />}
           </button>
         })}
@@ -556,6 +518,9 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     </div>
     </div>
     </div>
+    {float === 'workers' && <FloatWindow title="队员概览" icon={<Users size={14} />} width={480} onClose={() => setFloat(null)}>
+      <WorkerOverview rounds={workerRounds} now={now} onOpen={(id) => { openWorker(id, tasks.find((item) => item.id === id)?.title ?? id); setFloat(null) }} />
+    </FloatWindow>}
     <SideDock key={task.id} taskId={task.id} tasks={tasks} onOpen={onSelect} />
     {/* 目标/会议浮窗（队员任务不挂）：面板常驻挂载以持续上报状态，浮窗本体仅 open 时渲染。
         key={issueId}：面板数据按 Issue 归属，而面板是**异步**读数据、且 onGoal/onMeeting 每次

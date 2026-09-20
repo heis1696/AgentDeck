@@ -225,6 +225,169 @@
 }
 .main .settings-card:last-child { border-bottom: 0; }
 
+/* ---- Settings controls: one geometry and state contract (docs/UI-DETAIL-FEEDBACK.md §B) ----
+   Scoped strictly to .settings-page/.settings-stack: no global button or input override,
+   other pages keep their own control rules. Inputs, numeric fields, textareas, selects,
+   dropdown triggers, row buttons, sliders and toggles share height, radius and the
+   hover / focus-visible / invalid / pending / disabled states. */
+.settings-page .settings-stack .field .field-label {
+  display: block;
+  color: var(--text-dim);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-normal);
+}
+.settings-page .settings-stack .field > :is(.field-label, span:first-child) { margin-bottom: 6px; }
+.settings-page .settings-stack .field-label-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: 6px;
+}
+.settings-page .settings-stack .field-label-row .field-label { margin-bottom: 0; }
+.settings-page .settings-stack .field-value {
+  min-width: 32px;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-inset);
+  color: var(--text);
+  font-size: var(--text-caption);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+.settings-page .settings-stack .field:last-child { margin-bottom: 0; }
+
+/* Text, numeric, url and select controls share the 36px control box. */
+.settings-page .settings-stack :is(input[type='text'], input[type='url'], input[type='search'], input[type='password'], input[type='number'], input:not([type]), select, textarea) {
+  width: 100%;
+  min-height: var(--control-md);
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-caption);
+  transition: border-color var(--duration-quick) var(--ease-in-out), box-shadow var(--duration-quick) var(--ease-in-out), background var(--duration-quick) var(--ease-in-out);
+}
+.settings-page .settings-stack textarea { padding: 9px 10px; line-height: var(--leading-normal); resize: vertical; }
+.settings-page .settings-stack :is(input, select, textarea)::placeholder { color: var(--text-faint); }
+.settings-page .settings-stack :is(input, select, textarea):hover:not(:disabled):not([aria-invalid='true']) { border-color: var(--border-strong); }
+.settings-page .settings-stack :is(input, select, textarea):focus,
+.settings-page .settings-stack :is(input, select, textarea):focus-visible { outline: none; border-color: var(--accent); box-shadow: var(--focus-halo); }
+.settings-page .settings-stack :is(input, select, textarea)[aria-invalid='true'] { border-color: var(--status-failed); }
+.settings-page .settings-stack :is(input, select, textarea)[aria-invalid='true']:focus,
+.settings-page .settings-stack :is(input, select, textarea)[aria-invalid='true']:focus-visible { border-color: var(--status-failed); box-shadow: 0 0 0 3px var(--status-failed-bg); }
+.settings-page .settings-stack .field-error { display: block; margin-top: 5px; color: var(--status-failed); font-size: var(--text-micro); line-height: var(--leading-normal); }
+
+/* Dropdown triggers: same box as a text input, and the hit area is exactly the visible box. */
+.settings-page .settings-stack .menu-root { display: inline-flex; max-width: 100%; }
+.settings-page .settings-stack .menu-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 160px;
+  max-width: 100%;
+  min-height: var(--control-md);
+  padding: 0 10px;
+  text-align: left;
+}
+.settings-page .settings-stack .menu-trigger .menu-trigger-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-page .settings-stack .menu-trigger .menu-caret { margin-left: auto; }
+
+/* Row buttons keep one height, one radius and one icon rhythm. */
+.settings-page .settings-stack .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: var(--control-md);
+  padding: 0 12px;
+  border-radius: var(--radius-sm);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+}
+.settings-page .settings-stack .btn > svg { flex: 0 0 auto; }
+.settings-page .settings-stack .btn:focus-visible { outline: none; border-color: var(--accent); box-shadow: var(--focus-halo); }
+.settings-page .settings-stack .btn.primary:disabled { opacity: var(--disabled-opacity); filter: none; }
+.settings-page .settings-stack :is(input, select, textarea, .btn):disabled {
+  opacity: var(--disabled-opacity);
+  border-color: var(--disabled-border);
+  background: var(--disabled-bg);
+  color: var(--text-dim);
+  cursor: not-allowed;
+}
+
+/* Slider: full width, semantic accent, numeric read-out and scale. */
+.settings-page .settings-stack input[type='range'] {
+  width: 100%;
+  height: 24px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.settings-page .settings-stack input[type='range']:focus-visible { outline: none; border-radius: var(--radius-pill); box-shadow: var(--focus-halo); }
+.settings-page .settings-stack .field-scale {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 2px;
+  color: var(--text-faint);
+  font-size: var(--text-micro);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Toggle: a real checkbox (keyboard + label semantics preserved) drawn as a switch. */
+.settings-page .settings-stack .field input[type='checkbox'] {
+  appearance: none;
+  position: relative;
+  flex: 0 0 auto;
+  width: 36px;
+  height: 20px;
+  margin: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--bg-inset);
+  cursor: pointer;
+  transition: background var(--duration-quick) var(--ease-in-out), border-color var(--duration-quick) var(--ease-in-out), box-shadow var(--duration-quick) var(--ease-in-out);
+}
+.settings-page .settings-stack .field input[type='checkbox']::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  transition: transform var(--duration-quick) var(--ease-out), background var(--duration-quick) var(--ease-in-out);
+}
+.settings-page .settings-stack .field input[type='checkbox']:hover:not(:disabled) { border-color: var(--accent); }
+.settings-page .settings-stack .field input[type='checkbox']:checked { border-color: var(--accent); background: var(--accent-soft); }
+.settings-page .settings-stack .field input[type='checkbox']:checked::after { background: var(--accent); transform: translateX(16px); }
+.settings-page .settings-stack .field input[type='checkbox']:focus-visible { outline: none; box-shadow: var(--focus-halo); }
+.settings-page .settings-stack .field input[type='checkbox']:disabled { opacity: var(--disabled-opacity); cursor: not-allowed; background: var(--disabled-bg); border-color: var(--disabled-border); }
+.settings-page .settings-stack .toggle-field { display: flex; align-items: center; gap: 10px; min-height: var(--control-md); }
+.settings-page .settings-stack .toggle-field > span:last-child { color: var(--text); font-weight: var(--weight-regular); }
+
+/* Download progress and inline status text reuse the same surface and rhythm. */
+.settings-page .settings-stack .progress-track {
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-inset);
+  overflow: hidden;
+}
+.settings-page .settings-stack .progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width var(--duration-base) var(--ease-in-out);
+}
+.settings-page .settings-stack .probe-ok,
+.settings-page .settings-stack .probe-fail,
+.settings-page .settings-stack .hint { line-height: var(--leading-normal); }
+.settings-page .settings-stack .row { gap: var(--space-3); }
+
 /* Runtime and update panel */
 .runtime-page { display: flex; flex-direction: column; min-height: 0; }
 .runtime-content { padding: 26px 0 48px; }

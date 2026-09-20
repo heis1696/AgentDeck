@@ -264,17 +264,18 @@ section('Follow-up guards and complete worker-result access')
   ok(sendButton()?.disabled === true, 'Running task disables sending while keeping its draft editable')
   await keyOn(followBox(), 'Enter')
   ok(bridge.calls.followUp.length === 0 && followBox().value === '等待本轮结束后的追问', 'Enter cannot submit or discard a running-task draft')
-  const states = byQuery('.workers-live')?.textContent ?? ''
+  const states = byQuery('.worker-overview-trigger')?.title ?? ''
   ok(states.includes('1 执行中') && states.includes('1 排队') && states.includes('1 等待启动'), 'Worker summary distinguishes running, queued and parked')
   await unmount()
   await mount('done', ['done', 'done', 'failed', 'cancelled', 'done'])
   await openTask('taskA')
-  ok(container.querySelectorAll('.workers-pane > .workers-list .worker-card').length === 3, 'Finished worker preview stays compact')
-  ok(container.querySelectorAll('.workers-more .worker-card').length === 2, 'Every additional finished worker remains available in the disclosure')
-  await click(byQuery('.workers-more summary'))
-  ok(byQuery('.workers-more').open, 'Finished-worker disclosure can be expanded')
-  await click(byQuery('.workers-more .worker-card:last-child'))
+  ok(!byQuery('.detail-main .workers-pane') && !byQuery('.worker-overview'), 'Worker list does not occupy the main reading column')
+  await click(byQuery('.worker-overview-trigger'))
+  ok(container.querySelectorAll('.worker-round-ended .worker-card').length === 5, 'Every finished worker belongs to an ended group')
+  ok(byQuery('.worker-round-ended').open, 'The most recent all-ended round opens with its results visible')
+  await click(byQuery('.worker-round-ended .worker-card:last-child'))
   ok(byQuery('.worker-pane')?.textContent.includes('Worker 4'), 'Opening a hidden finished worker reaches its result pane')
+  ok(!byQuery('.worker-overview'), 'Worker selection closes the floating overview')
   await unmount()
 }
 
@@ -285,6 +286,7 @@ section('Activity read failures remain distinct from empty history')
     window.agentdeck.issues.comments = async () => { throw new Error('activity unavailable') }
     await mount()
     await openTask('taskA')
+    await click(byQuery('#detail-tab-activity'))
     ok(byQuery('.issue-timeline [role=alert]')?.textContent.includes('activity unavailable'), 'Activity failure is visible and recoverable')
     ok(!byQuery('.issue-timeline')?.textContent.includes('暂无动态'), 'Read failure does not look like empty history')
     window.agentdeck.issues.comments = async () => [

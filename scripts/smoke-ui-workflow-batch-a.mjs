@@ -15,6 +15,9 @@ globalThis.cancelAnimationFrame = window.cancelAnimationFrame.bind(window)
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
 window.matchMedia = () => ({ matches: false, media: '', onchange: null, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}, dispatchEvent() { return false } })
 window.Element.prototype.getClientRects = function () { return [{ x: 0, y: 0, width: 240, height: 28, top: 0, left: 0, right: 240, bottom: 28 }] }
+class ResizeObserverStub { observe() {} unobserve() {} disconnect() {} }
+window.ResizeObserver = ResizeObserverStub
+globalThis.ResizeObserver = ResizeObserverStub
 
 const outfile = path.join(root, 'out', 'smoke-ui-workflow-batch-a.cjs')
 const shikiStub = path.join(root, 'scripts', 'fixtures', 'shiki-stub.ts')
