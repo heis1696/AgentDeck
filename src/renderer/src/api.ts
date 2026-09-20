@@ -1,5 +1,5 @@
 // 渲染层 API 封装：window.agentdeck 的类型 + 常用 hooks
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import type { AgentDeckApi, AgentInfo, AgentModelCatalog, FileDiffResult, PresetInfo, PermissionRequest } from '../../shared/contracts'
 import type { Task, TaskEvent, AppSettings, Issue, Run, Comment, Automation, RuntimeSnapshot, AnalyticsSummary, IssuePriority, IssueStatus, RunTrigger } from '../../shared/types'
 import type { PackAssets, PetSayPayload, PetStateSnapshot } from '../../shared/pet'
@@ -22,11 +22,23 @@ export function fileDiff(taskId: string, file: string): Promise<FileDiffResult> 
   return bridge.tasks.fileDiff(taskId, file)
 }
 
-/** 任务列表 + 实时更新 */
+/** 任务列表 + 实时更新。
+ *  refresh 用单调请求序号防响应乱序：主进程事件密集时多次 list 并发在途，先发后至的旧快照
+ *  直接丢弃，只有最新一次请求的响应会落地——否则草稿创建后，一份创建前发出的旧列表快照
+ *  会把新任务从目录里抹掉（详情页随之丢 selected 弹回列表）。
+ *  ready 标记目录是否拿到过第一份真实列表：false = 目录未加载，宿主不应把空目录喂给交互中心。 */
 export function useTasks() {
   const [tasks, setTasks] = useState<Task[]>([])
+  const [ready, setReady] = useState(false)
+  const seqRef = useRef(0)
   const refresh = useCallback(async () => {
-    setTasks(await bridge.tasks.list())
+    const seq = ++seqRef.current
+    try {
+      const list = await bridge.tasks.list()
+      if (seq === seqRef.current) setTasks(list)
+    } finally {
+      if (seq === seqRef.current) setReady(true)
+    }
   }, [])
   useEffect(() => {
     refresh()
@@ -37,7 +49,33 @@ export function useTasks() {
       off2()
     }
   }, [refresh])
-  return { tasks, refresh }
+  return { tasks, refresh, ready }
+}
+
+/** 轮询等待任务出现在桥接任务目录里（草稿创建后的导航前置条件：目录可见才进详情）。
+ *  主进程 issues:create 同步注册任务，但「稍后」创建只广播 issues:updated、不广播
+ *  task:updated——渲染层目录不会自己刷新，这里以有界重试吸收时序差。 */
+export async function waitForTaskListed(id: string, opts: { attempts?: number; delayMs?: number } = {}): Promise<boolean> {
+  const attempts = opts.attempts ?? 20
+  const delayMs = opts.delayMs ?? 50
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const list = await bridge.tasks.list().catch(() => [] as Task[])
+    if (list.some((task) => task.id === id)) return true
+    if (attempt < attempts - 1) await new Promise((resolve) => setTimeout(resolve, delayMs))
+  }
+  return false
+}
+
+/** 有界重试取单个任务：Issue 已建但执行记录注册略有延迟时不立刻判失败。 */
+export async function getTaskWhenReady(id: string, opts: { attempts?: number; delayMs?: number } = {}): Promise<Task | null> {
+  const attempts = opts.attempts ?? 10
+  const delayMs = opts.delayMs ?? 50
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const task = await bridge.tasks.get(id).catch(() => null)
+    if (task) return task
+    if (attempt < attempts - 1) await new Promise((resolve) => setTimeout(resolve, delayMs))
+  }
+  return null
 }
 
 /** Issue is the durable user-facing unit; tasks remain an execution detail. */

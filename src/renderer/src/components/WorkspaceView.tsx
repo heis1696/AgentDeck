@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { ListTodo, MessagesSquare, Target, ArrowUpRight, Clock3, FolderOpen, Sparkles } from 'lucide-react'
-import { bridge, type AgentInfo } from '../api'
-import { ui } from '../ui/interaction-center'
+import { bridge, getTaskWhenReady, type AgentInfo } from '../api'
+import { isComposingKey, ui } from '../ui/interaction-center'
 import { useInteractionSelector } from '../hooks/useInteraction'
 import { captains } from './meeting/captains'
 import type { Task } from '../../../shared/types'
@@ -215,7 +215,8 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
       } else if (!startNow) {
         ui.toast.info('已创建，暂不启动——在任务详情点「开始执行」')
       }
-      const t = await bridge.tasks.get(issue.taskId)
+      // 执行记录注册与 Issue 落库之间可能有一瞬空档：有界重试取，不立刻判失败
+      const t = await getTaskWhenReady(issue.taskId)
       if (!t) throw new Error('Issue 创建成功，但执行记录尚未可用')
       clearPrompt()
       onCreated(t)
@@ -227,8 +228,8 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
   }
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // 回车发送；Shift+Enter 换行；中文输入法组词的 Enter 不算（isComposing）
-    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+    // 回车发送；Shift+Enter 换行；输入法组词的 Enter 不算（isComposingKey：isComposing 或 keyCode 229）
+    if (e.key === 'Enter' && !e.shiftKey && !isComposingKey(e.nativeEvent)) {
       e.preventDefault()
       void submit()
     }

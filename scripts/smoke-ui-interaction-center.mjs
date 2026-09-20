@@ -1,7 +1,10 @@
 // 交互中心冒烟（无 Electron / 无 DOM）：ui/interaction-center + ui/interaction-layer 的纯逻辑回归。
 // 覆盖：挂载时序（composer/dock/toast 跨挂载）、confirm 生命周期（FIFO + 卸载取消）、
-//       当前任务导航（祖先链/上限/删除/切换）、dock 异步更新（打开请求标识）、浮层键盘（最上层/焦点陷阱/快捷键）。
-// 另含结构回归：SideDock 导入环已断、DOM 自定义事件/模拟键盘/60ms 延时已移除、App 保留 pet 路由。
+//       当前任务导航（祖先链/上限/删除/切换）、目录就绪与待决路由（未加载≠已加载缺失、
+//       目录到达后重路由+错误 dock 桶迁移、旧 handle 仍可回写、关闭项不复活）、
+//       dock 异步更新（打开请求标识）、浮层键盘（最上层 Escape/焦点陷阱/快捷键只对模态让路）。
+// 另含结构回归：SideDock 导入环已断、DOM 自定义事件/模拟键盘/60ms 延时已移除、App 保留 pet 路由、
+//       useTasks 防乱序、快捷键只看最上层模态。
 import { build } from 'esbuild'
 import { pathToFileURL } from 'node:url'
 import fs from 'node:fs'
@@ -177,6 +180,50 @@ section('当前任务导航：祖先链 / 8 页签 / 删除 / 切换')
   ok(c.getState().tabs.length === 0 && c.getState().activeId === null && c.getState().view === 'issues', '全部任务删除后回到 Issue 主页')
 }
 
+/* ------------------------------------------- 目录就绪与待决路由（草稿/桥接 focus） */
+
+section('目录就绪与待决路由：未加载 ≠ 已加载缺失，目录到达后重路由 + 桶迁移')
+{
+  const c = createInteractionCenter({ layers: createLayerStack() })
+  ok(c.isCatalogReady() === false, '目录未加载：isCatalogReady 为假')
+  // 桥接 focus 事件先于目录到达（真实时序：主进程派发 task:focus 时渲染层列表还在途）
+  ok(c.openTask('kid') === 'tab' && c.getState().tabs.join() === 'kid' && c.getState().view === 'detail', '目录未加载时 openTask：乐观按普通页签兜底进详情（不丢请求）')
+  const early = c.dock.open({ id: 'task:kid', kind: 'task', title: '队员', payload: { taskId: 'kid' } })
+  ok(c.dock.state('kid')?.items.length === 1, '目录未加载时 dock.open 兜底自键（键错了的桶）')
+  // 目录到达：kid 其实是 root 的子任务 → 撤乐观页签、重路由到根详情 + dock，错误桶整体迁移
+  c.setTasks([{ id: 'root', title: '领队' }, { id: 'kid', title: '队员', parentTaskId: 'root' }])
+  ok(c.isCatalogReady() && c.getState().tabs.join() === 'root' && c.getState().activeId === 'root', '目录到达后待决子任务重路由：页签换成根任务并激活')
+  ok(c.dock.state('kid').items.length === 0 && c.dock.state('root')?.items.some((item) => item.id === 'task:kid'), '错误 dock 桶并入真正根任务的桶（存活项搬家，自键桶清掉）')
+  ok(c.dock.update(early, { title: '队员·改' }) === true && c.dock.state('root').items[0].title === '队员·改', '迁移后旧 handle（旧 rootId）仍可更新存活项')
+  ok(c.dock.state('root').activeId === 'task:kid', '迁移进来的存活项保持激活')
+
+  // 已加载缺失：目录里有别人、没有它 → 乐观页签兜底，但下一份快照仍没有就摘掉（不留僵尸页签）
+  ok(c.openTask('ghost') === 'tab' && c.getState().tabs.includes('ghost'), '已加载缺失：按普通页签兜底（缺失/未知祖先同路）')
+  c.setTasks([{ id: 'root', title: '领队' }, { id: 'kid', title: '队员', parentTaskId: 'root' }])
+  ok(!c.getState().tabs.includes('ghost') && c.getState().activeId !== 'ghost', '下一份目录仍没有它：乐观页签摘掉')
+
+  // 用户主动关掉的待决页签：目录到达后绝不借重定向复活
+  ok(c.openTask('kid2') === 'tab' && c.getState().tabs.includes('kid2'), '新子任务目录未达：乐观页签兜底')
+  c.closeTab('kid2')
+  c.setTasks([{ id: 'root', title: '领队' }, { id: 'kid', title: '队员', parentTaskId: 'root' }, { id: 'kid2', title: '队员2', parentTaskId: 'root' }])
+  ok(!c.getState().tabs.includes('kid2') && !c.dock.state('root')?.items.some((item) => item.id === 'task:kid2'), '用户关掉的待决页签：目录到达后不复活、不进 dock 桶')
+
+  // 待决页签被目录确认只是普通任务：页签保留，无重路由
+  ok(c.openTask('plain') === 'tab' && c.getState().tabs.includes('plain'), '目录未达的任务乐观开页签')
+  c.setTasks([{ id: 'root', title: '领队' }, { id: 'kid', title: '队员', parentTaskId: 'root' }, { id: 'kid2', title: '队员2', parentTaskId: 'root' }, { id: 'plain', title: '普通' }])
+  ok(c.getState().tabs.includes('plain') && c.getState().activeId === 'plain', '目录确认它是普通任务：页签保留即终态')
+
+  // 迁移不复活已关闭项 + 存活项旧 handle 继续回写
+  const c2 = createInteractionCenter({ layers: createLayerStack() })
+  const h1 = c2.dock.open({ id: 'file:kid:a.ts', kind: 'file', title: 'a.ts', payload: { taskId: 'kid', file: 'a.ts', additions: 1, deletions: 0 } })
+  const h2 = c2.dock.open({ id: 'file:kid:b.ts', kind: 'file', title: 'b.ts', payload: { taskId: 'kid', file: 'b.ts', additions: 2, deletions: 0 } })
+  c2.dock.close('file:kid:a.ts')
+  c2.setTasks([{ id: 'root', title: '领队' }, { id: 'kid', title: '队员', parentTaskId: 'root' }])
+  ok(c2.dock.state('kid').items.length === 0 && c2.dock.state('root').items.map((item) => item.id).join() === 'file:kid:b.ts', '错误桶迁移：已关闭的项不并入新桶（绝不复活）')
+  ok(c2.dock.update(h1, { payload: { diff: 'x' } }) === false, '已关闭项的旧 handle 回写被拒（token/定位双保险）')
+  ok(c2.dock.update(h2, { payload: { diff: 'y' } }) === true && c2.dock.state('root').items[0].payload.diff === 'y', '存活项的旧 handle 迁移后仍可回写')
+}
+
 /* ------------------------------------------------------- 页签条过滤（App） */
 
 section('页签条过滤：断裂祖先任务的普通页签不能被藏掉')
@@ -288,8 +335,22 @@ section('浮层键盘：最上层 Escape / 焦点陷阱 / 快捷键让路')
   ok(c.handleKey({ key: 'k', ctrlKey: true, isComposing: true }) === null && c.handleKey({ key: 'k', ctrlKey: true, keyCode: 229 }) === null, '输入法组合中（isComposing / keyCode 229）一律不抢键')
   const layerId = layers.push({ kind: 'modal', name: 'confirm', trap: true, onEscape: () => c.navigate('board') })
   const beforeOverlay = c.getState().activeId
-  ok(c.handleKey({ key: 'w', ctrlKey: true }) === null && c.getState().activeId === beforeOverlay, '浮层打开时 Ctrl+W 让路')
+  ok(c.handleKey({ key: 'w', ctrlKey: true }) === null && c.getState().activeId === beforeOverlay, '模态打开时 Ctrl+W 让路')
   layers.release(layerId)
+  // 非模态浮窗/菜单不封锁页面快捷键：overlay 只看最上层**模态**（layers.topModal），不是所有浮层
+  const tickBefore = c.getState().composerTick
+  const pageMenu = layers.push({ kind: 'popover', name: 'menu', trap: false })
+  ok(c.handleKey({ key: 'n', ctrlKey: true }) === 'new-task' && c.getState().composerTick === tickBefore + 1, '菜单（popover）打开：Ctrl+N 不被封锁')
+  const floatWin = layers.push({ kind: 'window', name: 'float-window', trap: false })
+  ok(layers.topModal() === null && c.handleKey({ key: 'w', ctrlKey: true }) === 'close-tab', '非模态浮窗同样不封锁（topModal 为空）')
+  const modalOverMenu = layers.push({ kind: 'modal', name: 'confirm', trap: true })
+  ok(c.handleKey({ key: 'w', ctrlKey: true }) === null && c.handleKey({ key: 'n', ctrlKey: true }) === null, '菜单之上压了模态：快捷键重新让路')
+  layers.release(modalOverMenu)
+  layers.release(floatWin)
+  layers.release(pageMenu)
+  const paletteWasOpen = c.getState().paletteOpen
+  ok(c.handleKey({ key: 'k', ctrlKey: true }) === 'palette-toggle' && c.getState().paletteOpen === !paletteWasOpen, '全部浮层关闭后 Ctrl+K 照常切换命令面板')
+  c.palette.close()
   ok(resolveShortcut({ key: 'Escape' }, { overlay: null }) === null, 'Escape 不是应用快捷键（由层栈处理）')
 }
 
@@ -341,6 +402,13 @@ section('结构回归：导入环 / DOM 事件 / pet 路由')
   // App 页签条：与 openTask 同源的过滤
   ok(/rootTabsOf\(tasks, tabs\)/.test(app) && /<TabBar tabs=\{rootTabs\}/.test(app), 'App 页签条用 rootTabsOf 过滤（与 openTask 路由同源）')
   ok(!/tabs\.filter\(\(id\) => !tasks\.find/.test(app), 'App 不再按 parentTaskId 一刀切过滤页签（断裂祖先任务被藏掉的根因）')
+
+  // 目录就绪门控与草稿创建后的导航（本轮 Review Follow-up：先见目录再路由 + 防刷新乱序）
+  const apiSource = read('src/renderer/src/api.ts')
+  const center = read('src/renderer/src/ui/interaction-center.ts')
+  ok(/if \(ready\) ui\.setTasks/.test(app) && /waitForTaskListed/.test(app), 'App 只在目录就绪后喂目录；草稿创建后等目录可见再导航')
+  ok(/const seq = \+\+seqRef\.current/.test(apiSource) && /seq === seqRef\.current/.test(apiSource), 'useTasks 刷新带单调请求序号：先发后至的旧列表快照直接丢弃')
+  ok(/topModal\(\)/.test(center) && !/overlay: layers\.topName\(\)/.test(center), '快捷键 overlay 只看最上层模态（topModal），非模态浮窗/菜单不封锁')
 
   // 全量渲染层导入环检测（相对导入，.ts/.tsx 双扩展名解析）
   const files = []

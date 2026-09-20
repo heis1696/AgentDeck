@@ -89,7 +89,7 @@ export interface ShortcutInput {
   target?: ShortcutTarget | null
 }
 export interface ShortcutContext {
-  /** 当前最上层浮层名（null = 无浮层）；浮层打开时快捷键让路 */
+  /** 当前最上层**模态**名（null = 无模态；菜单/浮窗等非模态层不算）：模态打开时快捷键让路 */
   overlay: string | null
 }
 
@@ -108,9 +108,11 @@ export function isEditableTarget(target: ShortcutTarget | null | undefined): boo
 /**
  * 快捷键解析（纯函数）：
  * - IME 组合中 / keyCode 229 → 不处理；
- * - 有浮层：只允许「Ctrl+K 收起命令面板」，其余让给浮层（Escape 由层栈处理）；
+ * - 有**模态**浮层（context.overlay = 最上层模态名，来自 layers.topModal()）：只允许
+ *   「Ctrl+K 收起命令面板」，其余让给模态（Escape 由层栈处理）。非模态的浮窗/菜单
+ *   （popover / window 层）不进 overlay——不能封锁页面快捷键；
  * - 焦点在可编辑元素：只保留全局命令面板 Ctrl+K，其余不抢键（Ctrl+N/W/Tab 与裸键都不抢）；
- * - 无浮层、非可编辑：Ctrl+K 面板、Ctrl+N 新建（聚焦输入框）、Ctrl+W 关闭当前页签、
+ * - 无模态、非可编辑：Ctrl+K 面板、Ctrl+N 新建（聚焦输入框）、Ctrl+W 关闭当前页签、
  *   Ctrl(+Shift)+Tab 循环页签、裸 c 聚焦输入框。
  */
 export function resolveShortcut(input: ShortcutInput, context: ShortcutContext): ShortcutAction | null {
@@ -229,6 +231,8 @@ export interface InteractionCenter {
   /** 最新任务目录（祖先链解析、删除清理的唯一依据） */
   setTasks(tasks: readonly CenterTask[]): void
   tasks(): readonly CenterTask[]
+  /** 目录是否已就绪（宿主首次 setTasks 前，openTask/dock 只能乐观兜底并记待决） */
+  isCatalogReady(): boolean
   rootTaskId(id: string): string
   resolveRoot(id: string): RootResolution
   /**
@@ -275,6 +279,14 @@ export function createInteractionCenter(options: InteractionCenterOptions = {}):
   let state: InteractionSnapshot = EMPTY_SNAPSHOT
   const listeners = new Set<() => void>()
   let catalog = new Map<string, CenterTask>()
+  /** 目录是否已就绪：宿主第一次 setTasks 前，渲染层没有任何任务信息（区分「目录未加载」与「已加载缺失」） */
+  let catalogReady = false
+  /**
+   * 待决路由：openTask 时目录里还查不到的任务 id（乐观按普通页签兜底）。
+   * 目录到达后由 setTasks 重路由——存在且祖先链完整 → 根详情 + dock 桶；仍缺失 → 页签随剪枝摘掉。
+   * 用户主动关掉的待决页签从这里除名，目录到达后绝不借重定向复活。
+   */
+  const pendingOpens = new Set<string>()
 
   const emit = (patch: Partial<InteractionSnapshot>): void => {
     state = { ...state, ...patch }
@@ -350,6 +362,7 @@ export function createInteractionCenter(options: InteractionCenterOptions = {}):
     const routeRootId = dockRouteRootId(id)
     if (routeRootId) {
       // 祖先链完整且根不是自己 → 子任务不开顶部页签：路由到根详情并在其 dock 桶里打开
+      pendingOpens.delete(id)
       activateTab(routeRootId)
       emit({ view: 'detail' })
       api.dock.open({ id: `task:${id}`, kind: 'task', title: catalog.get(id)?.title ?? id, payload: { taskId: id } }, { rootId: routeRootId })
@@ -357,11 +370,18 @@ export function createInteractionCenter(options: InteractionCenterOptions = {}):
     }
     activateTab(id)
     emit({ view: 'detail' })
+    // 目录里还没有的 id：祖先链与存在性都未知（目录未加载，或已加载但这份快照还没有它——
+    // 刚创建的任务/主进程刚派发的 focus 事件）。先按普通页签兜底让导航成立，并记为待决；
+    // 目录到达后 setTasks 按真实祖先链重定向，或确认缺失后摘除。
+    if (catalog.has(id)) pendingOpens.delete(id)
+    else pendingOpens.add(id)
     return 'tab'
   }
 
   const closeTab = (id: string): void => {
     if (!state.tabs.includes(id)) return
+    // 用户关掉的待决页签先除名：目录到达后不得借重定向复活（与 dock 项「关闭不复活」同纪律）
+    pendingOpens.delete(id)
     const tabs = state.tabs.filter((tab) => tab !== id)
     const activeId = state.activeId === id ? tabs[tabs.length - 1] ?? null : state.activeId
     const view = state.view === 'detail' && !activeId ? 'issues' : state.view
@@ -378,8 +398,80 @@ export function createInteractionCenter(options: InteractionCenterOptions = {}):
     return next
   }
 
+  /**
+   * 目录到达：三步收敛——
+   * 1. 迁移键错了的 dock 桶（目录未加载时的自键兜底）；
+   * 2. 重路由待决的 openTask（乐观普通页签 → 真实祖先链路由）；
+   * 3. 按目录剪枝页签/活动项/dock 桶（删除的任务不保留）。
+   */
   const setTasks = (tasks: readonly CenterTask[]): void => {
     catalog = new Map(tasks.map((task) => [task.id, task]))
+    catalogReady = true
+    migrateDockBuckets()
+    reconcilePendingOpens()
+    pruneByCatalog()
+  }
+
+  /**
+   * 目录未加载时 dock.open 只能按 payload.taskId 自键兜底；目录到达后发现该任务其实是
+   * 「祖先链完整的子任务」时，整桶并入真正根任务的桶。存活项原样搬家（token 不变 →
+   * 旧 handle 凭 id 重新定位后仍可回写）；同 id 冲突保留根桶现存项；已关闭的项不在任何
+   * 桶里，绝不因此复活。
+   */
+  const migrateDockBuckets = (): void => {
+    const moves = new Map<string, string>()
+    for (const key of Object.keys(state.docks)) {
+      const routeRootId = dockRouteRootIdIn(catalog, key)
+      if (routeRootId) moves.set(key, routeRootId)
+    }
+    if (!moves.size) return
+    const docks: Record<string, DockBucket> = { ...state.docks }
+    for (const [wrongKey, rightRoot] of moves) {
+      const source = docks[wrongKey]
+      if (!source) continue
+      const target = docks[rightRoot] ?? { items: [] as readonly DockEntry[], activeId: null }
+      const items = [...target.items]
+      for (const item of source.items) {
+        if (!items.some((current) => current.id === item.id)) items.push(item)
+      }
+      const activeId = target.activeId && items.some((item) => item.id === target.activeId)
+        ? target.activeId
+        : source.activeId && items.some((item) => item.id === source.activeId)
+          ? source.activeId
+          : items[0]?.id ?? null
+      docks[rightRoot] = { items, activeId }
+      delete docks[wrongKey]
+    }
+    emit({ docks })
+  }
+
+  /**
+   * 待决路由收敛：openTask 时目录里查不到的任务，按目录到达后的真实祖先链重定向——
+   * 存在且祖先链完整 → 撤掉乐观页签，路由到根详情 + dock 桶（桶里已有同 id 项——例如
+   * 自键兜底刚迁移过来的——只激活不重开，保留原打开请求标识，旧 handle 继续有效）；
+   * 是根任务/断链祖先 → 普通页签即终态；仍缺失 → 待决解除，乐观页签交给剪枝摘掉
+   * （一份快照内没能确认存在的乐观页签不留）。
+   */
+  const reconcilePendingOpens = (): void => {
+    if (!pendingOpens.size) return
+    for (const id of [...pendingOpens]) {
+      pendingOpens.delete(id)
+      if (!catalog.has(id)) continue
+      const routeRootId = dockRouteRootIdIn(catalog, id)
+      if (!routeRootId) continue
+      const dockId = `task:${id}`
+      // 撤掉乐观页签，换成根任务页签并激活（子任务不再占顶部页签条）
+      emit({ tabs: state.tabs.filter((tab) => tab !== id) })
+      activateTab(routeRootId)
+      emit({ view: 'detail' })
+      // 根桶里已有同 id 项（自键兜底刚迁移过来的）只激活不重开：保留原打开请求标识，旧 handle 继续有效
+      if (state.docks[routeRootId]?.items.some((item) => item.id === dockId)) api.dock.activate(dockId, { rootId: routeRootId })
+      else api.dock.open({ id: dockId, kind: 'task', title: catalog.get(id)?.title ?? id, payload: { taskId: id } }, { rootId: routeRootId })
+    }
+  }
+
+  /** 按目录剪枝：删除的任务连页签/活动项/dock 桶一起收掉（原 setTasks 尾部语义不变） */
+  const pruneByCatalog = (): void => {
     const tabs = state.tabs.filter((id) => catalog.has(id))
     let activeId = state.activeId
     if (activeId && !catalog.has(activeId)) activeId = tabs[tabs.length - 1] ?? null
@@ -413,6 +505,7 @@ export function createInteractionCenter(options: InteractionCenterOptions = {}):
     getState: () => state,
     setTasks,
     tasks: () => [...catalog.values()],
+    isCatalogReady: () => catalogReady,
     rootTaskId: (id) => resolveRoot(id).rootId,
     resolveRoot,
     isRootTab: (id) => dockRouteRootId(id) === null,
@@ -494,10 +587,25 @@ export function createInteractionCenter(options: InteractionCenterOptions = {}):
         return true
       },
       update: (handle, patch) => {
-        const bucket = state.docks[handle.rootId]
-        if (!bucket) return false
-        const index = bucket.items.findIndex((item) => item.id === handle.id)
+        // 先按 handle.rootId 定位；桶可能已被目录到达后的迁移搬到别的根桶——按 id 全局找，
+        // 找到后把 handle 重定向到新桶（旧 handle 继续有效）。找不到 = 项已关闭：绝不复活。
+        const pinned = state.docks[handle.rootId]
+        let rootId = handle.rootId
+        let index = pinned?.items.findIndex((item) => item.id === handle.id) ?? -1
+        if (index < 0) {
+          for (const [candidateRootId, bucket] of Object.entries(state.docks)) {
+            const candidateIndex = bucket.items.findIndex((item) => item.id === handle.id)
+            if (candidateIndex >= 0) {
+              rootId = candidateRootId
+              handle.rootId = candidateRootId
+              index = candidateIndex
+              break
+            }
+          }
+        }
         if (index < 0) return false
+        const bucket = state.docks[rootId]
+        if (!bucket) return false
         const current = bucket.items[index]
         // 打开请求标识不一致 = 该项已被关闭后重新打开（或来自更早的打开），旧异步结果作废
         if (current.token !== handle.token) return false
@@ -507,7 +615,7 @@ export function createInteractionCenter(options: InteractionCenterOptions = {}):
           title: patch.title ?? current.title,
           payload: { ...current.payload, ...(patch.payload ?? {}) }
         } as DockEntry
-        emit({ docks: { ...state.docks, [handle.rootId]: { items, activeId: bucket.activeId } } })
+        emit({ docks: { ...state.docks, [rootId]: { items, activeId: bucket.activeId } } })
         return true
       },
       close: (id, opts) => {
@@ -536,7 +644,9 @@ export function createInteractionCenter(options: InteractionCenterOptions = {}):
       state: (rootId) => bucketOf(rootId)
     },
     handleKey: (input) => {
-      const action = resolveShortcut(input, { overlay: layers.topName() })
+      // 只看最上层**模态**（layers.topModal）：菜单/浮窗等非模态层不封锁页面快捷键，
+      // 模态（面板/确认框/各页表单）打开时才整体让路。
+      const action = resolveShortcut(input, { overlay: layers.topModal()?.name ?? null })
       if (!action) return null
       switch (action) {
         case 'palette-toggle': api.palette.toggle(); return action
@@ -571,6 +681,8 @@ export function createInteractionCenter(options: InteractionCenterOptions = {}):
       nextConfirmId = 1
       nextDockToken = 1
       catalog = new Map()
+      catalogReady = false
+      pendingOpens.clear()
       state = EMPTY_SNAPSHOT
       for (const listener of listeners) listener()
     }
