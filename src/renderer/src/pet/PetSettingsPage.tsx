@@ -3,11 +3,15 @@
 // 「生成素材包」分区（pet:gen-* IPC：按态分表八表为默认——角色描述/风格标签/只读网格表随帧数联动/
 // 进度按 sheet 计/结果带耗时与 QC 警告；per-frame 保留为可选）。
 // 主程序设置的「常规」里只留开关与打开本窗的按钮（见 SettingsView 的 PetCard）。
-import { useEffect, useState } from 'react'
+//
+// 读数口径：整页只挂一个 usePetState（页级读取一次），五张卡片共享同一份快照——读失败/重试/
+// 陈旧提示都在页级结算，卡片不再各挂一份订阅、各读一次。
+// 写入口径：任何设置写入都先等确认再改本地展示；失败必须可见并保留草稿，待确认期间拒绝重复提交。
+import { useEffect, useRef, useState } from 'react'
 import { bridge, usePetState, useSettings } from '../api'
 import { PET_PERSONA_PRESETS } from '../../../shared/pet-lines'
 import { PET_PRESET_NONE, petSheetGridFor, petSheetSizeForGrid } from '../../../shared/pet'
-import type { PetGenStartInput } from '../../../shared/pet'
+import type { PetGenStartInput, PetStateSnapshot } from '../../../shared/pet'
 import { Menu } from '../ui/Menu'
 import { ToastHost, toast } from '../ui/Toasts'
 
@@ -26,8 +30,49 @@ const FRAME_STATE_LABELS: Array<{ id: string; label: string }> = [
   { id: 'eat', label: '吃（可选，0=不生成）' }
 ]
 
+const errText = (cause: unknown) => cause instanceof Error ? cause.message : String(cause)
+
+/** 设置写入收口：失败必须提示（toast）并把原因交回调用方，调用方据此保留草稿/就地报错。
+ *  返回 null = 已确认成功。 */
+async function writeSetting(label: string, action: () => Promise<unknown>): Promise<string | null> {
+  try {
+    await action()
+    return null
+  } catch (cause) {
+    const message = errText(cause)
+    toast.error(`${label}失败：${message}`)
+    return message
+  }
+}
+
+/** 五张卡片共享同一份已确认快照 + 同一个刷新入口 */
+interface CardProps {
+  state: PetStateSnapshot
+  onRefresh: () => Promise<unknown>
+}
+
+/** 单项设置写入：pending 闸门（同一份草稿连点只写一次）+ 失败原因就地保留 + 成功后刷新快照 */
+function useSettingWriter(onRefresh: () => Promise<unknown>) {
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const pendingRef = useRef(false)
+  const run = async (label: string, action: () => Promise<unknown>): Promise<'ok' | 'failed' | 'busy'> => {
+    if (pendingRef.current) return 'busy'
+    pendingRef.current = true
+    setPending(true)
+    setError(null)
+    const message = await writeSetting(label, action)
+    if (message) setError(message)
+    else await onRefresh()
+    pendingRef.current = false
+    setPending(false)
+    return message ? 'failed' : 'ok'
+  }
+  return { pending, error, run }
+}
+
 export function PetSettingsPage() {
-  const { state } = usePetState()
+  const { state, refresh, loading, error, stale } = usePetState()
   const { settings } = useSettings()
   // 主题跟随主程序设置（独立窗不挂主 UI，自刷主题类）
   useEffect(() => {
@@ -44,28 +89,44 @@ export function PetSettingsPage() {
         <h2>小助理设置</h2>
         <span className="page-desc">透明置顶小窗，可拖拽、可聊天、会自己说话</span>
       </header>
+      {/* 读到过快照但这次刷新失败：保留旧快照并标明它来自上一次成功读取 */}
+      {stale && (
+        <div className="data-state-banner data-state-stale" role="status" data-pet-stale>
+          <span>显示上次成功读取的小助理状态：{error}</span>
+          <button className="btn" type="button" onClick={() => void refresh()} disabled={loading}>{loading ? '重试中…' : '重试'}</button>
+        </div>
+      )}
       {state ? (
         <div className="settings-stack">
-          <StatusCard />
-          <PackCard />
-          <PersonaCard />
-          <ModelCard />
-          <GenCard />
+          <StatusCard state={state} onRefresh={refresh} />
+          <PackCard state={state} onRefresh={refresh} />
+          <PersonaCard state={state} onRefresh={refresh} />
+          <ModelCard state={state} onRefresh={refresh} />
+          <GenCard state={state} onRefresh={refresh} />
         </div>
       ) : (
-        <div className="settings-stack"><section className="settings-card"><p className="hint">小助理未启用，设置加载中…</p></section></div>
+        <div className="settings-stack">
+          {/* 「未启用」是有效状态（state.enabled=false），不是加载态；这里只处理真的没有快照 */}
+          <section className="settings-card" data-pet-read={loading ? 'loading' : error ? 'error' : 'empty'}>
+            <h3>小助理</h3>
+            <p className="hint">
+              {loading ? '正在读取小助理状态…' : error ? `小助理状态读取失败：${error}` : '暂时读不到小助理状态。'}
+            </p>
+            {!loading && <button className="btn" type="button" onClick={() => void refresh()}>重试</button>}
+          </section>
+        </div>
       )}
     </div>
   )
 }
 
 /** 当前状态行（好感/心情/投喂/最近事件）+ 启用开关 */
-function StatusCard() {
-  const { state, refresh } = usePetState()
-  if (!state) return null
+function StatusCard({ state, onRefresh }: CardProps) {
+  const { pending, error: actionError, run } = useSettingWriter(onRefresh)
   return (
     <section className="settings-card">
       <h3>小助理</h3>
+      {!state.enabled && <p className="hint" data-pet-disabled>小助理当前未启用：下面的设置仍会保存，启用后生效。</p>}
       {state.enabled && state.life && (
         <label className="field">
           <span>当前状态</span>
@@ -80,7 +141,8 @@ function StatusCard() {
         <input
           type="checkbox"
           checked={state.enabled}
-          onChange={(e) => { void bridge.pet.setEnabled(e.target.checked).then(() => refresh()) }}
+          disabled={pending}
+          onChange={(e) => { const next = e.target.checked; void run('启用小助理', () => bridge.pet.setEnabled(next)) }}
         />
         <span>启用小助理（透明置顶小窗，可拖拽、可聊天）</span>
       </label>
@@ -89,7 +151,7 @@ function StatusCard() {
         <Menu
           items={[{ value: '1', label: '100%' }, { value: '1.5', label: '150%' }, { value: '2', label: '200%' }]}
           value={String(state.zoom)}
-          onChange={(v) => void bridge.pet.setZoom(Number(v))}
+          onChange={(v) => void run('小助理尺寸保存', () => bridge.pet.setZoom(Number(v)))}
           trigger={(cur, open) => (
             <button className="btn menu-trigger" type="button">
               {cur?.label ?? '100%'} <span className="menu-caret">{open ? '▴' : '▾'}</span>
@@ -97,14 +159,15 @@ function StatusCard() {
           )}
         />
       </label>
+      {pending && <span className="hint" data-pet-pending>正在保存…</span>}
+      {actionError && <span className="hint" data-pet-action-error>保存失败：{actionError}</span>}
     </section>
   )
 }
 
 /** 素材包选择 + 坏包提示 */
-function PackCard() {
-  const { state } = usePetState()
-  if (!state) return null
+function PackCard({ state, onRefresh }: CardProps) {
+  const { pending, error: actionError, run } = useSettingWriter(onRefresh)
   return (
     <section className="settings-card">
       <h3>素材包</h3>
@@ -117,7 +180,7 @@ function PackCard() {
             hint: `${pack.frameCount} 帧`
           }))}
           value={state.packId}
-          onChange={(v) => void bridge.pet.setPack(v)}
+          onChange={(v) => void run('素材包切换', () => bridge.pet.setPack(v))}
           trigger={(cur, open) => (
             <button className="btn menu-trigger" type="button">
               {cur?.label ?? state.packId} <span className="menu-caret">{open ? '▴' : '▾'}</span>
@@ -130,20 +193,61 @@ function PackCard() {
           已跳过坏素材包：{state.packs.filter((pack) => !pack.ok).map((pack) => `${pack.id}（${pack.reason}）`).join('、')}
         </span>
       )}
+      {pending && <span className="hint" data-pet-pack-pending>正在保存…</span>}
+      {actionError && <span className="hint" data-pet-pack-error>切换素材包失败：{actionError}</span>}
     </section>
   )
 }
 
 /** persona 人设：三版预设 + 宏插入 + 文本域 */
-function PersonaCard() {
-  const { state } = usePetState()
+function PersonaCard({ state, onRefresh }: CardProps) {
   const [personaDraft, setPersonaDraft] = useState<string | null>(null)
-  if (!state) return null
+  const [saving, setSaving] = useState(false)
+  const savingRef = useRef(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const [autonomyError, setAutonomyError] = useState<string | null>(null)
+  // 草稿版本号：保存期间「改走又改回来」也算更新的一份草稿，不能被迟到的成功收起
+  const revision = useRef(0)
+  // 滑杆照本地区间设置模式写：每次变更都提交（末次生效），只有最新一次的结果决定提示
+  const autonomySeq = useRef(0)
+  const commitAutonomy = (next: number) => {
+    const seq = ++autonomySeq.current
+    void (async () => {
+      const message = await writeSetting('自主发言间隔保存', () => bridge.pet.setAutonomy(next))
+      if (seq === autonomySeq.current) setAutonomyError(message)
+    })()
+  }
   const persona = personaDraft ?? state.personaPrompt
-  const insertMacro = (macro: string) => setPersonaDraft((current) => {
-    const base = current ?? state.personaPrompt
-    return `${base.trimEnd()}${base.trim() ? '\n' : ''}{${macro}}`
-  })
+  const editDraft = (next: string | null) => { revision.current++; setPersonaDraft(next) }
+  const insertMacro = (macro: string) => {
+    revision.current++
+    setPersonaDraft((current) => {
+      const base = current ?? state.personaPrompt
+      return `${base.trimEnd()}${base.trim() ? '\n' : ''}{${macro}}`
+    })
+  }
+  const savePersona = async () => {
+    // 闸门用 ref：同一 tick 内的连点看到的还是上一次渲染的 saving=false
+    if (savingRef.current || personaDraft === null) return
+    savingRef.current = true
+    const submitted = persona
+    const submittedRevision = revision.current
+    setSaving(true)
+    setSaveError(null)
+    try {
+      await bridge.pet.setPersona(submitted)
+      if (revision.current === submittedRevision) setPersonaDraft(null)
+      toast.success('人设已保存')
+      void onRefresh()
+    } catch (cause) {
+      const message = errText(cause)
+      setSaveError(message)
+      toast.error(`人设保存失败：${message}`)
+    } finally {
+      savingRef.current = false
+      setSaving(false)
+    }
+  }
   return (
     <section className="settings-card">
       <h3>人设</h3>
@@ -154,7 +258,7 @@ function PersonaCard() {
           value={PET_PERSONA_PRESETS.find((preset) => preset.template === persona)?.id ?? ''}
           onChange={(id) => {
             const preset = PET_PERSONA_PRESETS.find((item) => item.id === id)
-            if (preset) setPersonaDraft(preset.template)
+            if (preset) editDraft(preset.template)
           }}
           trigger={(cur, open) => (
             <button className="btn menu-trigger" type="button">
@@ -169,7 +273,7 @@ function PersonaCard() {
         <textarea
           rows={6}
           value={persona}
-          onChange={(e) => setPersonaDraft(e.target.value)}
+          onChange={(e) => editDraft(e.target.value)}
           placeholder="留空使用内置「活泼」预设"
         />
         <span className="hint">
@@ -182,9 +286,13 @@ function PersonaCard() {
           ))}
         </span>
         <span className="row" style={{ gap: 6, marginTop: 6 }}>
-          <button className="btn primary" type="button" disabled={personaDraft === null} onClick={() => { void bridge.pet.setPersona(persona); setPersonaDraft(null); toast.success('人设已保存') }}>保存人设</button>
-          <button className="btn" type="button" disabled={personaDraft === null} onClick={() => setPersonaDraft(null)}>放弃修改</button>
+          <button className="btn primary" type="button" disabled={saving || personaDraft === null} onClick={() => void savePersona()}>
+            {saving ? '保存中…' : '保存人设'}
+          </button>
+          <button className="btn" type="button" disabled={personaDraft === null} onClick={() => editDraft(null)}>放弃修改</button>
         </span>
+        {personaDraft !== null && <span className="hint" data-persona-dirty>有未保存的修改；「保存人设」成功后才会生效。</span>}
+        {saveError && <span className="hint" data-persona-error>人设保存失败：{saveError}（草稿已保留，可重试）</span>}
       </label>
       <label className="field">
         <span>自主发言间隔：{state.autonomySec}s（下限 20s）</span>
@@ -194,17 +302,41 @@ function PersonaCard() {
           max={300}
           step={10}
           value={state.autonomySec}
-          onChange={(e) => void bridge.pet.setAutonomy(Number(e.target.value))}
+          onChange={(e) => commitAutonomy(Number(e.target.value))}
         />
+        {autonomyError && <span className="hint" data-pet-autonomy-error>自主发言间隔保存失败：{autonomyError}（已回到保存生效的值）</span>}
       </label>
     </section>
   )
 }
 
 /** 模型预设 + 模型名 + AI 脑状态 */
-function ModelCard() {
-  const { state } = usePetState()
-  if (!state) return null
+function ModelCard({ state, onRefresh }: CardProps) {
+  // 预设与模型名各用一个写入器：任一在途都不能吞掉另一个控件的提交
+  const presetWriter = useSettingWriter(onRefresh)
+  const modelWriter = useSettingWriter(onRefresh)
+  // 模型名走受控草稿：state.model 因预设切换/外部写入变化时草稿跟随，不再是一个永不跟预设走的 defaultValue
+  const [modelDraft, setModelDraft] = useState<string | null>(null)
+  const modelRevision = useRef(0)
+  const modelBase = useRef(state.model)
+  const ownEcho = useRef<string | null>(null)
+  useEffect(() => {
+    if (modelBase.current === state.model) return
+    modelBase.current = state.model
+    // 自己刚提交的值回显：保存期间输入的新草稿要留着，不能被回显抹掉
+    if (ownEcho.current !== null && state.model === ownEcho.current) { ownEcho.current = null; return }
+    setModelDraft(null)
+  }, [state.model])
+  const model = modelDraft ?? state.model
+  const commitModel = async () => {
+    const submitted = model.trim()
+    if (submitted === state.model) { modelRevision.current++; setModelDraft(null); return }
+    const revision = modelRevision.current
+    ownEcho.current = submitted
+    const outcome = await modelWriter.run('模型名保存', () => bridge.pet.setPreset(state.presetId, submitted))
+    if (outcome === 'failed') { ownEcho.current = null; return }
+    if (outcome === 'ok' && modelRevision.current === revision) setModelDraft(null)
+  }
   return (
     <section className="settings-card">
       <h3>模型</h3>
@@ -213,7 +345,11 @@ function ModelCard() {
         <Menu
           items={[{ value: PET_PRESET_NONE, label: '不接 AI（用本地台词）' }, ...state.presets.map((preset) => ({ value: preset.id, label: `${preset.name}（${preset.protocol}）` }))]}
           value={state.presetId}
-          onChange={(v) => void bridge.pet.setPreset(v, state.model)}
+          onChange={(v) => {
+            // 带上输入框里看得见的值：预设切换不该把刚填/刚存的模型名回退成旧值
+            const nextModel = model.trim() || state.model
+            void presetWriter.run('模型预设切换', () => bridge.pet.setPreset(v, nextModel))
+          }}
           trigger={(cur, open) => (
             <button className="btn menu-trigger" type="button">
               {cur?.label ?? (state.activePresetId ? `${state.presets.find((preset) => preset.id === state.activePresetId)?.name ?? state.activePresetId}（自动）` : '选择预设')} <span className="menu-caret">{open ? '▴' : '▾'}</span>
@@ -229,26 +365,28 @@ function ModelCard() {
         {state.presetId === '' && state.presets.length > 0 && (
           <span className="hint">未选择预设——已自动使用第一个预设；要停用 AI 请选「不接 AI」</span>
         )}
+        {state.presetId === PET_PRESET_NONE && <span className="hint">当前「不接 AI」：模型名不会生效，选一个预设后再填。</span>}
+        {presetWriter.pending && <span className="hint" data-pet-preset-pending>正在保存预设…</span>}
+        {presetWriter.error && <span className="hint" data-pet-preset-error>预设切换失败：{presetWriter.error}（仍显示上次确认的预设，可重试）</span>}
       </label>
       <label className="field">
         <span>模型名（OpenAI 兼容协议建议填写；Anthropic 协议必填）</span>
         <input
           type="text"
-          defaultValue={state.model}
+          value={model}
           placeholder="例如 deepseek-chat / claude-3-5-haiku-latest"
-          onBlur={(e) => {
-            const next = e.target.value.trim()
-            if (next !== state.model) void bridge.pet.setPreset(state.presetId, next)
-          }}
+          onChange={(e) => { modelRevision.current++; setModelDraft(e.target.value) }}
+          onBlur={() => void commitModel()}
         />
+        {modelWriter.pending && <span className="hint" data-pet-model-pending>正在保存模型名…</span>}
+        {modelWriter.error && <span className="hint" data-pet-model-error>模型名保存失败：{modelWriter.error}（草稿已保留，失焦可重试）</span>}
       </label>
     </section>
   )
 }
 
 /** 生成素材包：走所选预设的 images 通道；默认按态分表（每态一张洋红 sheet，锚点保一致性）；完成即进素材包下拉 */
-function GenCard() {
-  const { state, refresh } = usePetState()
+function GenCard({ state, onRefresh }: CardProps) {
   const [packId, setPackId] = useState('my-pet')
   const [presetId, setPresetId] = useState<string | null>(null)
   const [model, setModel] = useState<string | null>(null)
@@ -260,23 +398,29 @@ function GenCard() {
   const [styleTags, setStyleTags] = useState('')
   const [frameCounts, setFrameCounts] = useState<Record<string, number>>(DEFAULT_FRAME_COUNTS)
   const [busy, setBusy] = useState(false)
+  const busyRef = useRef(false)
+  const [cancelling, setCancelling] = useState(false)
   const [progress, setProgress] = useState<{ done: number; total: number; stage: string } | null>(null)
   const [result, setResult] = useState<string | null>(null)
 
   useEffect(() => {
     const offProgress = bridge.pet.onGenProgress((p) => setProgress(p))
     const offDone = bridge.pet.onGenDone(({ packId: id, frameCount, warnings, elapsedMs }) => {
+      busyRef.current = false
       setBusy(false)
+      setCancelling(false)
       setProgress(null)
       const secs = Math.round((elapsedMs ?? 0) / 1000)
       const warnTail = warnings?.length ? `；⚠ QC 警告 ${warnings.length} 条：${warnings.join('；')}` : ''
       setResult(`✓ 已生成 ${frameCount} 帧 → 素材包「${id}」（耗时 ${secs}s${warnTail}）`)
       if (warnings?.length) toast.success(`素材包生成完成（含 ${warnings.length} 条警告）`)
       else toast.success('素材包生成完成')
-      void refresh()
+      void onRefresh()
     })
     const offError = bridge.pet.onGenError(({ reason }) => {
+      busyRef.current = false
       setBusy(false)
+      setCancelling(false)
       setProgress(null)
       setResult(`✗ ${reason}`)
       toast.error(`素材包生成失败：${reason}`)
@@ -286,13 +430,13 @@ function GenCard() {
       offDone()
       offError()
     }
-  }, [refresh])
+  }, [onRefresh])
 
-  if (!state) return null
   const usablePresets = state.presets
   const effectivePresetId = presetId ?? (state.presetId && state.presetId !== PET_PRESET_NONE ? state.presetId : state.activePresetId)
   const activeStates = FRAME_STATE_LABELS.filter(({ id }) => (frameCounts[id] ?? 0) > 0)
   const start = () => {
+    if (busyRef.current) return
     const states: Record<string, number> = {}
     for (const { id } of FRAME_STATE_LABELS) {
       const count = Math.max(0, Math.round(frameCounts[id] ?? 0))
@@ -308,7 +452,9 @@ function GenCard() {
       states,
       mode
     }
+    busyRef.current = true
     setBusy(true)
+    setCancelling(false)
     setProgress(
       mode === 'sheets'
         ? { done: 0, total: activeStates.length, stage: '提交生成请求' }
@@ -317,11 +463,27 @@ function GenCard() {
     setResult(null)
     void bridge.pet.genStart(input).then((res) => {
       if (!res.ok) {
+        busyRef.current = false
         setBusy(false)
         setProgress(null)
         setResult(`✗ ${res.error ?? '无法启动生成'}`)
       }
+    }).catch((cause) => {
+      // 启动被拒（IPC 拒绝/主进程抛错）：放开 busy，配置原样保留，只回显失败原因
+      busyRef.current = false
+      setBusy(false)
+      setCancelling(false)
+      setProgress(null)
+      setResult(`✗ ${errText(cause)}`)
+      toast.error(`无法启动生成：${errText(cause)}`)
     })
+  }
+  const cancel = async () => {
+    if (cancelling) return
+    setCancelling(true)
+    const message = await writeSetting('取消生成', () => bridge.pet.genCancel())
+    setCancelling(false)
+    setResult(message ? `✗ 取消失败：${message}` : '已请求取消：当前帧完成后停下。')
   }
   const totalFrames = Object.values(frameCounts).reduce((a, b) => a + Math.max(0, b), 0)
   const percent = progress && progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0
@@ -450,16 +612,18 @@ function GenCard() {
           {busy ? '生成中…' : '开始生成'}
         </button>
         {busy && (
-          <button className="btn" type="button" onClick={() => void bridge.pet.genCancel()}>取消</button>
+          <button className="btn" type="button" disabled={cancelling} onClick={() => void cancel()}>{cancelling ? '取消中…' : '取消'}</button>
         )}
       </div>
+      {!effectivePresetId && <span className="hint" data-gen-blocked>还不能开始：先选一个模型预设（生成走它的 images 通道）。</span>}
+      {effectivePresetId && totalFrames < 1 && <span className="hint" data-gen-blocked>还不能开始：帧数表全为 0，至少给一个状态配 1 帧。</span>}
       {progress && (
         <label className="field">
           <span>{progress.stage}：{progress.done}/{progress.total}</span>
           <div className="pet-gen-bar"><div className="pet-gen-bar-fill" style={{ width: `${percent}%` }} /></div>
         </label>
       )}
-      {result && <span className="hint">{result}</span>}
+      {result && <span className="hint" data-gen-result>{result}</span>}
     </section>
   )
 }

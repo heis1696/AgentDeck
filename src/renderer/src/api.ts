@@ -156,17 +156,47 @@ export function useSettings() {
   return { settings, update, refresh, loading, error }
 }
 
-/** 桌宠状态快照 + 实时广播订阅（设置卡片用） */
+/** 桌宠状态快照 + 实时广播订阅（设置卡片用）。
+ *  读取与广播分开结算：广播是权威快照，收到广播即作废在途读取——否则一份更早发出、
+ *  更晚返回的读取会把广播后的新状态打回旧值。enabled=false 是有效的已加载状态，
+ *  只有「还没拿到过任何快照」才由 state=null 表示。
+ *  loading/error/stale 供设置页区分首次加载、读取失败与「失败但保留上次成功快照」。 */
 export function usePetState() {
   const [state, setState] = useState<PetStateSnapshot | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const requestSeq = useRef(0)
   const refresh = useCallback(async () => {
-    setState(await bridge.pet.getState())
+    const seq = ++requestSeq.current
+    setLoading(true)
+    try {
+      const next = await bridge.pet.getState()
+      if (seq !== requestSeq.current) return null
+      // getState 理论上总有快照；真拿到空值也不该抹掉已有的成功快照
+      setState((current) => next ?? current)
+      setError(null)
+      return next
+    } catch (cause) {
+      if (seq === requestSeq.current) setError(cause instanceof Error ? cause.message : String(cause))
+      return null
+    } finally {
+      if (seq === requestSeq.current) setLoading(false)
+    }
   }, [])
   useEffect(() => {
-    refresh()
-    return bridge.pet.onState(setState)
+    void refresh()
+    const off = bridge.pet.onState((next) => {
+      ++requestSeq.current
+      setState(next)
+      setError(null)
+      setLoading(false)
+    })
+    return () => {
+      requestSeq.current++
+      off()
+    }
   }, [refresh])
-  return { state, refresh }
+  return { state, refresh, loading, error, stale: error !== null && state !== null }
 }
 
 /** 桌宠共享类型再导出（组件层统一从 api.ts 取桌宠契约） */

@@ -57,6 +57,9 @@
 .us-ring-bg { stroke: var(--bg-hover); }
 .us-ring-arc { stroke: var(--status-done); }
 .us-ring.is-bad .us-ring-arc { stroke: var(--status-failed); }
+/* 该范围没有运行记录：失败率不适用，圆环保持中性，不冒充「满环成功」 */
+.us-ring.is-idle .us-ring-arc { stroke: var(--border); }
+.us-ring.is-idle b { color: var(--text-faint); }
 .us-ring b { position: relative; font-family: var(--font-mono); font-size: var(--text-caption); font-weight: 600; color: var(--text); }
 .us-ring b small { font-size: 10px; font-weight: 600; color: var(--text-faint); margin-left: 1px; }
 .us-ok-text { color: var(--status-done); display: inline-flex; align-items: center; gap: 4px; }

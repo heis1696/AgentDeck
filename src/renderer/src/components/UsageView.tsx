@@ -1,16 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Activity, AlertTriangle, CheckCircle2, CircleAlert, Coins, Gauge, RefreshCw, Server, Timer, Users, Wallet } from 'lucide-react'
-import { bridge, fmtDuration, fmtTokens } from '../api'
+import { bridge, fmtDuration, fmtTime, fmtTokens } from '../api'
 import { PageHeader } from '../ui/PageHeader'
 import { EmptyState } from '../ui/EmptyState'
-import type { AnalyticsSummary, UsageAggregate } from '../../../shared/types'
-
-const empty: UsageAggregate = { runs: 0, completed: 0, failed: 0, cancelled: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0, durationMs: 0 }
+import type { AnalyticsSummary } from '../../../shared/types'
 
 /** 运行时分布的固定色板（按占比顺序取色，与状态色无冲突） */
 const BACKEND_HUES = ['#4bc0c8', '#e3a84b', '#8f7ff0', '#58c58a', '#5b9dff', '#ef7168', '#d8739e']
 
 type Range = '7d' | '30d' | 'all'
+
+const RANGE_ITEMS: ReadonlyArray<Readonly<[Range, string]>> = [['7d', '近 7 天'], ['30d', '近 30 天'], ['all', '全部']]
+const RANGE_LABEL: Record<Range, string> = { '7d': '近 7 天', '30d': '近 30 天', all: '全部' }
+
+/** 一份成功快照连同它自己的范围——范围是快照的属性，不是页面的当前选择 */
+interface UsageSnapshot {
+  range: Range
+  summary: AnalyticsSummary
+}
 
 interface TrendBucket {
   key: string
@@ -25,20 +32,22 @@ interface TrendBucket {
 const pad2 = (n: number) => `${n}`.padStart(2, '0')
 const dayKeyOf = (d: Date) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
 
-/** 把每日序列装进图表桶：7/30 天按天补零；「全部」跨度 >60 天时并成月桶 */
-function buildTrend(summary: AnalyticsSummary | null, range: Range): TrendBucket[] {
+/** 把每日序列装进图表桶：7/30 天按天补零；「全部」跨度 >60 天时并成月桶。
+ *  右边界取快照自己的 until，而不是渲染时刻的 now：陈旧快照按今天的日期补零，
+ *  会把「它只统计到那天」伪装成「这些天确实没有消耗」，也会随重渲染漂移。 */
+function buildTrend(summary: AnalyticsSummary | null, range: Range, end: number): TrendBucket[] {
   const byDay = summary?.byDay ?? []
   if (!byDay.length) return []
   const byKey = new Map(byDay.map((d) => [d.date, d]))
-  const today = new Date()
+  const last = new Date(end)
   const first = new Date(`${byDay[0].date}T00:00:00`)
-  const spanDays = Math.round((today.getTime() - first.getTime()) / 86_400_000)
+  const spanDays = Math.round((last.getTime() - first.getTime()) / 86_400_000)
   const monthMode = range === 'all' && spanDays > 60
   const buckets: TrendBucket[] = []
   if (monthMode) {
     const start = new Date(first.getFullYear(), first.getMonth(), 1)
-    const end = new Date(today.getFullYear(), today.getMonth(), 1)
-    for (const cursor = start; cursor <= end; cursor.setMonth(cursor.getMonth() + 1)) {
+    const stop = new Date(last.getFullYear(), last.getMonth(), 1)
+    for (const cursor = new Date(start); cursor <= stop; cursor.setMonth(cursor.getMonth() + 1)) {
       const key = `${cursor.getFullYear()}-${pad2(cursor.getMonth() + 1)}`
       const row = byKey.get(key)
       buckets.push({
@@ -52,10 +61,10 @@ function buildTrend(summary: AnalyticsSummary | null, range: Range): TrendBucket
       })
     }
   } else {
-    const start = range === '7d' ? new Date(today.getTime() - 6 * 86_400_000)
-      : range === '30d' ? new Date(today.getTime() - 29 * 86_400_000)
+    const start = range === '7d' ? new Date(last.getTime() - 6 * 86_400_000)
+      : range === '30d' ? new Date(last.getTime() - 29 * 86_400_000)
       : new Date(`${byDay[0].date}T00:00:00`)
-    for (const cursor = new Date(start); cursor <= today; cursor.setDate(cursor.getDate() + 1)) {
+    for (const cursor = new Date(start); cursor <= last; cursor.setDate(cursor.getDate() + 1)) {
       const key = dayKeyOf(cursor)
       const row = byKey.get(key)
       buckets.push({
@@ -147,26 +156,29 @@ function TrendChart({ buckets, peak }: { buckets: TrendBucket[]; peak: number })
 }
 
 export function UsageView() {
-  const [summary, setSummary] = useState<AnalyticsSummary | null>(null)
+  const [range, setRange] = useState<Range>('7d')
+  // 数值与图表一律从这份快照读，范围也随它一起存：切范围时旧快照仍按旧范围展示，
+  // 不会被当前选中的范围重新贴标签或重新分桶。
+  const [snapshot, setSnapshot] = useState<UsageSnapshot | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [range, setRange] = useState<Range>('7d')
   const since = useMemo(() => range === 'all' ? undefined : Date.now() - (range === '7d' ? 7 : 30) * 86_400_000, [range])
   const requestSeq = useRef(0)
   const refresh = useCallback(async () => {
     const request = ++requestSeq.current
+    const requested = range
     setLoading(true)
     try {
       const next = await bridge.analytics.summary({ since })
       if (request !== requestSeq.current) return
-      setSummary(next)
+      setSnapshot({ range: requested, summary: next })
       setError(null)
     } catch (cause) {
       if (request === requestSeq.current) setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
       if (request === requestSeq.current) setLoading(false)
     }
-  }, [since])
+  }, [range, since])
   useEffect(() => {
     void refresh()
     const off = bridge.tasks.onUpdated(() => { void refresh() })
@@ -176,24 +188,44 @@ export function UsageView() {
     }
   }, [refresh])
 
-  const total = summary?.totals ?? empty
+  // 图表桶用快照自己的范围与 until（不是当前选中范围、也不是渲染时刻）：
+  // 它必须在早退分支之前求值——React 要求每次渲染的 hooks 数量一致
+  const trendSummary = snapshot?.summary ?? null
+  const trendScope = snapshot?.range ?? range
+  const trend = useMemo(() => buildTrend(trendSummary, trendScope, trendSummary?.until ?? Date.now()), [trendSummary, trendScope])
+
+  // 还没有任何成功快照：加载与失败必须是两种可分辨的状态
+  if (!snapshot) {
+    const failed = !loading && error !== null
+    return <div className="psh-page">
+      <PageHeader title="用量" icon={<Gauge size={16} />} actions={failed
+        ? <button className="btn" type="button" onClick={() => void refresh()} disabled={loading}><RefreshCw size={14} className={loading ? 'spin' : ''} /> 重试</button>
+        : undefined} />
+      <div className="psh-body">
+        <EmptyState
+          icon={failed ? CircleAlert : Gauge}
+          title={failed ? '统计加载失败' : '统计加载中'}
+          description={failed ? error ?? '无法读取用量数据。' : '正在读取用量数据。'}
+          action={failed ? <button className="btn" type="button" onClick={() => void refresh()}><RefreshCw size={14} /> 重试</button> : undefined}
+        />
+      </div>
+    </div>
+  }
+
+  const { summary } = snapshot
+  const scope = snapshot.range
+  const scopeSwitching = scope !== range
+  const total = summary.totals
   const tokens = total.inputTokens + total.outputTokens
   const failureRate = total.runs ? Math.round(total.failed / total.runs * 100) : 0
   const avgDuration = total.runs ? total.durationMs / total.runs : 0
   const costPerMTok = tokens ? total.costUsd / (tokens / 1_000_000) : 0
-  const trend = useMemo(() => buildTrend(summary, range), [summary, range])
+  // runs 覆盖该范围内所有运行记录：完成/失败/取消之外的都是仍在进行（或排队）的
+  const pending = Math.max(0, total.runs - total.completed - total.failed - total.cancelled)
   const trendPeak = Math.max(1, ...trend.map((b) => b.inputTokens + b.outputTokens))
-  const backendTotal = Math.max(1, (summary?.byBackend ?? []).reduce((sum, row) => sum + row.inputTokens + row.outputTokens, 0))
-  const agentTokenMax = Math.max(1, ...(summary?.byAgent ?? []).map((row) => row.inputTokens + row.outputTokens))
+  const backendTotal = Math.max(1, summary.byBackend.reduce((sum, row) => sum + row.inputTokens + row.outputTokens, 0))
+  const agentTokenMax = Math.max(1, ...summary.byAgent.map((row) => row.inputTokens + row.outputTokens))
 
-  if (!summary && (loading || error)) {
-    return <div className="psh-page">
-      <PageHeader title="用量" icon={<Gauge size={16} />} actions={<button className="btn" type="button" onClick={() => void refresh()} disabled={loading}><RefreshCw size={14} className={loading ? 'spin' : ''} /> 重试</button>} />
-      <div className="psh-body">
-        <EmptyState icon={loading ? Gauge : CircleAlert} title={loading ? '统计加载中' : '统计加载失败'} description={loading ? '正在读取用量数据。' : error ?? '无法读取用量数据。'} action={!loading ? <button className="btn" type="button" onClick={() => void refresh()}><RefreshCw size={14} /> 重试</button> : undefined} />
-      </div>
-    </div>
-  }
   return <div className="psh-page">
     {/* 唯一主标题：KPI 数值走 us-stat-figure，不会被页题排版接管 */}
     <PageHeader
@@ -201,124 +233,142 @@ export function UsageView() {
       icon={<Gauge size={16} />}
       actions={<div className="us-controls">
         <div className="us-seg" role="tablist">
-          {([['7d', '近 7 天'], ['30d', '近 30 天'], ['all', '全部']] as const).map(([value, label]) =>
+          {RANGE_ITEMS.map(([value, label]) =>
             <button key={value} role="tab" aria-selected={range === value} className={range === value ? 'active' : ''} onClick={() => setRange(value)}>{label}</button>)}
         </div>
         <button className="btn" onClick={() => void refresh()} disabled={loading}><RefreshCw size={14} className={loading ? 'spin' : ''} /> 刷新</button>
       </div>}
     />
     <div className="psh-body">
-      {error && summary && <div className="data-state-banner data-state-stale" role="status"><CircleAlert size={14} /><span>显示上次成功的统计快照：{error}</span><button className="btn" type="button" onClick={() => void refresh()} disabled={loading}><RefreshCw size={13} className={loading ? 'spin' : ''} /> 重试</button></div>}
-      {summary && total.runs === 0 && <div className="data-state-banner data-state-empty" role="status"><Gauge size={14} /><span>当前时间范围没有用量记录。</span></div>}
-      {loading && !summary ? <div className="empty"><Gauge size={32} /><span>统计加载中…</span></div> : <>
-        <section className="us-hero">
-          <div className="us-stats">
-            <div className="us-stat us-stat-lead">
-              <span className="us-stat-icon"><Coins size={15} /></span>
-              <div className="us-stat-figure us-tokens">{fmtTokens(tokens)}</div>
-              <span className="us-stat-label">Tokens 总消耗</span>
-              <span className="us-stat-sub">输入 {fmtTokens(total.inputTokens)} · 输出 {fmtTokens(total.outputTokens)}</span>
-            </div>
-            <div className="us-stat">
-              <span className="us-stat-icon"><Wallet size={15} /></span>
-              <div className="us-stat-figure">{total.costUsd ? <>$<span className="us-figure-unit">{total.costUsd.toFixed(2)}</span></> : '—'}</div>
-              <span className="us-stat-label">预估成本</span>
-              <span className="us-stat-sub">{tokens && total.costUsd ? `$${costPerMTok.toFixed(3)} / 1M tok` : '暂无计费数据'}</span>
-            </div>
-            <div className="us-stat">
-              <span className="us-stat-icon"><Activity size={15} /></span>
-              <div className="us-stat-figure">{total.runs}</div>
-              <span className="us-stat-label">运行次数</span>
-              <span className="us-stat-sub">{total.runs ? <>成功 {total.completed} · 失败 {total.failed}{total.cancelled ? <> · 取消 {total.cancelled}</> : null} · 均次 {fmtDuration(avgDuration)}</> : '该时段没有运行'}</span>
-            </div>
-            <div className="us-stat us-stat-ring">
-              <span className={`us-ring ${failureRate > 0 ? 'is-bad' : 'is-ok'}`}>
-                <svg viewBox="0 0 48 48" width="54" height="54">
-                  <circle className="us-ring-bg" cx="24" cy="24" r="20" fill="none" strokeWidth="4.5" />
-                  <circle
-                    className="us-ring-arc" cx="24" cy="24" r="20" fill="none" strokeWidth="4.5" strokeLinecap="round"
-                    strokeDasharray={`${125.66 * failureRate / 100} 125.66`} transform="rotate(-90 24 24)"
-                  />
-                </svg>
-                <b>{failureRate}<small>%</small></b>
-              </span>
-              <span className="us-ring-side">
-                <span className="us-stat-label">失败率</span>
-                <span className="us-stat-sub">{failureRate > 0 ? <span className="us-warn-text"><AlertTriangle size={11} /> {total.failed} 次失败待处理</span> : <span className="us-ok-text"><CheckCircle2 size={11} /> 运行全部成功</span>}</span>
-              </span>
-            </div>
+      {error && <div className="data-state-banner data-state-stale" role="status" data-usage-stale>
+        <CircleAlert size={14} />
+        <span>读取「{RANGE_LABEL[range]}」失败：{error}。以下仍是「{RANGE_LABEL[scope]}」的成功快照（{fmtTime(summary.generatedAt)}）。</span>
+        <button className="btn" type="button" onClick={() => void refresh()} disabled={loading}><RefreshCw size={13} className={loading ? 'spin' : ''} /> 重试</button>
+      </div>}
+      {!error && scopeSwitching && <div className="data-state-banner" role="status" data-usage-scope-switch>
+        <RefreshCw size={14} className="spin" />
+        <span>正在读取「{RANGE_LABEL[range]}」…页面仍是「{RANGE_LABEL[scope]}」的成功快照。</span>
+      </div>}
+      {total.runs === 0 && <div className="data-state-banner data-state-empty" role="status"><Gauge size={14} /><span>「{RANGE_LABEL[scope]}」没有用量记录。</span></div>}
+      <section className="us-hero">
+        <div className="us-stats">
+          <div className="us-stat us-stat-lead">
+            <span className="us-stat-icon"><Coins size={15} /></span>
+            <div className="us-stat-figure us-tokens">{fmtTokens(tokens)}</div>
+            <span className="us-stat-label">Tokens 总消耗</span>
+            <span className="us-stat-sub">输入 {fmtTokens(total.inputTokens)} · 输出 {fmtTokens(total.outputTokens)}</span>
           </div>
-          {trend.length
-            ? <TrendChart buckets={trend} peak={trendPeak} />
-            : <div className="us-trend-empty">该时段没有消耗记录，切到更大范围看看。</div>}
-        </section>
-
-        <div className="us-grid">
-          <section className="us-panel">
-            <div className="us-panel-head"><h3><AlertTriangle size={13} className="us-hicon us-hicon-err" />失败构成</h3><span className="us-subtle">{summary?.errors.length ?? 0} 类错误</span></div>
-            {summary?.errors.length ? <div className="us-mix">
-              {summary.errors.map((error, index) => {
-                const max = Math.max(...summary.errors.map((item) => item.count))
-                return <div className="us-mix-row" key={error.code} style={{ '--d': `${index * 50}ms` } as React.CSSProperties}>
-                  <span className="us-mix-rank">{index + 1}</span>
-                  <span className="us-mix-info">
-                    <b>{error.title}</b>
-                    <small><i className={error.retryable ? 'us-chip us-chip-retry' : 'us-chip'}>{error.retryable ? '可重试' : error.code}</i></small>
-                  </span>
-                  <span className="us-mix-track"><i style={{ width: `${Math.max(6, error.count / max * 100)}%` }} /></span>
-                  <b className="us-mix-count">{error.count}</b>
-                </div>
-              })}
-            </div> : <div className="us-blank"><CheckCircle2 size={20} /><span>该时段没有失败记录。</span></div>}
-          </section>
-          <section className="us-panel">
-            <div className="us-panel-head"><h3><Server size={13} className="us-hicon" />按运行时</h3><span className="us-subtle">运行次数与 token 占比</span></div>
-            {summary?.byBackend.length ? <div className="us-back">
-              {summary.byBackend.map((row, index) => {
-                const amount = row.inputTokens + row.outputTokens
-                const share = amount / backendTotal * 100
-                const shareText = share > 0 && share < 1 ? '<1' : Math.round(share)
-                const hue = BACKEND_HUES[index % BACKEND_HUES.length]
-                return <div className="us-back-row" key={row.key} style={{ '--d': `${index * 50}ms`, '--hue': hue } as React.CSSProperties}>
-                  <span className="us-back-name"><i />{row.label}</span>
-                  <span className="us-back-meta">{row.runs} 次</span>
-                  <span className="us-back-track"><i style={{ width: `${Math.max(share, 2)}%` }} /></span>
-                  <b className="us-back-share">{shareText}%</b>
-                  <span className="us-back-tokens">{fmtTokens(amount)}</span>
-                </div>
-              })}
-            </div> : <div className="us-blank"><Gauge size={20} /><span>该时段没有运行时活动。</span></div>}
-          </section>
+          <div className="us-stat">
+            <span className="us-stat-icon"><Wallet size={15} /></span>
+            <div className="us-stat-figure">{total.costUsd ? <>$<span className="us-figure-unit">{total.costUsd.toFixed(2)}</span></> : '—'}</div>
+            <span className="us-stat-label">预估成本</span>
+            <span className="us-stat-sub">{tokens && total.costUsd ? `$${costPerMTok.toFixed(3)} / 1M tok` : '暂无计费数据'}</span>
+          </div>
+          <div className="us-stat">
+            <span className="us-stat-icon"><Activity size={15} /></span>
+            <div className="us-stat-figure">{total.runs}</div>
+            <span className="us-stat-label">运行次数</span>
+            <span className="us-stat-sub">{total.runs
+              ? <>成功 {total.completed} · 失败 {total.failed}{total.cancelled ? <> · 取消 {total.cancelled}</> : null}{pending ? <> · 进行中 {pending}</> : null} · 均次 {fmtDuration(avgDuration)}</>
+              : '该时段没有运行'}</span>
+          </div>
+          <div className="us-stat us-stat-ring">
+            <span className={`us-ring ${total.runs === 0 ? 'is-idle' : failureRate > 0 ? 'is-bad' : 'is-ok'}`}>
+              <svg viewBox="0 0 48 48" width="54" height="54">
+                <circle className="us-ring-bg" cx="24" cy="24" r="20" fill="none" strokeWidth="4.5" />
+                <circle
+                  className="us-ring-arc" cx="24" cy="24" r="20" fill="none" strokeWidth="4.5" strokeLinecap="round"
+                  strokeDasharray={`${125.66 * failureRate / 100} 125.66`} transform="rotate(-90 24 24)"
+                />
+              </svg>
+              <b>{failureRate}<small>%</small></b>
+            </span>
+            <span className="us-ring-side">
+              <span className="us-stat-label">失败率</span>
+              <span className="us-stat-sub">{total.runs === 0
+                ? '没有运行，失败率不适用'
+                : total.failed > 0
+                  ? <span className="us-warn-text"><AlertTriangle size={11} /> {total.failed} 次失败{pending ? ` · ${pending} 次进行中` : ''}</span>
+                  : pending > 0
+                    ? <span className="us-ok-text"><CheckCircle2 size={11} /> 暂无失败 · {pending} 次进行中</span>
+                    : total.cancelled > 0
+                      ? <span className="us-ok-text"><CheckCircle2 size={11} /> 无失败 · {total.cancelled} 次取消</span>
+                      : <span className="us-ok-text"><CheckCircle2 size={11} /> 运行全部成功</span>}</span>
+            </span>
+          </div>
         </div>
+        {trend.length
+          ? <TrendChart buckets={trend} peak={trendPeak} />
+          : <div className="us-trend-empty">「{RANGE_LABEL[scope]}」没有消耗记录{scope === 'all' ? '。' : '，切到更大范围看看。'}</div>}
+      </section>
 
-        <section className="us-panel us-agents">
-          <div className="us-panel-head"><h3><Users size={13} className="us-hicon" />队员明细</h3><span className="us-subtle"><Timer size={11} /> 用时为累计执行时长</span></div>
-          {summary?.byAgent.length ? <div className="us-table-scroll"><table className="us-table">
-            <thead><tr><th className="us-num">#</th><th>队员</th><th className="us-num">运行</th><th className="us-num">成功</th><th className="us-num">失败</th><th>Tokens</th><th className="us-num">成本</th><th className="us-num">用时</th></tr></thead>
-            <tbody>
-              {summary.byAgent.map((row, index) => {
-                const amount = row.inputTokens + row.outputTokens
-                return <tr key={row.key}>
-                  <td className="us-num us-rank">{pad2(index + 1)}</td>
-                  <td className="us-agent">{row.label}</td>
-                  <td className="us-num">{row.runs}</td>
-                  <td className="us-num us-ok-text">{row.completed}</td>
-                  <td className="us-num">{row.failed ? <span className="us-chip us-chip-fail">{row.failed}</span> : <span className="us-num-dim">0</span>}</td>
-                  <td>
-                    <div className="us-token-cell">
-                      <span>{fmtTokens(amount)}</span>
-                      {amount ? <i style={{ width: `${Math.max(4, amount / agentTokenMax * 100)}%` }} /> : null}
-                    </div>
-                  </td>
-                  <td className="us-num">{row.costUsd ? `$${row.costUsd.toFixed(2)}` : '—'}</td>
-                  <td className="us-num">{row.durationMs ? fmtDuration(row.durationMs) : '—'}</td>
-                </tr>
-              })}
-            </tbody>
-          </table></div> : <div className="us-blank"><Users size={20} /><span>该时段没有队员活动。</span></div>}
+      <div className="us-grid">
+        <section className="us-panel">
+          <div className="us-panel-head"><h3><AlertTriangle size={13} className="us-hicon us-hicon-err" />失败构成</h3><span className="us-subtle">{summary.errors.length ? `${summary.errors.length} 类错误` : total.runs ? '没有失败记录' : '没有运行记录'}</span></div>
+          {summary.errors.length ? <div className="us-mix">
+            {summary.errors.map((error, index) => {
+              const max = Math.max(...summary.errors.map((item) => item.count))
+              return <div className="us-mix-row" key={error.code} style={{ '--d': `${index * 50}ms` } as React.CSSProperties}>
+                <span className="us-mix-rank">{index + 1}</span>
+                <span className="us-mix-info">
+                  <b>{error.title}</b>
+                  <small><i className={error.retryable ? 'us-chip us-chip-retry' : 'us-chip'}>{error.retryable ? '可重试' : error.code}</i></small>
+                </span>
+                <span className="us-mix-track"><i style={{ width: `${Math.max(6, error.count / max * 100)}%` }} /></span>
+                <b className="us-mix-count">{error.count}</b>
+              </div>
+            })}
+          </div> : <div className="us-blank"><CheckCircle2 size={20} /><span>{total.runs ? `「${RANGE_LABEL[scope]}」没有失败记录。` : `「${RANGE_LABEL[scope]}」没有运行记录。`}</span></div>}
         </section>
-        <footer className="us-foot">统计生成于 {summary ? new Date(summary.generatedAt).toLocaleTimeString() : '—'}</footer>
-      </>}
+        <section className="us-panel">
+          <div className="us-panel-head"><h3><Server size={13} className="us-hicon" />按运行时</h3><span className="us-subtle">运行次数与 token 占比</span></div>
+          {summary.byBackend.length ? <div className="us-back">
+            {summary.byBackend.map((row, index) => {
+              const amount = row.inputTokens + row.outputTokens
+              const share = amount / backendTotal * 100
+              const shareText = share > 0 && share < 1 ? '<1' : Math.round(share)
+              const hue = BACKEND_HUES[index % BACKEND_HUES.length]
+              return <div className="us-back-row" key={row.key} style={{ '--d': `${index * 50}ms`, '--hue': hue } as React.CSSProperties}>
+                <span className="us-back-name"><i />{row.label}</span>
+                <span className="us-back-meta">{row.runs} 次</span>
+                <span className="us-back-track"><i style={{ width: `${Math.max(share, 2)}%` }} /></span>
+                <b className="us-back-share">{shareText}%</b>
+                <span className="us-back-tokens">{fmtTokens(amount)}</span>
+              </div>
+            })}
+          </div> : <div className="us-blank"><Gauge size={20} /><span>「{RANGE_LABEL[scope]}」没有运行时活动。</span></div>}
+        </section>
+      </div>
+
+      <section className="us-panel us-agents">
+        <div className="us-panel-head"><h3><Users size={13} className="us-hicon" />队员明细</h3><span className="us-subtle"><Timer size={11} /> 用时为累计执行时长</span></div>
+        {summary.byAgent.length ? <div className="us-table-scroll"><table className="us-table">
+          <thead><tr><th className="us-num">#</th><th>队员</th><th className="us-num">运行</th><th className="us-num">成功</th><th className="us-num">失败</th><th>Tokens</th><th className="us-num">成本</th><th className="us-num">用时</th></tr></thead>
+          <tbody>
+            {summary.byAgent.map((row, index) => {
+              const amount = row.inputTokens + row.outputTokens
+              return <tr key={row.key}>
+                <td className="us-num us-rank">{pad2(index + 1)}</td>
+                <td className="us-agent">{row.label}</td>
+                <td className="us-num">{row.runs}</td>
+                <td className="us-num us-ok-text">{row.completed}</td>
+                <td className="us-num">{row.failed ? <span className="us-chip us-chip-fail">{row.failed}</span> : <span className="us-num-dim">0</span>}</td>
+                <td>
+                  <div className="us-token-cell">
+                    <span>{fmtTokens(amount)}</span>
+                    {amount ? <i style={{ width: `${Math.max(4, amount / agentTokenMax * 100)}%` }} /> : null}
+                  </div>
+                </td>
+                <td className="us-num">{row.costUsd ? `$${row.costUsd.toFixed(2)}` : '—'}</td>
+                <td className="us-num">{row.durationMs ? fmtDuration(row.durationMs) : '—'}</td>
+              </tr>
+            })}
+          </tbody>
+        </table></div> : <div className="us-blank"><Users size={20} /><span>「{RANGE_LABEL[scope]}」没有队员活动。</span></div>}
+      </section>
+      <footer className="us-foot" data-usage-scope={scope}>
+        统计范围：{RANGE_LABEL[scope]} · 统计生成于 {fmtTime(summary.generatedAt)}{scopeSwitching ? ` · 正在加载「${RANGE_LABEL[range]}」` : ''}
+      </footer>
     </div>
   </div>
 }

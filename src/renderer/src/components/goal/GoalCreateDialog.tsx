@@ -83,11 +83,11 @@ export function GoalCreateDialog({ issueId, prefill, onClose }: { issueId: strin
       </label>
       <label className="field row" style={{ gap: 8, alignItems: 'center' }}>
         <input type="checkbox" checked={draft.startNow} onChange={(e) => setDraft({ ...draft, startNow: e.target.checked })} />
-        <span>立即开始推进</span>
+        <span>创建后立即开始推进（会生成执行任务）</span>
       </label>
       <div className="dialog-footer">
         <span className="hint">工作目录：{prefill.workdir || '（未绑定）'}</span>
-        <button className="btn primary" disabled={!canCreate || busy} onClick={() => void commitCreate()}>开启</button>
+        <button className="btn primary" disabled={!canCreate || busy} onClick={() => void commitCreate()}>{draft.startNow ? '创建并开始推进' : '创建为草稿'}</button>
       </div>
     </div>
   </div>

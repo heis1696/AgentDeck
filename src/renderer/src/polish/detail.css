@@ -598,8 +598,15 @@ html.light .tab.active {
 .meeting-actions { display: flex; align-items: center; gap: 5px; margin-top: 7px; }
 .meeting-interject { display: flex; flex: 1; min-width: 0; gap: 4px; }
 .meeting-interject input { width: 100%; min-height: 27px; padding: 0 7px; font-size: 11px; }
-.meeting-action-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; padding: 6px 7px; border-top: 1px solid var(--border); color: var(--ink-dim); font-size: var(--text-caption); }
-.meeting-approval { display: inline-flex; gap: 3px; }
+.meeting-action-item { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-top: 6px; padding: 7px; border-top: 1px solid var(--border); color: var(--ink-dim); font-size: var(--text-caption); }
+.meeting-action-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 3px; }
+.meeting-action-title { color: var(--ink); line-height: 1.35; overflow-wrap: anywhere; }
+.meeting-action-meta { color: var(--text-faint); font-size: var(--text-micro); line-height: 1.4; overflow-wrap: anywhere; }
+.meeting-approval { display: flex; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+.meeting-approval .btn { max-width: 100%; min-height: 26px; padding: 0 7px; font-size: var(--text-micro); white-space: normal; text-align: left; }
+.meeting-interject-state { color: var(--text-faint); font-size: var(--text-micro); }
+.meeting-interject-state.error { color: var(--status-failed); }
+@container main (max-width: 600px) { .meeting-action-item { flex-direction: column; } .meeting-approval { justify-content: flex-start; } }
 @container main (max-width: 600px) { .meeting-selects { grid-template-columns: 1fr; } }
 
 /* ---- 追问框技能命令菜单（F4）：textarea 上方浮层，样式对齐 Palette ---- */
