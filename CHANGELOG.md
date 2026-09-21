@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### 修复
+
+- **持久化与快照一致性七连修（多任务并行实战收口）**：store 写入串行化并绑定执行归属（防并发写互相覆盖）；git 快照全消费端拒绝陈旧版本（防旧快照盖新现场），执行域快照结果持久化；队员回合分组呈现与设置控件对齐；详情画布恢复与追问框正常滚动；窄窗口下 SideDock 贴任务侧；队员时钟与交互覆盖缺口收口。
+
 ### 新增
 
 - **桌面宠物（AI Desktop Pet，A/B/C 三期全量落地）**：像素风桌宠常驻透明置顶小窗——原创素材生成器（Node 内置模块产 PNG 帧动画，零新依赖）、双端行为状态机（`src/shared/pet.ts` 七态：待机/走动/发呆/睡觉/拖拽/聊天/说话，纯函数 smoke 直连）、点击互动 + 拖拽抛掷 + 气泡聊天。**AI 脑**（B 期）：`pet-llm.ts` 双协议（OpenAI/Anthropic）chat 调用，persona 系统提示词可编辑带宏替换（`{board_summary}` 看板摘要 / `{pack_name}` / `{time_of_day}`），自主循环按可配间隔决策（走动/说话/发呆，静默防重入）；台词库 `pet-lines` 兜底离线场景。**素材包体系**：默认包经 vite import 进 bundle（双热更通道零登记），用户包目录热切换（`pet.json` 定义走速/动画节奏/状态转移，换目录即换皮肤）；右键菜单（聊天/打开设置/切素材包子菜单/隐藏）。设置集中在「桌宠」卡片（开关/素材包/persona/自主间隔/模型预设——可单独选小模型省钱），独立持久化 `userData/pet.json` 不混入全局设置广播。设计文档 [docs/plan/desktop-pet.md](docs/plan/desktop-pet.md) + 功能规格 [docs/features/desktop-pet.md](docs/features/desktop-pet.md) + 调研 [docs/research/desktop-pet-references.md](docs/research/desktop-pet-references.md)；`smoke:pet-behavior` / `smoke:pet-brain` / `smoke:pet-store` 三门禁全绿。
