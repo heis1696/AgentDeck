@@ -41,11 +41,16 @@ function makeLeaderBackend(script) {
     async probe() { return { ok: true, detail: '' } },
     // 先让出一个微任务再发首回合事件：同步发会撞上 scheduler.pump 的重入闸
     // （launch(领队)→run→start 还在 pump 栈上，此时建单 enqueue 会被 pumping 闸吞掉，子任务永远 queued）
-    async start({ events }) {
+    async start({ events: rawEvents, turn }) {
+      let activeTurn = turn
+      const events = {
+        onEvent: (event) => rawEvents.onEvent(event, activeTurn),
+        onTurnEnd: (result) => rawEvents.onTurnEnd(result, activeTurn)
+      }
       const sid = 'sess_lead'
       await Promise.resolve()
       script.step(0, { events })
-      return { sessionId: sid, async send(content) { sent.push(content); script.step(sent.length, { events, content }) }, async stop() {}, async close() {} }
+      return { sessionId: sid, turnScoped: true, async send(content, nextTurn) { activeTurn = nextTurn; sent.push(content); script.step(sent.length, { events, content }) }, async stop() {}, async close() {} }
     }
   }
 }

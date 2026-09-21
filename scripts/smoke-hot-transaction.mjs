@@ -40,6 +40,7 @@ const ok = (condition, message) => {
 const equal = (actual, expected, message) => ok(actual === expected, actual === expected ? message : `${message}: ${JSON.stringify(actual)} !== ${JSON.stringify(expected)}`)
 const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex')
 const version = (n) => `${shell}-hot.${n}`
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 async function loadTs(entry) {
   const outfile = path.join(work, `${path.basename(entry, '.ts')}-${Math.random().toString(36).slice(2)}.cjs`)
@@ -127,6 +128,7 @@ function countArtifacts(channel) {
 function makeUpdater(userData, idle = true) {
   let currentIdle = idle
   const calls = { relaunch: [], loadFile: [] }
+  const states = []
   const updater = new HotUpdater({
     getWindow: () => ({ loadFile: (file) => calls.loadFile.push(file), webContents: { send: () => {} } }),
     isMainIdle: () => currentIdle,
@@ -136,7 +138,8 @@ function makeUpdater(userData, idle = true) {
     getShellVersion: () => shell,
     getAppDir: () => null
   })
-  return { updater, calls, setIdle: (value) => { currentIdle = value } }
+  updater.onState((snapshot) => states.push(snapshot))
+  return { updater, calls, states, setIdle: (value) => { currentIdle = value } }
 }
 
 function pointerVersion(userData, channel) {
@@ -219,6 +222,11 @@ async function scenarioDelayedL2() {
   equal(pointerVersion(userData, 'renderer'), null, 'dependent L2 pointer stays untouched')
   equal(countArtifacts('renderer'), rendererArtifacts, 'dependent L2 is not downloaded early')
   equal(context.calls.relaunch.length, 0, 'staging does not relaunch')
+  const checkedWhileStaged = await context.updater.check()
+  equal(checkedWhileStaged.phase, 'staged', 'check preserves the staged payload phase')
+  equal(checkedWhileStaged.channel, 'payload', 'check preserves the staged payload channel')
+  equal(checkedWhileStaged.stagedVersion, l1, 'check preserves the staged payload version')
+  equal(context.updater.hasStagedPayload(), true, 'check does not clear the staged payload')
   context.setIdle(true)
   await context.updater.applyStagedOnQuit()
   equal(pointerVersion(userData, 'payload'), l1, 'staged L1 flips during quit')
@@ -231,6 +239,25 @@ async function scenarioDelayedL2() {
   equal(checked.available?.renderer, l2, 'L2 becomes available after the new L1 is active')
   equal((await next.updater.apply('renderer')).ok, true, 'delayed L2 can be applied in the next process')
   equal(pointerVersion(userData, 'renderer'), l2, 'delayed L2 pointer is committed')
+}
+
+async function scenarioBusyCheckPreservesState() {
+  console.log('\n[scenario] busy check returns the active update state without overwriting it')
+  const userData = setUserData('busy-check')
+  const release = version(15)
+  publish('renderer', release)
+  rendererDelayMs = 250
+  const context = makeUpdater(userData)
+  const applyPromise = context.updater.apply('renderer')
+  for (let i = 0; i < 100 && !context.states.some((state) => state.phase === 'downloading' && state.channel === 'renderer'); i++) {
+    await sleep(5)
+  }
+  const checked = await context.updater.check()
+  equal(checked.phase, 'downloading', 'busy check returns the active downloading phase')
+  equal(checked.channel, 'renderer', 'busy check returns the active channel')
+  equal(context.states.some((state) => state.phase === 'idle' && state.channel === null), false, 'busy check emits no overwriting idle state')
+  equal((await applyPromise).ok, true, 'the active update still completes')
+  rendererDelayMs = 0
 }
 
 async function scenarioFeedRollbackAfterCheck() {
@@ -416,6 +443,7 @@ async function scenarioPointerChangesDuringDownload() {
 try {
   await scenarioSameRoundUnlocksL2()
   await scenarioDelayedL2()
+  await scenarioBusyCheckPreservesState()
   await scenarioFeedRollbackAfterCheck()
   await scenarioDirectOldVersion()
   await scenarioPointerChangesDuringDownload()

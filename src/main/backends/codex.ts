@@ -3,7 +3,8 @@
 // 事件：thread.started(id) → item.started/completed(command_execution|mcp_tool_call|agent_message) → turn.completed
 // 续聊：codex exec resume <id> --json ...
 // 注意：Windows 下 workspace-write 沙箱会废掉命令执行，必须 bypass（实测 exit -1）
-import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnResult } from './types'
+import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnResult, BackendTurnStamp } from './types'
+import { bindTurn } from './types'
 import type { TaskEvent, ToolEditMeta } from '../../shared/types'
 import { isJsonObject, jsonObject, jsonString, runCliJsonl, toolEvent } from './cli-common'
 import { parseEditMeta } from './edit-meta'
@@ -124,18 +125,20 @@ export function createCodexBackend(): AgentBackend {
       const p = await probeCli('codex')
       return p.ok ? { ok: true, detail: `codex ${p.version}` } : { ok: false, detail: p.error ?? '未安装' }
     },
-    async start({ prompt, workdir, events, resumeSessionId, model }) {
+    async start({ prompt, workdir, events: rawEvents, resumeSessionId, model, turn }) {
       const dir = workdir || process.cwd()
       let own: { kill: () => void } | null = null
-      const runTurn = (turnPrompt: string, resumeId?: string) =>
-        runOnce(turnPrompt, dir, resumeId, events, model, (r) => { own = r })
-      const r = await runTurn(prompt, resumeSessionId)
+      // 一次性 CLI：每个回合一个进程。回合身份随进程绑定，被杀旧进程的迟到回调带旧身份。
+      const runTurn = (turnPrompt: string, resumeId?: string, turnStamp?: BackendTurnStamp) =>
+        runOnce(turnPrompt, dir, resumeId, bindTurn(rawEvents, turnStamp), model, (r) => { own = r })
+      const r = await runTurn(prompt, resumeSessionId, turn)
       if (!r.ok && r.error) throw new Error(r.error)
       const sid = r.sessionId
       return {
         sessionId: sid,
-        async send(content) {
-          const res = await runTurn(content, sid)
+        turnScoped: true,
+        async send(content, turnStamp) {
+          const res = await runTurn(content, sid, turnStamp)
           if (!res.ok) throw new Error(res.error || '回合失败')
         },
         async stop() {

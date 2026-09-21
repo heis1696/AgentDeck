@@ -41,10 +41,10 @@ preload 以 `contextBridge` 暴露，全部经 `ipcRenderer.invoke/on` 与主进
 | `list` | `() => Promise<Task[]>` | 全量任务，按创建时间倒序 |
 | `get` | `(id) => Promise<Task \| null>` | 单个任务 |
 | `events` | `(id, afterSeq = 0) => Promise<TaskEvent[]>` | 增量读执行日志（seq > afterSeq，上限 5000 条） |
-| `create` | `(input: TaskCreateInput) => Promise<Task>` | 创建并按 `startNow` 决定是否立即入队。`input: { title, prompt, workdir, backend?, agentId?, handoff?, startNow?, trigger? }`。`agentId` 优先于 `backend`；领队身份由该 agent 的 `subordinates` 决定；`startNow: false` 落为 parked（等 `start` 手动拉起） |
-| `start` | `(id) => Promise<IpcResult>` | 启动 parked 任务（仅 queued+parked 可启动） |
+| `create` | `(input: TaskCreateInput) => Promise<Task>` | 创建并按 `startNow` 决定是否立即入队。`input: { title, prompt, workdir, backend?, agentId?, handoff?, startNow?, trigger? }`。`agentId` 优先于 `backend`；领队身份由该 agent 的 `subordinates` 决定；`startNow: false` 落为 parked（等 `start` 手动拉起）。相同 `dedupeKey` / `requestId` / `idempotencyKey` 的重放复用原任务，不解除停放；启动已有任务需显式调用 `start` |
+| `start` | `(id) => Promise<IpcResult>` | 启动 queued 任务（含 parked 和排队解卡）；接力任务记录本阶段人工启动确认并传入首回合，不代表工具权限或其他审批已获批准 |
 | `cancel` | `(id) => Promise<IpcResult>` | 取消排队/运行中任务；**级联取消其运行中子任务** |
-| `followUp` | `(id, content, opts?: { relay?: boolean }) => Promise<IpcResult>` | 在已完成任务会话上追问（done/failed/cancelled 均可）；无活跃会话走 resume（dsh ACP 无跨进程 resume，重启后追问会新建会话）。`relay: true` 仅由「接力下一阶段」按钮传入，触发 `<continue>` 语义的 handoff |
+| `followUp` | `(id, content, opts?: { relay?: boolean }) => Promise<IpcResult>` | 在已完成任务会话上追问（done/failed/cancelled 均可）；无活跃会话走 resume（dsh ACP 无跨进程 resume，重启后追问会新建会话）。`relay: true` 仅由「接力下一阶段」按钮传入；若已有非取消后继则复用，queued 后继按人工确认启动，不重复建单 |
 | `delete` | `(id) => Promise<IpcResult>` | 删除任务及日志（连带子任务），并回收名下委派 worktree；运行中拒绝 |
 | `retry` | `(id) => Promise<IpcResult>` | 清空结果/会话/attempt 重置为 queued 重跑 |
 | `move` | `(id, status) => Promise<IpcResult>` | 看板拖动的状态流转；`validateMove`（shared/taskflow）校验合法性，→ running 仅限 queued 且解除 parked |
@@ -197,6 +197,8 @@ interface Task {
   issueId?: string              // 所属 Issue（iss_<taskId> 兼容派生）
   suppressIssue?: boolean       // run_only 自动化：不投影成 Issue
   runId?: string                // 执行实例（重试/续聊保留 Run 历史）
+  executionOwner?: { pid, instance, token, leaseExpiresAt? } // 条件写入的执行归属；租约过期不是死亡证据
+  gitOperation?: { token, owner, createdAt } // 异步 Git 集成占用；重试、启动、删除及清扫需等待释放
   goalId?: string; phaseIndex?: number   // 目标模式阶段标记
   failure?: FailureInfo         // 失败分类：code/title/hint/retryable（11 类稳定 code）
   parentTaskId?: string         // 委派产生的子任务指向领队
@@ -440,33 +442,47 @@ interface AgentBackend {
   //   model?: string              // agent 钉死的模型覆盖；空 = 平台默认
   //   connection?: { name, baseURL, apiKey }   // API 预设覆盖，按会话内存注入
   //   resumeSessionId?: string    // 提供时走 session/resume
+  //   turn?: BackendTurnStamp     // 首回合身份；适配器必须原样回传给该回合的每个回调
   //   events: BackendSessionEvents
   // }
 }
 
 interface BackendSession {
   sessionId: string
-  send(content): Promise<void>    // 续聊；回合结束经 events.onTurnEnd
+  turnScoped?: boolean            // 声明会把 start/send 收到的回合身份回传到每个回调
+  send(content, turn?): Promise<void>  // 续聊；回合结束经 events.onTurnEnd
   stop(): Promise<void>           // 中止当前回合
+  detach?(): Promise<void>        // 仅断开本地传输，保留可 resume 的 provider session
   close(): Promise<void>          // 关闭并释放进程
 }
 
+interface BackendTurnStamp { seq: number; id: string }   // 不可变；id 唯一且永不复用
+
 interface BackendSessionEvents {
-  onEvent(e: Omit<TaskEvent,'seq'>)                           // 日志事件（ts 必填，seq 由 store 分配）
-  onHeartbeat?()                                              // 连接上有任何消息即回调：
-                                                              // 供空转看门狗续命，长思考/后台子代理不误判超时
-  onTurnEnd(r: { response, ok, error?, tokenCount?, durationMs?, delegationText? })
-  onPermission?(req): Promise<{ optionId?, decision }>        // 可选；缺省自动放行
-  onLaunch?(handle: { stop() })                               // 可选；进程拉起即注册取消句柄
-  onSessionId?(sessionId: string)                             // 可选；首轮失败前也立即持久化，供 retry resume
+  onEvent(e: Omit<TaskEvent,'seq'>, turn?)                     // 日志事件（ts 必填，seq 由 store 分配）
+  onHeartbeat?(turn?)                                          // 连接上有任何消息即回调：
+                                                               // 供空转看门狗续命，长思考/后台子代理不误判超时
+  onTurnEnd(r: { response, ok, error?, tokenCount?, durationMs?, delegationText? }, turn?)
+  onPermission?(req, turn?): Promise<{ optionId?, decision }>   // 可选；缺省自动放行
+  onLaunch?(handle: { stop() })                                 // 可选；进程拉起即注册取消句柄（属于会话）
+  onSessionId?(sessionId: string, turn?)                        // 可选；首轮失败前也立即持久化，供 retry resume
 }
+
+// 适配器只需在 start/send 入口调一次：把它收到的回合身份固定到本回合的所有回调上
+const scoped = bindTurn(events, turn)
 ```
+
+**回合身份（不可变，跨回合不复用）**：运行器给每个回合发一个 `BackendTurnStamp`，只按 `id`
+严格关联回调——未知或已回收的 id 一律丢弃，绝不把"最近开始的回合"当成回调的归属。因此旧回合
+迟到（stop/close 之后）的终态、事件、sessionId、权限请求和心跳都无法裁决、污染或续命新回合。
+声明 `turnScoped: true` 的连接才允许在同一连接上连续跑多个回合；没有可靠标识的连接只承载
+隔离的首回合，后续一律关掉连接、按 `sessionId` 重建（隔离连接 + 恢复），不根据时序猜归属。
 
 **两种进程模型**：
 
 | 模型 | 代表 | 会话 | 续聊实现 |
 |---|---|---|---|
-| 常驻服务 | zcode（app-server stdio 协议）；dsh（ACP，`dsh-acp.ts`） | 连接存活期间多轮 | `session/send`（dsh ACP 无跨进程 resume，会话随服务进程存亡） |
+| 常驻服务 | zcode（app-server stdio 协议）；dsh（ACP，`dsh-acp.ts`） | zcode 由 Runner 按回合隔离连接并 resume；ACP 以 `session/prompt` 响应作为强回合边界 | zcode `session/resume`；dsh ACP 同进程 `session/prompt`（无跨进程 resume） |
 | 一次性进程 | claude / codex / opencode；dsh（无 ACP 组件时的 headless 回退） | 每回合一个进程 | 重新 spawn + resume 参数（`--resume` / `exec resume` / `-s`；headless dsh 无 resume，`send` 直接抛错） |
 
 公共基建：`cli-common.ts`（JSONL 行解析、10 分钟空闲超时、5MB 输出上限看门狗）；`cli-locator.ts`（Windows npm `.cmd` 垫片解析到原生 exe / node 脚本，绕开 EINVAL）。dsh ACP 的组合配置内嵌于 `dsh-acp.ts`，启动时写入 dsh 仓库 `examples/acp-agent/agentdeck.cordis.yml`（loader 以 config 目录为锚解析插件），会话落盘 `~/.agentdeck/dsh-sessions`。

@@ -11,18 +11,23 @@ export function registerIssueIpc(ctx: IpcContext) {
   ipcMain.handle('issues:create', (_e, input: unknown) => {
     const parsed = parseIssueCreate(input)
     const task = ctx.createTask({ title: parsed.title, prompt: parsed.description, workdir: parsed.workdir, agentId: parsed.agentId, backend: parsed.backend, handoff: parsed.handoff, startNow: parsed.startNow, titleAuto: parsed.titleAuto, requestId: parsed.requestId, idempotencyKey: parsed.idempotencyKey }, parsed.trigger ?? 'assignment')
-    if (parsed.startNow === false) ctx.publishIssueUpdate(task)
-    else ctx.runner.enqueue(task)
-    const issue = ctx.issueStore.get(task.issueId ?? `iss_${task.id}`)
-    if (!issue) throw new Error('Issue projection failed')
-    return issue
+    // The Task commit above is authoritative. Publish/project on every path so
+    // a parked Issue is visible immediately and a failed projection enters the
+    // IssueStore retry loop instead of failing this successful creation.
+    ctx.publishIssueUpdate(task)
+    if (parsed.startNow !== false) ctx.runner.enqueue(task)
+    // Keep the public return type as Issue even while the durable projection
+    // is unavailable. issueForTask uses the Task's stable issueId and never
+    // creates another Task or consumes an Issue identifier.
+    return ctx.issueStore.issueForTask(task)
   })
   ipcMain.handle('issues:runs', (_e, id: unknown) => { const issue = ctx.issueStore.get(parseId(id, 'issueId')); return issue ? ctx.issueStore.runs(issue.id) : [] })
   ipcMain.handle('issues:comments', (_e, id: unknown) => { const issue = ctx.issueStore.get(parseId(id, 'issueId')); return issue ? ctx.issueStore.comments(issue.id) : [] })
   ipcMain.handle('issues:update', (_e, id: unknown, patch: unknown) => {
     const issueId = parseId(id, 'issueId')
     const parsed = parseIssuePatch(patch)
-    const issue = parsed.status ? ctx.issueStore.updateWorkflow(issueId, parsed.status) : ctx.issueStore.updateMetadata(issueId, parsed)
+    // 状态与元数据同批提交时走合并落盘；未知 Issue 返回 null 且不广播
+    const issue = ctx.issueStore.update(issueId, parsed)
     if (issue) sendUpdate(issue.taskId, issue.id, issue, ctx.issueStore.runForTask(issue.taskId) ?? null)
     return issue
   })

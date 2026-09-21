@@ -225,11 +225,18 @@ for (const mode of ['initial', 'follow-up']) {
   const backend = {
     id: `cleanup-${mode}`, label: 'Cleanup race',
     async probe() { return { ok: true, detail: '' } },
-    async start({ events }) {
-      const index = emitters.push(events)
+    async start({ events, turn }) {
+      let activeTurn = turn
+      const scopedEvents = {
+        onEvent: (event) => events.onEvent(event, activeTurn),
+        onTurnEnd: (result) => events.onTurnEnd(result, activeTurn),
+        onSessionId: (id) => events.onSessionId?.(id, activeTurn)
+      }
+      const index = emitters.push(scopedEvents)
       return {
         sessionId: `cleanup-${mode}-${index}`,
-        async send() { throw new Error('old turn failed') },
+        turnScoped: true,
+        async send(_content, nextTurn) { activeTurn = nextTurn; throw new Error('old turn failed') },
         async stop() { if (index === 1) { enteredStop(); await stopped } },
         async close() {}
       }
@@ -276,11 +283,14 @@ for (const kind of ['investigate', 'consult']) {
   const backend = {
     id: `orchestration-${kind}`, label: 'Orchestration race',
     async probe() { return { ok: true, detail: '' } },
-    async start({ events }) {
-      const index = emitters.push(events)
+    async start({ events, turn }) {
+      let activeTurn = turn
+      const scopedEvents = { onTurnEnd: (result) => events.onTurnEnd(result, activeTurn) }
+      const index = emitters.push(scopedEvents)
       return {
         sessionId: `orchestration-${kind}-${index}`,
-        async send() { sends.push(index); events.onTurnEnd({ ok: true, response: 'replacement complete' }) },
+        turnScoped: true,
+        async send(_content, nextTurn) { activeTurn = nextTurn; sends.push(index); events.onTurnEnd({ ok: true, response: 'replacement complete' }, activeTurn) },
         async stop() {}, async close() {}
       }
     }
@@ -320,9 +330,11 @@ for (const kind of ['investigate', 'consult']) {
   const backend = {
     id: 'delegate-replacement', label: 'Delegate replacement',
     async probe() { return { ok: true, detail: '' } },
-    async start({ events }) {
-      const index = emitters.push(events)
-      return { sessionId: `delegate-session-${index}`, async send() { events.onTurnEnd({ ok: true, response: 'new leader done' }) }, async stop() {}, async close() {} }
+    async start({ events, turn }) {
+      let activeTurn = turn
+      const scopedEvents = { onTurnEnd: (result) => events.onTurnEnd(result, activeTurn) }
+      const index = emitters.push(scopedEvents)
+      return { sessionId: `delegate-session-${index}`, turnScoped: true, async send(_content, nextTurn) { activeTurn = nextTurn; events.onTurnEnd({ ok: true, response: 'new leader done' }, activeTurn) }, async stop() {}, async close() {} }
     }
   }
   const ownedRunner = new TaskRunner(store, new Map([[backend.id, backend]]), () => ({ concurrency: 1, workerConcurrency: 1, mode: 'yolo', notify: false }))

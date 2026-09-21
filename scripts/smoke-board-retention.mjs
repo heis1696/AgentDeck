@@ -76,6 +76,16 @@ try {
   fs.writeFileSync(issueFile, JSON.stringify(persisted))
   const issues = new IssueStore(data)
   const service = new TaskService({ store, issueStore: issues })
+  const expand = service.taskCascade.bind(service)
+  let raceInjected = false
+  service.taskCascade = (ids) => {
+    const snapshot = expand(ids)
+    if (!raceInjected && ids.includes(race.id)) {
+      raceInjected = true
+      store.update(race.id, { status: 'running' })
+    }
+    return snapshot
+  }
   const forgotten = []
   const published = []
   const logFile = path.join(data, 'issues', 'retention.jsonl')
@@ -83,10 +93,14 @@ try {
     store, issueStore: issues, taskService: service, now: () => now,
     activeGoalIssueIds: () => new Set([`iss_${activeGoal.id}`, `iss_${protectedChild.id}`, `iss_${goalRunOnlyLeader.id}`]),
     activeMeetingIssueIds: () => new Set([`iss_${activeMeeting.id}`, `iss_${meetingRunOnlyLeader.id}`]),
-    forget: async (id) => { forgotten.push(id); if (id === race.id) store.update(id, { status: 'running' }) },
+    forget: async (id) => {
+      assert.equal(store.get(id), undefined, 'canonical deletion precedes cleanup')
+      forgotten.push(id)
+    },
     onTaskDeleted: (id) => published.push(id), eventLog: new EventLog(logFile)
   }
   const report = await sweepExpiredIssues(deps)
+  assert.ok(raceInjected && !forgotten.includes(race.id), 'a replaced execution is never cleaned up')
   for (const task of [expired, failed, cancelled, leader, child, grandchild]) {
     assert.equal(store.get(task.id), undefined, `${task.title} deleted`)
     assert.equal(issues.get(`iss_${task.id}`), undefined, 'projection removed')

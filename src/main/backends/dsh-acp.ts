@@ -14,7 +14,8 @@ import os from 'node:os'
 import path from 'node:path'
 import type { TaskEvent } from '../../shared/types'
 import type { PermissionRequest } from '../../shared/contracts'
-import type { BackendSession, BackendSessionEvents } from './types'
+import type { BackendSession, BackendSessionEvents, BackendTurnStamp } from './types'
+import { bindTurn } from './types'
 import { killProcessTree } from './cli-common'
 import { findSystemNode } from './cli-locator'
 
@@ -303,6 +304,8 @@ export interface DshAcpSessionOptions {
   model?: string
   events: BackendSessionEvents
   acp: DshAcpBin
+  /** 首回合身份：本连接会把消息归属到它，并原样回传 */
+  turn?: BackendTurnStamp
 }
 
 /**
@@ -311,8 +314,18 @@ export interface DshAcpSessionOptions {
  * 调用方（dsh.ts）据此回退 headless 一次性模式。
  */
 export async function startDshAcpSession(opts: DshAcpSessionOptions): Promise<BackendSession> {
-  const { prompt, workdir, mode, model, events, acp } = opts
-  const emit = (e: Omit<TaskEvent, 'seq' | 'ts'>) => events.onEvent({ ...e, ts: Date.now() })
+  const { prompt, workdir, mode, model, events, acp, turn: firstTurn } = opts
+  /**
+   * 本连接"在飞回合"的发射通道：**每个回合一个不可变通道**（bindTurn 固定住身份），
+   * 换回合只换指针、绝不改写既有通道。没有回合身份时退回会话级通道（老调用方零变化），
+   * 归属由上层按"未标记回调"处理。
+   */
+  let active: BackendSessionEvents | undefined = firstTurn ? bindTurn(events, firstTurn) : events
+  const channel = () => active
+  const setTurn = (stamp?: BackendTurnStamp) => {
+    active = stamp ? bindTurn(events, stamp) : events
+  }
+  const emit = (e: Omit<TaskEvent, 'seq' | 'ts'>) => channel()?.onEvent({ ...e, ts: Date.now() })
 
   // 组合配置必须落在 dsh 仓库的 examples 工作区内：loader 以 config 所在目录为
   // 锚向上解析 @deepseek-ai/* 插件包（examples/acp-agent 是唯一同时链接
@@ -358,12 +371,12 @@ export async function startDshAcpSession(opts: DshAcpSessionOptions): Promise<Ba
     if (!turn) return
     const t = turn
     turn = undefined
-    events.onTurnEnd({ response: r.response, ok: r.ok, error: r.error })
+    channel()?.onTurnEnd({ response: r.response, ok: r.ok, error: r.error })
     t.resolve(r)
   }
 
   conn.onNotification = (method, params) => {
-    events.onHeartbeat?.() // 任何协议消息都是进展：看门狗续命
+    channel()?.onHeartbeat?.() // 任何协议消息都是进展：看门狗续命
     if (method !== 'session/update') return
     const update = (params.update ?? {}) as Record<string, unknown>
     if (update.sessionUpdate !== 'agent_message_chunk') return
@@ -402,8 +415,8 @@ export async function startDshAcpSession(opts: DshAcpSessionOptions): Promise<Ba
           ? options.map((o) => ({ optionId: o.optionId, name: o.name, response: { decision: (o.allow ? 'allow' : 'deny') as 'allow' | 'deny' } }))
           : [{ optionId: 'allow-once', name: 'Allow once', response: { decision: 'allow' as const } }]
       }
-      const choice = events.onPermission
-        ? await events.onPermission(request).catch(() => ({ decision: 'deny' as const }))
+      const choice = channel()?.onPermission
+        ? await channel()!.onPermission!(request).catch(() => ({ decision: 'deny' as const }))
         : { decision: 'allow' as const } // 未提供权限回调时自动放行（接口约定）
       const chosen = choice.decision === 'allow'
         ? (options.find((o) => o.allow && o.optionId === choice.optionId) ?? options.find((o) => o.allow))
@@ -441,10 +454,12 @@ export async function startDshAcpSession(opts: DshAcpSessionOptions): Promise<Ba
   }
   // 启动成功后进程退出不再构成"启动失败"：吞掉 bootExit 的迟到拒绝
   void bootExit.catch(() => {})
-  events.onSessionId?.(sessionId)
+  channel()?.onSessionId?.(sessionId)
   emit({ kind: 'status', text: 'dsh ACP 会话就绪（流式事件/续聊）' })
 
-  const runTurn = async (content: string) => {
+  const runTurn = async (content: string, stamp?: BackendTurnStamp) => {
+    // 新回合开新通道：旧通道连同它的身份一起作废，迟到消息带不回新回合
+    setTurn(stamp)
     const result = new Promise<{ ok: boolean; response: string; error?: string }>((resolve) => {
       turn = { texts: [], resolve }
     })
@@ -483,13 +498,16 @@ export async function startDshAcpSession(opts: DshAcpSessionOptions): Promise<Ba
     return early
   }
 
-  const first = await runTurn(prompt)
+  const first = await runTurn(prompt, firstTurn)
   if (!first.ok && first.error) throw new Error(first.error)
 
   return {
     sessionId,
-    async send(content) {
-      const r = await runTurn(content)
+    // ACP's session/prompt response is the protocol turn boundary: the next
+    // prompt is not sent until that response has settled all prior updates.
+    turnScoped: true,
+    async send(content, stamp) {
+      const r = await runTurn(content, stamp)
       if (!r.ok && r.error) throw new Error(r.error)
     },
     async stop() {
@@ -497,6 +515,8 @@ export async function startDshAcpSession(opts: DshAcpSessionOptions): Promise<Ba
     },
     async close() {
       settleTurn({ ok: false, response: '', error: '会话已关闭' })
+      // 关闭即断开归属：之后连接上再冒出来的消息不再属于任何回合
+      active = undefined
       await conn.kill()
     }
   }

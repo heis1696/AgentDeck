@@ -59,17 +59,20 @@ function continueBackend(tag, firstText, secondText) {
   return {
     id: tag, label: tag,
     async probe() { return { ok: true, detail: '' } },
-    async start({ events }) {
+    async start({ events, turn }) {
+      let activeTurn = turn
       setTimeout(() => {
-        events.onEvent({ ts: Date.now(), kind: 'final', text: firstText })
-        events.onTurnEnd({ response: firstText, ok: true })
+        events.onEvent({ ts: Date.now(), kind: 'final', text: firstText }, activeTurn)
+        events.onTurnEnd({ response: firstText, ok: true }, activeTurn)
       }, 30)
       return {
         sessionId: 's_' + tag + Math.random().toString(36).slice(2, 5),
-        async send(content) {
+        turnScoped: true,
+        async send(content, nextTurn) {
+          activeTurn = nextTurn
           setTimeout(() => {
-            events.onEvent({ ts: Date.now(), kind: 'final', text: secondText })
-            events.onTurnEnd({ response: secondText, ok: true })
+            events.onEvent({ ts: Date.now(), kind: 'final', text: secondText }, activeTurn)
+            events.onTurnEnd({ response: secondText, ok: true }, activeTurn)
           }, 30)
           await new Promise((r) => setTimeout(r, 40))
         },
@@ -149,8 +152,6 @@ while (Date.now() - t2 < 15000 && store.get(c.id)?.status !== 'done') await new 
 assert(store.get(c.id)?.status === 'done', '场景 C：worker done')
 assert(!created.includes('SHOULD-NOT-CREATE'), '场景 C：worker 的 continue 被忽略')
 
-console.log('\n✅ CONTINUE SMOKE PASSED')
-
 // ---- 场景 D：接力触发面收窄 ----
 // D1：自由追问里提到"下一阶段"（讨论方案）——不再按关键词猜测接力意图，上下文原地保留
 const runnerD = new TaskRunner(store, new Map([['lead', continueBackend('lead', '本阶段完成。', '下一阶段可以先梳理验收清单，我建议…')]]), () => ({ concurrency: 1, mode: 'yolo', notify: false, workerConcurrency: 2 }), () => {})
@@ -190,6 +191,8 @@ while (Date.now() - t5 < 15000 && !dSucc) await new Promise((r) => setTimeout(r,
 assert(!!dSucc && dSucc.trigger === 'handoff' && !dSucc.parked, '场景 D2：按钮触发 auto 接力（后继已创建并启动）')
 assert(dSucc.continuesFrom === d2.id && dSucc.issueId === 'iss_D2', '场景 D2：continuesFrom/issue 正确')
 assert(!store.get(d2.id).result.includes('<continue'), '场景 D2：标记不外漏')
+for (let i = 0; i < 100 && store.get(dSucc.id)?.status !== 'done'; i++) await new Promise((resolve) => setTimeout(resolve, 20))
+assert(store.get(dSucc.id)?.status === 'done', '续聊产生的后继在前序收尾后恢复调度，不滞留 queued')
 // D3：UI 追问（wait:false）——IPC 开跑即返回，不锁整轮；后台回合照常完成
 const runnerD3 = new TaskRunner(store, new Map([['lead', continueBackend('lead', '首轮完成。', '追问回答完成。')]]), () => ({ concurrency: 1, mode: 'yolo', notify: false, workerConcurrency: 2 }), () => {})
 runnerD3.attachTeam(() => team)
@@ -257,7 +260,111 @@ const briefF2 = '阶段2：继续施工下一模块，方案见 docs/plan.md §2
 const f2Task = runtime.runner['onContinue']({ sourceTaskId: srcF2.id, issueId: srcF2.issueId, brief: briefF2, start: 'parked' })
 assert(!!f2Task && f2Task.parked === true && f2Task.trigger === 'handoff' && f2Task.continuesFrom === srcF2.id, '场景 F2：sidecar parked 后继创建（同 Issue、指向前一阶段）')
 assert(JSON.stringify(runtime.issueStore.comments(srcF2.issueId)).includes('阶段接力已备好'), '场景 F2：parked 可见性评论已落（与主进程对齐，不再隐形）')
+const noticeCount = runtime.issueStore.comments(srcF2.issueId).length
 const f2Replay = runtime.runner['onContinue']({ sourceTaskId: srcF2.id, issueId: srcF2.issueId, brief: briefF2, start: 'parked' })
 assert(f2Replay?.id === f2Task.id, '场景 F2：同 source+brief 幂等复用（不重复建单）')
-console.log('')
+assert(runtime.issueStore.comments(srcF2.issueId).length === noticeCount, '相同请求立即重放不重复追加提醒')
+const f2Reworded = runtime.runner['onContinue']({ sourceTaskId: srcF2.id, issueId: srcF2.issueId, brief: '阶段2：换种说法再次交接同一阶段', start: 'auto' })
+assert(f2Reworded?.id === f2Task.id && f2Reworded.parked, '同来源改写简报仍复用后继，不自动解除停放')
+assert(runtime.issueStore.comments(srcF2.issueId).length === noticeCount, '重复接力不重复写可见通知')
+
+// Replays still repair legacy Goal metadata and publish the repaired projection.
+const repairGoal = runtime.goalController.create({ text: 'repair legacy handoff', issueId: srcF2.issueId, completionConditions: ['complete'], stopConditions: [], maxRuns: 1, maxDurationMs: 60000, workdir: '', startNow: false })
+runtime.store.update(srcF2.id, { goalId: repairGoal.id, phaseIndex: 0, status: 'running', runId: 'repair-source' })
+let repairedNotifications = 0
+const onRuntimeTask = runtime['onTaskChanged'].bind(runtime)
+runtime['onTaskChanged'] = (task) => { if (task.id === f2Task.id && task.goalId === repairGoal.id && task.phaseIndex === 1) repairedNotifications++; onRuntimeTask(task) }
+const replayMarker = `<continue start="auto">${briefF2}，更新简报</continue>`
+runtime.runner['handleContinue'](srcF2.id, runtime.store.get(srcF2.id), [replayMarker], replayMarker)
+assert(runtime.store.get(f2Task.id).goalId === repairGoal.id && runtime.store.get(f2Task.id).phaseIndex === 1 && repairedNotifications > 0, 'Runner 重放仍经 TaskService 修复旧后继，并通知 Goal 投影')
+assert(runtime.store.get(f2Task.id).parked && runtime.issueStore.comments(srcF2.issueId).length === noticeCount, '旧后继修复不自动启动、不重复提醒')
+runtime.store.update(f2Task.id, { goalId: undefined, phaseIndex: undefined })
+runtime.store.update(srcF2.id, { status: 'done' })
+runtime.runner['backends'].set('zcode', continueBackend('repair', 'complete', ''))
+repairedNotifications = 0
+assert((await runtime.runner.followUp(srcF2.id, '启动已备好的阶段', { relay: true })).ok, '人工接力复用旧后继')
+for (let i = 0; i < 100 && runtime.store.get(f2Task.id)?.status !== 'done'; i++) await new Promise((resolve) => setTimeout(resolve, 20))
+assert(runtime.store.get(f2Task.id).goalId === repairGoal.id && runtime.store.get(f2Task.id).phaseIndex === 1 && repairedNotifications > 0, '人工接力快捷入口也修复并发布 Goal 归属')
+
+// Reproduce the production loop: reworded phase 2 must not create phase 2 again.
+const repeatText = '只读核查完成，等待确认。<continue start="parked">阶段2待用户明确确认后实施：按 docs/BUG-AUDIT-PERSISTENCE.md 修复。补充本轮核查记录。</continue>'
+const repeatRunner = new TaskRunner(store, new Map([['lead', continueBackend('repeat', repeatText, '')]]), () => ({ concurrency: 1, mode: 'yolo', notify: false }), () => {})
+let repeatCreates = 0
+repeatRunner.attachContinue(() => { repeatCreates++; return {} })
+const repeatSource = store.create({ title: 'repeat phase', prompt: '阶段2：等待用户确认后，按 docs/BUG-AUDIT-PERSISTENCE.md 实施。', workdir: '', backend: 'lead', issueId: 'iss_repeat', continuesFrom: 'phase1', trigger: 'handoff' })
+repeatRunner.enqueue(repeatSource)
+for (let i = 0; i < 100 && store.get(repeatSource.id)?.status !== 'done'; i++) await new Promise((resolve) => setTimeout(resolve, 50))
+assert(store.get(repeatSource.id)?.status === 'done' && repeatCreates === 0, '同阶段改写简报被拦截，不再生成下一张待确认任务')
+assert(store.readEvents(repeatSource.id).some((event) => event.text?.includes('阶段接力已阻止')), '重复阶段拦截可观测')
+assert(!store.get(repeatSource.id).result.includes('<continue'), '被拒绝的接力标记不会外漏')
+
+// Normal phase advancement still creates exactly one successor per phase.
+const chainDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-chain-'))
+const chainRuntime = new SidecarRuntime(chainDir)
+const chainStore = chainRuntime.store
+const chainService = chainRuntime.taskService
+let launches = 0
+const predecessorStates = []
+const phaseBackend = {
+  id: 'phase', label: 'phase', async probe() { return { ok: true, detail: '' } },
+  async start({ prompt, events }) {
+    launches++
+    const current = chainStore.list().find((task) => task.status === 'running' && prompt.includes(task.prompt))
+    if (current?.continuesFrom) {
+      const persisted = JSON.parse(fs.readFileSync(path.join(chainDir, 'tasks/tasks.json'), 'utf8'))
+      predecessorStates.push([chainStore.get(current.continuesFrom)?.status, persisted.tasks.find((task) => task.id === current.continuesFrom)?.status])
+    }
+    const result = prompt.includes('阶段3：最终验收') ? '验收完成' : prompt.includes('阶段2：实现功能')
+      ? '阶段2已完成。<continue start="auto">阶段3：最终验收</continue>'
+      : '阶段1已完成。<continue start="auto">阶段2：实现功能</continue>'
+    setTimeout(() => { events.onEvent({ ts: Date.now(), kind: 'final', text: result }); events.onTurnEnd({ ok: true, response: result }) }, 10)
+    return { sessionId: `phase-${launches}`, async send() {}, async stop() {}, async close() {} }
+  }
+}
+const chainRunner = new TaskRunner(chainStore, new Map([['phase', phaseBackend]]), () => ({ concurrency: 2, mode: 'yolo', notify: false }), () => {})
+const finalizeChain = chainRunner['finalizer'].finalizeDone.bind(chainRunner['finalizer'])
+chainRunner['finalizer'].finalizeDone = async (...args) => {
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  return finalizeChain(...args)
+}
+chainRunner.attachContinue((input) => { const next = chainService.createHandoffTask(input); if (next && !next.parked) chainRunner.enqueue(next); return next })
+const chainFirst = chainService.createTask({ title: 'phase1', prompt: '阶段1：设计', backend: 'phase' })
+chainRunner.enqueue(chainFirst)
+for (let i = 0; i < 100 && (launches < 3 || chainStore.list().some((task) => task.status !== 'done')); i++) await new Promise((resolve) => setTimeout(resolve, 50))
+assert(launches === 3 && chainStore.list().length === 3 && chainStore.list().every((task) => task.status === 'done'), '阶段1→2→3正常自动推进，每阶段只启动一次')
+assert(predecessorStates.length === 2 && predecessorStates.every(([memory, disk]) => memory === 'done' && disk === 'done'), '并发2且前序延迟收尾：后继只能在前序终态落盘后启动')
+await chainRunner.shutdown()
+await chainRuntime.close()
+await repeatRunner.shutdown()
+
+for (const fault of ['event', 'terminal']) {
+  const faultRuntime = new SidecarRuntime(fs.mkdtempSync(path.join(os.tmpdir(), 'sc-finalize-fault-')))
+  const faultStore = faultRuntime.store
+  const faultBackend = continueBackend('fault', '准备完成', '完成。<continue start="auto">阶段2：执行后继</continue>')
+  const faultRunner = new TaskRunner(faultStore, new Map([['fault', faultBackend]]), () => ({ concurrency: 2, mode: 'ask', notify: false }), () => {})
+  faultRunner.attachContinue((input) => { const next = faultRuntime.taskService.createHandoffTask(input); if (next && !next.parked) faultRunner.enqueue(next); return next })
+  const source = faultRuntime.taskService.createTask({ title: fault, prompt: '阶段1：准备', backend: 'fault' })
+  faultRunner.enqueue(source)
+  for (let i = 0; i < 100 && faultStore.get(source.id)?.status !== 'done'; i++) await new Promise((resolve) => setTimeout(resolve, 20))
+  let injected = false
+  const update = faultStore.updateIf.bind(faultStore)
+  const append = faultStore.appendEvent.bind(faultStore)
+  faultStore.updateIf = (id, expected, patch) => {
+    if (fault === 'terminal' && !injected && id === source.id && patch.status === 'done') { injected = true; throw new Error('injected terminal write failure') }
+    return update(id, expected, patch)
+  }
+  faultStore.appendEvent = (id, event, expected) => {
+    if (fault === 'event' && !injected && id === source.id && event.kind === 'status' && faultStore.list().some((task) => task.continuesFrom === source.id)) { injected = true; throw new Error('injected status event write failure') }
+    return append(id, event, expected)
+  }
+  const failedTurn = await faultRunner.followUp(source.id, '进入下一阶段')
+  const next = faultStore.list().find((task) => task.continuesFrom === source.id)
+  for (let i = 0; i < 100 && next && faultStore.get(next.id)?.status !== 'done'; i++) await new Promise((resolve) => setTimeout(resolve, 20))
+  assert(injected && !failedTurn.ok && faultStore.get(source.id).status === 'failed', `${fault} 故障：前序续聊正确进入失败终态`)
+  assert(next && faultStore.get(next.id).status === 'done', `${fault} 故障：已创建后继在失败终态落盘后被唤醒，不永久排队`)
+  await faultRunner.shutdown()
+  await faultRuntime.close()
+}
+await runtime.close()
+console.log('\n✅ CONTINUE SMOKE PASSED')
 process.exit(0)

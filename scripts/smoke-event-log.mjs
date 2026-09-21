@@ -6,6 +6,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 
 const root = path.resolve(import.meta.dirname, '..')
 const outfile = path.join(root, 'out', 'smoke-event-log-store.cjs')
@@ -54,6 +55,95 @@ if (!store.truncateEvents(task.id, 1)) throw new Error('event truncation failed'
 store.appendEvent(task.id, { ts: Date.now(), kind: 'text', text: 'after-truncate' })
 const afterTruncate = store.readEvents(task.id, 1)
 if (afterTruncate.length !== 1 || afterTruncate[0].seq !== 2) throw new Error('offset index was not rebuilt after truncation')
+
+// Failed snapshot/index writes must remain pending until a later flush succeeds.
+const retryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-store-retry-'))
+const retryStore = new TaskStore(retryDir)
+const retryTask = retryStore.create({ title: 'retry', prompt: 'test', workdir: '', backend: 'fake' })
+const retryIndex = path.join(retryDir, 'tasks', 'tasks.json')
+const retrySnapshot = path.join(retryDir, 'tasks', retryTask.id, 'task.json')
+const injectedError = () => Object.assign(new Error('injected persistence failure'), { code: 'EIO' })
+const realWrite = fs.writeFileSync
+const realRename = fs.renameSync
+const realOpen = fs.openSync
+const realSync = fs.fsyncSync
+const faultTargets = ['snapshot', 'index-write', 'index-sync', 'index-rename']
+for (const target of faultTargets) {
+  retryStore.appendEvent(retryTask.id, { ts: Date.now(), kind: 'status', text: target })
+  const count = retryStore.get(retryTask.id).eventCount
+  const opened = new Map()
+  const temporaryOf = (file, targetFile) => typeof file === 'string' && file.startsWith(targetFile + '.') && file.endsWith('.tmp')
+  try {
+    fs.writeFileSync = (file, ...args) => {
+      if ((target === 'snapshot' && temporaryOf(file, retrySnapshot)) || (target === 'index-write' && temporaryOf(file, retryIndex))) throw injectedError()
+      return realWrite(file, ...args)
+    }
+    fs.openSync = (file, ...args) => { const fd = realOpen(file, ...args); opened.set(fd, file); return fd }
+    fs.fsyncSync = (fd) => { if (target === 'index-sync' && temporaryOf(opened.get(fd), retryIndex)) throw injectedError(); return realSync(fd) }
+    fs.renameSync = (from, to) => {
+      if (target === 'index-rename' && to === retryIndex) throw injectedError()
+      return realRename(from, to)
+    }
+    assert.throws(() => retryStore.flush(), /injected persistence failure/, `${target}: explicit flush reports the error`)
+    assert.equal(JSON.parse(fs.readFileSync(retryIndex, 'utf8')).tasks[0].eventCount, target === 'snapshot' ? count : count - 1, `${target}: authoritative index remains readable`)
+  } finally {
+    fs.writeFileSync = realWrite
+    fs.renameSync = realRename
+    fs.openSync = realOpen
+    fs.fsyncSync = realSync
+  }
+  const deadline = Date.now() + 3000
+  while (JSON.parse(fs.readFileSync(retrySnapshot, 'utf8')).eventCount !== count && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  assert.equal(JSON.parse(fs.readFileSync(retryIndex, 'utf8')).tasks[0].eventCount, count, `${target}: retry persists the index`)
+  assert.equal(JSON.parse(fs.readFileSync(retrySnapshot, 'utf8')).eventCount, count, `${target}: explicit flush failure retains its automatic retry`)
+}
+
+// The second index replacement acknowledges a completed snapshot. Failure
+// here must retain the durable queue even after the memory queue was cleared.
+retryStore.appendEvent(retryTask.id, { ts: Date.now(), kind: 'status', text: 'ack retry' })
+let indexReplacements = 0
+try {
+  fs.renameSync = (from, to) => {
+    if (to === retryIndex && ++indexReplacements === 2) throw injectedError()
+    return realRename(from, to)
+  }
+  assert.throws(() => retryStore.flush(), /injected persistence failure/)
+  assert.equal(indexReplacements, 2, 'fault targets the acknowledgement replacement')
+  assert.ok(JSON.parse(fs.readFileSync(retryIndex, 'utf8')).pendingTaskSnapshots.includes(retryTask.id), 'failed acknowledgement retains durable work')
+  assert.equal(JSON.parse(fs.readFileSync(retrySnapshot, 'utf8')).eventCount, faultTargets.length + 1, 'snapshot already succeeded before acknowledgement failed')
+} finally { fs.renameSync = realRename }
+const ackDeadline = Date.now() + 3000
+while (JSON.parse(fs.readFileSync(retryIndex, 'utf8')).pendingTaskSnapshots?.length && Date.now() < ackDeadline) {
+  await new Promise((resolve) => setTimeout(resolve, 20))
+}
+assert.equal(JSON.parse(fs.readFileSync(retryIndex, 'utf8')).pendingTaskSnapshots, undefined, 'automatic retry acknowledges completed work')
+
+// An asynchronous failure must be reported and retried without an uncaught exception.
+const flushErrors = []
+const realConsoleError = console.error
+let failingRenames = 2
+try {
+  console.error = (...args) => flushErrors.push(args)
+  fs.renameSync = (from, to) => {
+    if (to === retryIndex && failingRenames-- > 0) throw injectedError()
+    return realRename(from, to)
+  }
+  retryStore.appendEvent(retryTask.id, { ts: Date.now(), kind: 'status', text: 'background retry' })
+  const deadline = Date.now() + 3000
+  while (JSON.parse(fs.readFileSync(retryIndex, 'utf8')).tasks[0].eventCount !== faultTargets.length + 2 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  assert.equal(JSON.parse(fs.readFileSync(retryIndex, 'utf8')).tasks[0].eventCount, faultTargets.length + 2, 'background flush recovers after repeated failures')
+  assert.equal(flushErrors.length, 2, 'background failures are reported')
+} finally {
+  fs.writeFileSync = realWrite
+  fs.renameSync = realRename
+  console.error = realConsoleError
+  retryStore.flush()
+}
+console.log('✓ snapshot/index failures preserve pending writes and background flush retries safely')
 
 // A future event schema must fail closed through TaskStore as well, rather than
 // being swallowed while reconciling the task snapshot on restart.
@@ -186,7 +276,7 @@ if (noNewlineLog.read().length !== 1 || noNewlineLog.append({ ts: 2, kind: 'stat
     const { EventLog } = require(process.argv[1])
     const [file, role, release] = process.argv.slice(2)
     const originalOpen = fs.openSync
-    const originalLink = fs.linkSync
+    const originalRename = fs.renameSync
     const originalWrite = fs.writeSync
     let eventFd
     let paused = false
@@ -210,10 +300,10 @@ if (noNewlineLog.read().length !== 1 || noNewlineLog.append({ ts: 2, kind: 'stat
       }
       return originalWrite(fd, buffer, offset, length, ...args)
     }
-    fs.linkSync = function(source, target) {
-      try { return originalLink.call(fs, source, target) }
+    fs.renameSync = function(source, target) {
+      try { return originalRename.call(fs, source, target) }
       catch (error) {
-        if (target === file + '.lock' && error.code === 'EEXIST' && !reported) {
+        if (target === file + '.lock' && ['EEXIST', 'ENOTEMPTY', 'EPERM', 'EACCES'].includes(error.code) && !reported) {
           reported = true
           process.send({ kind: 'contended' })
         }
@@ -282,28 +372,48 @@ if (noNewlineLog.read().length !== 1 || noNewlineLog.append({ ts: 2, kind: 'stat
     await Promise.all([appending.exited, truncating?.exited])
   }
 
-  const crashed = spawnSync(process.execPath, ['-e', 'require("node:fs").writeFileSync(process.argv[1], JSON.stringify({pid: process.pid, instance: "dead-instance"}))', file + '.lock'])
-  assert.equal(crashed.status, 0)
+  fs.unlinkSync(release)
+  const crashed = launch('A')
+  try { await crashed.waitMessage(['paused']) }
+  finally { crashed.child.kill(); await crashed.exited }
   assert.equal(new EventLog(file).append({ ts: 2, kind: 'status', text: 'after crash' })?.seq, 2, 'dead writer lock is recoverable')
-  for (const owner of ['invalid-owner', JSON.stringify({ pid: process.pid, instance: 'a-different-process-start' })]) {
-    fs.writeFileSync(file + '.lock', owner)
-    assert.ok(new EventLog(file).append({ ts: 3, kind: 'status', text: 'recovered owner' }), 'malformed owner and reused live PID locks are recoverable')
+  const placeOwner = (value) => {
+    const nonce = randomUUID()
+    const name = `owner-${nonce}.json`
+    fs.mkdirSync(file + '.lock')
+    fs.writeFileSync(path.join(file + '.lock', name), typeof value === 'string' ? value : JSON.stringify({ ...value, nonce }))
+    return name
   }
-  const realLink = fs.linkSync
+  const malformed = placeOwner('invalid-owner')
+  assert.throws(() => new EventLog(file).append({ ts: 3, kind: 'status', text: 'unknown owner' }), /Timed out acquiring/)
+  assert.equal(fs.readFileSync(path.join(file + '.lock', malformed), 'utf8'), 'invalid-owner', 'unknown owner stays unchanged')
+  fs.unlinkSync(path.join(file + '.lock', malformed))
+  fs.rmdirSync(file + '.lock')
+  const realRename = fs.renameSync
   let validOwner
-  fs.linkSync = (source, target) => {
-    const result = realLink(source, target)
-    if (target === file + '.lock') validOwner = fs.readFileSync(target, 'utf8')
+  let validOwnerName
+  fs.renameSync = (source, target) => {
+    const result = realRename(source, target)
+    if (target === file + '.lock') {
+      validOwnerName = fs.readdirSync(target)[0]
+      validOwner = fs.readFileSync(path.join(target, validOwnerName), 'utf8')
+    }
     return result
   }
   try { new EventLog(file).append({ ts: 4, kind: 'status', text: 'capture owner' }) }
-  finally { fs.linkSync = realLink }
-  fs.writeFileSync(file + '.lock', validOwner)
+  finally { fs.renameSync = realRename }
+  const instance = JSON.parse(validOwner).instance
+  const oldInstance = instance.slice(0, -1) + (instance.endsWith('0') ? '1' : '0')
+  placeOwner({ pid: process.pid, instance: oldInstance })
+  assert.ok(new EventLog(file).append({ ts: 3, kind: 'status', text: 'recovered owner' }), 'reused live PID identifies a dead former owner')
+  fs.mkdirSync(file + '.lock')
+  fs.writeFileSync(path.join(file + '.lock', validOwnerName), validOwner)
   const blockedAt = performance.now()
   assert.throws(() => new EventLog(file).append({ ts: 5, kind: 'status', text: 'must not steal' }), /Timed out acquiring/)
   assert.ok(performance.now() - blockedAt < 1000, 'live-owner contention is bounded rather than freezing for ten seconds')
-  assert.equal(fs.readFileSync(file + '.lock', 'utf8'), validOwner, 'a live process instance keeps ownership')
-  fs.unlinkSync(file + '.lock')
+  assert.equal(fs.readFileSync(path.join(file + '.lock', validOwnerName), 'utf8'), validOwner, 'a live process instance keeps ownership')
+  fs.unlinkSync(path.join(file + '.lock', validOwnerName))
+  fs.rmdirSync(file + '.lock')
 }
 
 // Existing collision damage must remain visible and retain both payloads.

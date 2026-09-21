@@ -99,6 +99,18 @@ try {
     check(goals.runs(goal.id).some((run) => run.taskId === handoff.id && run.phaseIndex === 1), 'handoff enters GoalRun projection')
     check(controller.get(goal.id)?.status === 'completed', 'linked handoff can complete the Goal')
 
+    const repeated = service.createHandoffTask({ sourceTaskId: phase0.id, issueId: goal.issueId, brief: 'phase two with extra notes', start: 'auto' })
+    check(repeated.id === handoff.id && repeated.status === 'done', 'changed wording reuses the completed successor without restarting it')
+    const nextPhase = service.createHandoffTask({ sourceTaskId: handoff.id, issueId: goal.issueId, brief: 'phase three', start: 'parked' })
+    check(nextPhase.continuesFrom === handoff.id, 'a successor can hand off to the next phase')
+    check(service.createHandoffTask({ sourceTaskId: nextPhase.id, issueId: goal.issueId, brief: ' phase   three ', start: 'auto' }) === null, 'identical unnumbered phase cannot hand itself off again')
+    store.update(nextPhase.id, { status: 'cancelled' })
+    const replacement = service.createHandoffTask({ sourceTaskId: handoff.id, issueId: goal.issueId, brief: 'phase three revised', start: 'parked' })
+    check(replacement.id !== nextPhase.id && replacement.status === 'queued' && replacement.parked, 'cancelled successor is an abandoned attempt and may be replaced')
+    const numbered = service.createHandoffTask({ sourceTaskId: replacement.id, issueId: goal.issueId, brief: '阶段4：实施', start: 'parked' })
+    check(service.createHandoffTask({ sourceTaskId: numbered.id, issueId: goal.issueId, brief: '阶段4待用户确认：补充检查记录', start: 'parked' }) === null, 'same numbered phase is rejected even when the brief grows')
+    check(service.createHandoffTask({ sourceTaskId: numbered.id, issueId: goal.issueId, brief: '阶段4.1：下一子阶段', start: 'parked' }) !== null, 'distinct numbered subphase remains a valid handoff')
+
     const key = `goal_${goal.id}:phase_replay`
     const first = service.create({ title: 'replay', prompt: 'replay', workdir: '', issueId: goal.issueId, goalId: goal.id, phaseIndex: 2, dedupeKey: key })
     const issueCount = issueStore.list().length
@@ -112,6 +124,9 @@ try {
     const requestTask = service.create({ title: 'request replay', prompt: 'request replay', workdir: '', issueId: goal.issueId, requestId: requestKey })
     const aliasTask = service.create({ title: 'request replay changed', prompt: 'request replay changed', workdir: '', issueId: goal.issueId, idempotencyKey: requestKey })
     check(requestTask.id === aliasTask.id, 'requestId and idempotencyKey aliases dedupe to one Task')
+    const parkedRequest = service.create({ title: 'parked request', prompt: 'wait', requestId: 'parked-request', startNow: false })
+    const parkedReplay = service.create({ title: 'replayed start', prompt: 'start', idempotencyKey: 'parked-request', startNow: true })
+    check(parkedReplay.id === parkedRequest.id && parkedReplay.parked === true && !parkedReplay.manualStartConfirmedAt, 'ordinary idempotent create replay preserves parking and does not fabricate manual confirmation')
     let conflictRejected = false
     try {
       service.create({ title: 'conflict', prompt: 'conflict', workdir: '', requestId: 'request-a', idempotencyKey: 'request-b' })

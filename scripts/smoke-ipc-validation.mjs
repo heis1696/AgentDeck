@@ -21,6 +21,14 @@ expectReject(() => validation.parseTaskCreate({ title: 'x', prompt: 'p', workdir
 expectReject(() => validation.parseIssuePatch({ status: 'running' }), 'invalid issue status')
 expectReject(() => validation.parseSettingsPatch({ concurrency: 0 }), 'invalid concurrency')
 expectReject(() => validation.parseSettingsPatch({ unknown: true }), 'unknown setting')
+for (const address of ['https://updates.example.com/agentdeck', 'http://127.0.0.1:8080/feed', '']) {
+  const parsed = validation.parseSettingsPatch({ updateFeedUrl: `  ${address}  ` })
+  if (parsed.updateFeedUrl !== address) throw new Error('update feed address was not preserved and trimmed')
+}
+if (validation.parseSettingsPatch({ updateFeedUrl: '' }).updateFeedUrl !== '') throw new Error('empty update feed must restore the default')
+for (const value of [null, 42, true, {}, []]) {
+  expectReject(() => validation.parseSettingsPatch({ updateFeedUrl: value }), 'non-string update feed')
+}
 // 调优参数：合法值放行、越界值拒绝（区间与 ipc-validation 的 settingsIntRanges 对齐）
 const tuning = validation.parseSettingsPatch({
   turnIdleTimeoutMs: 300_000, permissionTimeoutMs: 60_000, maxRetryAttempts: 0, retryBackoffMs: 0,
@@ -51,6 +59,22 @@ expectReject(() => validation.parseAgents([{ id: 'same', name: 'One', backend: '
 const presets = validation.parsePresets([{ id: 'pst_1', name: 'Gateway', backend: 'claude', baseURL: 'https://example.invalid', apiKey: 'secret', createdAt: 1 }])
 if (presets.length !== 1 || presets[0].backend !== 'claude') throw new Error('valid presets were rejected')
 expectReject(() => validation.parsePresets([{ id: 'pst_1', name: 'Gateway', backend: 'claude', baseURL: '', apiKey: 'secret', createdAt: 1 }]), 'empty preset URL')
+// API 预设线协议：白名单内放行并原样回传（保存后不得退回 baseURL 推断），undefined 保持缺省，其余拒收
+const protocolPresets = validation.parsePresets([
+  { id: 'pst_openai', name: 'OpenAI 网关', backend: 'zcode', baseURL: 'https://openrouter.ai/api/v1', apiKey: 'secret', protocol: 'openai', note: 'chat/completions', createdAt: 1 },
+  { id: 'pst_anthropic', name: '原生网关', backend: 'claude', baseURL: 'https://api.anthropic.com', apiKey: 'secret', protocol: 'anthropic', createdAt: 2 },
+  { id: 'pst_default', name: '缺省推断', backend: 'codex', baseURL: 'https://example.invalid', apiKey: 'secret', createdAt: 3 }
+])
+if (protocolPresets[0].protocol !== 'openai' || protocolPresets[1].protocol !== 'anthropic') throw new Error('preset protocol was not preserved')
+if (protocolPresets[2].protocol !== undefined || 'protocol' in protocolPresets[2]) throw new Error('absent preset protocol must stay undefined')
+const automaticProtocol = validation.parsePresets([{ ...protocolPresets[0], protocol: undefined }])[0]
+if ('protocol' in automaticProtocol) throw new Error('selecting automatic protocol must clear the explicit override')
+if (protocolPresets[0].baseURL !== 'https://openrouter.ai/api/v1' || protocolPresets[0].note !== 'chat/completions' || protocolPresets[0].createdAt !== 1) throw new Error('preset protocol support dropped sibling fields')
+const reparsed = validation.parsePresets(protocolPresets)
+if (JSON.stringify(reparsed) !== JSON.stringify(protocolPresets)) throw new Error('preset protocol round-trip is not idempotent')
+for (const value of ['OpenAI', 'openai-chat', 'messages', '', ' openai ', 1, null, true, {}]) {
+  expectReject(() => validation.parsePresets([{ id: 'pst_1', name: 'Gateway', backend: 'zcode', baseURL: 'https://example.invalid', apiKey: 'secret', protocol: value, createdAt: 1 }]), `illegal preset protocol ${JSON.stringify(value)}`)
+}
 expectReject(() => validation.parseFollowUpOptions({ relay: 'yes' }), 'invalid relay flag')
 const followUpOptions = validation.parseFollowUpOptions({ relay: true, collectFinal: true })
 if (followUpOptions.relay !== true || followUpOptions.collectFinal !== true) throw new Error('collectFinal follow-up option was rejected')

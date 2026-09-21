@@ -8,7 +8,7 @@ const issuePriorities = new Set<IssuePriority>(['urgent', 'high', 'medium', 'low
 const taskStatuses = new Set<TaskStatus>(['queued', 'running', 'done', 'failed', 'cancelled'])
 const triggers = new Set<RunTrigger>(['assignment', 'mention', 'autopilot', 'manual', 'handoff', 'meeting'])
 const backendIds = new Set<string>(BACKEND_IDS)
-const settingsKeys = new Set<keyof AppSettings>(['theme', 'zcodePath', 'dshPath', 'nodePath', 'concurrency', 'notifyOnDone', 'mode', 'workerConcurrency', 'sharedDir', 'turnIdleTimeoutMs', 'permissionTimeoutMs', 'maxRetryAttempts', 'retryBackoffMs', 'maxHandoffChain', 'delegateMaxRounds', 'delegateMaxTotalRounds', 'delegateMaxDepth', 'doomLoopThreshold', 'worktreeMaxAgeDays'])
+const settingsKeys = new Set<keyof AppSettings>(['theme', 'zcodePath', 'dshPath', 'nodePath', 'concurrency', 'notifyOnDone', 'mode', 'workerConcurrency', 'sharedDir', 'turnIdleTimeoutMs', 'permissionTimeoutMs', 'maxRetryAttempts', 'retryBackoffMs', 'maxHandoffChain', 'delegateMaxRounds', 'delegateMaxTotalRounds', 'delegateMaxDepth', 'doomLoopThreshold', 'worktreeMaxAgeDays', 'updateFeedUrl'])
 
 /** 调优参数的合法区间：越界直接拒绝，防止手滑值把看门狗/预算打穿 */
 const settingsIntRanges: Partial<Record<keyof AppSettings, [min: number, max: number]>> = {
@@ -305,9 +305,11 @@ export function parseSettingsPatch(value: unknown): Partial<AppSettings> {
     if (value !== undefined && (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > max)) throw new Error(`${key} 必须是 ${min}-${max} 的整数`)
   }
   for (const key of ['zcodePath', 'dshPath', 'nodePath'] as const) if (input[key] !== undefined && typeof input[key] !== 'string') throw new Error(`${key} 必须是字符串`)
-  if (input.sharedDir !== undefined) {
-    if (typeof input.sharedDir !== 'string') throw new Error('sharedDir 必须是字符串')
-    input.sharedDir = input.sharedDir.trim()
+  for (const key of ['sharedDir', 'updateFeedUrl'] as const) {
+    if (input[key] !== undefined) {
+      if (typeof input[key] !== 'string') throw new Error(`${key} 必须是字符串`)
+      input[key] = input[key].trim()
+    }
   }
   if (input.notifyOnDone !== undefined && typeof input.notifyOnDone !== 'boolean') throw new Error('notifyOnDone 必须是布尔值')
   return input as Partial<AppSettings>
@@ -369,16 +371,21 @@ export function parseAgents(value: unknown): Agent[] {
   })
 }
 
+/** 线协议白名单：与 presets.ts 的 ApiPreset.protocol 对齐（缺省 = 按 baseURL 推断，故 undefined 合法） */
+const presetProtocols = new Set<NonNullable<ApiPreset['protocol']>>(['anthropic', 'openai'])
+
 export function parsePresets(value: unknown): ApiPreset[] {
   if (!Array.isArray(value) || value.length > 100) throw new Error('presets 必须是最多 100 项的数组')
   const ids = new Set<string>()
   return value.map((item, index) => {
     const input = record(item, `preset[${index}]`)
-    assertKeys(input, ['id', 'name', 'backend', 'baseURL', 'apiKey', 'note', 'createdAt'], `preset[${index}]`)
+    assertKeys(input, ['id', 'name', 'backend', 'baseURL', 'apiKey', 'protocol', 'note', 'createdAt'], `preset[${index}]`)
     const id = stringValue(input.id, `preset[${index}].id`)!
     const backend = stringValue(input.backend, `preset[${index}].backend`)!
+    const protocol = input.protocol
     if (ids.has(id)) throw new Error(`preset id 重复: ${id}`)
     if (!backendIds.has(backend)) throw new Error(`preset backend 无效: ${backend}`)
+    if (protocol !== undefined && (typeof protocol !== 'string' || !presetProtocols.has(protocol as NonNullable<ApiPreset['protocol']>))) throw new Error(`preset protocol 无效: ${String(protocol)}`)
     ids.add(id)
     return {
       id,
@@ -386,6 +393,8 @@ export function parsePresets(value: unknown): ApiPreset[] {
       backend,
       baseURL: stringValue(input.baseURL, `preset[${index}].baseURL`)! ,
       apiKey: stringValue(input.apiKey, `preset[${index}].apiKey`)! ,
+      // 显式协议必须原样回传：丢字段会让保存后的预设退回 baseURL 推断，用户选的 openai 被静默改回 anthropic
+      ...(protocol !== undefined ? { protocol: protocol as NonNullable<ApiPreset['protocol']> } : {}),
       createdAt: finiteNumber(input.createdAt, `preset[${index}].createdAt`)! ,
       ...(optionalString(input.note, `preset[${index}].note`) ? { note: optionalString(input.note, `preset[${index}].note`) } : {})
     }

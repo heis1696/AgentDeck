@@ -1,11 +1,14 @@
 import fs from 'node:fs'
+import { prepareManualTaskStart, taskIdentity } from './handoff'
+import { atomicWriteJson } from './persistence'
 import path from 'node:path'
 import http from 'node:http'
 import crypto from 'node:crypto'
 import { SIDECAR_PROTOCOL_VERSION } from './sidecar'
 import { SIDECAR_PROTOCOL } from './sidecar/protocol'
 import { EventLog } from './event-log'
-import type { TaskEvent } from '../shared/types'
+import type { ExecutionOwner, TaskEvent, TaskStatus } from '../shared/types'
+import type { TaskExpectation } from './store'
 import { SidecarRuntime } from './sidecar-runtime'
 
 type JsonRecord = Record<string, unknown>
@@ -64,10 +67,12 @@ function loadArray(file: string, key?: string): unknown[] {
 }
 
 /** Reused per-file EventLog instances. Building one parses the whole JSONL,
- * so recreating it per request turned every events.read on a large log into
- * a multi-second full re-read and starved the sidecar's single thread. The
+ * so recreating it per request turns a large-log read into a multi-second full
+ * re-read that starves the sidecar's single thread. Task logs are read and
+ * written through the TaskStore, which keeps its own per-task instances; this
+ * cache covers the remaining direct reads (the goal event stream). The
  * watermark freshness check in EventLog keeps reused instances correct, and
- * the LRU cap bounds memory when a userData dir holds many task logs. */
+ * the LRU cap bounds memory when a userData dir holds many logs. */
 const eventLogCache = new Map<string, EventLog>()
 const EVENT_LOG_CACHE_LIMIT = 16
 
@@ -118,65 +123,10 @@ function durableState(userDataDir: string) {
   return { tasks, issues, runs, comments, goals, checkpoints, specSnapshots, specDecisions, specApprovals, goalEvents, orphanRuns }
 }
 
-function readEvents(userDataDir: string, taskId: string, afterSeq = 0) {
-  return sharedEventLog(eventFile(userDataDir, taskId)).read(afterSeq)
-}
-
-function eventFile(userDataDir: string, taskId: string) {
-  if (!/^[A-Za-z0-9_-]{1,160}$/.test(taskId)) throw new Error('invalid taskId')
-  const root = path.resolve(userDataDir, 'tasks')
-  const file = path.resolve(root, taskId, 'events.jsonl')
-  if (!file.startsWith(`${root}${path.sep}`)) throw new Error('invalid taskId')
-  return file
-}
-
-function appendEvent(userDataDir: string, taskId: string, input: unknown) {
-  return sharedEventLog(eventFile(userDataDir, taskId)).append(record(input) as Omit<TaskEvent, 'seq'>)
-}
-
-/** Convert claimed stale executions back into runnable durable tasks. The
- * operation is idempotent: only tasks still marked `running` are changed. */
-function claimOrphanTasks(userDataDir: string, runIds: readonly string[], owner: string) {
-  const file = path.join(userDataDir, 'tasks', 'tasks.json')
-  let document: JsonRecord
-  try { document = JSON.parse(fs.readFileSync(file, 'utf8')) as JsonRecord } catch { return [] }
-  if (!Array.isArray(document.tasks)) return []
-  const wanted = new Set(runIds)
-  const adopted: string[] = []
-  const adoptedTaskIds: string[] = []
-  for (const task of document.tasks) {
-    const value = record(task)
-    const id = String(value.id || '')
-    const runId = String(value.runId || '')
-    if (value.status !== 'running' || (!wanted.has(id) && !wanted.has(runId))) continue
-    value.status = 'queued'
-    delete value.startedAt
-    delete value.endedAt
-    delete value.runId
-    value.error = `Orphan run adopted by sidecar ${owner}; queued for resume`
-    adopted.push(runId || id)
-    if (id) adoptedTaskIds.push(id)
-  }
-  if (!adopted.length) return []
-  for (const taskId of adoptedTaskIds) {
-    appendEvent(userDataDir, taskId, {
-      eventId: `orphan-claim:${owner}:${taskId}`,
-      kind: 'status',
-      text: `orphan run claimed by sidecar ${owner}`,
-      data: { orphanClaim: owner }
-    })
-    const task = document.tasks.find((entry) => String(record(entry).id || '') === taskId)
-    if (task) record(task).eventCount = sharedEventLog(eventFile(userDataDir, taskId)).count()
-  }
-  const tmp = `${file}.tmp`
-  fs.mkdirSync(path.dirname(file), { recursive: true })
-  fs.writeFileSync(tmp, JSON.stringify(document, null, 2), 'utf8')
-  fs.renameSync(tmp, file)
-  return adopted
-}
-
-/** Start the standalone business process. It is intentionally dependency-free
- * so electron-vite can bundle it and node can run it during recovery tests. */
+/**
+ * Start the standalone business process. It is intentionally dependency-free
+ * so electron-vite can bundle it and node can run it during recovery tests.
+ */
 export function startSidecarServer(options: SidecarServerOptions): SidecarServer {
   if (!options.token) throw new Error('sidecar token is required')
   const instanceId = options.instanceId || crypto.randomUUID()
@@ -240,13 +190,30 @@ export function startSidecarServer(options: SidecarServerOptions): SidecarServer
         const input = record(params.input)
         const trigger = typeof params.trigger === 'string' ? params.trigger : undefined
         result = runtime.taskService.createTask(input as never, trigger as never)
+      } else if (method === 'issues.create') {
+        runtime.refreshIfIdle()
+        const rawInput = record(params.input)
+        const input = {
+          ...rawInput,
+          // The Issue API calls this field description; TaskService keeps the
+          // compatibility name prompt internally.
+          prompt: rawInput.prompt ?? rawInput.description
+        }
+        const trigger = typeof params.trigger === 'string' ? params.trigger : undefined
+        // Preserve the Issue-returning creation contract across the sidecar
+        // boundary. The runtime returns a derived stable view when the
+        // projection write is temporarily unavailable.
+        result = runtime.createIssue(input as never, trigger as never)
       } else if (method === 'tasks.start') {
-        const task = typeof params.id === 'string' ? runtime.store.get(params.id) : null
-        if (!task || task.status !== 'queued') throw new Error('task is not queued')
-        runtime.store.update(task.id, { parked: undefined })
+        if (typeof params.id !== 'string') throw new Error('task id is required')
+        // Same captured-identity preparation as the desktop start button and
+        // drag-to-running entry: only a still-queued record may be unparked,
+        // and a state change made meanwhile is never overwritten.
+        const started = prepareManualTaskStart(runtime.store, params.id)
+        if (!started) throw new Error('task is not queued')
         runtime.start()
-        runtime.runner.enqueue(runtime.store.get(task.id)!)
-        result = runtime.store.get(task.id)
+        runtime.runner.enqueue(started)
+        result = runtime.store.get(started.id) ?? started
       } else if (method === 'tasks.cancel') {
         if (typeof params.id !== 'string') throw new Error('task id is required')
         result = await runtime.runner.cancel(params.id)
@@ -254,10 +221,15 @@ export function startSidecarServer(options: SidecarServerOptions): SidecarServer
         if (typeof params.id !== 'string') throw new Error('task id is required')
         const task = runtime.store.get(params.id)
         if (!task || task.status === 'running' || task.status === 'queued') throw new Error('task cannot be retried')
-        await runtime.runner.closeSession(task.id)
-        runtime.store.update(task.id, { status: 'queued', error: undefined, failure: undefined, result: undefined, sessionId: undefined, attempt: undefined, runId: undefined })
+        const captured = taskIdentity(task)
+        // Validate first, clean up second: the conditional requeue is the only
+        // proof the observed run still owns the record. Cleanup of a rejected
+        // retry must not touch a replacement run's session.
+        const requeued = runtime.store.updateIf(task.id, captured, { status: 'queued', error: undefined, failure: undefined, result: undefined, sessionId: undefined, attempt: undefined, runId: undefined, executionOwner: undefined })
+        if (!requeued) throw new Error('task state changed; retry aborted')
+        await runtime.runner.closeSession(task.id, { runId: task.runId, executionOwner: task.executionOwner })
         runtime.start()
-        runtime.runner.enqueue(runtime.store.get(task.id)!)
+        runtime.runner.enqueue(requeued)
         result = { ok: true }
       } else if (method === 'tasks.followup') {
         if (typeof params.id !== 'string' || typeof params.content !== 'string') throw new Error('task id and content are required')
@@ -265,35 +237,63 @@ export function startSidecarServer(options: SidecarServerOptions): SidecarServer
       } else if (method === 'events.replay' || method === 'events.read') {
         const taskId = typeof params.taskId === 'string' ? params.taskId : ''
         if (!taskId) throw new Error('taskId is required')
-        result = readEvents(options.userDataDir, taskId, typeof params.afterSeq === 'number' ? params.afterSeq : 0)
+        // Reads go through the owner of the durable index: a deleted task has
+        // no record, so its removed log cannot be served back.
+        result = runtime.store.readEvents(taskId, typeof params.afterSeq === 'number' ? params.afterSeq : 0)
       } else if (method === 'events.append') {
         const taskId = typeof params.taskId === 'string' ? params.taskId : ''
         if (!taskId || params.event === undefined) throw new Error('taskId and event are required')
-        result = appendEvent(options.userDataDir, taskId, params.event)
+        // Task events are appended by the store, under the storage transaction
+        // and only for a Task that still exists. A deleted Task therefore
+        // cannot have its log file (or its directory) recreated.
+        //
+        // The authorization uses the run identity the caller captured when it
+        // produced the event. Reading the latest record here would let a stale
+        // event ride on whatever run currently owns the task, so a missing
+        // identity only matches a record that has none (queued/legacy).
+        const expectation = record(params.expected)
+        const runId = typeof expectation.runId === 'string'
+          ? expectation.runId
+          : (typeof params.runId === 'string' ? params.runId : undefined)
+        const executionOwner = (expectation.executionOwner ?? params.executionOwner) as ExecutionOwner | undefined
+        const status = expectation.status ?? params.status
+        const expected: TaskExpectation = {
+          ...(status !== undefined ? { status: status as TaskStatus | TaskStatus[] } : {}),
+          runId,
+          executionOwner
+        }
+        const event = runtime.store.appendEvent(taskId, record(params.event) as Omit<TaskEvent, 'seq'>, expected)
+        if (!event) throw new Error('task does not exist, or the captured run identity no longer owns it')
+        result = event
       } else if (method === 'runs.takeover' || method === 'runs.claim') {
-        const state = durableState(options.userDataDir)
         const file = path.join(options.userDataDir, 'sidecar-orphans.json')
         const now = Date.now()
         const prior = (() => { try { return JSON.parse(fs.readFileSync(file, 'utf8')) as JsonRecord } catch { return {} } })()
         const priorLease = typeof prior.leaseExpiresAt === 'number' ? prior.leaseExpiresAt : 0
-        const leaseActive = priorLease > now && (prior.instanceId === instanceId || processAlive(prior.pid))
-        const candidates = state.orphanRuns.map((task) => String(record(task).runId || record(task).id || '')).filter(Boolean)
-        // A live lease prevents two sidecars from both claiming the same run.
-        // Expired leases are safely replaced and remain auditable on disk.
-        const runIds = leaseActive && Array.isArray(prior.runIds) ? [] : candidates
+        // A sidecar lease only defers to a peer that is still alive. It is not
+        // evidence of death, so it can never be the reason a run changes hands.
+        const peerLeaseActive = priorLease > now && (prior.instanceId === instanceId || processAlive(prior.pid))
+        const candidates = runtime.store.list()
+          .filter((task) => task.status === 'running')
+          .map((task) => task.runId || task.id)
+          .filter(Boolean)
+        // Takeover itself is the store's ownership-checked recovery: only an
+        // execution owner proven dead outside the lock is claimed, and the
+        // exact observed run is committed conditionally, once.
+        const adopted = peerLeaseActive ? [] : runtime.takeoverRuns(candidates).map((task) => task.runId || task.id)
         const takeover = {
           protocolVersion: SIDECAR_PROTOCOL_VERSION,
           instanceId,
           pid: process.pid,
           claimedAt: now,
           leaseExpiresAt: now + 30_000,
-          runIds
+          runIds: adopted
         }
-        fs.mkdirSync(path.dirname(file), { recursive: true })
-        fs.writeFileSync(`${file}.tmp`, JSON.stringify(takeover, null, 2), 'utf8')
-        fs.renameSync(`${file}.tmp`, file)
-        const adopted = runIds.length ? claimOrphanTasks(options.userDataDir, runIds, instanceId) : []
-        if (adopted.length) runtime.refreshAfterTakeover()
+        // Publishing the lease must not collide with a peer that is taking
+        // over at the same time: a shared temporary path let one writer's
+        // rename lose the other's file (ENOENT). Unique names plus fsync and
+        // atomic replacement keep both the lease and its reader consistent.
+        atomicWriteJson(file, takeover)
         result = { adopted, orphanRuns: durableState(options.userDataDir).orphanRuns, lease: takeover }
       } else {
         return json(res, 404, { protocol: SIDECAR_PROTOCOL, version: SIDECAR_PROTOCOL_VERSION, id: body.id, ok: false, error: { code: 'unknown_method', message: `unknown sidecar method: ${method}` } })

@@ -2,7 +2,8 @@
 // 无头：opencode run --format json --dangerously-skip-permissions --dir <workdir> <prompt>
 // 事件：step_start/tool_use/step_finish/text（sessionID 全程携带）；回合结束 = 进程退出
 // 续聊：-s <sessionId>
-import type { AgentBackend, BackendSession, BackendSessionEvents } from './types'
+import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnStamp } from './types'
+import { bindTurn } from './types'
 import type { TaskEvent, ToolEditMeta } from '../../shared/types'
 import { isJsonObject, jsonObject, jsonString, runCliJsonl, toolEvent, killProcessTree } from './cli-common'
 import { parseEditMeta, stringifyToolArgs } from './edit-meta'
@@ -33,6 +34,9 @@ export interface OpencodeBackendOptions {
   cliOnly?: boolean
   skipVersionProbe?: boolean
   fetch?: FetchLike
+  /** Test seam for the production local-server wrapper. */
+  startServer?: () => Promise<{ url: string; child: ChildProcess }>
+  stopServer?: (child: ChildProcess) => Promise<void>
 }
 
 export function createOpencodeBackend(config: OpencodeBackendOptions = {}): AgentBackend {
@@ -149,17 +153,19 @@ export function createOpencodeBackend(config: OpencodeBackendOptions = {}): Agen
       const p = await probeCli('opencode')
       return p.ok ? { ok: true, detail: `opencode ${p.version}` } : { ok: false, detail: p.error ?? '未安装' }
     },
-    async start({ prompt, workdir, events, resumeSessionId, model }) {
+    async start({ prompt, workdir, events: rawEvents, resumeSessionId, model, turn }) {
       let own: { kill: () => void } | null = null
-      const runTurn = (turnPrompt: string, resumeId?: string) =>
-        runOnce(turnPrompt, workdir, resumeId, events, model, (r) => { own = r })
-      const r = await runTurn(prompt, resumeSessionId)
+      // 一次性 CLI：每回合一个进程；回合身份随进程绑定
+      const runTurn = (turnPrompt: string, resumeId?: string, turnStamp?: BackendTurnStamp) =>
+        runOnce(turnPrompt, workdir, resumeId, bindTurn(rawEvents, turnStamp), model, (r) => { own = r })
+      const r = await runTurn(prompt, resumeSessionId, turn)
       if (!r.ok && r.error) throw new Error(r.error)
       const sid = r.sessionId
       return {
         sessionId: sid,
-        async send(content) {
-          const res = await runTurn(content, sid)
+        turnScoped: true,
+        async send(content, turnStamp) {
+          const res = await runTurn(content, sid, turnStamp)
           if (!res.ok) throw new Error(res.error || '回合失败')
         },
         async stop() {
@@ -182,14 +188,21 @@ export function createOpencodeBackend(config: OpencodeBackendOptions = {}): Agen
   const skipVersionProbe = config.skipVersionProbe ?? /^(1|true)$/i.test(process.env.AGENTDECK_OPENCODE_SERVER_SKIP_VERSION || '')
   let sidecar: SidecarState | undefined
   let sidecarStarting: Promise<SidecarState> | undefined
+  const sessionLeases = new Map<string, { state: SidecarState; holder: symbol }>()
 
   const stopSidecar = async () => {
     const current = sidecar
     if (!current) return
     sidecar = undefined
-    try { await killProcessTree(current.child) } catch {}
+    try { await (config.stopServer ? config.stopServer(current.child) : killProcessTree(current.child)) } catch {}
   }
   const startSidecar = async (): Promise<SidecarState> => {
+    if (config.startServer) {
+      const started = await config.startServer()
+      const state: SidecarState = { ...started, users: 0 }
+      state.child.once?.('exit', () => { if (sidecar === state) sidecar = undefined })
+      return state
+    }
     const resolved: ResolvedCli | null = resolveCli('opencode')
     if (!resolved) throw new OpencodeServerUnavailableError('PATH 上找不到 opencode')
     const port = await freePort()
@@ -200,6 +213,7 @@ export function createOpencodeBackend(config: OpencodeBackendOptions = {}): Agen
     let stderr = ''
     child.stderr?.on('data', (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-1000) })
     const state: SidecarState = { url: `http://127.0.0.1:${port}`, child, users: 0 }
+    child.once('exit', () => { if (sidecar === state) sidecar = undefined })
     const client = new OpencodeServerClient({ baseUrl: state.url, skipVersionProbe, requestTimeoutMs: 1_000, ...(config.fetch ? { fetch: config.fetch } : {}) })
     let last = ''
     try {
@@ -260,20 +274,44 @@ export function createOpencodeBackend(config: OpencodeBackendOptions = {}): Agen
       if (disabled) return cliBackend.start(options)
       try {
         const state = await ensureServer()
-        if (state.child) state.users++
+        const resumeLease = state.child && options.resumeSessionId ? sessionLeases.get(options.resumeSessionId) : undefined
+        const transferred = !!resumeLease && resumeLease.state === state
+        if (state.child && !transferred) state.users++
         let session
         try {
           session = await createOpencodeServerBackend({ baseUrl: state.url, skipVersionProbe, ...(config.fetch ? { fetch: config.fetch } : {}) }).start(options)
         } catch (error) {
-          if (state.child) await releaseSidecar(state)
+          if (state.child) {
+            if (transferred && options.resumeSessionId && sessionLeases.get(options.resumeSessionId) === resumeLease) sessionLeases.delete(options.resumeSessionId)
+            await releaseSidecar(state)
+          }
           throw error
         }
-        let released = false
+        const holder = Symbol(session.sessionId)
+        const lease = state.child ? (resumeLease && transferred ? resumeLease : { state, holder }) : undefined
+        if (lease) {
+          if (options.resumeSessionId && options.resumeSessionId !== session.sessionId && sessionLeases.get(options.resumeSessionId) === lease) sessionLeases.delete(options.resumeSessionId)
+          lease.holder = holder
+          sessionLeases.set(session.sessionId, lease)
+        }
+        let disposition: 'attached' | 'detached' | 'closed' = 'attached'
         const close = session.close
+        const detach = session.detach
+        session.detach = async () => {
+          if (disposition !== 'attached') return
+          disposition = 'detached'
+          await detach?.()
+        }
         session.close = async () => {
-          if (released) return
-          released = true
-          try { await close() } finally { await releaseSidecar(state) }
+          if (disposition === 'closed') return
+          if (disposition === 'detached' && lease?.holder !== holder) return
+          disposition = 'closed'
+          try { await close() } finally {
+            if (lease && sessionLeases.get(session.sessionId) === lease && lease.holder === holder) {
+              sessionLeases.delete(session.sessionId)
+              await releaseSidecar(state)
+            }
+          }
         }
         return session
       } catch (error) {

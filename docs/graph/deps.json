@@ -2,9 +2,42 @@
   "modules": [
     {
       "source": "src/main/acceptance-verifier.ts",
-      "dependencies": [],
+      "dependencies": [
+        {
+          "module": "../shared/git-snapshot",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/shared/git-snapshot.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
       "dependents": [
         "src/main/index.ts"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
+      "source": "src/shared/git-snapshot.ts",
+      "dependencies": [],
+      "dependents": [
+        "src/main/acceptance-verifier.ts",
+        "src/main/delegate.ts",
+        "src/main/task-finalizer.ts",
+        "src/renderer/src/components/BoardView.tsx",
+        "src/renderer/src/components/TaskDetail.tsx",
+        "src/renderer/src/components/task/GitSummary.tsx",
+        "src/renderer/src/components/task/WorkerOverview.tsx"
       ],
       "orphan": false,
       "valid": true
@@ -217,10 +250,10 @@
         "src/main/agents.ts",
         "src/main/event-log.ts",
         "src/main/goal-store.ts",
+        "src/main/store.ts",
         "src/main/ipc-validation.ts",
         "src/main/presets.ts",
         "src/main/settings.ts",
-        "src/main/store.ts",
         "src/main/sidecar-runtime.ts",
         "src/renderer/src/components/AgentsView.tsx",
         "src/renderer/src/components/AutomationView.tsx"
@@ -346,6 +379,23 @@
           "matchesDoNotFollow": false,
           "circular": false,
           "valid": true
+        },
+        {
+          "module": "./types",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/backends/types.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
         }
       ],
       "dependents": [
@@ -393,6 +443,21 @@
       "dependents": [
         "src/main/backends/claude.ts",
         "src/main/backends/codex.ts",
+        "src/main/backends/opencode-server.ts",
+        "src/main/backends/opencode.ts",
+        "src/main/backends/zcode.ts"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
+      "source": "src/main/backends/types.ts",
+      "dependencies": [],
+      "dependents": [
+        "src/main/backends/claude.ts",
+        "src/main/backends/codex.ts",
+        "src/main/backends/dsh-acp.ts",
+        "src/main/backends/dsh.ts",
         "src/main/backends/opencode-server.ts",
         "src/main/backends/opencode.ts",
         "src/main/backends/zcode.ts"
@@ -453,6 +518,23 @@
           "matchesDoNotFollow": false,
           "circular": false,
           "valid": true
+        },
+        {
+          "module": "./types",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/backends/types.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
         }
       ],
       "dependents": [
@@ -492,6 +574,23 @@
             "import"
           ],
           "resolved": "src/main/backends/cli-locator.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "./types",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/backends/types.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -559,6 +658,23 @@
           "matchesDoNotFollow": false,
           "circular": false,
           "valid": true
+        },
+        {
+          "module": "./types",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/backends/types.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
         }
       ],
       "dependents": [
@@ -582,6 +698,23 @@
             "import"
           ],
           "resolved": "src/main/backends/edit-meta.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "./types",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/backends/types.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -666,6 +799,23 @@
           "matchesDoNotFollow": false,
           "circular": false,
           "valid": true
+        },
+        {
+          "module": "./types",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/backends/types.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
         }
       ],
       "dependents": [
@@ -673,13 +823,6 @@
         "src/main/sidecar-runtime.ts"
       ],
       "orphan": false,
-      "valid": true
-    },
-    {
-      "source": "src/main/backends/types.ts",
-      "dependencies": [],
-      "dependents": [],
-      "orphan": true,
       "valid": true
     },
     {
@@ -795,6 +938,23 @@
             "import"
           ],
           "resolved": "src/main/backends/edit-meta.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "./types",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/backends/types.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -1041,6 +1201,23 @@
       "source": "src/main/delegate.ts",
       "dependencies": [
         {
+          "module": "../shared/git-snapshot",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/shared/git-snapshot.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "./git",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -1265,12 +1442,42 @@
           "matchesDoNotFollow": false,
           "circular": false,
           "valid": true
+        },
+        {
+          "module": "./persistence",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/persistence.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
         }
       ],
       "dependents": [
         "src/main/goal-store.ts",
-        "src/main/index.ts",
         "src/main/store.ts",
+        "src/main/index.ts",
+        "src/main/sidecar-server.ts"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
+      "source": "src/main/persistence.ts",
+      "dependencies": [],
+      "dependents": [
+        "src/main/event-log.ts",
+        "src/main/store.ts",
+        "src/main/issue-store.ts",
+        "src/main/runner.ts",
         "src/main/sidecar-server.ts"
       ],
       "orphan": false,
@@ -1372,6 +1579,7 @@
       "dependents": [
         "src/main/goal-controller.ts",
         "src/main/goal-store.ts",
+        "src/main/store.ts",
         "src/main/ipc/tasks.ts",
         "src/main/issue-store.ts",
         "src/main/runner.ts",
@@ -1448,6 +1656,122 @@
       ],
       "dependents": [
         "src/main/index.ts",
+        "src/main/sidecar-runtime.ts"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
+      "source": "src/main/handoff.ts",
+      "dependencies": [
+        {
+          "module": "./store",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/store.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
+      "dependents": [
+        "src/main/index.ts",
+        "src/main/ipc/tasks.ts",
+        "src/main/runner.ts",
+        "src/main/task-service.ts",
+        "src/main/sidecar-runtime.ts",
+        "src/main/sidecar-server.ts"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
+      "source": "src/main/store.ts",
+      "dependencies": [
+        {
+          "module": "../shared/taskflow",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/shared/taskflow.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "../shared/types",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/shared/types.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "./event-log",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/event-log.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "./persistence",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/persistence.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
+      "dependents": [
+        "src/main/handoff.ts",
+        "src/main/index.ts",
+        "src/main/ipc/tasks.ts",
+        "src/main/issue-store.ts",
+        "src/main/runner.ts",
+        "src/main/task-service.ts",
         "src/main/sidecar-runtime.ts"
       ],
       "orphan": false,
@@ -1873,6 +2197,23 @@
             "import"
           ],
           "resolved": "src/main/goal-store.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "./handoff",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/handoff.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -3243,6 +3584,23 @@
           "valid": true
         },
         {
+          "module": "../handoff",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/handoff.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "../ipc-validation",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -3252,6 +3610,23 @@
             "import"
           ],
           "resolved": "src/main/ipc-validation.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "../store",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/store.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -3315,6 +3690,40 @@
             "import"
           ],
           "resolved": "src/shared/taskflow.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "./persistence",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/persistence.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "./store",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/store.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -4076,6 +4485,23 @@
           "valid": true
         },
         {
+          "module": "./handoff",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/handoff.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "./permission-broker",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -4085,6 +4511,23 @@
             "import"
           ],
           "resolved": "src/main/permission-broker.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "./persistence",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/persistence.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -4136,6 +4579,23 @@
             "import"
           ],
           "resolved": "src/main/scheduler.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "./store",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/store.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -4244,6 +4704,23 @@
     {
       "source": "src/main/task-finalizer.ts",
       "dependencies": [
+        {
+          "module": "../shared/git-snapshot",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/shared/git-snapshot.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
         {
           "module": "../shared/taskflow",
           "moduleSystem": "es6",
@@ -4368,10 +4845,10 @@
       "valid": true
     },
     {
-      "source": "src/main/store.ts",
+      "source": "src/main/task-service.ts",
       "dependencies": [
         {
-          "module": "../shared/types",
+          "module": "./handoff",
           "moduleSystem": "es6",
           "dynamic": false,
           "exoticallyRequired": false,
@@ -4379,7 +4856,7 @@
             "local",
             "import"
           ],
-          "resolved": "src/shared/types.ts",
+          "resolved": "src/main/handoff.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -4388,7 +4865,7 @@
           "valid": true
         },
         {
-          "module": "./event-log",
+          "module": "./store",
           "moduleSystem": "es6",
           "dynamic": false,
           "exoticallyRequired": false,
@@ -4396,7 +4873,7 @@
             "local",
             "import"
           ],
-          "resolved": "src/main/event-log.ts",
+          "resolved": "src/main/store.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -4405,16 +4882,6 @@
           "valid": true
         }
       ],
-      "dependents": [
-        "src/main/index.ts",
-        "src/main/sidecar-runtime.ts"
-      ],
-      "orphan": false,
-      "valid": true
-    },
-    {
-      "source": "src/main/task-service.ts",
-      "dependencies": [],
       "dependents": [
         "src/main/index.ts",
         "src/main/sidecar-runtime.ts"
@@ -4569,6 +5036,23 @@
           "valid": true
         },
         {
+          "module": "./handoff",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/handoff.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "./issue-store",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -4656,6 +5140,40 @@
             "import"
           ],
           "resolved": "src/main/event-log.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "./handoff",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/handoff.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "./persistence",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/persistence.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -5671,6 +6189,23 @@
       "source": "src/renderer/src/components/BoardView.tsx",
       "dependencies": [
         {
+          "module": "../../../shared/git-snapshot",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/shared/git-snapshot.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "../api",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -6384,6 +6919,23 @@
     {
       "source": "src/renderer/src/components/TaskDetail.tsx",
       "dependencies": [
+        {
+          "module": "../../../shared/git-snapshot",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/shared/git-snapshot.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
         {
           "module": "../api",
           "moduleSystem": "es6",
@@ -7998,6 +8550,23 @@
       "source": "src/renderer/src/components/task/GitSummary.tsx",
       "dependencies": [
         {
+          "module": "../../../../shared/git-snapshot",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/shared/git-snapshot.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "../../ui/interaction-center",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -8059,6 +8628,23 @@
     {
       "source": "src/renderer/src/components/task/WorkerOverview.tsx",
       "dependencies": [
+        {
+          "module": "../../../../shared/git-snapshot",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/shared/git-snapshot.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
         {
           "module": "../../api",
           "moduleSystem": "es6",
@@ -9118,8 +9704,8 @@
     "info": 0,
     "ignore": 0,
     "advisedExitCode": 0,
-    "totalCruised": 183,
-    "totalDependenciesCruised": 413,
+    "totalCruised": 186,
+    "totalDependenciesCruised": 444,
     "optionsUsed": {
       "baseDir": "C:\\Projects\\AgentDeck",
       "combinedDependencies": false,
@@ -9135,7 +9721,7 @@
         "tsd",
         "amd"
       ],
-      "outputTo": "-",
+      "outputTo": "docs/graph/deps.json",
       "outputType": "json",
       "preserveSymlinks": false,
       "skipAnalysisNotInRules": false,
@@ -9157,8 +9743,8 @@
         {
           "name": "babel",
           "version": ">=7.0.0 <8.0.0",
-          "available": true,
-          "currentVersion": "@babel/core@7.29.7"
+          "available": false,
+          "currentVersion": "-"
         },
         {
           "name": "coffee-script",

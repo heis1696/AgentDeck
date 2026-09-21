@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import type { FileDiffErrorCode, FileDiffResult } from '../shared/contracts'
-import type { TaskGitSnapshot, WorktreeCleanupStatus, WorktreeInfo } from '../shared/types'
+import type { Task, TaskGitSnapshot, WorktreeCleanupStatus, WorktreeInfo } from '../shared/types'
 
 export interface GitCommandResult {
   ok: boolean
@@ -81,6 +81,28 @@ export interface GitSnapshotResult {
   diff: string
   stat: string
   snapshot: TaskGitSnapshot
+}
+
+export interface WorktreePruneLease { release(): void }
+
+/** Preserve live task worktrees and every repository with an in-flight Git reservation. */
+export function shouldKeepTaskWorktree(tasks: readonly Task[], repoDir: string, ownerTaskId: string): boolean {
+  const byId = new Map(tasks.map((task) => [task.id, task]))
+  const owner = tasks.find((task) => task.id === ownerTaskId)
+  let related = owner
+  const seen = new Set<string>()
+  while (related && !seen.has(related.id)) {
+    seen.add(related.id)
+    if (related.status === 'queued' || related.status === 'running' || related.gitOperation !== undefined) return true
+    related = related.parentTaskId ? byId.get(related.parentTaskId) : undefined
+  }
+  if (!ownerTaskId.startsWith('.agentdeck-merge-')) return false
+  const root = path.resolve(repoDir)
+  return tasks.some((task) => (task.status === 'queued' || task.status === 'running' || task.gitOperation !== undefined) && [task.worktree?.repoDir, task.workdir].some((candidate) => {
+    if (!candidate) return false
+    const resolved = path.resolve(candidate)
+    return resolved === root || isWithin(root, resolved)
+  }))
 }
 
 function snapshotFailure(scope: TaskGitSnapshot['scope'], state: 'error' | 'unavailable', reason: string): GitSnapshotResult {
@@ -621,12 +643,11 @@ export async function deleteBranch(workdir: string, name: string): Promise<boole
 export async function pruneWorktrees(
   repoDir: string,
   keepTask: (taskId: string) => boolean = () => false,
-  options: { maxAgeMs?: number; now?: number } = {}
+  options: { maxAgeMs?: number; now?: number; claimWorktree?: (taskId: string, mergeWorktree: boolean) => WorktreePruneLease | undefined } = {}
 ): Promise<WorktreePruneResult> {
   const root = await repositoryRoot(repoDir)
   const result: WorktreePruneResult = { repoDir: root ?? repoDir, scanned: 0, removed: [], retained: [], failed: [] }
   if (!root) return result
-  await runGit(root, ['worktree', 'prune'], 15000)
   const worktreeDir = managedRoot(root)
   let entries: fs.Dirent[] = []
   try { entries = fs.readdirSync(worktreeDir, { withFileTypes: true }) } catch {}
@@ -637,22 +658,31 @@ export async function pruneWorktrees(
   for (const name of names) {
     const wtPath = path.join(worktreeDir, name)
     const metadata = readMetadataFile(metadataFile(root, name))
-    if (metadata?.cleanupStatus === 'removed' && !fs.existsSync(wtPath)) {
-      if (metadata.branch.startsWith(MANAGED_BRANCH_PREFIX) && !(await branchExists(root, metadata.branch))) {
-        // Already fully reclaimed; retain the sidecar as an audit record.
-        continue
-      }
-      if (metadata.branch.startsWith(MANAGED_BRANCH_PREFIX) && await deleteBranch(root, metadata.branch)) {
-        result.removed.push(name)
-      } else {
-        result.retained.push({ name, reason: 'worktree already removed; managed branch retained' })
-      }
-      continue
-    }
     result.scanned++
     const owner = metadata?.ownerTaskId || name.replace(/_c\d+$/, '')
     if (owner && keepTask(owner)) {
-      result.retained.push({ name, reason: 'owner task still exists' })
+      result.retained.push({ name, reason: 'owner task or Git operation is still active' })
+      continue
+    }
+    if (metadata?.cleanupStatus === 'removed' && !fs.existsSync(wtPath)) {
+      const lease = options.claimWorktree?.(owner, name.startsWith('.agentdeck-merge-'))
+      if (!lease) {
+        result.retained.push({ name, reason: 'cleanup ownership could not be established' })
+        continue
+      }
+      try {
+        if (metadata.branch.startsWith(MANAGED_BRANCH_PREFIX) && !(await branchExists(root, metadata.branch))) {
+          // Already fully reclaimed; retain the sidecar as an audit record.
+          continue
+        }
+        if (metadata.branch.startsWith(MANAGED_BRANCH_PREFIX) && await deleteBranch(root, metadata.branch)) {
+          result.removed.push(name)
+        } else {
+          result.retained.push({ name, reason: 'worktree already removed; managed branch retained' })
+        }
+      } finally {
+        lease?.release()
+      }
       continue
     }
     if (metadata?.manualKeep) {
@@ -666,10 +696,19 @@ export async function pruneWorktrees(
       result.retained.push({ name, reason: 'within retention window' })
       continue
     }
-    const reclaimed = await reclaimWorktree(wtPath, { deleteBranch: true })
-    if (reclaimed.ok) result.removed.push(name)
-    else if (reclaimed.status === 'retained') result.retained.push({ name, reason: reclaimed.reason ?? 'retained by policy' })
-    else result.failed.push({ name, reason: reclaimed.reason ?? 'cleanup failed' })
+    const lease = options.claimWorktree?.(owner, crashLeftover)
+    if (!lease) {
+      result.retained.push({ name, reason: 'cleanup ownership could not be established' })
+      continue
+    }
+    try {
+      const reclaimed = await reclaimWorktree(wtPath, { deleteBranch: true })
+      if (reclaimed.ok) result.removed.push(name)
+      else if (reclaimed.status === 'retained') result.retained.push({ name, reason: reclaimed.reason ?? 'retained by policy' })
+      else result.failed.push({ name, reason: reclaimed.reason ?? 'cleanup failed' })
+    } finally {
+      lease?.release()
+    }
   }
   return result
 }
@@ -678,7 +717,7 @@ export async function pruneWorktrees(
 export async function sweepWorktrees(
   repoDir: string,
   keepTask: (taskId: string) => boolean,
-  options: { maxAgeMs?: number; now?: number } = {}
+  options: { maxAgeMs?: number; now?: number; claimWorktree?: (taskId: string, mergeWorktree: boolean) => WorktreePruneLease | undefined } = {}
 ): Promise<string[]> {
   // Preserve the legacy startup behavior: ownerless clean worktrees are
   // removed immediately, while dirty/manual-kept trees remain fail-closed.

@@ -55,15 +55,18 @@ const hangBackend = {
   id: 'hang',
   label: 'Hang',
   async probe() { return { ok: true, detail: '' } },
-  async start({ events }) {
+  async start({ events, turn }) {
     hangState.events = events
+    hangState.firstTurn = turn
     setTimeout(() => {
-      events.onEvent({ ts: Date.now(), kind: 'final', text: 'done:真实工作成果' })
-      events.onTurnEnd({ response: 'done:真实工作成果', ok: true })
+      events.onEvent({ ts: Date.now(), kind: 'final', text: 'done:真实工作成果' }, turn)
+      events.onTurnEnd({ response: 'done:真实工作成果', ok: true }, turn)
     }, 30)
     return {
       sessionId: 'sess_hang',
-      async send(content) {
+      turnScoped: true,
+      async send(content, titleTurn) {
+        hangState.titleTurn = titleTurn
         if (content.includes('重起一个简短标题')) return new Promise(() => {}) // 永不裁决
         return new Promise(() => {})
       },
@@ -86,8 +89,8 @@ assert(hangState.stops >= 1, '已尝试停掉服务端标题回合')
 
 // 迟到的标题终态（终态丢失后迟迟到达）必须被护栏拒绝，不再改动任务
 const beforeCount = store.get(t1.id).eventCount
-hangState.events.onEvent({ ts: Date.now(), kind: 'final', text: '迟到的标题' })
-hangState.events.onTurnEnd({ response: '迟到的标题', ok: true })
+hangState.events.onEvent({ ts: Date.now(), kind: 'final', text: '迟到的标题' }, hangState.titleTurn)
+hangState.events.onTurnEnd({ response: '迟到的标题', ok: true }, hangState.titleTurn)
 await wait(200)
 cur = store.get(t1.id)
 assert(cur.status === 'done' && cur.title === '原始标题', '迟到终态被代数护栏拒绝')
@@ -99,17 +102,18 @@ const okBackend = {
   id: 'ok',
   label: 'Ok',
   async probe() { return { ok: true, detail: '' } },
-  async start({ events }) {
+  async start({ events, turn }) {
     setTimeout(() => {
-      events.onEvent({ ts: Date.now(), kind: 'final', text: 'done:正经结果' })
-      events.onTurnEnd({ response: 'done:正经结果', ok: true })
+      events.onEvent({ ts: Date.now(), kind: 'final', text: 'done:正经结果' }, turn)
+      events.onTurnEnd({ response: 'done:正经结果', ok: true }, turn)
     }, 30)
     return {
       sessionId: 'sess_ok',
-      async send(content) {
+      turnScoped: true,
+      async send(content, titleTurn) {
         if (content.includes('重起一个简短标题')) {
           setTimeout(() => {
-            events.onTurnEnd({ response: '全新标题', ok: true })
+            events.onTurnEnd({ response: '全新标题', ok: true }, titleTurn)
           }, 30)
           await wait(60)
           return

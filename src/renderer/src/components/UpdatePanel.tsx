@@ -100,7 +100,7 @@ export function UpdatePanel() {
     const next = settings.updateFeedUrl ?? ''
     const previous = persistedRef.current
     persistedRef.current = next
-    if (writtenRef.current === null) writtenRef.current = next
+    writtenRef.current = next
     // 广播只覆盖「没有本地改动」的草稿：保存期间继续输入的内容不能被回写清掉
     if (previous === null || draftRef.current.trim() === previous) {
       draftRef.current = next
@@ -124,7 +124,7 @@ export function UpdatePanel() {
   // 当前快照对应的地址：本次会话查过就用查过的地址，否则视为与已落盘地址一致
   const snapshotFeed = checkedFeed ?? savedFeed
   const conclusionCurrent = snapshotFeed === feedDraft.trim()
-  const canApply = available.length > 0 ? conclusionCurrent : state?.phase === 'staged' && state?.channel === 'shell'
+  const canApply = !failure && !checkError && (available.length > 0 ? conclusionCurrent : state?.phase === 'staged' && state?.channel === 'shell')
   const staleConclusion = checkedFeed !== null && !conclusionCurrent
 
   /** 所有更新操作的共同闸门：ref 与 state 同置，连点只放行第一次 */
@@ -188,7 +188,16 @@ export function UpdatePanel() {
       const submitted = draftRef.current.trim()
       if (!(await saveFeed(submitted))) return
       setCheckError(null)
-      const snapshot = await bridge.updates.check()
+      let snapshot: UpdateStateSnapshot
+      try {
+        snapshot = await bridge.updates.check()
+      } catch (cause) {
+        const detail = describe(cause)
+        setCheckedFeed(null)
+        setCheckError(detail)
+        ui.toast.error(`检查更新失败：${detail}`)
+        return
+      }
       setState(snapshot)
       const reported = failureOf(snapshot)
       if (reported) {
@@ -257,7 +266,7 @@ export function UpdatePanel() {
         {staleConclusion && (
           <p className="hint" data-update-stale>地址已改动：上一次检查的结论与「开始更新」已失效，请重新检查更新。</p>
         )}
-        {checkedFeed !== null && conclusionCurrent && available.length === 0 && state?.phase === 'idle' && !failure && (
+        {checkedFeed !== null && conclusionCurrent && available.length === 0 && state?.phase === 'idle' && !failure && !checkError && (
           <p className="hint" data-update-none>本次检查未发现可应用的更新；单个通道的检查失败会被跳过且不在此上报，所以这不等于已确认最新。</p>
         )}
         {state?.channel === 'shell' && state?.phase === 'staged' && state.stagedVersion && (

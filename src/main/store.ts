@@ -1,8 +1,11 @@
 // 文件存储：userData/tasks.json（索引）+ userData/tasks/<id>/events.jsonl（日志流）
 import fs from 'node:fs'
 import path from 'node:path'
-import { isTaskEventDurable, isTaskStatus, type Task, type TaskEvent, type IntegrationInfo } from '../shared/types'
+import { randomUUID } from 'node:crypto'
+import { isTaskEventDurable, isTaskStatus, type Task, type TaskEvent, type IntegrationInfo, type ExecutionOwner, type TaskStatus, type TaskGitOperation } from '../shared/types'
+import { executionRecordFromTask } from '../shared/taskflow'
 import { EventLog } from './event-log'
+import { atomicWriteJson, readJsonFile, withStorageTransaction, assertSynchronousAction, assertTransactionToken, processOwnerState, createExecutionOwner, type SynchronousAction, type TransactionToken } from './persistence'
 
 /** Version of the task index envelope, independent from per-task snapshots. */
 export const TASK_INDEX_SCHEMA_VERSION = 1 as const
@@ -10,6 +13,11 @@ export const TASK_INDEX_SCHEMA_VERSION = 1 as const
 export interface TaskIndexDocument {
   schemaVersion: typeof TASK_INDEX_SCHEMA_VERSION
   tasks: Task[]
+  deletedDedupeKeys?: string[]
+  /** Terminal runs awaiting an idempotent Issue projection acknowledgement. */
+  pendingIssueProjections?: Task[]
+  pendingTaskSnapshots?: string[]
+  pendingTaskDeletes?: string[]
 }
 
 type LegacyTask = Partial<Task> & {
@@ -20,9 +28,9 @@ type LegacyTask = Partial<Task> & {
 /** Current on-disk Task shape. Unknown keys must not become implicit schema. */
 const TASK_INDEX_FIELDS = [
   'id', 'title', 'prompt', 'workdir', 'backend', 'agentId', 'trigger', 'issueId',
-  'suppressIssue', 'runId', 'goalId', 'phaseIndex', 'parentTaskId', 'workerIndex', 'integration', 'status',
+  'suppressIssue', 'runId', 'executionOwner', 'gitOperation', 'goalId', 'phaseIndex', 'parentTaskId', 'workerIndex', 'integration', 'status',
   'createdAt', 'startedAt', 'endedAt', 'result', 'error', 'failure', 'attempt',
-  'roundsUsed', 'handoff', 'continuesFrom', 'parked', 'backgroundRunning', 'titleAuto', 'sessionId',
+  'roundsUsed', 'handoff', 'continuesFrom', 'parked', 'manualStartConfirmedAt', 'backgroundRunning', 'titleAuto', 'sessionId',
   'gitDiff', 'gitStat', 'gitSnapshot', 'usage', 'eventCount', 'unavailableReason', 'worktree', 'workVersion', 'dedupeKey'
 ] as const
 
@@ -70,6 +78,7 @@ export function migrateTaskRecord(raw: unknown, sourceVersion = 0, now = Date.no
   if (typeof out.workdir !== 'string') out.workdir = ''
   if (typeof out.backend !== 'string' || !out.backend) out.backend = 'zcode'
   if (!isTaskStatus(out.status)) out.status = 'queued'
+  if (typeof out.manualStartConfirmedAt !== 'number' || !Number.isFinite(out.manualStartConfirmedAt) || out.manualStartConfirmedAt <= 0) delete out.manualStartConfirmedAt
 
   // A running task cannot survive an application restart. This recovery is
   // deliberately idempotent: the persisted result is terminal on next load.
@@ -120,43 +129,89 @@ export function migrateTaskIndex(raw: unknown, now = Date.now(), options: { reco
   }
   return {
     schemaVersion: TASK_INDEX_SCHEMA_VERSION,
+    ...(isRecord(raw) && Array.isArray(raw.deletedDedupeKeys) ? { deletedDedupeKeys: raw.deletedDedupeKeys.filter((key): key is string => typeof key === 'string') } : {}),
+    ...(isRecord(raw) && Array.isArray(raw.pendingIssueProjections) ? { pendingIssueProjections: raw.pendingIssueProjections.map((entry) => migrateTaskRecord(entry, sourceVersion, now, { recoverRunning: false })).filter((task): task is Task => task !== null) } : {}),
+    ...(isRecord(raw) && Array.isArray(raw.pendingTaskSnapshots) ? { pendingTaskSnapshots: raw.pendingTaskSnapshots.filter((id): id is string => typeof id === 'string' && /^[A-Za-z0-9_-]{1,160}$/.test(id)) } : {}),
+    ...(isRecord(raw) && Array.isArray(raw.pendingTaskDeletes) ? { pendingTaskDeletes: raw.pendingTaskDeletes.filter((id): id is string => typeof id === 'string' && /^[A-Za-z0-9_-]{1,160}$/.test(id)) } : {}),
     tasks: entries
       .map((entry) => migrateTaskRecord(entry, sourceVersion, now, options))
       .filter((task): task is Task => task !== null)
   }
 }
 
-function sameTaskEntries(raw: unknown, document: TaskIndexDocument): boolean {
-  if (!isRecord(raw) || raw.schemaVersion !== TASK_INDEX_SCHEMA_VERSION || !Array.isArray(raw.tasks)) return false
-  return JSON.stringify(raw.tasks) === JSON.stringify(document.tasks)
+export type TaskCreateRecord = Pick<Task, 'title' | 'prompt' | 'workdir' | 'backend'> & Partial<Pick<Task,
+  'parentTaskId' | 'workerIndex' | 'integration' | 'agentId' | 'handoff' | 'continuesFrom' | 'parked' |
+  'backgroundRunning' | 'suppressIssue' | 'trigger' | 'issueId' | 'goalId' | 'phaseIndex' | 'titleAuto' |
+  'unavailableReason' | 'worktree' | 'workVersion' | 'dedupeKey'>>
+
+export interface TaskExpectation {
+  status?: TaskStatus | readonly TaskStatus[]
+  runId?: string
+  executionOwner?: ExecutionOwner
+  parked?: boolean
+  attempt?: number
+  phaseIndex?: number
+  startedAt?: number
+  gitOperationToken?: string
+  workdir?: string
+  workVersion?: string
+}
+
+export interface GitOperationClaim extends TaskGitOperation { taskIds: string[] }
+
+export function sameExecutionOwner(a: ExecutionOwner | undefined, b: ExecutionOwner | undefined): boolean {
+  if (a === undefined || b === undefined) return a === b
+  if (!isRecord(a) || !isRecord(b) || typeof a.pid !== 'number' || a.pid <= 0 || typeof a.instance !== 'string' || !a.instance || typeof a.token !== 'string' || !a.token) return false
+  return a.pid === b.pid && a.instance === b.instance && a.token === b.token
+}
+
+function matchesTask(task: Task, expected: TaskExpectation): boolean {
+  for (const key of Object.keys(expected) as Array<keyof TaskExpectation>) {
+    if (key === 'status') {
+      const statuses = expected.status
+      if (Array.isArray(statuses) ? !statuses.includes(task.status) : task.status !== statuses) return false
+    } else if (key === 'executionOwner') {
+      if (!sameExecutionOwner(task.executionOwner, expected.executionOwner)) return false
+    } else if (key === 'gitOperationToken') {
+      if (task.gitOperation?.token !== expected.gitOperationToken) return false
+    } else if (task[key] !== expected[key]) return false
+  }
+  return true
+}
+
+export interface TaskTransaction {
+  get(id: string): Task | undefined
+  list(): Task[]
+  create(input: TaskCreateRecord): Task
+  update(id: string, patch: Partial<Task>, expected?: TaskExpectation): Task | undefined
+  delete(id: string, expected?: TaskExpectation): boolean
+  appendEvent(id: string, event: Omit<TaskEvent, 'seq'>, expected?: TaskExpectation): TaskEvent | null
 }
 
 export class TaskStore {
-  private dir: string
-  private tasks = new Map<string, Task>()
+  private readonly dir: string
+  private readonly userDataDir: string
   private logs = new Map<string, EventLog>()
   private pendingSnapshots = new Set<string>()
+  private pendingDeletes = new Set<string>()
+  private pendingGitReleases = new Map<string, GitOperationClaim>()
   private indexTimer: NodeJS.Timeout | undefined
   private indexDirty = false
-  /** Ids flipped running→failed by this process's load migration. The startup
-   * reconciliation owns the narration and the final-event rescue; without it a
-   * restart-interrupted turn (e.g. one waiting on an auto-retry) would leave a
-   * timeline that dead-ends at its last live event with no explanation. */
-  private restartInterrupted = new Set<string>()
-  private readonly recoverRunning: boolean
+  private flushRetryDelayMs = 250
+  private restartInterrupted: Task[] = []
 
   constructor(userDataDir: string, options: { recoverRunning?: boolean } = {}) {
-    this.recoverRunning = options.recoverRunning !== false
+    this.userDataDir = userDataDir
     this.dir = path.join(userDataDir, 'tasks')
-    fs.mkdirSync(this.dir, { recursive: true })
-    this.loadIndex()
+    const document = this.readDocument()
+    if (document.pendingTaskSnapshots?.length || document.pendingTaskDeletes?.length) this.scheduleFlush()
+    if (options.recoverRunning === true) this.restartInterrupted = this.recoverDeadRuns('failed')
   }
 
-  private indexFile() {
-    return path.join(this.dir, 'tasks.json')
-  }
+  private indexFile() { return path.join(this.dir, 'tasks.json') }
 
   private taskDir(id: string) {
+    if (!/^[A-Za-z0-9_-]{1,160}$/.test(id)) throw new Error('Invalid task id')
     return path.join(this.dir, id)
   }
 
@@ -169,214 +224,402 @@ export class TaskStore {
     return log
   }
 
-  private loadIndex() {
-    let raw: string
-    try {
-      raw = fs.readFileSync(this.indexFile(), 'utf8')
-    } catch (error) {
-      // A missing index is the normal first-launch state. Other filesystem
-      // errors must remain visible instead of silently dropping all tasks.
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
-      throw error
-    }
-
-    const parsed = JSON.parse(raw) as unknown
-    const document = migrateTaskIndex(parsed, Date.now(), { recoverRunning: this.recoverRunning })
-    // Record zombie-running flips while the raw status is still visible. The
-    // flip itself stays silent and idempotent; startup reconciliation reads
-    // this ledger once and appends the visible "interrupted" trace.
-    const rawEntries = Array.isArray(parsed) ? parsed : isRecord(parsed) && Array.isArray(parsed.tasks) ? parsed.tasks : []
-    for (const entry of rawEntries) {
-      if (this.recoverRunning && isRecord(entry) && entry.status === 'running' && typeof entry.id === 'string' && entry.id.trim()) {
-        this.restartInterrupted.add(entry.id)
+  private readDocument(deriveCounts = true): TaskIndexDocument {
+    const raw = readJsonFile<unknown>(this.indexFile(), undefined)
+    const document = raw === undefined ? { schemaVersion: TASK_INDEX_SCHEMA_VERSION, tasks: [] } : migrateTaskIndex(raw, Date.now(), { recoverRunning: false })
+    if (deriveCounts) for (const task of document.tasks) {
+      const count = this.eventLog(task.id).count()
+      if (task.eventCount !== count) {
+        task.eventCount = count
+        this.pendingSnapshots.add(task.id)
+        this.indexDirty = true
+        // JSONL is authoritative for events, including an append followed by
+        // process exit before the delayed index/snapshot flush could run.
+        this.scheduleFlush()
       }
     }
-    let needsSave = !sameTaskEntries(parsed, document)
-    for (const migrated of document.tasks) {
-      // Reconcile counters with the append-only log after an interrupted write.
-      // EventLog owns JSONL recovery and live-only filtering. Counting raw
-      // lines here would resurrect torn/unknown records in tasks.json. Future
-      // event schema versions intentionally propagate as a fail-closed error.
-      const eventCount = this.eventLog(migrated.id).count()
-      if (migrated.eventCount !== eventCount) {
-        migrated.eventCount = eventCount
-        needsSave = true
-      }
-      this.tasks.set(migrated.id, migrated)
-    }
-    if (needsSave) this.saveIndex()
+    return document
   }
 
-  private saveIndex() {
-    const tasks = [...this.tasks.values()].sort((a, b) => b.createdAt - a.createdAt)
-    const document: TaskIndexDocument = { schemaVersion: TASK_INDEX_SCHEMA_VERSION, tasks }
-    const tmp = this.indexFile() + '.tmp'
-    fs.writeFileSync(tmp, JSON.stringify(document, null, 2))
-    fs.renameSync(tmp, this.indexFile())
+  private saveIndex(document: TaskIndexDocument) {
+    document.tasks.sort((a, b) => b.createdAt - a.createdAt)
+    atomicWriteJson(this.indexFile(), document)
   }
 
-  private scheduleFlush() {
-    this.indexDirty = true
+  private scheduleFlush(delayMs = 25) {
     if (this.indexTimer) return
     this.indexTimer = setTimeout(() => {
       this.indexTimer = undefined
-      this.flush()
-    }, 25)
+      try {
+        this.flush()
+      } catch (error) {
+        console.error('[TaskStore] Background flush failed; pending writes retained', error)
+      }
+    }, delayMs)
+    if (delayMs > 25) this.indexTimer.unref()
   }
 
-  /** Persist event-driven snapshots and the task index as one bounded batch. */
-  flush() {
-    if (this.indexTimer) {
-      clearTimeout(this.indexTimer)
-      this.indexTimer = undefined
+  private retainSnapshotWork(document: TaskIndexDocument) {
+    for (const id of document.pendingTaskSnapshots ?? []) this.pendingSnapshots.add(id)
+    for (const id of document.pendingTaskDeletes ?? []) this.pendingDeletes.add(id)
+    const currentIds = new Set(document.tasks.map((task) => task.id))
+    document.pendingTaskSnapshots = [...this.pendingSnapshots].filter((id) => currentIds.has(id))
+    document.pendingTaskDeletes = [...this.pendingDeletes].filter((id) => !currentIds.has(id))
+    if (!document.pendingTaskSnapshots.length) delete document.pendingTaskSnapshots
+    if (!document.pendingTaskDeletes.length) delete document.pendingTaskDeletes
+  }
+
+  private flushSnapshotsLocked(document: TaskIndexDocument) {
+    this.retainSnapshotWork(document)
+    const needsAcknowledgement = !!(document.pendingTaskSnapshots?.length || document.pendingTaskDeletes?.length)
+    const tasks = new Map(document.tasks.map((task) => [task.id, task]))
+    for (const id of this.pendingDeletes) {
+      if (!tasks.has(id)) fs.rmSync(this.taskDir(id), { recursive: true, force: true })
+      this.pendingDeletes.delete(id)
     }
     for (const id of this.pendingSnapshots) {
-      const task = this.tasks.get(id)
-      if (!task) continue
-      try {
-        fs.writeFileSync(path.join(this.taskDir(id), 'task.json'), JSON.stringify(task, null, 2))
-      } catch {}
+      const task = tasks.get(id)
+      if (task) atomicWriteJson(path.join(this.taskDir(id), 'task.json'), task)
+      this.pendingSnapshots.delete(id)
     }
-    this.pendingSnapshots.clear()
-    if (this.indexDirty) {
-      this.indexDirty = false
-      this.saveIndex()
+    if (needsAcknowledgement) {
+      delete document.pendingTaskSnapshots
+      delete document.pendingTaskDeletes
+      this.saveIndex(document)
     }
   }
 
-  /** Reload durable task/index state for a sidecar takeover barrier. */
+  /** Every mutation starts with committed state; the view expires on return. */
+  transaction<T>(action: SynchronousAction<T, TaskTransaction>): T {
+    assertSynchronousAction(action)
+    const work = ((token: TransactionToken) => {
+      const document = this.readDocument()
+      const tasks = new Map(document.tasks.map((task) => [task.id, task]))
+      const touched = new Set<string>()
+      const removed = new Set<string>()
+      const deletedKeys = new Set(document.deletedDedupeKeys ?? [])
+      const projectionKey = (task: Task) => JSON.stringify([task.id, executionRecordFromTask(task).id])
+      const projections = new Map((document.pendingIssueProjections ?? []).map((task) => [projectionKey(task), task]))
+      let changed = false
+      const active = () => assertTransactionToken(token)
+      const view: TaskTransaction = {
+        get: (id) => { active(); return tasks.get(id) },
+        list: () => { active(); return [...tasks.values()].sort((a, b) => b.createdAt - a.createdAt) },
+        create: (input) => {
+          active()
+          if (input.dedupeKey) {
+            const existing = [...tasks.values()].find((task) => task.dedupeKey === input.dedupeKey)
+            if (existing) return existing
+            if (deletedKeys.has(input.dedupeKey)) throw new Error('Task request was explicitly deleted')
+          }
+          const task: Task = {
+            id: 't_' + Date.now().toString(36) + '_' + randomUUID().replace(/-/g, '').slice(0, 12),
+            title: input.title, prompt: input.prompt, workdir: input.workdir, backend: input.backend,
+            status: 'queued', createdAt: Date.now(), eventCount: 0
+          }
+          const fields = ['parentTaskId', 'workerIndex', 'integration', 'agentId', 'handoff', 'continuesFrom', 'parked',
+            'backgroundRunning', 'suppressIssue', 'trigger', 'issueId', 'goalId', 'phaseIndex', 'titleAuto',
+            'unavailableReason', 'worktree', 'workVersion', 'dedupeKey'] as const
+          for (const field of fields) {
+            const value = input[field]
+            if (value || typeof value === 'number') Object.assign(task, { [field]: value })
+          }
+          tasks.set(task.id, task)
+          touched.add(task.id)
+          changed = true
+          return task
+        },
+        update: (id, patch, expected = {}) => {
+          active()
+          const task = tasks.get(id)
+          if (!task || !matchesTask(task, expected)) return undefined
+          if (patch.id !== undefined && patch.id !== id) throw new Error('Task identity is immutable')
+          const contentFields: Array<keyof Task> = ['title', 'prompt', 'workdir', 'backend', 'agentId', 'handoff']
+          const contentChanged = contentFields.some((field) => Object.prototype.hasOwnProperty.call(patch, field) && patch[field] !== task[field])
+          if (contentChanged && !Object.prototype.hasOwnProperty.call(patch, 'workVersion')) {
+            const current = Number.parseInt(task.workVersion ?? '0', 10)
+            patch = { ...patch, workVersion: Number.isFinite(current) ? String(current + 1) : '1' }
+          }
+          if (task.gitOperation !== undefined) {
+            const ownsOperation = typeof expected.gitOperationToken === 'string' && expected.gitOperationToken === task.gitOperation?.token
+            const has = (key: keyof Task) => Object.prototype.hasOwnProperty.call(patch, key)
+            if (has('gitOperation') && !ownsOperation) return undefined
+            if (contentChanged && !ownsOperation) return undefined
+            if ((has('workdir') || has('worktree')) && !ownsOperation) return undefined
+            if (['runId', 'attempt', 'startedAt', 'phaseIndex', 'workVersion'].some((key) => has(key as keyof Task) && patch[key as keyof Task] !== task[key as keyof Task])) return undefined
+            if (has('executionOwner') && !sameExecutionOwner(task.executionOwner, patch.executionOwner)) return undefined
+            if (has('status') && patch.status !== task.status
+              && !(task.status === 'running' && (patch.status === 'cancelled' || patch.status === 'failed'))) return undefined
+          }
+          Object.assign(task, patch)
+          if (['done', 'failed', 'cancelled'].includes(task.status)) projections.set(projectionKey(task), structuredClone(task))
+          touched.add(id)
+          changed = true
+          return task
+        },
+        delete: (id, expected = {}) => {
+          active()
+          const task = tasks.get(id)
+          if (!task || !matchesTask(task, expected)) return false
+          if (task.gitOperation !== undefined) return false
+          if (task.dedupeKey) deletedKeys.add(task.dedupeKey)
+          tasks.delete(id)
+          touched.delete(id)
+          removed.add(id)
+          changed = true
+          return true
+        },
+        appendEvent: (id, event, expected = {}) => {
+          active()
+          const task = tasks.get(id)
+          if (!task || !matchesTask(task, expected)) return null
+          const log = this.eventLog(id)
+          const full = log.append(event)
+          if (full && isTaskEventDurable(full)) {
+            task.eventCount = log.count()
+            this.pendingSnapshots.add(id)
+            this.indexDirty = true
+            this.scheduleFlush()
+          }
+          return full
+        }
+      }
+      const result = action(view)
+      if (result && typeof (result as { then?: unknown }).then === 'function') throw new Error('Task transactions must be synchronous')
+      if (changed) {
+        document.tasks = [...tasks.values()]
+        if (deletedKeys.size) document.deletedDedupeKeys = [...deletedKeys]
+        for (const [key, task] of projections) if (!tasks.has(task.id)) projections.delete(key)
+        if (projections.size) document.pendingIssueProjections = [...projections.values()]
+        else delete document.pendingIssueProjections
+        for (const id of touched) this.pendingSnapshots.add(id)
+        for (const id of removed) {
+          this.logs.delete(id)
+          this.pendingSnapshots.delete(id)
+          this.pendingDeletes.add(id)
+        }
+        // Commit derived-file work with the authoritative mutation so a crash
+        // cannot lose a failed snapshot write or directory deletion.
+        this.retainSnapshotWork(document)
+        this.saveIndex(document)
+        // Snapshots are derived data. A failed snapshot cannot roll back an
+        // already committed index, but remains queued for explicit/background retry.
+        try { this.flushSnapshotsLocked(document) }
+        catch (error) { console.error('[TaskStore] Snapshot flush pending', error); this.scheduleFlush() }
+      }
+      return result
+    }) as SynchronousAction<T>
+    return withStorageTransaction<T>(this.userDataDir, work)
+  }
+
+  create(input: TaskCreateRecord): Task { return this.transaction((tx) => tx.create(input)) }
+
+  get(id: string): Task | undefined { return this.readDocument().tasks.find((task) => task.id === id) }
+
+  list(): Task[] { return this.readDocument().tasks.sort((a, b) => b.createdAt - a.createdAt) }
+
+  update(id: string, patch: Partial<Task>) { return this.updateIf(id, {}, patch) }
+
+  updateIf(id: string, expected: TaskExpectation, patch: Partial<Task>): Task | undefined {
+    return this.transaction((tx) => tx.update(id, patch, expected))
+  }
+
+  matches(id: string, expected: TaskExpectation): boolean {
+    const task = this.get(id)
+    return !!task && matchesTask(task, expected)
+  }
+
+  /** Reserve every affected task before any asynchronous Git side effect. */
+  claimGitOperation(records: readonly { id: string; expected: TaskExpectation }[]): GitOperationClaim | undefined {
+    if (!records.length || new Set(records.map((entry) => entry.id)).size !== records.length) return undefined
+    const operation: TaskGitOperation = { token: randomUUID(), owner: createExecutionOwner(), createdAt: Date.now() }
+    return this.transaction((tx) => {
+      for (const entry of records) {
+        const task = tx.get(entry.id)
+        if (!task || task.status === 'queued' || task.gitOperation !== undefined || !matchesTask(task, entry.expected)) return undefined
+      }
+      for (const entry of records) tx.update(entry.id, { gitOperation: operation }, entry.expected)
+      return { ...operation, taskIds: records.map((entry) => entry.id) }
+    })
+  }
+
+  /** Reserve terminal tasks before reclaiming their worktree or a repo merge worktree. */
+  claimWorktreeCleanup(repoDir: string, ownerTaskId: string, mergeWorktree = false): GitOperationClaim | undefined {
+    const root = path.resolve(repoDir)
+    const belongsToRepo = (task: Task) => [task.worktree?.repoDir, task.workdir].some((candidate) => {
+      if (!candidate) return false
+      const resolved = path.resolve(candidate)
+      return resolved === root || resolved.startsWith(root + path.sep)
+    })
+    const operation: TaskGitOperation = { token: randomUUID(), owner: createExecutionOwner(), createdAt: Date.now() }
+    return this.transaction((tx) => {
+      const all = tx.list()
+      const byId = new Map(all.map((task) => [task.id, task]))
+      const targets: Task[] = []
+      if (mergeWorktree) {
+        targets.push(...all.filter(belongsToRepo))
+      } else {
+        let task = byId.get(ownerTaskId)
+        const seen = new Set<string>()
+        while (task && !seen.has(task.id)) {
+          seen.add(task.id)
+          targets.push(task)
+          task = task.parentTaskId ? byId.get(task.parentTaskId) : undefined
+        }
+      }
+      if (!targets.length || targets.some((task) => !['done', 'failed', 'cancelled'].includes(task.status) || task.gitOperation !== undefined)) return undefined
+      for (const task of targets) tx.update(task.id, { gitOperation: operation }, {
+        status: task.status, runId: task.runId, executionOwner: task.executionOwner,
+        attempt: task.attempt, phaseIndex: task.phaseIndex, startedAt: task.startedAt,
+        workdir: task.workdir, workVersion: task.workVersion
+      })
+      return { ...operation, taskIds: targets.map((task) => task.id) }
+    })
+  }
+
+  releaseGitOperation(claim: GitOperationClaim): void {
+    if (claim.owner.pid !== process.pid || processOwnerState(claim.owner) !== 'live') throw new Error('Git operation belongs to another process')
+    this.pendingGitReleases.set(claim.token, claim)
+    try {
+      this.transaction((tx) => {
+        for (const id of claim.taskIds) tx.update(id, { gitOperation: undefined }, { gitOperationToken: claim.token })
+      })
+      this.pendingGitReleases.delete(claim.token)
+    } catch (error) {
+      this.scheduleFlush(this.flushRetryDelayMs)
+      this.flushRetryDelayMs = Math.min(this.flushRetryDelayMs * 2, 5000)
+      throw error
+    }
+  }
+
+  /** Clear only operations whose exact process identity is proven dead. */
+  recoverDeadGitOperations(): Task[] {
+    const candidates = this.list().filter((task) => task.gitOperation && processOwnerState(task.gitOperation.owner) === 'dead')
+    if (!candidates.length) return []
+    return this.transaction((tx) => {
+      const recovered: Task[] = []
+      for (const stale of candidates) {
+        const operation = stale.gitOperation!
+        const current = tx.get(stale.id)
+        if (!current?.gitOperation || current.gitOperation.token !== operation.token
+          || !sameExecutionOwner(current.gitOperation.owner, operation.owner)) continue
+        tx.appendEvent(stale.id, {
+          eventId: `git-operation-recovery:${operation.token}:${stale.id}`,
+          ts: Date.now(), kind: 'status',
+          text: 'Confirmed dead Git operation owner; released persisted reservation',
+          data: { gitOperationRecovery: operation.token }
+        }, { gitOperationToken: operation.token })
+        const cleared = tx.update(stale.id, { gitOperation: undefined }, { gitOperationToken: operation.token })
+        if (cleared) recovered.push(stale)
+      }
+      return recovered
+    })
+  }
+
+  claimRun(id: string, expected: TaskExpectation, runId: string, owner: ExecutionOwner, patch: Partial<Task> = {}): Task | undefined {
+    if (!owner.token || owner.pid !== process.pid || processOwnerState(owner) !== 'live') throw new Error('Invalid execution owner')
+    return this.transaction((tx) => {
+      const task = tx.get(id)
+      if (!task || task.gitOperation !== undefined || task.status === 'running' || (task.status === 'queued' && task.parked) || !matchesTask(task, expected)) return undefined
+      return tx.update(id, { ...patch, status: 'running', runId, executionOwner: { ...owner, leaseExpiresAt: Date.now() + 30000 } }, expected)
+    })
+  }
+
+  delete(id: string) { this.transaction((tx) => tx.delete(id)) }
+
+  deleteIf(id: string, expected: TaskExpectation): boolean { return this.transaction((tx) => tx.delete(id, expected)) }
+
+  appendEvent(id: string, event: Omit<TaskEvent, 'seq'>, expected: TaskExpectation = {}): TaskEvent | null {
+    return this.transaction((tx) => tx.appendEvent(id, event, expected))
+  }
+
+  flush() {
+    if (this.indexTimer) { clearTimeout(this.indexTimer); this.indexTimer = undefined }
+    try {
+      for (const claim of [...this.pendingGitReleases.values()]) this.releaseGitOperation(claim)
+      withStorageTransaction(this.userDataDir, () => {
+        const document = this.readDocument(false)
+        let dirty = this.indexDirty
+        for (const task of document.tasks) {
+          const count = this.eventLog(task.id).count()
+          if (count !== task.eventCount) {
+            task.eventCount = count
+            this.pendingSnapshots.add(task.id)
+            dirty = true
+          }
+        }
+        this.retainSnapshotWork(document)
+        if (dirty || document.pendingTaskSnapshots?.length || document.pendingTaskDeletes?.length) this.saveIndex(document)
+        this.indexDirty = false
+        this.flushSnapshotsLocked(document)
+        this.flushRetryDelayMs = 250
+      })
+    } catch (error) {
+      if (!this.indexTimer) {
+        this.scheduleFlush(this.flushRetryDelayMs)
+        this.flushRetryDelayMs = Math.min(this.flushRetryDelayMs * 2, 5000)
+      }
+      throw error
+    }
+  }
+
+  flushEvents(id: string) { void id; this.flush() }
+
   reload() {
-    this.tasks.clear()
     this.logs.clear()
-    this.restartInterrupted.clear()
-    this.pendingSnapshots.clear()
-    this.loadIndex()
+    this.readDocument()
   }
 
-  create(input: Pick<Task, 'title' | 'prompt' | 'workdir' | 'backend'> & Partial<Pick<Task, 'parentTaskId' | 'workerIndex' | 'integration' | 'agentId' | 'handoff' | 'continuesFrom' | 'parked' | 'backgroundRunning' | 'suppressIssue' | 'trigger' | 'issueId' | 'goalId' | 'phaseIndex' | 'titleAuto' | 'unavailableReason' | 'worktree' | 'workVersion' | 'dedupeKey'>>): Task {
-    const task: Task = {
-      id: `t_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
-      title: input.title,
-      prompt: input.prompt,
-      workdir: input.workdir,
-      backend: input.backend,
-      ...(input.agentId ? { agentId: input.agentId } : {}),
-      ...(input.trigger ? { trigger: input.trigger } : {}),
-      ...(input.issueId ? { issueId: input.issueId } : {}),
-      ...(input.goalId ? { goalId: input.goalId } : {}),
-      ...(input.phaseIndex !== undefined ? { phaseIndex: input.phaseIndex } : {}),
-      ...(input.parentTaskId ? { parentTaskId: input.parentTaskId } : {}),
-      ...(input.workerIndex !== undefined ? { workerIndex: input.workerIndex } : {}),
-      ...(input.unavailableReason ? { unavailableReason: input.unavailableReason } : {}),
-      ...(input.worktree ? { worktree: input.worktree } : {}),
-      ...(input.integration ? { integration: input.integration } : {}),
-      ...(input.handoff ? { handoff: input.handoff } : {}),
-      ...(input.continuesFrom ? { continuesFrom: input.continuesFrom } : {}),
-      ...(input.parked ? { parked: true } : {}),
-      ...(input.backgroundRunning ? { backgroundRunning: true } : {}),
-      ...(input.suppressIssue ? { suppressIssue: true } : {}),
-      ...(input.titleAuto ? { titleAuto: true } : {}),
-      ...(input.workVersion ? { workVersion: input.workVersion } : {}),
-      ...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}),
-      status: 'queued',
-      createdAt: Date.now(),
-      eventCount: 0
-    }
-    this.tasks.set(task.id, task)
-    fs.mkdirSync(this.taskDir(task.id), { recursive: true })
-    fs.writeFileSync(path.join(this.taskDir(task.id), 'task.json'), JSON.stringify(task, null, 2))
-    this.saveIndex()
-    return task
+  /** Probe outside the lock, then conditionally commit the exact observed run. */
+  recoverDeadRuns(status: 'queued' | 'failed', ids?: readonly string[]): Task[] {
+    const candidates = this.list().filter((task) => task.status === 'running'
+      && (!ids || ids.includes(task.id) || (!!task.runId && ids.includes(task.runId)))
+      && processOwnerState(task.executionOwner) === 'dead')
+    if (!candidates.length) return []
+    return this.transaction((tx) => {
+      const recovered: Task[] = []
+      for (const stale of candidates) {
+        const expected: TaskExpectation = { status: 'running', runId: stale.runId, executionOwner: stale.executionOwner }
+        if (status === 'queued' && !tx.update(stale.id, { status: 'failed', endedAt: Date.now(), error: 'Execution owner process exited; run interrupted' }, expected)) continue
+        const patch: Partial<Task> = status === 'queued'
+          ? { status, runId: undefined, executionOwner: undefined, startedAt: undefined, endedAt: undefined, error: undefined }
+          : { status, endedAt: Date.now(), error: 'Execution owner process exited; run interrupted' }
+        const task = tx.update(stale.id, patch, status === 'queued' ? { ...expected, status: 'failed' } : expected)
+        if (!task) continue
+        tx.appendEvent(stale.id, { eventId: 'owner-recovery-' + stale.id + '-' + stale.runId + '-' + stale.executionOwner?.token,
+          ts: Date.now(), kind: 'status', text: status === 'queued' ? 'Confirmed dead execution owner; queued for recovery' : 'Confirmed dead execution owner; marked interrupted' })
+        recovered.push(stale)
+      }
+      return recovered
+    })
   }
 
-  get(id: string): Task | undefined {
-    return this.tasks.get(id)
-  }
-
-  /** Tasks flipped running→failed by the load migration (drain-once). */
   drainRestartInterrupted(): Task[] {
-    const drained: Task[] = []
-    for (const id of this.restartInterrupted) {
-      const task = this.tasks.get(id)
-      if (task) drained.push(task)
-    }
-    this.restartInterrupted.clear()
+    const drained = this.restartInterrupted
+    this.restartInterrupted = []
     return drained
   }
 
-  list(): Task[] {
-    return [...this.tasks.values()].sort((a, b) => b.createdAt - a.createdAt)
-  }
-
-  update(id: string, patch: Partial<Task>) {
-    const t = this.tasks.get(id)
-    if (!t) return
-    // Permission approvals are scoped to the task content. A caller may set a
-    // version explicitly (for deterministic migrations/tests); otherwise bump
-    // it whenever an execution-relevant field changes.
-    const contentFields: Array<keyof Task> = ['title', 'prompt', 'workdir', 'backend', 'agentId', 'handoff']
-    const changed = contentFields.some((field) => Object.prototype.hasOwnProperty.call(patch, field) && patch[field] !== t[field])
-    if (changed && !Object.prototype.hasOwnProperty.call(patch, 'workVersion')) {
-      const current = Number.parseInt(t.workVersion ?? '0', 10)
-      patch = { ...patch, workVersion: Number.isFinite(current) ? String(current + 1) : '1' }
-    }
-    Object.assign(t, patch)
-    try {
-      fs.writeFileSync(path.join(this.taskDir(id), 'task.json'), JSON.stringify(t, null, 2))
-    } catch {}
-    this.saveIndex()
-  }
-
-  delete(id: string) {
-    const t = this.tasks.get(id)
-    if (!t) return
-    this.logs.delete(id)
-    this.tasks.delete(id)
-    fs.rmSync(this.taskDir(id), { recursive: true, force: true })
-    this.saveIndex()
-  }
-
-  appendEvent(id: string, e: Omit<TaskEvent, 'seq'>): TaskEvent | null {
-    const t = this.tasks.get(id)
-    if (!t) return null
-    fs.mkdirSync(this.taskDir(id), { recursive: true })
-    // Synchronous append keeps readEvents/finalization and crash recovery consistent.
-    const log = this.eventLog(id)
-    const full = log.append(e)
-    if (!full) return null
-    if (isTaskEventDurable(full)) {
-      // EventLog deduplicates producer ids and requested sequence numbers;
-      // reconcile from its durable index so replay never inflates the count.
-      t.eventCount = log.count()
+  truncateEvents(id: string, keepThroughSeq: number, expected: TaskExpectation = {}): boolean {
+    return withStorageTransaction(this.userDataDir, () => {
+      const document = this.readDocument()
+      const task = document.tasks.find((item) => item.id === id)
+      if (!task || !matchesTask(task, expected)) return false
+      const kept = this.eventLog(id).truncate(keepThroughSeq)
+      if (!kept) return false
+      task.eventCount = kept.length
       this.pendingSnapshots.add(id)
+      this.indexDirty = true
       this.scheduleFlush()
-    }
-    return full
-  }
-
-  flushEvents(id: string) {
-    void id
-    this.flush()
-  }
-
-  /** 消息回退：只保留 seq <= keepThroughSeq 的事件并重写 events.jsonl（tmp+rename）；
-   * 同步重置 seq 计数器与 eventCount，task.json 和索引落盘。任务不存在返回 false。 */
-  truncateEvents(id: string, keepThroughSeq: number): boolean {
-    const t = this.tasks.get(id)
-    if (!t) return false
-    this.flush()
-    fs.mkdirSync(this.taskDir(id), { recursive: true })
-    const kept = this.eventLog(id).truncate(keepThroughSeq)
-    if (!kept) return false
-    t.eventCount = kept.length
-    try {
-      fs.writeFileSync(path.join(this.taskDir(id), 'task.json'), JSON.stringify(t, null, 2))
-    } catch {}
-    this.saveIndex()
-    return true
+      this.retainSnapshotWork(document)
+      this.saveIndex(document)
+      this.flushSnapshotsLocked(document)
+      return true
+    })
   }
 
   readEvents(id: string, afterSeq = 0, limit = 5000): TaskEvent[] {
+    if (!this.readDocument(false).tasks.some((task) => task.id === id)) return []
     return this.eventLog(id).read(afterSeq, limit)
   }
 }

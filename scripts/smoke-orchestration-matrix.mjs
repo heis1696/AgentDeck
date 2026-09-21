@@ -81,11 +81,12 @@ function scriptedBackend(id, plan) {
     id,
     label: id,
     async probe() { return { ok: true, detail: '' } },
-    start({ events, resumeSessionId }) {
+    start({ events, resumeSessionId, turn }) {
+      let activeTurn = turn
       const step = getStart() ?? { response: 'ok' }
       stats.starts.push({ resumeSessionId, step })
       if (step.fail) {
-        if (step.sessionId) events.onSessionId?.(step.sessionId)
+        if (step.sessionId) events.onSessionId?.(step.sessionId, activeTurn)
         return new Promise((resolve, reject) => {
           setTimeout(() => reject(new Error(step.fail)), step.delayMs ?? 20)
         })
@@ -94,32 +95,34 @@ function scriptedBackend(id, plan) {
       const sessionId = step.sessionId ?? `${id}-session-${++sessionIndex}`
       const session = {
         sessionId,
-        async send(content) {
+        turnScoped: true,
+        async send(content, nextTurn) {
+          activeTurn = nextTurn
           const sendStep = getSend()
           stats.sends.push({ content, step: sendStep })
           await new Promise((resolve) => setTimeout(resolve, sendStep.delayMs ?? 15))
-          for (const chunk of sendStep.streamChunks ?? []) events.onEvent({ ts: Date.now(), kind: 'text', text: chunk })
-          if (sendStep.emitFinal !== false) events.onEvent({ ts: Date.now(), kind: 'final', text: sendStep.response ?? '' })
+          for (const chunk of sendStep.streamChunks ?? []) events.onEvent({ ts: Date.now(), kind: 'text', text: chunk }, activeTurn)
+          if (sendStep.emitFinal !== false) events.onEvent({ ts: Date.now(), kind: 'final', text: sendStep.response ?? '' }, activeTurn)
           events.onTurnEnd({
             response: sendStep.response ?? '',
             delegationText: sendStep.delegationText,
             ok: sendStep.ok !== false,
             ...(sendStep.error ? { error: sendStep.error } : {})
-          })
+          }, activeTurn)
         },
         async stop() { stats.stops++ },
         async close() { stats.closes++ }
       }
 
       setTimeout(() => {
-        for (const chunk of step.streamChunks ?? []) events.onEvent({ ts: Date.now(), kind: 'text', text: chunk })
-        if (step.emitFinal !== false) events.onEvent({ ts: Date.now(), kind: 'final', text: step.response ?? '' })
+        for (const chunk of step.streamChunks ?? []) events.onEvent({ ts: Date.now(), kind: 'text', text: chunk }, turn)
+        if (step.emitFinal !== false) events.onEvent({ ts: Date.now(), kind: 'final', text: step.response ?? '' }, turn)
         events.onTurnEnd({
           response: step.response ?? '',
           delegationText: step.delegationText,
           ok: step.ok !== false,
           ...(step.error ? { error: step.error } : {})
-        })
+        }, turn)
       }, step.delayMs ?? 20)
       return Promise.resolve(session)
     }
@@ -378,7 +381,8 @@ async function scenarioEpipeFollowUpRunIdentity() {
     id: 'epipe-follow-up',
     label: 'EPIPE follow-up',
     async probe() { return { ok: true, detail: '' } },
-    start({ events, resumeSessionId }) {
+    start({ events, resumeSessionId, turn }) {
+      let activeTurn = turn
       starts++
       const resumed = !!resumeSessionId
       const response = JSON.stringify({ summary: 'stop', completedConditions: [], incompleteConditions: ['never'], nextPlan: '', blockers: [] })

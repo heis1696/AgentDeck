@@ -59,6 +59,7 @@ export class HotUpdater {
   private stagedShell: { version: string; stagedDir: string } | null = null
   /** 最近一次 check 拿到的各通道 feed 版本（驱动 available 快照与 applyAll 编排） */
   private feedVersions: Partial<Record<UpdateChannel, string>> = {}
+  private initialCheckTimer: NodeJS.Timeout | undefined
   private checkTimer: NodeJS.Timeout | undefined
 
   constructor(private deps: UpdaterDeps) {}
@@ -77,17 +78,24 @@ export class HotUpdater {
     const fire = () => {
       this.check().catch(() => {})
     }
-    setTimeout(fire, initialDelayMs)
+    clearTimeout(this.initialCheckTimer)
     clearInterval(this.checkTimer)
+    this.initialCheckTimer = setTimeout(() => {
+      this.initialCheckTimer = undefined
+      fire()
+    }, initialDelayMs)
     this.checkTimer = setInterval(fire, intervalMs)
   }
 
   stop(): void {
+    clearTimeout(this.initialCheckTimer)
+    this.initialCheckTimer = undefined
     clearInterval(this.checkTimer)
+    this.checkTimer = undefined
   }
 
   async check(): Promise<UpdateStateSnapshot> {
-    if (this.busy) return this.emit({ phase: 'idle', error: undefined })
+    if (this.busy) return this.getState()
     this.busy = true
     try {
       this.emit({ phase: 'checking', channel: null, error: undefined })
@@ -109,6 +117,12 @@ export class HotUpdater {
     if (process.env.AGENTDECK_HOT_AUTO_APPLY_SHELL === '1') {
       await this.apply('shell').catch(() => {})
       await this.apply('shell').catch(() => {})
+    }
+    if (this.stagedShell) {
+      return this.emit({ phase: 'staged', channel: 'shell', stagedVersion: this.stagedShell.version, error: undefined })
+    }
+    if (this.staged) {
+      return this.emit({ phase: 'staged', channel: 'payload', stagedVersion: this.staged.version, error: undefined })
     }
     return this.emit({ phase: 'idle', channel: null, error: undefined })
   }

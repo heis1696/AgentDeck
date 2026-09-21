@@ -73,6 +73,7 @@ const eq = (actual, expected, msg) => {
   ok(same, same ? msg : `${msg} — 实际 ${show(actual)} / 期望 ${show(expected)}`)
 }
 const note = (msg) => console.log(`  [info] ${msg}`)
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 // ---------- 临时工作区（失败保留现场） ----------
 const work = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-smoke-hot-updater-'))
@@ -318,6 +319,15 @@ const channelEntries = (channel) => {
 const stagingResidue = (channel) => channelEntries(channel).filter((n) => n.startsWith('.staging-') || n.startsWith('.latest-'))
 const availableKeys = (snapshot) => Object.keys(snapshot?.available ?? {})
 
+async function scenarioPeriodicStopCancelsInitialCheck() {
+  console.log('\n[scenario] periodic check stop cancels the delayed initial check')
+  const context = makeUpdater({ dataDir: path.join(work, 'periodic-stop') })
+  context.updater.startPeriodicCheck(25, 1000)
+  context.updater.stop()
+  await sleep(75)
+  eq(context.states.length, 0, 'stop cancels the delayed initial check and emits no state')
+}
+
 /** 失败路径公共断言：现网零触碰（生效面不变、指针不变、未落版本目录、无 staging/.latest 残留）。 */
 function assertUntouched(tag, { effBefore, pointers, notInstalled }) {
   const effAfter = effective()
@@ -470,6 +480,8 @@ async function main() {
   note(`shell=${SHELL} ${L1}=L1 载荷 / ${L2}=L2 渲染层；feed ${feedBase}；keyId=${keyId}（临时，进程外无效）`)
 
   // —— A 冷启动检查
+  await scenarioPeriodicStopCancelsInitialCheck()
+
   console.log('\n[scenario] A 冷启动检查（feed: L1 hot.28 + L2 hot.30）')
   publish('payload', L1)
   publish('renderer', L2)

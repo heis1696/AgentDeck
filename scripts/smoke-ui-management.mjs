@@ -44,6 +44,7 @@ await build({
       "export { createRoot } from 'react-dom/client'",
       "export { ui } from './src/renderer/src/ui/interaction-center'",
       "export { ConfirmHost } from './src/renderer/src/ui/Confirm'",
+      "export { parseSettingsPatch } from './src/main/ipc-validation'",
       "export { RuntimeView } from './src/renderer/src/components/RuntimeView'",
       "export { SettingsView } from './src/renderer/src/components/SettingsView'",
       "export { UpdatePanel } from './src/renderer/src/components/UpdatePanel'",
@@ -61,7 +62,7 @@ await build({
   logLevel: 'silent'
 })
 
-const { act, createElement, createRoot, ui, ConfirmHost, RuntimeView, SettingsView, UpdatePanel, AutomationView } = await import(pathToFileURL(outfile).href)
+const { act, createElement, createRoot, ui, ConfirmHost, RuntimeView, SettingsView, UpdatePanel, AutomationView, parseSettingsPatch } = await import(pathToFileURL(outfile).href)
 
 /* ------------------------------------------------------------------ 工具 */
 
@@ -187,7 +188,8 @@ try {
   /* ------------------------------------- 2. SettingsView：显式保存 + 检测 */
   console.log('[2] SettingsView：运行时路径显式保存，检测先保存再探测')
   const settingsEvents = []
-  const realSettingsSet = api.settings.set
+  const fixtureSettingsSet = api.settings.set
+  const realSettingsSet = async (patch) => fixtureSettingsSet(parseSettingsPatch(patch))
 const realSettingsGet = api.settings.get
   api.settings.set = async (patch) => { settingsEvents.push({ kind: 'save', patch }); return realSettingsSet(patch) }
   api.settings.probe = async () => { settingsEvents.push({ kind: 'probe' }); return { ok: true, detail: 'zcode.cjs 可用', searched: [] } }
@@ -270,6 +272,14 @@ const realSettingsGet = api.settings.get
   assert.equal(host.textContent.includes('已是最新'), false, '不声称「已是最新」：逐通道检查失败会被 updater 静默吞掉')
   assert.equal(applyBtn.disabled, true, '无可用更新时应用仍不可用')
   assert(host.querySelector('[data-update-none]'), '面板内给出「本次未发现可应用的更新」结论')
+
+  updateEvents.length = 0
+  await fill(feedInput, '')
+  await click(checkBtn, '清空更新源后检查')
+  assert.deepEqual(updateEvents.map((event) => event.kind), ['save', 'check'], '恢复默认源也必须先保存再检查')
+  assert.equal(updateEvents[0].patch.updateFeedUrl, '', '空地址保存为默认更新源')
+  assert.equal((await realSettingsGet()).updateFeedUrl, '', '默认更新源已保存')
+  assert.equal(card(1).querySelector('[data-feed-error]'), null, '合法更新源不应触发保存错误')
 
   checkedSnapshot = { ...baseState, available: { renderer: '0.23.0' } }
   await click(checkBtn, '检查更新（有新版）')
@@ -414,17 +424,54 @@ const realSettingsGet = api.settings.get
 
   // 显式失败快照：是错误，不是「没有可用更新」
   api.settings.set = (patch) => { feedWrites.push(patch.updateFeedUrl); return realSettingsSet(patch) }
-  api.updates.check = async () => { checks.push({ feed: persistedFeed }); return { ...baseState, phase: 'failed', error: 'manifest 验签失败' } }
+  api.updates.check = async () => { checks.push({ feed: persistedFeed }); return { ...baseState, phase: 'failed', error: 'manifest 验签失败', available: { renderer: '0.23.0' } } }
   await fill(raceInput, 'https://feed.example/error')
   const toastMark = toasts.length
   await click(raceCheck, '检查返回失败快照')
   assert(host.querySelector('[data-update-check-error]').textContent.includes('manifest 验签失败'), '失败快照按错误处理并说明原因')
   assert(host.querySelector('[data-update-error]'), '状态区也标注失败')
   assert.equal(host.querySelector('[data-update-none]'), null, '失败快照不得渲染成「没有更新」')
+  assert.equal(raceApply.disabled, true, '失败快照携带旧 available 时也不得应用')
   assert.equal(lastToast('error').text.includes('检查更新失败'), true, '失败快照产生错误提示')
   assert.equal(toasts.slice(toastMark).some((item) => item.kind === 'success' && item.text.includes('已开始更新')), false, '失败检查不产生假「已开始更新」')
   await unmount()
   console.log('PASS UpdatePanel：失焦/检查串行、精确草稿、结论与操作失效、失败快照按错误处理')
+
+  // External settings changes must invalidate the save cache, including a return to an old address.
+  await realSettingsSet({ updateFeedUrl: 'https://feed.example/original' })
+  const broadcastWrites = []
+  const checkedAddresses = []
+  const availableState = { ...baseState, available: { renderer: '0.23.0' } }
+  api.settings.set = async (patch) => { broadcastWrites.push(patch.updateFeedUrl); return realSettingsSet(patch) }
+  api.updates.getState = async () => baseState
+  api.updates.check = async () => {
+    checkedAddresses.push((await realSettingsGet()).updateFeedUrl)
+    return availableState
+  }
+  await mount(UpdatePanel)
+  const broadcastInput = card(1).querySelector('input')
+  const broadcastCheck = button('检查更新')
+  const broadcastApply = button('开始更新')
+  await click(broadcastCheck, '检查最初地址')
+  assert.equal(broadcastApply.disabled, false, '成功检查后允许更新')
+  await act(async () => { await realSettingsSet({ updateFeedUrl: 'https://feed.example/other-window' }) })
+  assert.equal(broadcastInput.value, 'https://feed.example/other-window', '其他窗口广播同步干净输入框')
+  await fill(broadcastInput, 'https://feed.example/original')
+  await click(broadcastCheck, '广播后改回旧地址再检查')
+  assert.deepEqual(broadcastWrites, ['https://feed.example/original'], '旧地址也须重新保存，不能命中过期缓存')
+  assert.equal(checkedAddresses.at(-1), 'https://feed.example/original', '实际检查地址与输入框相同')
+
+  api.updates.check = async () => { throw new Error('update IPC unavailable') }
+  await click(broadcastCheck, 'IPC 拒绝时丢弃旧检查结论')
+  assert.equal(broadcastApply.disabled, true, '检查抛错后旧 available 不得继续应用')
+  assert(host.querySelector('[data-update-check-error]')?.textContent.includes('update IPC unavailable'), 'IPC 错误在面板中保留')
+  assert.equal(host.querySelector('[data-update-none]'), null, 'IPC 错误不显示无更新结论')
+  api.updates.check = async () => availableState
+  await click(broadcastCheck, '检查恢复')
+  assert.equal(broadcastApply.disabled, false, '重新检查成功后可应用')
+  assert.equal(host.querySelector('[data-update-check-error]'), null, '成功检查清除错误')
+  await unmount()
+  console.log('PASS UpdatePanel：跨窗口保存缓存、检查拒绝后禁用旧结果、恢复后可应用')
 
   /* -------------- 6. SettingsView：保存期间编辑 / 探测归属 / 重复探测 -------------- */
   console.log('[6] SettingsView：保存期间的新输入、探测结果归属已保存路径、干净路径连点')

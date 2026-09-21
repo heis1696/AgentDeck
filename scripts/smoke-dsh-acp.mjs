@@ -14,6 +14,9 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-dsh-acp-'))
 const outfile = path.join(root, 'out', 'smoke-dsh-acp.cjs')
 await build({ entryPoints: [path.join(root, 'src/main/backends/dsh-acp.ts')], outfile, bundle: true, platform: 'node', format: 'cjs', target: 'node18' })
 const { startDshAcpSession, AcpBootError } = await import(pathToFileURL(outfile).href)
+const backendOutfile = path.join(root, 'out', 'smoke-dsh-backend.cjs')
+await build({ entryPoints: [path.join(root, 'src/main/backends/dsh.ts')], outfile: backendOutfile, bundle: true, platform: 'node', format: 'cjs', target: 'node18' })
+const { createDshBackend } = await import(pathToFileURL(backendOutfile).href)
 
 // ---- fake ACP server ----
 const fakeServer = path.join(tmp, 'fake-acp.mjs')
@@ -150,5 +153,29 @@ assert(bootError instanceof AcpBootError && /code=3/.test(bootError.message), `�
 // ---- 7) 服务端收到的权限选择 ----
 const permLog = JSON.parse(fs.readFileSync(permissionLogPath, 'utf8'))
 assert(JSON.stringify(permLog) === JSON.stringify([{ outcome: { outcome: 'selected', optionId: 'allow-once' } }]), '权限选择按 ACP outcome 格式回传服务端')
+
+// ---- 8) Production composition: dsh.ts must not bind ACP twice to turn #1 ----
+const fakeRepo = path.join(tmp, 'deepseek-harness')
+const productionBin = path.join(fakeRepo, 'packages', 'examples', 'acp-demo', 'lib', 'bin.js')
+fs.mkdirSync(path.dirname(productionBin), { recursive: true })
+fs.copyFileSync(fakeServer, productionBin)
+const productionEvents = []
+const productionTurns = []
+const dsh = createDshBackend(() => ({ dshPath: path.join(fakeRepo, 'apps', 'cli', 'lib', 'bin.js') }))
+const turn1 = { seq: 1, id: 'dsh-production-turn-1' }
+const turn2 = { seq: 2, id: 'dsh-production-turn-2' }
+const productionSession = await dsh.start({
+  prompt: 'production first', workdir: tmp, mode: 'yolo', turn: turn1,
+  events: {
+    onEvent: (event, turn) => productionEvents.push({ event, turn }),
+    onTurnEnd: (result, turn) => productionTurns.push({ result, turn }),
+    onHeartbeat: () => {}, onSessionId: () => {}
+  }
+})
+await productionSession.send('production second', turn2)
+assert(productionSession.turnScoped === true, 'production DSH ACP declares its proven prompt boundary')
+assert(productionTurns[0]?.turn?.id === turn1.id && productionTurns[1]?.turn?.id === turn2.id, 'production DSH ACP reports each terminal with its own stamp')
+assert(productionEvents.some((item) => item.event.kind === 'final' && item.turn?.id === turn2.id), 'production second-turn events do not fall back to the first stamp')
+await productionSession.close()
 
 console.log('\n✅ DSH ACP SMOKE PASSED')

@@ -8,6 +8,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import type { AgentBackend, BackendSession, BackendSessionEvents } from './types'
+import { bindTurn } from './types'
 import { runCliJsonl } from './cli-common'
 import { resolveCli, findOnPath, findSystemNode } from './cli-locator'
 import { findDshAcpBin, startDshAcpSession, AcpBootError } from './dsh-acp'
@@ -142,23 +143,29 @@ export function createDshBackend(getPaths: () => { dshPath: string }): AgentBack
       })
     },
     async start(args) {
-      const { prompt, workdir, events, mode, model } = args
+      const { prompt, workdir, events: rawEvents, mode, model, turn } = args
       // ACP 组件在才尝试：缺失时直接 headless，不产生额外延迟
       const acp = findDshAcpBin(getPaths().dshPath || undefined)
       if (acp) {
         try {
-          return await startDshAcpSession({ prompt, workdir, mode, model, events, acp })
+          // ACP owns its per-turn binding. Passing an already-bound channel
+          // would force every later turn back onto the first turn's stamp.
+          return await startDshAcpSession({ prompt, workdir, mode, model, events: rawEvents, acp, turn })
         } catch (e) {
           if (!(e instanceof AcpBootError)) throw e
+          const events = bindTurn(rawEvents, turn)
           // 启动期失败（握手/建会话/进程早退）：降级 headless，任务仍能跑
           events.onEvent({ kind: 'status', ts: Date.now(), text: `dsh ACP 启动失败，降级 headless：${e.message.slice(0, 160)}` })
         }
       }
+      // Headless is one process per turn, so one fixed channel is sufficient.
+      const events = bindTurn(rawEvents, turn)
       let own: { kill: () => void } | null = null
       const r = await runOnce(prompt, workdir, events, (runner) => { own = runner })
       if (!r.ok) throw new Error(r.error || 'dsh 回合失败')
       return {
         sessionId: `dsh_${Date.now().toString(36)}`,
+        turnScoped: true,
         async send() {
           throw new Error('dsh 无头模式不支持续聊（请新建任务）')
         },

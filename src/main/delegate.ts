@@ -3,7 +3,7 @@
 // 结果回灌 → 领队继续。循环直到领队不再派发。任何支持续聊的后端都适用。
 // 提示词文案集中在 src/main/prompts/delegation.ts（本文件只保留解析器与循环逻辑）。
 import type { Task, TaskEvent } from '../shared/types'
-import type { TaskStore } from './store'
+import type { TaskExpectation, TaskStore } from './store'
 import type { TaskRunner } from './runner'
 import type { BackendSession, BackendTurnResult } from './backends/types'
 import {
@@ -371,22 +371,33 @@ export function delegateChildBranch(
  * 标记解析用回合文本的全部来源（终态全文/流式累计并集 + 最后一条消息，多源去重——
  * 单一来源可能不含中间消息里的标记）；最终结果只取每轮最后一条 assistant 消息
  * （response），避免中间过程灌进 result/回灌上下文。
+ *
+ * `expected` 是本次委派所属运行的完整执行归属（发起该回合前捕获）。循环不再从
+ * store 重新读取身份：所有事件追加、状态写入和内存状态收编都以它为准，回合终态
+ * 之后被替换的运行不会被旧响应、旧轮数或旧集成结果污染。
  */
+export function runDelegationLoop(taskId: string, session: BackendSession, first: BackendTurnResult, ctx: DelegationContext): Promise<DelegationOutcome>
+export function runDelegationLoop(taskId: string, session: BackendSession, first: BackendTurnResult, expected: TaskExpectation, ctx: DelegationContext): Promise<DelegationOutcome>
 export async function runDelegationLoop(
   taskId: string,
   session: BackendSession,
   first: BackendTurnResult,
-  ctx: DelegationContext
+  expectedOrContext: TaskExpectation | DelegationContext,
+  context?: DelegationContext
 ): Promise<DelegationOutcome> {
+  const ctx = context ?? expectedOrContext as DelegationContext
   const { store, runner, pushTask, pushEvent } = ctx
-  const task = store.get(taskId)!
-  const runId = task.runId
-  const active = () => {
-    const current = store.get(taskId)
-    return current?.status === 'running' && current.runId === runId
-  }
+  // Preserve the four-argument entry for direct consumers. Production passes
+  // the expectation captured before the turn, rather than discovering it here.
+  const observed = context ? undefined : store.get(taskId)
+  const expected: TaskExpectation = context ? expectedOrContext as TaskExpectation
+    : { status: 'running', runId: observed?.runId, executionOwner: observed?.executionOwner }
+  const runId = expected.runId
+  const active = () => store.matches(taskId, expected)
   const abandoned = (): DelegationOutcome => ({ rounds: 0, children: [], finalText: '', scanTexts: [] })
   if (!active()) return abandoned()
+  const task = store.get(taskId)
+  if (!task) return abandoned()
   const team = ctx.getTeam()
   const me = team.find((a) => a.id === task.agentId)
   const subs = (me?.subordinates ?? []).map((id) => team.find((a) => a.id === id)).filter(Boolean) as AgentLike[]
@@ -395,7 +406,9 @@ export async function runDelegationLoop(
   const note = (text: string) => {
     if (!active()) return
     const e = { ts: Date.now(), kind: 'status' as const, text }
-    const full = store.appendEvent(taskId, e)
+    // A refused conditional append means this loop no longer owns the Run:
+    // only an accepted event may reach host-side consumers.
+    const full = store.appendEvent(taskId, e, expected)
     if (full) pushEvent(taskId, full)
   }
 
@@ -422,6 +435,7 @@ export async function runDelegationLoop(
   /** 结果用：每轮最后一条 assistant 消息 */
   let finalResponse = first.response
   let allChildren: string[] = []
+  const reportedChildren = new Map<string, Task>()
   let round = 0
   for (const n of parseRoundNotes(first.response)) {
     note(`领队评估：${n.outcome}${n.reason ? ' — ' + n.reason : ''}`)
@@ -434,7 +448,7 @@ export async function runDelegationLoop(
   const rosterText = subs.map((a) => `${a.name}（${a.backend}）`).join('、')
   const feedbackRejections = async (): Promise<boolean> => {
     if (!active()) return false
-    const rejects = runner.takeDelegateRejections(taskId)
+    const rejects = runner.takeDelegateRejections(taskId, runId)
     if (!rejects.length || rejectedFeedbacks >= 2) return false
     rejectedFeedbacks++
     note(`⚠ ${rejects.length} 条派单被拒（未建单），原因回灌给领队改派`)
@@ -459,7 +473,7 @@ export async function runDelegationLoop(
     const calls = parseDelegatesMerged(...scanTexts)
     // 收编流式期间提前建的单（等待未决建单完成）。seenKeys 是本会话出现过的全部派单
     // key（含已交付的）：领队在回灌/评估回合里复述旧派单标记时，绝不能当成新派单再建。
-    const early = await runner.takeEarlySpawns(taskId)
+    const early = await runner.takeEarlySpawns(taskId, runId)
     if (!active()) return abandoned()
     const fresh = calls.filter((c) => !early.seenKeys.has(`${c.to}\n${c.prompt}`))
     if (!fresh.length && !early.entries.length) {
@@ -508,6 +522,7 @@ export async function runDelegationLoop(
       .map((id, idx) => {
         const c = store.get(id)!
         if (!c) return childReportEntry('worker', 'cancelled', idx + 1, 'Task was removed')
+        reportedChildren.set(id, c)
         const call = roundChildren.get(id)
         const seq = idx + 1
         childSeqMap.set(id, seq)
@@ -518,7 +533,7 @@ export async function runDelegationLoop(
     // 拒单随报告捎带：只靠「整轮零新单」兜底送达的话，领队每轮都有新单时永远收不到，
     // 会带着「该单在途」的幻觉继续排计划（iss_t_mu5t2em6_ymbllw 实测：混合轮里一单被拒，
     // 领队连着多轮评估「仍在途等回灌」，该工作项无人领）。take 即清空，兜底通道不会重复送。
-    const rideAlongRejects = runner.takeDelegateRejections(taskId)
+    const rideAlongRejects = runner.takeDelegateRejections(taskId, runId)
     let rejectNotice = ''
     let continueInstruction = CONTINUE_INSTRUCTION
     if (rideAlongRejects.length) {
@@ -574,7 +589,7 @@ export async function runDelegationLoop(
 
   // 循环结束仍有未送达的拒单（预算耗尽等路径）：留痕 + Issue 评论，不让工作项静默消失
   if (!active()) return abandoned()
-  const leftoverRejects = runner.takeDelegateRejections(taskId)
+  const leftoverRejects = runner.takeDelegateRejections(taskId, runId)
   if (leftoverRejects.length) {
     note(`⚠ 委派结束仍有 ${leftoverRejects.length} 条派单被拒且未回灌：${leftoverRejects.map((r) => r.slice(0, 80)).join('；')}`)
     if (task.issueId) {
@@ -589,119 +604,144 @@ export async function runDelegationLoop(
   let gitStat = ''
   let gitSnapshot: Task['gitSnapshot']
   if (hasRepo && task.workdir && baseBranch && allChildren.length) {
-    integrationBranch = `agentdeck/task-${taskId}`
-    let allOk = true
-    const problems: string[] = []
-    let idx = 0
-    let mergedCount = 0
-    for (const cid of allChildren) {
-      idx++
-      const c = store.get(cid)!
-      if (!c.workdir) continue
-      // 该子任务需要合入的分支：自己的工作分支（有改动时）+ 它作为子领队的集成分支（二层委派递归交付）
-      const ownBranch = delegateChildBranch(c, taskId, idx)
-      const subIntegration = await branchExists(task.workdir, `agentdeck/task-${cid}`) ? `agentdeck/task-${cid}` : ''
-      if (!active()) return abandoned()
-      if (!ownBranch && !subIntegration) {
-        // 没有任何可集成改动，worktree 里没有值得保留的东西：直接回收
-        const reclaimed = await reclaimWorktree(c.workdir)
-        if (!active()) return abandoned()
-        if (c.worktree) store.update(cid, {
-          worktree: {
-            ...c.worktree,
-            cleanupStatus: reclaimed.status,
-            ...(reclaimed.reason ? { cleanupReason: reclaimed.reason } : {}),
-            ...(reclaimed.ok ? { cleanedAt: Date.now() } : {})
-          }
-        })
-        if (!reclaimed.ok) {
-          allOk = false
-          problems.push(`worktree cleanup: ${reclaimed.reason ?? reclaimed.status}`)
-        }
-        continue
-      }
-      if (ownBranch) await commitAll(c.workdir, `agentdeck: ${c.title}`)
-      if (!active()) return abandoned()
-      let childOk = true
-      for (const b of [ownBranch, subIntegration].filter(Boolean)) {
-        const r = await mergeBranchInto(task.workdir, integrationBranch, b!)
-        if (!active()) return abandoned()
-        if (!r.ok) {
-          childOk = false
-          allOk = false
-          problems.push(r.message)
-          if (c.worktree) store.update(cid, {
-            worktree: { ...c.worktree, cleanupStatus: 'retained', cleanupReason: r.message }
-          })
-          if (r.conflict) break
-        } else {
-          mergedCount++
-        }
-      }
-      // 收尾回收：全部合入集成分支后 worktree 即无保留价值（改动都在集成分支上），
-      // 顺带删掉已合并的工作分支；有失败/冲突则保留现场便于排查，留待任务删除时回收
-      if (childOk) {
-        const reclaimed = await reclaimWorktree(c.workdir)
-        if (!active()) return abandoned()
-        if (c.worktree) store.update(cid, {
-          worktree: {
-            ...c.worktree,
-            cleanupStatus: reclaimed.status,
-            ...(reclaimed.reason ? { cleanupReason: reclaimed.reason } : {}),
-            ...(reclaimed.ok ? { cleanedAt: Date.now() } : {})
-          }
-        })
-        if (!reclaimed.ok && reclaimed.status === 'failed') {
-          childOk = false
-          allOk = false
-          problems.push(`worktree cleanup: ${reclaimed.reason ?? 'failed'}`)
-        }
-        if (childOk && ownBranch && !(await deleteBranch(task.workdir, ownBranch))) {
-          if (!active()) return abandoned()
-          childOk = false
-          allOk = false
-          problems.push(`branch cleanup: ${ownBranch}`)
-          if (c.worktree) store.update(cid, {
-            worktree: { ...c.worktree, cleanupStatus: 'retained', cleanupReason: `branch ${ownBranch} could not be deleted` }
-          })
-          await markWorktreeCleanup(c.workdir, 'retained', `branch ${ownBranch} could not be deleted`)
-        }
-        if (!active()) return abandoned()
-      }
-      if (!allOk) break
-    }
-    if (allOk && mergedCount > 0) {
-      const sum = await branchDiffSummary(task.workdir, baseBranch, integrationBranch)
-      if (!active()) return abandoned()
-      gitDiff = sum.diff
-      gitStat = sum.stat
-      gitSnapshot = sum.snapshot
-      integrationNote = `改动已合入集成分支 ${integrationBranch}（基线 ${baseBranch}，${mergedCount} 个子任务），确认后可自行 merge`
-      note(`集成完成 → ${integrationBranch}`)
-    } else if (allOk) {
-      // 没有任何子任务产生可合并改动（可能都改在了主目录或无改动）
-      const dirty = await import('./git').then((g) => g.snapshotGitAfter(task.workdir))
-      if (!active()) return abandoned()
-      gitDiff = dirty.diff || ""
-      gitStat = dirty.stat || ""
-      gitSnapshot = dirty.snapshot
-      integrationNote = '子任务无独立分支改动；领队若自己改了文件，改动保留在主目录工作区（未提交）'
+    const childIdentity = (child: Task): TaskExpectation => ({
+      status: child.status, runId: child.runId, executionOwner: child.executionOwner,
+      attempt: child.attempt, startedAt: child.startedAt, phaseIndex: child.phaseIndex,
+      workdir: child.workdir, workVersion: child.workVersion
+    })
+    const candidates = [...reportedChildren.values()].filter((child) => !!child.workdir)
+    const terminal = candidates.every((child) => ['done', 'failed', 'cancelled'].includes(child.status))
+    const operation = terminal ? store.claimGitOperation([
+      { id: taskId, expected: { ...expected, workdir: task.workdir, workVersion: task.workVersion } },
+      ...candidates.map((child) => ({ id: child.id, expected: childIdentity(child) }))
+    ]) : undefined
+    if (!operation) {
+      note('Git integration deferred: an execution changed or another Git operation owns the workspace')
     } else {
-      // 一次性告知：失败原因只进时间线事件（收件箱/看板等错误面亦可散见），
-      // 不写进常驻的集成横幅——横幅长期挂在任务详情上只会在事后造成噪音
-      note(`集成停止：${problems.join('; ')}`)
+      try {
+        integrationBranch = `agentdeck/task-${taskId}`
+        let allOk = true
+        const problems: string[] = []
+        let idx = 0
+        let mergedCount = 0
+        for (const cid of allChildren) {
+          idx++
+          const c = reportedChildren.get(cid)
+          if (!c || !c.workdir) continue
+          // Every child write is bound to the exact child record this pass read:
+          // a child that was re-run cannot receive a stale worktree conclusion.
+          const capturedChild: TaskExpectation = { ...childIdentity(c), gitOperationToken: operation.token }
+          // 该子任务需要合入的分支：自己的工作分支（有改动时）+ 它作为子领队的集成分支（二层委派递归交付）
+          const ownBranch = delegateChildBranch(c, taskId, idx)
+          const subIntegration = await branchExists(task.workdir, `agentdeck/task-${cid}`) ? `agentdeck/task-${cid}` : ''
+          if (!active()) return abandoned()
+          if (!ownBranch && !subIntegration) {
+            // 没有任何可集成改动，worktree 里没有值得保留的东西：直接回收
+            const reclaimed = await reclaimWorktree(c.workdir)
+            if (!active()) return abandoned()
+            if (c.worktree) store.updateIf(cid, capturedChild, {
+              worktree: {
+                ...c.worktree,
+                cleanupStatus: reclaimed.status,
+                ...(reclaimed.reason ? { cleanupReason: reclaimed.reason } : {}),
+                ...(reclaimed.ok ? { cleanedAt: Date.now() } : {})
+              }
+            })
+            if (!reclaimed.ok) {
+              allOk = false
+              problems.push(`worktree cleanup: ${reclaimed.reason ?? reclaimed.status}`)
+            }
+            continue
+          }
+          if (ownBranch) await commitAll(c.workdir, `agentdeck: ${c.title}`)
+          if (!active()) return abandoned()
+          let childOk = true
+          for (const b of [ownBranch, subIntegration].filter(Boolean)) {
+            const r = await mergeBranchInto(task.workdir, integrationBranch, b!)
+            if (!active()) return abandoned()
+            if (!r.ok) {
+              childOk = false
+              allOk = false
+              problems.push(r.message)
+              if (c.worktree) store.updateIf(cid, capturedChild, {
+                worktree: { ...c.worktree, cleanupStatus: 'retained', cleanupReason: r.message }
+              })
+              if (r.conflict) break
+            } else {
+              mergedCount++
+            }
+          }
+          // 收尾回收：全部合入集成分支后 worktree 即无保留价值（改动都在集成分支上），
+          // 顺带删掉已合并的工作分支；有失败/冲突则保留现场便于排查，留待任务删除时回收
+          if (childOk) {
+            const reclaimed = await reclaimWorktree(c.workdir)
+            if (!active()) return abandoned()
+            if (c.worktree) store.updateIf(cid, capturedChild, {
+              worktree: {
+                ...c.worktree,
+                cleanupStatus: reclaimed.status,
+                ...(reclaimed.reason ? { cleanupReason: reclaimed.reason } : {}),
+                ...(reclaimed.ok ? { cleanedAt: Date.now() } : {})
+              }
+            })
+            if (!reclaimed.ok && reclaimed.status === 'failed') {
+              childOk = false
+              allOk = false
+              problems.push(`worktree cleanup: ${reclaimed.reason ?? 'failed'}`)
+            }
+            if (childOk && ownBranch && !(await deleteBranch(task.workdir, ownBranch))) {
+              if (!active()) return abandoned()
+              childOk = false
+              allOk = false
+              problems.push(`branch cleanup: ${ownBranch}`)
+              if (c.worktree) store.updateIf(cid, capturedChild, {
+                worktree: { ...c.worktree, cleanupStatus: 'retained', cleanupReason: `branch ${ownBranch} could not be deleted` }
+              })
+              await markWorktreeCleanup(c.workdir, 'retained', `branch ${ownBranch} could not be deleted`)
+            }
+            if (!active()) return abandoned()
+          }
+          if (!allOk) break
+        }
+        if (allOk && mergedCount > 0) {
+          const sum = await branchDiffSummary(task.workdir, baseBranch, integrationBranch)
+          if (!active()) return abandoned()
+          gitDiff = sum.diff
+          gitStat = sum.stat
+          gitSnapshot = sum.snapshot
+          integrationNote = `改动已合入集成分支 ${integrationBranch}（基线 ${baseBranch}，${mergedCount} 个子任务），确认后可自行 merge`
+          note(`集成完成 → ${integrationBranch}`)
+        } else if (allOk) {
+          // 没有任何子任务产生可合并改动（可能都改在了主目录或无改动）
+          const dirty = await import('./git').then((g) => g.snapshotGitAfter(task.workdir))
+          if (!active()) return abandoned()
+          gitDiff = dirty.diff || ""
+          gitStat = dirty.stat || ""
+          gitSnapshot = dirty.snapshot
+          integrationNote = '子任务无独立分支改动；领队若自己改了文件，改动保留在主目录工作区（未提交）'
+        } else {
+          // 一次性告知：失败原因只进时间线事件（收件箱/看板等错误面亦可散见），
+          // 不写进常驻的集成横幅——横幅长期挂在任务详情上只会在事后造成噪音
+          note(`集成停止：${problems.join('; ')}`)
+        }
+      } finally {
+        store.releaseGitOperation(operation)
+      }
     }
   }
 
   if (!active()) return abandoned()
-  store.update(taskId, {
+  // Read the current record for the phase fields and commit conditionally on
+  // this Run: a replaced Run keeps whatever the replacement wrote.
+  const current = store.get(taskId)
+  const updated = store.updateIf(taskId, expected, {
     ...(integrationBranch ? { integration: { branch: integrationBranch, note: integrationNote } } : {}),
     gitDiff: gitDiff || undefined,
     gitStat: gitStat || undefined,
-    gitSnapshot: gitSnapshot ? { ...gitSnapshot, runId, phaseIndex: task.phaseIndex, startedAt: task.startedAt } : undefined,
+    gitSnapshot: gitSnapshot ? { ...gitSnapshot, runId, phaseIndex: current?.phaseIndex, startedAt: current?.startedAt } : undefined,
     roundsUsed: round
   } as Partial<Task>)
-  pushTask(taskId)
+  if (updated) pushTask(taskId)
 
   return { rounds: round, children: allChildren, finalText: stripReviews(stripRoundNotes(stripDelegates(finalResponse || scanTexts[0] || scanTexts[1]))), scanTexts }
 }

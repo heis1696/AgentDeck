@@ -1,13 +1,15 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { DEFAULT_SETTINGS, type AppSettings, type Task } from '../shared/types'
+import { DEFAULT_SETTINGS, type AppSettings, type Issue, type RunTrigger, type Task } from '../shared/types'
 import { TaskStore } from './store'
 import { IssueStore } from './issue-store'
 import { GoalStore } from './goal-store'
 import { GoalController } from './goal-controller'
 import { TaskService } from './task-service'
+import type { TaskCreateInput } from './task-service'
 import { TaskRunner } from './runner'
 import type { AgentBackend } from './backends/types'
+import { prepareManualTaskStart } from './handoff'
 import { createClaudeBackend } from './backends/claude'
 import { createCodexBackend } from './backends/codex'
 import { createDshBackend } from './backends/dsh'
@@ -56,8 +58,12 @@ export class SidecarRuntime {
     this.settings = loadSettings(userDataDir)
     this.agents = loadAgents(userDataDir)
     this.store = new TaskStore(userDataDir, { recoverRunning: false })
+    this.store.recoverDeadGitOperations()
     this.issueStore = new IssueStore(userDataDir)
-    this.issueStore.sync(this.store.list())
+    // A committed Task must keep the sidecar available while its Issue
+    // projection retries. This also makes startup resilient to a transient
+    // write/fsync/rename failure in the projection file.
+    this.issueStore.syncEventually(this.store.list())
     const backends = new Map<string, AgentBackend>([
       ['claude', createClaudeBackend()],
       ['codex', createCodexBackend()],
@@ -90,7 +96,7 @@ export class SidecarRuntime {
     this.goalController = new GoalController(this.goalStore = new GoalStore(userDataDir), {
       createTask: (input) => this.taskService.createTask({ title: input.title, prompt: input.prompt, workdir: input.workdir, backend: input.backend, agentId: input.agentId, issueId: input.issueId, goalId: input.goalId, phaseIndex: input.phaseIndex, dedupeKey: input.dedupeKey, startNow: input.startNow }, input.trigger),
       enqueueTask: (task) => this.runner.enqueue(task),
-      startTask: (task) => { this.store.update(task.id, { parked: undefined }); return this.store.get(task.id)! },
+      startTask: (task) => prepareManualTaskStart(this.store, task.id) ?? this.store.get(task.id) ?? task,
       cancelTask: (taskId) => this.runner.cancel(taskId),
       listTasks: () => this.store.list(),
       continueTask: (taskId, content) => this.runner.followUp(taskId, content),
@@ -98,14 +104,19 @@ export class SidecarRuntime {
     })
     this.runner.attachContinue(({ sourceTaskId, issueId, brief, start }) => {
       const source = this.store.get(sourceTaskId)
-      const task = this.taskService.createHandoffTask({ sourceTaskId, issueId, brief, start })
-      if (task && start !== 'parked') this.runner.enqueue(task)
-      else if (task) this.onTaskChanged(task)
+      const resolved = this.taskService.resolveHandoffTask({ sourceTaskId, issueId, brief, start })
+      if (!resolved) return null
+      const { task, created } = resolved
+      if (!created) {
+        this.onTaskChanged(task)
+        return task
+      }
+      if (!task.parked && task.status === 'queued') this.runner.enqueue(task)
+      else this.onTaskChanged(task)
       // 与主进程接线（index.ts attachContinue）对齐：停放的后继对用户是隐形的
       // （调度泵与重启对账都跳过 parked），sidecar 又没有 notifyTaskChanged 推送通道——
-      // 落一条 Issue 评论把"等你启动"喊到用户看得到的地方。只对新建（10s 内）落评论，
-      // 幂等复用/重放不刷屏。
-      if (task?.parked && task.issueId && Date.now() - task.createdAt < 10_000) {
+      // 落一条 Issue 评论把"等你启动"喊到用户看得到的地方，只在新建时追加。
+      if (task.parked && task.issueId) {
         const firstLine = task.prompt.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? task.title
         this.issueStore.addComment(task.issueId, `⏸ 阶段接力已备好：${firstLine.slice(0, 80)}——下一阶段在等你启动（打开该 Issue 的最新执行，点「▶ 启动」）`, { type: 'agent', id: source?.agentId ?? 'relay' })
       }
@@ -114,8 +125,17 @@ export class SidecarRuntime {
   }
 
   private onTaskChanged(task: Task) {
-    this.issueStore.sync(this.store.list())
+    this.issueStore.syncEventually(this.store.list())
     this.goalController.onTaskChanged(task)
+  }
+
+  /** Sidecar equivalent of issues:create: return an Issue-shaped view even if
+   * its durable projection is temporarily unavailable. */
+  createIssue(input: TaskCreateInput, trigger: RunTrigger = input.trigger ?? 'assignment'): Issue {
+    const task = this.taskService.createTask(input, trigger)
+    this.issueStore.syncTaskEventually(task)
+    if (input.startNow !== false) this.runner.enqueue(task)
+    return this.issueStore.issueForTask(task)
   }
 
   state() {
@@ -144,14 +164,27 @@ export class SidecarRuntime {
     for (const task of this.store.list()) if (task.status === 'queued' && !task.parked) this.runner.enqueue(task)
   }
 
+  /**
+   * Adopt orphan runs. This is the single takeover entry point: the store
+   * probes the recorded execution owner outside the lock and conditionally
+   * commits the exact observed run, so only a provably dead owner is claimed
+   * and a claim can happen exactly once. An alive or unreadable identity is
+   * never taken over, and an expired lease is not death evidence.
+   */
+  takeoverRuns(ids?: readonly string[]): Task[] {
+    const adopted = this.store.recoverDeadRuns('queued', ids)
+    if (adopted.length) this.refreshAfterTakeover()
+    return adopted
+  }
+
   refreshAfterTakeover() {
     this.store.reload()
-    this.issueStore.sync(this.store.list())
+    this.issueStore.syncEventually(this.store.list())
   }
 
   refreshIfIdle() {
     if (!this.started) this.refreshAfterTakeover()
   }
 
-  async close() { await this.runner.shutdown(); this.store.flush() }
+  async close() { await this.runner.shutdown(); this.store.flush(); this.issueStore.close() }
 }

@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createServer } from 'node:net'
+import type { ExecutionOwner, TaskStatus } from '../shared/types'
 
 /** Versioned protocol shared by the Electron shell and the business sidecar. */
 export const SIDECAR_PROTOCOL_VERSION = 1 as const
@@ -382,8 +383,15 @@ export class SidecarManager {
     return this.rpc<T[]>('events.read', { taskId, afterSeq })
   }
 
-  async appendEvent<T = unknown>(taskId: string, event: unknown): Promise<T> {
-    return this.rpc<T>('events.append', { taskId, event })
+  async appendEvent<T = unknown>(
+    taskId: string,
+    event: unknown,
+    /** Identity captured by the caller before it produced the event. Without
+     *  it the append only matches a record with no run identity at all, so an
+     *  old event can never be authorized by whatever run is latest. */
+    expected?: { runId?: string; executionOwner?: ExecutionOwner; status?: TaskStatus | TaskStatus[] }
+  ): Promise<T> {
+    return this.rpc<T>('events.append', { taskId, event, ...(expected ? { expected } : {}) })
   }
 
   /** Re-establish the process and perform the state barrier used by renderer

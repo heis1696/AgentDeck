@@ -2,7 +2,8 @@
 // 无头：claude -p <prompt> --output-format stream-json --verbose --dangerously-skip-permissions
 // 事件：system/init(session_id) → assistant(text|tool_use) → user(tool_result) → result(终态+费用)
 // 续聊：--resume <sessionId>
-import type { AgentBackend, BackendSession, BackendSessionEvents } from './types'
+import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnStamp } from './types'
+import { bindTurn } from './types'
 import type { TaskEvent, ToolEditMeta } from '../../shared/types'
 import { isJsonObject, jsonNumber, jsonObject, jsonString, runCliJsonl, toolEvent } from './cli-common'
 import { parseEditMeta, stringifyToolArgs } from './edit-meta'
@@ -132,12 +133,14 @@ export function createClaudeBackend(): AgentBackend {
       const p = await probeCli('claude')
       return p.ok ? { ok: true, detail: `claude ${p.version}` } : { ok: false, detail: p.error ?? '未安装' }
     },
-    async start({ prompt, workdir, events, resumeSessionId, model, connection }) {
+    async start({ prompt, workdir, events: rawEvents, resumeSessionId, model, connection, turn }) {
       const dir = workdir || process.cwd()
       let own: { kill: () => void } | null = null
-      const runTurn = (turnPrompt: string, resumeId?: string) =>
-        runOnce(turnPrompt, dir, resumeId, events, model, connection, (r) => { own = r })
-      const first = runTurn(prompt, resumeSessionId)
+      // 每个回合都是独立进程：把它自己的回合身份绑到该进程的所有回调上，
+      // 被杀掉的旧进程再吐终态也只会带着旧身份，被运行器丢弃。
+      const runTurn = (turnPrompt: string, resumeId?: string, turnStamp?: BackendTurnStamp) =>
+        runOnce(turnPrompt, dir, resumeId, bindTurn(rawEvents, turnStamp), model, connection, (r) => { own = r })
+      const first = runTurn(prompt, resumeSessionId, turn)
       const sidPromise = first.then((r) => r.sessionId).catch(() => '')
       // start() 在回合结束后才 resolve 与 zcode 语义不同——但接口允许：
       // session.send 的续聊发生在 start resolve 之后，天然串行。
@@ -146,8 +149,9 @@ export function createClaudeBackend(): AgentBackend {
       const sid = r.sessionId
       const session: BackendSession = {
         sessionId: sid,
-        async send(content) {
-          const res = await runTurn(content, sid)
+        turnScoped: true,
+        async send(content, turnStamp) {
+          const res = await runTurn(content, sid, turnStamp)
           if (!res.ok) throw new Error(res.error || '回合失败')
         },
         async stop() {

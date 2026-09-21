@@ -4,7 +4,7 @@ import { buildAnalytics } from '../analytics'
 import { parseAnalyticsRange, parseContent, parseNotification, parseSettingsPatch } from '../ipc-validation'
 import { probeRuntimes } from '../runtime'
 import { zcodeDefaultPaths } from '../backends/zcode-config'
-import { listWorktreeMetadata, pruneWorktrees } from '../git'
+import { listWorktreeMetadata, pruneWorktrees, shouldKeepTaskWorktree } from '../git'
 import type { IpcContext } from './context'
 
 export function registerSystemIpc(ctx: IpcContext) {
@@ -31,10 +31,13 @@ export function registerSystemIpc(ctx: IpcContext) {
     const maxAgeMs = ctx.settings.worktreeMaxAgeDays * 24 * 60 * 60 * 1000
     const results = []
     for (const repoDir of dirs) {
-      results.push(await pruneWorktrees(repoDir, (owner) => {
-        const task = ctx.store.get(owner)
-        return task?.status === 'queued' || task?.status === 'running'
-      }, { maxAgeMs }))
+      results.push(await pruneWorktrees(repoDir, (owner) => shouldKeepTaskWorktree(ctx.store.list(), repoDir, owner), {
+        maxAgeMs,
+        claimWorktree: (owner, merge) => {
+          const claim = ctx.store.claimWorktreeCleanup(repoDir, owner, merge)
+          return claim ? { release: () => { try { ctx.store.releaseGitOperation(claim) } catch {} } } : undefined
+        }
+      }))
       for (const metadata of listWorktreeMetadata(repoDir)) {
         const task = ctx.store.list().find((item) => item.worktree?.path === metadata.path)
         if (task && task.worktree && task.worktree.cleanupStatus !== metadata.cleanupStatus) {

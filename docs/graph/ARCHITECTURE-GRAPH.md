@@ -121,6 +121,7 @@ flowchart LR
 - 主干三层：**队列（runner）→ 回合（executor）→ 委派（delegate）**。executor 只认 `AgentBackend` 接口，换/加后端不动编排；delegate 把「派子任务给别的 agent」做成文本协议标记，子任务落在独立 worktree 跑完再由 git 合并回灌。
 - `delegate → runner` 只有 `import type`（编译期擦除），运行时**无环**（INVENTORY §2.6 环 1）；想彻底消环可把 `RunnerPorts` 的委派端口收窄成接口移进 delegate。
 - `EventGate`（turn-lifecycle）是可靠性闸门：stop/close 之后晚到的后端回调按代际作废，不会污染下一个回合。
+- 回合身份（runner 的 `SessionTurnRouter` + `BackendTurnStamp`）是闸门的**归属**来源：每个回合拿一个不可变 stamp，回调按 `id` 严格关联；声明 `turnScoped` 的适配器（`backends/types.ts` 的 `bindTurn`）可在同一连接上连续跑回合，没有可靠标识的连接只跑隔离首回合，后续关连接并按 `sessionId` 重建。
 - goal / meeting / forge 三个旁路**不走 runner 的队列**，由组合根直接装配；meeting 与 agent-sessions 复用 delegate 的协议解析（type-only + 值导入各一）。
 - git.ts 在主干上出现三次：委派回灌、任务终态快照、IPC 的 fileDiff——它是唯一碰 git 的模块。
 

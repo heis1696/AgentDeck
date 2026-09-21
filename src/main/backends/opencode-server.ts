@@ -1,6 +1,7 @@
 import type { PermissionRequest } from '../../shared/contracts'
 import type { TaskEvent } from '../../shared/types'
-import type { AgentBackend, BackendSession, BackendSessionEvents } from './types'
+import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnStamp } from './types'
+import { bindTurn } from './types'
 import { parseEditMeta, stringifyToolArgs } from './edit-meta'
 
 type RecordValue = Record<string, unknown>
@@ -238,7 +239,7 @@ export function createOpencodeServerBackend(options: OpencodeServerBackendOption
         return result.ok ? { ok: true, detail: `OpenCode server ${result.version}` } : { ok: false, detail: result.error }
       } catch (error) { return { ok: false, detail: error instanceof Error ? error.message : String(error) } }
     },
-    async start({ prompt, workdir, mode, events, resumeSessionId, model }) {
+    async start({ prompt, workdir, mode, events: rawEvents, resumeSessionId, model, turn }) {
       const directory = workdir || options.directory || process.cwd()
       const client = new OpencodeServerClient({ ...options, directory, requestTimeoutMs: options.requestTimeoutMs ?? 5_000 })
       if (!options.skipVersionProbe) {
@@ -246,13 +247,19 @@ export function createOpencodeServerBackend(options: OpencodeServerBackendOption
         if (!result.ok) throw new OpencodeServerUnavailableError(result.error)
       }
       const sessionId = resumeSessionId || await client.createSession(directory, model)
-      events.onSessionId?.(sessionId)
+      /**
+       * 常驻 server 连接上"在飞回合"的发射通道：每回合一个不可变通道（bindTurn 固定身份），
+       * 换回合只换指针；没有回合身份时退回会话级通道（老调用方零变化）。
+       */
+      let turnEvents: BackendSessionEvents = turn ? bindTurn(rawEvents, turn) : rawEvents
+      const setTurn = (stamp?: BackendTurnStamp) => { turnEvents = stamp ? bindTurn(rawEvents, stamp) : rawEvents }
+      turnEvents.onSessionId?.(sessionId)
       const abort = new AbortController()
       let closed = false
       let cursor = 0
       let active: { startedAt: number; text: Map<string, string>; reasoning: Map<string, string>; tokens?: number; resolve: (r: { ok: boolean; response: string; error?: string; tokenCount?: number; durationMs?: number }) => void; ended: boolean } | undefined
       const seen = new Set<string>()
-      const emit = (event: Omit<TaskEvent, 'seq' | 'ts'>) => events.onEvent({ ...event, ts: Date.now() })
+      const emit = (event: Omit<TaskEvent, 'seq' | 'ts'>) => turnEvents?.onEvent({ ...event, ts: Date.now() })
       const finish = (ok: boolean, error?: string, responseOverride?: string) => {
         const turn = active
         if (!turn || turn.ended) return
@@ -262,7 +269,8 @@ export function createOpencodeServerBackend(options: OpencodeServerBackendOption
         const response = responseOverride ?? (explicit.length ? explicit[explicit.length - 1].trim() : (turn.text.get('__stream') ?? '').trim())
         if (response) emit({ kind: 'final', type: 'text.ended', durability: 'durable', durable: true, text: response })
         const durationMs = Date.now() - turn.startedAt
-        events.onTurnEnd({ ok, response, error, tokenCount: turn.tokens, durationMs, delegationText: allText && allText !== response ? allText : undefined })
+        // 收口用本回合自己的通道：终态带着本回合身份发出，随后到达的旧回合事件不会被记到新回合
+        turnEvents.onTurnEnd({ ok, response, error, tokenCount: turn.tokens, durationMs, delegationText: allText && allText !== response ? allText : undefined })
         turn.resolve({ ok, response, error, tokenCount: turn.tokens, durationMs })
       }
       const handleEvent = async (value: unknown) => {
@@ -270,7 +278,7 @@ export function createOpencodeServerBackend(options: OpencodeServerBackendOption
         const seq = eventSequence(raw, payload)
         cursor = Math.max(cursor, seq ?? cursor + 1)
         if (sid && sid !== sessionId) return
-        events.onHeartbeat?.()
+        turnEvents?.onHeartbeat?.()
         const id = stringValue(raw.id ?? payload.eventId)
         if (id) { if (seen.has(id)) return; seen.add(id); if (seen.size > 5000) seen.delete(seen.values().next().value as string) }
         if (type === 'server.connected') return
@@ -278,7 +286,7 @@ export function createOpencodeServerBackend(options: OpencodeServerBackendOption
           const request = permissionRequest(payload); if (!request) return
           const choice = mode === 'yolo'
             ? { decision: 'allow' as const }
-            : await events.onPermission?.(request) ?? { decision: 'deny' as const }
+            : await turnEvents?.onPermission?.(request) ?? { decision: 'deny' as const }
           const selected = request.options.find((option) => ['allow', 'once', 'always'].includes(option.response.decision)
             && (choice.optionId === undefined || option.optionId === choice.optionId))
           const allow = choice.decision === 'allow' && (mode === 'yolo' || !!selected)
@@ -396,8 +404,10 @@ export function createOpencodeServerBackend(options: OpencodeServerBackendOption
           await new Promise((resolve) => setTimeout(resolve, 250))
         }
       })()
-      const runTurn = async (content: string) => {
+      const runTurn = async (content: string, stamp?: BackendTurnStamp) => {
         if (closed) throw new Error('OpenCode session is closed')
+        // 新回合先立新通道：旧通道连同身份作废，旧回合的迟到事件带不回新回合
+        setTurn(stamp)
         const result = new Promise<{ ok: boolean; response: string; error?: string; tokenCount?: number; durationMs?: number }>((resolve) => { active = { startedAt: Date.now(), text: new Map(), reasoning: new Map(), resolve, ended: false } })
         try { await client.prompt(sessionId, directory, content, model) }
         catch (error) { active?.resolve({ ok: false, response: '', error: error instanceof Error ? error.message : String(error) }); active = undefined; return result }
@@ -405,14 +415,23 @@ export function createOpencodeServerBackend(options: OpencodeServerBackendOption
         const timeout = new Promise<{ ok: boolean; response: string; error: string }>((resolve) => { timer = setTimeout(() => { finish(false, 'OpenCode session prompt timed out'); resolve({ ok: false, response: '', error: 'OpenCode session prompt timed out' }) }, 10 * 60 * 1000) })
         try { return await Promise.race([result, timeout]) } finally { if (timer) clearTimeout(timer) }
       }
-      events.onLaunch?.({ stop: () => client.interrupt(sessionId, directory) })
-      const first = await runTurn(prompt)
+      rawEvents.onLaunch?.({ stop: () => client.interrupt(sessionId, directory) })
+      const first = await runTurn(prompt, turn)
       if (!first.ok) { abort.abort(); throw new Error(first.error || 'OpenCode server turn failed') }
+      let deleted = false
+      const disconnect = async () => {
+        if (closed) return
+        if (active) finish(false, 'OpenCode session disconnected')
+        closed = true
+        abort.abort()
+        await Promise.race([Promise.allSettled([stream, poll]), new Promise((resolve) => setTimeout(resolve, 1000))])
+      }
       const session: BackendSession = {
         sessionId,
-        async send(content) { const result = await runTurn(content); if (!result.ok) throw new Error(result.error || 'OpenCode server turn failed') },
+        async send(content, stamp) { const result = await runTurn(content, stamp); if (!result.ok) throw new Error(result.error || 'OpenCode server turn failed') },
         async stop() { try { await client.interrupt(sessionId, directory) } catch {} finally { finish(false, 'OpenCode session interrupted') } },
-        async close() { if (closed) return; if (active) finish(false, 'OpenCode session closed'); closed = true; abort.abort(); await client.close(sessionId, directory).catch(() => {}); await Promise.race([Promise.allSettled([stream, poll]), new Promise((resolve) => setTimeout(resolve, 1000))]) }
+        detach: disconnect,
+        async close() { await disconnect(); if (!deleted) { deleted = true; await client.close(sessionId, directory).catch(() => {}) } }
       }
       return session
     }

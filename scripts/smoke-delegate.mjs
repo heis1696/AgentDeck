@@ -38,13 +38,29 @@ await build({
 })
 const { currentGitChanges, GitSummary } = await import(pathToFileURL(summaryOut).href)
 
+function scopedCallbacks(raw, firstTurn) {
+  let turn = firstTurn
+  return {
+    events: {
+      onEvent: (event) => raw.onEvent(event, turn),
+      onTurnEnd: (result) => raw.onTurnEnd(result, turn),
+      onHeartbeat: () => raw.onHeartbeat?.(turn),
+      onSessionId: (id) => raw.onSessionId?.(id, turn),
+      onPermission: (request) => raw.onPermission?.(request, turn)
+    },
+    setTurn: (next) => { turn = next }
+  }
+}
+
 // ---- 假后端：领队 zcode 风格（send 续聊），worker claude 风格 ----
 function makeLeaderBackend() {
   return {
     id: 'zcode',
     label: 'ZetCode',
     async probe() { return { ok: true, detail: '' } },
-    async start({ prompt, events }) {
+    async start({ prompt, events: rawEvents, turn }) {
+      const scoped = scopedCallbacks(rawEvents, turn)
+      const events = scoped.events
       const sid = 'sess_lead_' + Math.random().toString(36).slice(2, 6)
       // 首回合：派两个
       setTimeout(() => {
@@ -56,7 +72,9 @@ function makeLeaderBackend() {
       }, 30)
       return {
         sessionId: sid,
-        async send(content) {
+        turnScoped: true,
+        async send(content, nextTurn) {
+          scoped.setTurn(nextTurn)
           // 第二回合：收到结果汇报 → 收尾（不再派发）
           setTimeout(() => {
             const followup = '追问派工'
@@ -245,14 +263,18 @@ function delegatingBackend(id, firstText, finishText) {
   return {
     id, label: id,
     async probe() { return { ok: true, detail: '' } },
-    async start({ events }) {
+    async start({ events: rawEvents, turn }) {
+      const scoped = scopedCallbacks(rawEvents, turn)
+      const events = scoped.events
       setTimeout(() => {
         events.onEvent({ ts: Date.now(), kind: 'final', text: firstText })
         events.onTurnEnd({ response: firstText, ok: true })
       }, 30)
       return {
         sessionId: 's_' + id,
-        async send(content) {
+        turnScoped: true,
+        async send(content, nextTurn) {
+          scoped.setTurn(nextTurn)
           setTimeout(() => {
             const text = content.includes('结果汇报') ? finishText : '继续等待'
             events.onEvent({ ts: Date.now(), kind: 'final', text })
@@ -333,7 +355,9 @@ const sentToLeader = []
 const streamLeader = {
   id: 'stream', label: 'stream',
   async probe() { return { ok: true, detail: '' } },
-  async start({ events }) {
+  async start({ events: rawEvents, turn }) {
+    const scoped = scopedCallbacks(rawEvents, turn)
+    const events = scoped.events
     setTimeout(() => {
       // 流式：闭合的 delegate 标签先随 text 事件到达（此刻就应提前建单），领队回合故意拖 2.5s 才结束
       events.onEvent({ ts: Date.now(), kind: 'text', text: '派活。\n<delegate to="Solo">把 d.txt 改成 v2</delegate>' })
@@ -343,7 +367,9 @@ const streamLeader = {
     }, 30)
     return {
       sessionId: 's_stream',
-      async send(content) {
+      turnScoped: true,
+      async send(content, nextTurn) {
+        scoped.setTurn(nextTurn)
         sentToLeader.push(content)
         // 回归（生产事故：同一任务派两次）：领队在回灌回合复述已派发过的同一标记，
         // 嗅探与循环都必须凭 seenKeys 识别为已派单，绝不重复建单
@@ -402,7 +428,9 @@ const reviewResults = []
 const reviewLeader = {
   id: 'review', label: 'review',
   async probe() { return { ok: true, detail: '' } },
-  async start({ events }) {
+  async start({ events: rawEvents, turn }) {
+    const scoped = scopedCallbacks(rawEvents, turn)
+    const events = scoped.events
     setTimeout(() => {
       const text = '派两个。\n<delegate to="Worker4a">任务 A</delegate>\n<delegate to="Worker4b">任务 B</delegate>'
       events.onEvent({ ts: Date.now(), kind: 'final', text })
@@ -410,7 +438,9 @@ const reviewLeader = {
     }, 30)
     return {
       sessionId: 's_review',
-      async send(content) {
+      turnScoped: true,
+      async send(content, nextTurn) {
+        scoped.setTurn(nextTurn)
         setTimeout(() => {
           // 回灌报告应带单号（#1、#2）；审核协议已追加
           if (content.includes('单号 #1') && content.includes('单号 #2') && content.includes('<review of=')) {

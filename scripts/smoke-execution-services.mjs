@@ -28,4 +28,16 @@ try { await executor.start(() => starting, timeout, () => accept) } catch {}
 await new Promise((resolve) => setTimeout(resolve, 50))
 assert(lateClosed, 'late session is closed after the start race is abandoned')
 
+const abandoned = new Executor()
+const began = Date.now()
+let closeCalled = false
+const closed = await Promise.race([
+  abandoned.start(async () => ({
+    send: async () => {}, stop: async () => {},
+    close: () => { closeCalled = true; return new Promise(() => {}) }
+  }), new Promise(() => {}), () => false).then(() => false, () => true),
+  new Promise((resolve) => setTimeout(() => resolve(false), 2600))
+])
+assert(closed && closeCalled && Date.now() - began < 2600, 'rejected late session cannot hold the scheduler slot through a hanging close')
+
 console.log('\nEXECUTION SERVICES SMOKE PASSED')

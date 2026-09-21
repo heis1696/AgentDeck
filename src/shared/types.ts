@@ -356,6 +356,19 @@ export interface TaskGitSnapshot {
   truncated?: boolean
 }
 
+export interface ExecutionOwner {
+  pid: number
+  instance: string
+  token: string
+  leaseExpiresAt?: number
+}
+
+export interface TaskGitOperation {
+  token: string
+  owner: ExecutionOwner
+  createdAt: number
+}
+
 export interface Task {
   id: string
   title: string
@@ -374,6 +387,10 @@ export interface Task {
   suppressIssue?: boolean
   /** Unique execution instance used to preserve Run history across retries/follow-ups. */
   runId?: string
+  /** OS process identity and runner token; an expired lease is not death evidence. */
+  executionOwner?: ExecutionOwner
+  /** Blocks execution replacement while a claimed Git operation is in flight. */
+  gitOperation?: TaskGitOperation
   /** Goal that owns this execution, when the task is one goal phase. */
   goalId?: string
   /** Zero-based phase number within the owning Goal. */
@@ -408,6 +425,8 @@ export interface Task {
   continuesFrom?: string
   /** 暂不启动：创建后停放在队列外，等用户手动开始 */
   parked?: boolean
+  /** Set only by an explicit start action; scoped to this task, not tool permissions. */
+  manualStartConfirmedAt?: number
   /** Background work is still running; Goal evaluation must defer. */
   backgroundRunning?: boolean
   /** 标题由 prompt 首行自动派生（非用户拟定）：首轮完成后由 agent 总结重起，重命名后失效 */

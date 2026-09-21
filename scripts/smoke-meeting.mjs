@@ -33,7 +33,8 @@ const backend = {
   id: 'fake-meeting',
   label: 'Fake meeting',
   async probe() { return { ok: true, detail: 'fake' } },
-  async start({ prompt, events }) {
+  async start({ prompt, events, turn }) {
+    let activeTurn = turn
     const agent = prompt.includes('Beta') ? 'beta' : prompt.includes('Gamma') ? 'gamma' : 'alpha'
     const sessionId = `${agent}-session`
     const response = agent === 'alpha'
@@ -48,11 +49,11 @@ const backend = {
     phaseCalls.push({ agent, prompt })
     setTimeout(() => {
       if (response === null) {
-        events.onTurnEnd({ ok: false, response: '', error: 'provider hard error' })
+        events.onTurnEnd({ ok: false, response: '', error: 'provider hard error' }, activeTurn)
         return
       }
-      events.onEvent({ ts: Date.now(), kind: 'final', text: response })
-      events.onTurnEnd({ ok: true, response })
+      events.onEvent({ ts: Date.now(), kind: 'final', text: response }, activeTurn)
+      events.onTurnEnd({ ok: true, response }, activeTurn)
     }, 5)
     const emit = (content) => {
       const responseFor = (value) => {
@@ -77,13 +78,14 @@ const backend = {
           : '{"decisions":["ship"],"objections":[],"actionItems":[{"title":"run release checks","owner":"Alpha","acceptance":["checks pass"]}],"openQuestions":[]}\n<stance verdict="agree" grounds="accepted"/>'
       }
       const response = responseFor(content)
-      if (response === null) return events.onTurnEnd({ ok: false, response: '', error: 'provider hard error' })
-      events.onEvent({ ts: Date.now(), kind: 'final', text: response })
-      events.onTurnEnd({ ok: true, response })
+      if (response === null) return events.onTurnEnd({ ok: false, response: '', error: 'provider hard error' }, activeTurn)
+      events.onEvent({ ts: Date.now(), kind: 'final', text: response }, activeTurn)
+      events.onTurnEnd({ ok: true, response }, activeTurn)
     }
     return {
       sessionId,
-      async send(content) { if (content.includes('强制综合')) synthesisCalls++; phaseCalls.push({ agent, prompt: content }); await sleep(3); emit(content) },
+      turnScoped: true,
+      async send(content, nextTurn) { activeTurn = nextTurn; if (content.includes('强制综合')) synthesisCalls++; phaseCalls.push({ agent, prompt: content }); await sleep(3); emit(content) },
       async stop() {},
       async close() {}
     }

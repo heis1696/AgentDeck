@@ -26,8 +26,13 @@ export class Scheduler {
     this.pumping = true
     try {
       const { concurrency, workerConcurrency } = this.limits()
-      const queued = this.listTasks()
-        .filter((task) => task.status === 'queued' && !task.parked)
+      const tasks = this.listTasks()
+      const active = new Set(tasks.filter((task) => task.status === 'queued' || task.status === 'running').map((task) => task.id))
+      const queued = tasks
+        .filter((task) => task.status === 'queued' && !task.parked && task.gitOperation === undefined)
+        // A handoff may be created before its source finishes asynchronous
+        // finalization. Spare concurrency must not overlap those phases.
+        .filter((task) => !task.continuesFrom || !active.has(task.continuesFrom))
         .sort((a, b) => a.createdAt - b.createdAt)
       const normal = queued.filter((task) => !task.parentTaskId)
       const workers = queued.filter((task) => !!task.parentTaskId)

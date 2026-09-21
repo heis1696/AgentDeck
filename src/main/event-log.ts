@@ -1,7 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { execFileSync } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { withFileLock, type SynchronousAction } from './persistence'
 import type { TaskEvent } from '../shared/types'
 import {
   isTaskEventDurable,
@@ -120,26 +119,6 @@ function canonicalEvent(event: TaskEvent): string {
   return JSON.stringify(stable(copy))
 }
 
-let ownProcessStart: string | undefined
-function processStartIdentity(pid: number): string | undefined {
-  if (pid === process.pid && ownProcessStart) return ownProcessStart
-  try {
-    let value: string
-    const timeout = pid === process.pid ? 2_000 : 750
-    if (process.platform === 'linux') {
-      const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8')
-      value = `${fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim()}:${stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19]}`
-    } else if (process.platform === 'win32') {
-      value = execFileSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', `[Console]::Write((Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks)`], { encoding: 'utf8', windowsHide: true, timeout, stdio: ['ignore', 'pipe', 'ignore'] }).trim()
-    } else {
-      value = execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], { encoding: 'utf8', timeout, stdio: ['ignore', 'pipe', 'ignore'] }).trim()
-    }
-    if (!value) return undefined
-    if (pid === process.pid) ownProcessStart = value
-    return value
-  } catch { return undefined }
-}
-
 /**
  * Append-only event log for one task directory. Durable events are written to
  * JSONL; live-only fragments are returned to the caller for broadcast but do
@@ -165,62 +144,8 @@ export class EventLog {
 
   constructor(private readonly file: string) {}
 
-  /** Atomic hard-link publication prevents incomplete lock metadata. Process
-   * start identity distinguishes a live owner from a reused PID. */
-  private withWriteLock<T>(action: () => T): T {
-    fs.mkdirSync(path.dirname(this.file), { recursive: true })
-    const lock = this.file + '.lock'
-    const instance = processStartIdentity(process.pid)
-    if (!instance) throw new Error('Cannot determine event log writer process identity')
-    const ownerFile = `${lock}.${process.pid}.${randomUUID()}`
-    fs.writeFileSync(ownerFile, JSON.stringify({ pid: process.pid, instance }), { encoding: 'utf8', flag: 'wx', mode: 0o600 })
-    const pause = new Int32Array(new SharedArrayBuffer(4))
-    const started = performance.now()
-    let acquired = false
-    let checkedOwner: string | undefined
-    try {
-      for (;;) {
-        try {
-          fs.linkSync(ownerFile, lock)
-          acquired = true
-          break
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-          try {
-            const before = fs.statSync(lock)
-            const ownerText = fs.readFileSync(lock, 'utf8')
-            let owner: unknown
-            try { owner = JSON.parse(ownerText) } catch {}
-            let abandoned = !isRecord(owner) || !Number.isSafeInteger(owner.pid) || Number(owner.pid) <= 0 || typeof owner.instance !== 'string'
-            if (!abandoned && isRecord(owner)) {
-              const pid = Number(owner.pid)
-              try { process.kill(pid, 0) }
-              catch (probeError) { abandoned = (probeError as NodeJS.ErrnoException).code === 'ESRCH' }
-              // Ordinary fsync contention needs no subprocess probe. Only a
-              // stalled lock is checked against OS process creation time.
-              if (!abandoned && (pid === process.pid || performance.now() - started >= 50) && checkedOwner !== ownerText) {
-                const currentInstance = processStartIdentity(pid)
-                if (currentInstance) abandoned = currentInstance !== owner.instance
-                checkedOwner = ownerText
-              }
-            }
-            if (abandoned) {
-              const current = fs.statSync(lock)
-              if (current.ino === before.ino && current.mtimeMs === before.mtimeMs && fs.readFileSync(lock, 'utf8') === ownerText) fs.unlinkSync(lock)
-              continue
-            }
-          } catch (probeError) {
-            if ((probeError as NodeJS.ErrnoException).code === 'ENOENT') continue
-          }
-          if (performance.now() - started >= 250) throw new Error(`Timed out acquiring event log lock: ${this.file}`)
-          Atomics.wait(pause, 0, 0, 5)
-        }
-      }
-      return action()
-    } finally {
-      if (acquired) fs.unlinkSync(lock)
-      fs.unlinkSync(ownerFile)
-    }
+  private withWriteLock<T>(action: SynchronousAction<T>): T {
+    return withFileLock<T>(this.file + '.lock', action, { kind: 'event', timeoutMs: 250 })
   }
 
   /** Bring the cache up to date with the file before serving a read or

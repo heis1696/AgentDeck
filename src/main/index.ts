@@ -11,6 +11,7 @@ import { AgentSessionRegistry } from './agent-sessions'
 import { MeetingController } from './meeting-controller'
 import { MeetingStore } from './meeting-store'
 import { TaskService } from './task-service'
+import { prepareManualTaskStart, reconcileStartupTasks } from './handoff'
 import { EventLog } from './event-log'
 import { startIssueRetention } from './retention'
 import { AutomationStore } from './automation-store'
@@ -25,7 +26,7 @@ import { createDshBackend } from './backends/dsh'
 import type { AgentBackend } from './backends/types'
 import type { AppSettings, Task, RunTrigger } from '../shared/types'
 import { ensureSharedDir } from './skills'
-import { sweepWorktrees } from './git'
+import { shouldKeepTaskWorktree, sweepWorktrees } from './git'
 import { registerIpcHandlers, type CreateTaskInput } from './ipc/register'
 import { SidecarManager } from './sidecar'
 import { PetController } from './pet'
@@ -129,14 +130,20 @@ if (hasInstanceLock) {
 function publishIssueUpdate(task: Task | null) {
   if (!task || !issueStore || !store) return
   const parent = task.parentTaskId ? store.get(task.parentTaskId) : undefined
-  issueStore.syncTask(task, parent)
+  issueStore.syncTaskEventually(task, parent)
   const issueId = task.issueId ?? `iss_${task.id}`
-  const issue = issueStore.get(issueId)
-  const run = issue ? issueStore.runForTask(task.id) : undefined
+  // The Task has already committed even when the Issue file is temporarily
+  // unavailable. Broadcast a stable derived Issue so the renderer can update
+  // immediately; IssueStore will replace it with the durable projection on
+  // its retry.
+  const issue = issueStore.issueForTask(task)
+  const run = (() => {
+    try { return issueStore.runForTask(task.id) } catch { return undefined }
+  })()
   mainWindow?.webContents.send('issues:updated', {
     taskId: task.id,
-    issueId: issue?.id ?? issueId,
-    issue: issue ?? null,
+    issueId: issue.id ?? issueId,
+    issue,
     run: run ?? null
   })
 }
@@ -301,13 +308,16 @@ const initMain = async (): Promise<void> => {
   })
   try { await sidecarManager.reconnect() } catch { /* compatibility fallback keeps main-process execution available */ }
   store = new TaskStore(app.getPath('userData'))
+  store.recoverDeadGitOperations()
   issueStore = new IssueStore(app.getPath('userData'))
-  issueStore.sync(store.list())
+  issueStore.syncEventually(store.list())
   // 启动清扫：回收上次会话遗留的委派 worktree（合并临时目录 + 已删任务的目录），后台执行不阻塞启动
   for (const dir of new Set(store.list().map((t) => t.worktree?.repoDir || t.workdir).filter(Boolean))) {
-    void sweepWorktrees(dir, (owner) => {
-      const task = store.get(owner)
-      return task?.status === 'queued' || task?.status === 'running'
+    void sweepWorktrees(dir, (owner) => shouldKeepTaskWorktree(store.list(), dir, owner), {
+      claimWorktree: (owner, merge) => {
+        const claim = store.claimWorktreeCleanup(dir, owner, merge)
+        return claim ? { release: () => { try { store.releaseGitOperation(claim) } catch {} } } : undefined
+      }
     }).catch(() => {})
   }
   goalStore = new GoalStore(app.getPath('userData'))
@@ -391,10 +401,10 @@ const initMain = async (): Promise<void> => {
     getAgents: () => agents,
     taskService,
     startTask: (taskId) => {
-      const task = store.get(taskId)
-      if (!task || task.status !== 'queued') return
-      store.update(taskId, { parked: undefined })
-      runner.enqueue(store.get(taskId)!)
+      // 与「▶ 启动」按钮、拖动启动共用同一次捕获身份的准备工作
+      const started = prepareManualTaskStart(store, taskId)
+      if (!started) return
+      runner.enqueue(started)
     },
     issueExists: (issueId) => !!issueStore.get(issueId),
     addIssueComment: (issueId, content, authorId) => { issueStore.addComment(issueId, content, { type: 'agent', id: authorId ?? 'meeting' }) },
@@ -402,62 +412,21 @@ const initMain = async (): Promise<void> => {
   })
   meetingController.recover()
   meetingController.subscribe((meeting) => mainWindow?.webContents.send('meetings:updated', meeting))
-  // 启动对账：执行存在于主进程内存里，快照里遗留的 running 在重启后必然是僵尸。
-  // store 的加载迁移已把它们翻成 failed 并登记在案（直接按 status 过滤会扑空——
-  // 轮到这里的它们早已不是 running，时间线会永远死止在最后一刻，比如卡在"⟳ 自动重试"）。
-  // 日志尾部已有 final 的（输出实际完成、只是状态没来得及落盘）补记为 done；其余留中断说明。
-  for (const stale of store.drainRestartInterrupted()) {
-    const events = store.readEvents(stale.id)
-    // 只有 final 就是日志最后一个事件时才可抢救（final 落盘后、状态落盘前崩溃）。
-    // 多回合任务里旧回合的 final 后面总跟着新回合的事件（追问/委派状态），那说明
-    // 被打断的是后继回合——按旧 final 抢救成 done 会把没跑完的回合谎报成完成。
-    const lastEvent = events[events.length - 1]
-    const lastFinal = lastEvent?.kind === 'final' && lastEvent.text ? lastEvent : undefined
-    const note = store.appendEvent(stale.id, {
-      ts: Date.now(),
-      kind: 'status',
-      text: lastFinal
-        ? '启动对账：检测到本任务在上次退出前已完成输出，自动标记为完成'
-        : '启动对账：应用重启导致执行中断，自动标记为失败（可「重新运行」或继续追问）'
-    })
-    store.update(stale.id, lastFinal
-      ? { status: 'done', endedAt: lastFinal.ts, result: lastFinal.text ?? stale.result }
-      : { status: 'failed', endedAt: Date.now() })
-    if (note) runner.pushEvent(stale.id, note)
-    notifyTaskChanged(store.get(stale.id) ?? stale)
-    // 委派领队被重启打断时，队员可能已交付——报告摘要留到 Issue，别随领队一起失联
-    const kids = store.list().filter((t) => t.parentTaskId === stale.id && (t.status === 'done' || t.status === 'failed'))
-    if (stale.issueId && kids.length) {
+  // 启动对账：执行只活在主进程内存里，快照里遗留的 running 只有在**执行身份被证实
+  // 已死**时才是僵尸——活跃或身份不可读的运行一律保留（租约过期不是死亡证据）。
+  // 接管统一走 store.recoverDeadRuns：锁外探活、锁内按捕获身份条件提交，每个死运行
+  // 只认领一次；日志尾部按捕获运行绑定，替换运行之前的旧日志不能决定它的结论。
+  reconcileStartupTasks({
+    store,
+    pushEvent: (taskId, event) => runner.pushEvent(taskId, event),
+    enqueue: (task) => runner.enqueue(task),
+    notifyTaskChanged,
+    relayInterruptedLeader: (stale, kids) => {
+      if (!stale.issueId) return
       const excerpts = kids.slice(0, 5).map((kid) => `- **${kid.title}**（${kid.status}）：${(kid.result ?? '').slice(0, 400) || '（无最终输出）'}`).join('\n')
       issueStore.addComment(stale.issueId, `⚠ 委派报告未送达：领队执行被应用重启打断。以下为队员报告摘要：\n${excerpts}`, { type: 'agent', id: 'relay' })
     }
-  }
-  // 排队启动依赖事件（enqueue / 上一跑落幕触发 pump），重启后事件源全消失，
-  // 遗留的 queued 会永远滞留——硬切接力的后继任务正是这么卡死的。启动对账分两路：
-  // ① 普通任务（自包含，如硬切后继）→ 补一次 enqueue 自动恢复，时间线留痕；
-  // ② goal 绑定 / 委派 worker → 置 parked 挂起（pump 只认非 parked，不停车迟早被
-  //    后续任何一次 pump 顺带扫走，等于静默恢复）。goal 重启后由 waiting_user 确认
-  //    续跑（launchNext 新建）；worker 的委派循环已死，跑了也无人收编，留 ▶ 手动入口。
-  for (const stale of store.list().filter((task) => task.status === 'queued' && !task.parked)) {
-    if (stale.goalId || stale.parentTaskId) {
-      const note = store.appendEvent(stale.id, {
-        ts: Date.now(),
-        kind: 'status',
-        text: '启动对账：应用重启，排队任务挂起待确认（可手动启动）'
-      })
-      store.update(stale.id, { parked: true })
-      if (note) runner.pushEvent(stale.id, note)
-      notifyTaskChanged(store.get(stale.id) ?? stale)
-    } else {
-      const note = store.appendEvent(stale.id, {
-        ts: Date.now(),
-        kind: 'status',
-        text: '启动对账：恢复上次排队中的执行'
-      })
-      if (note) runner.pushEvent(stale.id, note)
-      runner.enqueue(store.get(stale.id) ?? stale)
-    }
-  }
+  })
   presets = loadPresets()
   runner.attachPresets(() => presets)
   runner.attachIssueOps({
@@ -499,8 +468,7 @@ const initMain = async (): Promise<void> => {
     verifyAcceptance: (goal, task) => verifyAcceptance(goal, task),
     enqueueTask: (task) => runner.enqueue(task),
     startTask: (task) => {
-      store.update(task.id, { parked: undefined })
-      return store.get(task.id)!
+      return prepareManualTaskStart(store, task.id) ?? store.get(task.id) ?? task
     },
     cancelTask: (taskId) => runner.cancel(taskId),
     listTasks: () => store.list(),
@@ -532,15 +500,20 @@ const initMain = async (): Promise<void> => {
   runner.attachContinue(({ sourceTaskId, issueId, brief, start }) => {
     const source = store.get(sourceTaskId)
     if (!source) return null
-    const task = taskService.createHandoffTask({ sourceTaskId, issueId, brief, start })
-    if (!task) return null
-    if (start !== 'parked' && task.status === 'queued') runner.enqueue(task)
+    const resolved = taskService.resolveHandoffTask({ sourceTaskId, issueId, brief, start })
+    if (!resolved) return null
+    const { task, created } = resolved
+    if (!created) {
+      notifyTaskChanged(task)
+      return task
+    }
+    if (!task.parked && task.status === 'queued') runner.enqueue(task)
     else {
       notifyTaskChanged(task)
       // 停放的后继对用户是隐形的（调度泵与重启对账都跳过 parked）——落一条 Issue 评论
       // 把"等你启动"喊到用户看得到的地方，而不是只留在旧执行的时间线尾部。
-      // 只对新建（10s 内）落评论，幂等复用/重放不刷屏。
-      if (task.parked && task.issueId && Date.now() - task.createdAt < 10_000) {
+      // Only a newly created successor gets a visible handoff notice.
+      if (task.parked && task.issueId) {
         const firstLine = task.prompt.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? task.title
         issueStore.addComment(task.issueId, `⏸ 阶段接力已备好：${firstLine.slice(0, 80)}——下一阶段在等你启动（打开该 Issue 的最新执行，点「▶ 启动」）`, { type: 'agent', id: source.agentId ?? 'relay' })
       }

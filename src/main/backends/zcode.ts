@@ -15,7 +15,8 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import type { TaskEvent } from '../../shared/types'
-import type { AgentBackend, BackendSession, BackendSessionEvents } from './types'
+import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnStamp } from './types'
+import { bindTurn } from './types'
 import { isJsonObject, type JsonObject } from './cli-common'
 import { ZcodeConnection } from './zcode-transport'
 import { compactToolArgs, mergeTurnTexts as mergeTexts, runtimePreferences, sessionEvent, zcodeRecord, zcodeString } from './zcode-protocol'
@@ -122,7 +123,7 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
       if (!cfg.ok) return { ok: false, detail: `${cfg.detail} · ${nodeNote}` }
       return { ok: node.source !== 'fallback-electron', detail: `${bundle} · ${provider.detail} · ${cfg.detail} · ${nodeNote}` }
     },
-    async start({ prompt, workdir, mode, model, connection, events, resumeSessionId }) {
+    async start({ prompt, workdir, mode, model, connection, events: rawEvents, resumeSessionId, turn }) {
       const { nodePath, zcodePath } = getPaths()
       const bundle = findBundle(zcodePath || undefined)
       if (!bundle) throw new Error('找不到 zcode.cjs')
@@ -139,8 +140,18 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
       const conn = new ZcodeConnection(node.path, bundle, cwd)
       // 启动即注册硬停句柄：session/create 等握手请求挂死时（进程半死/连接无响应），
       // 调用方在 start 返回前也有手段杀掉进程，不会永久占住任务与并发槽
-      events.onLaunch?.({ stop: () => conn.kill() })
-      const emit = (e: Omit<TaskEvent, 'seq' | 'ts'>) => events.onEvent({ ...e, ts: Date.now() })
+      rawEvents.onLaunch?.({ stop: () => conn.kill() })
+      /**
+       * 常驻连接上"在飞回合"的发射通道：每个回合一个不可变通道（bindTurn 固定住身份），
+       * 换回合只换指针、绝不改写既有通道。没有回合身份时退回会话级通道（老调用方零变化），
+       * 归属由上层按"未标记回调"处理。
+       */
+      let active: BackendSessionEvents = turn ? bindTurn(rawEvents, turn) : rawEvents
+      const channel = () => active
+      const setTurn = (stamp?: BackendTurnStamp) => {
+        active = stamp ? bindTurn(rawEvents, stamp) : rawEvents
+      }
+      const emit = (e: Omit<TaskEvent, 'seq' | 'ts'>) => channel()?.onEvent({ ...e, ts: Date.now() })
 
       let turnResolver: ((v: { response: string; ok: boolean; error?: string }) => void) | null = null
       let currentText = ''
@@ -197,13 +208,13 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
         flushTurnEndWaiters()
         if (swallowingStaleTurnEnd) return
         emit({ kind: 'final', text: response || r.error || '' })
-        events.onTurnEnd(ended)
+        channel()?.onTurnEnd(ended)
       }
 
       conn.onMessage((m) => {
         // 任何线级消息都是进展信号（含被静默的思考增量/遥测/资源采样）：
         // 模型长时间思考、子代理在后台跑等静默阶段靠它给上层看门狗续命，避免误判超时
-        events.onHeartbeat?.()
+        channel()?.onHeartbeat?.()
         // 连接层合成的进程退出通知：回合仍在途时以错误收尾（lastTurnEnd 已置则本就无人在等）
         if (m.method === 'zcode.exit') {
           if (!lastTurnEnd) {
@@ -391,13 +402,13 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
             options
           }
           const reqId = m.id
-          if (events.onPermission) {
+          if (channel()?.onPermission) {
             emit({
               kind: 'status',
               text: `权限请求: ${req.toolName} (${req.riskLevel})`
             })
-            events
-              .onPermission(req)
+            channel()!
+              .onPermission!(req)
               .then((choice) => {
                 // An option id must never override a denial, including broker timeouts.
                 const chosen = options.find((option) => option.response.decision === choice.decision
@@ -448,7 +459,7 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
       }
       if (!sessionId) throw new Error('会话创建/resume 未返回 sessionId')
       sessionIdHolder.value = sessionId
-      events.onSessionId?.(sessionId)
+      channel()?.onSessionId?.(sessionId)
       await conn.request('session/subscribe', { sessionId, deliveryKind: 'desktop-continuous' })
       currentText = ''
       lastSegment = ''
@@ -460,7 +471,9 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
 
       const session: BackendSession = {
         sessionId,
-        async send(content: string) {
+        async send(content: string, turnStamp?: BackendTurnStamp) {
+          // 新回合先立新通道：旧通道连同它的身份一起作废，旧回合的迟到消息带不回新回合
+          setTurn(turnStamp)
           // 串行化：上一回合仍在跑（调用方已放弃等待/被中断）时，先停掉它并等终态，
           // 否则两个回合的流式事件与终态会互相错配——旧终态误 resolve 新等待、
           // 新终态又被 lastTurnEnd 去重守卫吞掉

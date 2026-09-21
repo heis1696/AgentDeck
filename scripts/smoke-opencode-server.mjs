@@ -1,11 +1,15 @@
 import { build } from 'esbuild'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { EventEmitter } from 'node:events'
 
 const root = path.resolve(import.meta.dirname, '..')
 const outfile = path.join(root, 'out', 'smoke-opencode-server.cjs')
 await build({ entryPoints: [path.join(root, 'src/main/backends/opencode-server.ts')], outfile, bundle: true, platform: 'node', format: 'cjs', target: 'node18' })
 const { createOpencodeServerBackend } = await import(pathToFileURL(outfile).href)
+const wrapperOutfile = path.join(root, 'out', 'smoke-opencode-wrapper.cjs')
+await build({ entryPoints: [path.join(root, 'src/main/backends/opencode.ts')], outfile: wrapperOutfile, bundle: true, platform: 'node', format: 'cjs', target: 'node18' })
+const { createOpencodeBackend } = await import(pathToFileURL(wrapperOutfile).href)
 
 const calls = []
 const seenAfter = []
@@ -64,12 +68,22 @@ if (!events.some((event) => event.type === 'session.compacted')) throw new Error
 if (!events.some((event) => event.type === 'session.fork')) throw new Error('fork event mapping failed')
 if (!events.some((event) => event.kind === 'final' && event.text === 'server-ok')) throw new Error('final event mapping failed')
 await session.stop()
-await session.close()
+const deletesBeforeDetach = calls.filter((call) => call.method === 'DELETE').length
+await session.detach()
+if (calls.filter((call) => call.method === 'DELETE').length !== deletesBeforeDetach) throw new Error('detach deleted the resumable server session')
+let resumedEnded
+const resumed = await backend.start({
+  prompt: 'resume safely', workdir: 'D:/smoke', mode: 'build', resumeSessionId: session.sessionId,
+  events: { onEvent() {}, onTurnEnd: (result) => { resumedEnded = result } }
+})
+if (!resumedEnded?.ok || resumed.sessionId !== session.sessionId) throw new Error('detached server session could not resume')
+if (calls.filter((call) => call.path === '/session' && call.method === 'POST').length !== 1) throw new Error('resume created a replacement session instead of reusing the durable id')
+await resumed.close()
 if (!calls.some((call) => call.method === 'POST' && call.path.endsWith('/abort'))) throw new Error('interrupt endpoint was not called')
 if (!calls.some((call) => call.method === 'DELETE' && call.path === '/session/ses-smoke')) throw new Error('close endpoint was not called')
 if (!calls.some((call) => call.method === 'POST' && call.path.endsWith('/reply'))) throw new Error('permission reply endpoint was not called')
 if (!seenAfter.length || seenAfter.some((value) => value === null)) throw new Error('SSE after cursor was not supplied')
-console.log('✓ OpenCode server session, permission, event mapping, interrupt/close and SSE cursor')
+console.log('✓ OpenCode server session, permission, event mapping, detach/resume, interrupt/close and SSE cursor')
 
 wireEvents[0].properties.options = [
   { optionId: 'once', response: { decision: 'allow' } },
@@ -97,3 +111,22 @@ for (const [choice, expected] of [
   } finally { await permissionSession.close() }
 }
 console.log('PASS OpenCode denial overrides conflicting ids; explicit once/always options retain scope')
+
+let serverStarts = 0
+let serverStops = 0
+const fakeChild = new EventEmitter()
+const wrapped = createOpencodeBackend({
+  required: true,
+  skipVersionProbe: true,
+  fetch: fakeFetch,
+  startServer: async () => { serverStarts++; return { url: 'http://fake', child: fakeChild } },
+  stopServer: async () => { serverStops++ }
+})
+const wrappedFirst = await wrapped.start({ prompt: 'wrapped first', workdir: 'D:/smoke', mode: 'build', events: { onEvent() {}, onTurnEnd() {} } })
+await wrappedFirst.detach()
+if (serverStarts !== 1 || serverStops !== 0) throw new Error(`detach leaked or stopped the production server lease (${serverStarts}/${serverStops})`)
+const wrappedSecond = await wrapped.start({ prompt: 'wrapped resume', workdir: 'D:/smoke', mode: 'build', resumeSessionId: wrappedFirst.sessionId, events: { onEvent() {}, onTurnEnd() {} } })
+if (serverStarts !== 1 || serverStops !== 0) throw new Error(`resume acquired a duplicate production server lease (${serverStarts}/${serverStops})`)
+await wrappedSecond.close()
+if (serverStops !== 1) throw new Error(`final close did not release exactly one production server lease (${serverStops})`)
+console.log('PASS production OpenCode wrapper transfers one local-server lease across detach/resume')

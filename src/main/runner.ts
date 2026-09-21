@@ -1,11 +1,13 @@
 // 任务运行器：队列 + 生命周期 + 事件管道
 // 状态机：queued → running → done | failed | cancelled
-import type { Task, TaskEvent, WorktreeInfo } from '../shared/types'
+import type { ExecutionOwner, Task, TaskEvent, WorktreeInfo } from '../shared/types'
 import { createHash } from 'node:crypto'
-import type { TaskStore } from './store'
-import type { AgentBackend, BackendSession, PermissionRequest, BackendTurnResult } from './backends/types'
+import { sameExecutionOwner, type TaskExpectation, type TaskStore } from './store'
+import { createExecutionOwner } from './persistence'
+import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnStamp, PermissionRequest, BackendTurnResult } from './backends/types'
 import { runDelegationLoop, parseContinueMerged, stripContinue, parseDelegates, parseConsultsMerged, stripConsults, parseInvestigatesMerged, stripInvestigates, ancestorBudget, sanitizeChildPrompt, MAX_DEPTH, MAX_TOTAL_ROUNDS, type AgentLike, type DelegateCall, type ConsultCall, type InvestigateCall } from './delegate'
-import { buildAgentPrompt, buildDelegationBlock, buildChildPrompt, CONTINUE_BLOCK, HANDOFF_CUE, RETITLE_PROMPT } from './prompts'
+import { buildAgentPrompt, buildDelegationBlock, buildChildPrompt, CONTINUE_BLOCK, HANDOFF_CUE, HANDOFF_RECEIVE_CUE, HANDOFF_START_CONFIRMED_CUE, RETITLE_PROMPT } from './prompts'
+import { findHandoffSuccessor, prepareManualTaskStart, repeatsHandoffPhase } from './handoff'
 import { isGitRepo, createWorktree, currentBranch, setWorktreeOwner, reclaimWorktree } from './git'
 
 /** API 预设（主进程 presets.ts 的 ApiPreset 的运行时子集，避免环依赖） */
@@ -40,7 +42,7 @@ import { PermissionBroker } from './permission-broker'
 import { TaskFinalizer } from './task-finalizer'
 import { Executor } from './executor'
 import { decideRetry } from './retry-policy'
-import { TurnLifecycle } from './turn-lifecycle'
+import { TurnLifecycle, type EventGateToken } from './turn-lifecycle'
 import { DSH_TURN_BUDGET_MS } from './backends/dsh'
 
 /** Main-process task creation dependency. Kept structural to avoid coupling
@@ -93,6 +95,137 @@ const RETITLE_BUDGET_EXCEEDED = 'retitle-budget-exceeded'
 /** 后端连接已死的特征：命中后丢弃内存会话、降级 resume 重建（不再需要重启应用） */
 const SESSION_DEAD_RE = /连接已关闭|进程退出|EPIPE|ENOTCONN|ECONNRESET|ECONNREFUSED|disconnected/i
 
+/**
+ * One execution Run, captured when its conditional claim committed.
+ *
+ * Every durable write produced by that Run's asynchronous work carries this
+ * identity as its `expected` condition. A stale callback therefore cannot
+ * finish, re-label or re-session a newer Run on the same compatibility Task,
+ * no matter which process it came from. The owner is absent only for legacy or
+ * hand-authored records whose identity is unknown; such a record only matches
+ * other owner-less records, so an unknown owner is never silently adopted.
+ */
+interface RunClaim {
+  taskId: string
+  runId: string
+  owner?: ExecutionOwner
+}
+
+/** A write that is only valid while the claimed Run is still the running one. */
+function runCondition(claim: RunClaim, extra: TaskExpectation = {}): TaskExpectation {
+  return { ...extra, status: 'running', runId: claim.runId, executionOwner: claim.owner }
+}
+
+/** A write that belongs to the claimed Run regardless of its current status. */
+function runIdentity(claim: RunClaim, extra: TaskExpectation = {}): TaskExpectation {
+  return { ...extra, runId: claim.runId, executionOwner: claim.owner }
+}
+
+/**
+ * One accepted prompt→reply turn on one backend session.
+ *
+ * The record is immutable: `claim`, `generation`, `stamp` and its callback set
+ * are fixed when the turn opens and are never re-pointed. A callback is judged
+ * against the record it was stamped with, so opening a later turn can never
+ * re-authorize the closures of an earlier one — the failure mode of the old
+ * shared-and-mutated `EventContext`.
+ */
+interface TurnRecord {
+  readonly taskId: string
+  readonly seq: number
+  readonly stamp: BackendTurnStamp
+  readonly generation: number
+  readonly claim: RunClaim
+  readonly token: EventGateToken
+  readonly events: BackendSessionEvents
+}
+
+/** Reported when a session cannot prove which turn a callback belongs to. */
+export const TURN_ISOLATION_REQUIRED = 'session-turn-identity-unavailable'
+
+/**
+ * Correlates the callbacks of one `BackendSession` with the turn that produced
+ * them. The session-level channel (created once, handed to the adapter at
+ * start) forwards into this router; only the router decides which immutable
+ * `TurnRecord` — if any — receives a callback:
+ *
+ * - a callback stamped with a known, still-open turn id goes to that turn;
+ * - an unknown or already-closed id is dropped, never re-credited to the
+ *   newest turn;
+ * - a session that did **not** declare `turnScoped` cannot distinguish turns at
+ *   all, so it is used for its isolated first turn only. Every later turn
+ *   rebuilds the connection from its session id instead of guessing.
+ */
+class SessionTurnRouter {
+  private readonly open = new Map<string, TurnRecord>()
+  private currentId?: string
+  private seq = 0
+  /** 未声明回合身份的连接：未标记回调只能归给当时唯一在飞的回合 */
+  legacy = true
+  /** 有回合没收终态就被放弃：未标记回调的归属不再可信 */
+  ambiguous = false
+  /** 会话 id（登记后可知；回合 token 用它做 owner 门禁） */
+  owner?: string
+  /** 最近一次开在此连接上的运行身份（closeSession 的归属兜底） */
+  lastClaim?: RunClaim
+
+  nextSeq() {
+    return ++this.seq
+  }
+
+  openTurn(record: TurnRecord) {
+    this.open.set(record.stamp.id, record)
+    this.currentId = record.stamp.id
+  }
+
+  /** Terminal admitted: the turn may no longer receive anything. */
+  closeTurn(id: string) {
+    this.open.delete(id)
+  }
+
+  /**
+   * The turn was given up (watchdog, cancel, send failure) before any terminal.
+   * Its callbacks are dropped from now on, and a connection that cannot stamp
+   * callbacks is marked unpinnable so the next turn rebuilds it.
+   */
+  abandonTurn(id?: string) {
+    if (!this.currentId) return
+    if (id !== undefined && id !== this.currentId) return
+    const record = this.open.get(this.currentId)
+    if (!record) return
+    this.open.delete(record.stamp.id)
+    if (this.legacy) this.ambiguous = true
+  }
+
+  abandonOpen() {
+    this.abandonTurn()
+  }
+
+  /** Drop every callback still associated with this connection. */
+  retire(reason: 'closed' | 'replaced' = 'closed') {
+    this.open.clear()
+    this.currentId = undefined
+    if (reason === 'replaced') this.ambiguous = true
+  }
+
+  /** Immutable routing decision for one adapter callback. */
+  resolve(stamp?: BackendTurnStamp): TurnRecord | undefined {
+    if (stamp && typeof stamp.id === 'string') return this.open.get(stamp.id)
+    if (!this.legacy) return undefined
+    if (this.ambiguous) return undefined
+    return this.currentId ? this.open.get(this.currentId) : undefined
+  }
+
+  current(): TurnRecord | undefined {
+    return this.currentId ? this.open.get(this.currentId) : undefined
+  }
+
+  /** A connection without turn identity may only be reused while unambiguous. */
+  mayOpenNewTurn() {
+    return !this.ambiguous
+  }
+}
+
 export class TaskRunner {
   private store: TaskStore
   private backends: Map<string, AgentBackend>
@@ -104,8 +237,14 @@ export class TaskRunner {
     doomLoopThreshold?: number
   }
   private sessions = new Map<string, BackendSession>()
-  /** Bind a backend session's callbacks to the currently accepted turn. */
-  private sessionEventContexts = new WeakMap<BackendSession, { generation: number; sessionOwner?: string }>()
+  /** Runs this runner committed to. Only a committed claim may start a backend
+   *  or authorize a later write; the durable record is the tie-breaker. */
+  private claims = new Map<string, RunClaim>()
+  /** Per-session turn router: the single place that maps an adapter callback to
+   *  a turn. Turn records are immutable; only the routing pointer moves. */
+  private sessionTurns = new WeakMap<BackendSession, SessionTurnRouter>()
+  /** Turn sequence for stamp ids (monotonic across sessions of one runner). */
+  private turnSeq = 0
   /** 启动即注册的中止句柄（一次性 CLI 在 session 返回前就要能取消） */
   private launchHandles = new Map<string, { stop: () => void | Promise<unknown> }>()
   /** Delayed provider retries must be cancellable and must not outlive shutdown. */
@@ -184,14 +323,20 @@ export class TaskRunner {
     // Keep the in-memory gate aligned with the durable compatibility record;
     // this makes terminal transitions visible before any late callback arrives.
     this.lifecycle(taskId).setStatus(task.status)
+    // Follow-up turns have no scheduler slot to release. Wake after terminal
+    // writes, even if projection fails; defer until retry/cancel bookkeeping ends.
+    if ((task.status === 'done' || task.status === 'failed' || task.status === 'cancelled')
+      && this.store.list().some((next) => next.continuesFrom === taskId && next.status === 'queued' && !next.parked)) {
+      queueMicrotask(() => this.scheduler.enqueue())
+    }
     // Keep projections in step with every runner lifecycle transition before
     // notifying renderer consumers. The callback is optional for CLI/smoke use.
     this.onTaskChanged?.(task)
     this.ports.send('task:updated', task)
   }
   /** 记录用户输入（首条 prompt / 追问），对话视图按 user 事件分气泡 */
-  private recordUser(taskId: string, text: string) {
-    const full = this.store.appendEvent(taskId, { ts: Date.now(), kind: 'user', text })
+  private recordUser(taskId: string, text: string, expected: TaskExpectation = {}) {
+    const full = this.store.appendEvent(taskId, { ts: Date.now(), kind: 'user', text }, expected)
     if (full) this.pushEvent(taskId, full)
   }
   pushEvent(taskId: string, e: TaskEvent) {
@@ -207,65 +352,149 @@ export class TaskRunner {
     return lifecycle
   }
 
-  /** 事件管道：落盘 + 推 UI；onTurnEnd 可挂回调 */
-  private makeEvents(taskId: string, onTurnEnd?: (r: BackendTurnResult) => void, context?: { generation: number; sessionOwner?: string }) {
+  /**
+   * 事件管道：落盘 + 推 UI；onTurnEnd 可挂回调。
+   *
+   * 闭包只读本回合的不可变身份（claim / generation / token），运行器任何时刻都不再
+   * 改写它——给旧回调"重新授权"的唯一途径因此消失。
+   */
+  private makeTurnEvents(
+    taskId: string,
+    router: SessionTurnRouter,
+    claim: RunClaim,
+    token: EventGateToken,
+    stamp: BackendTurnStamp,
+    onTurnEnd?: (r: BackendTurnResult) => void
+  ): BackendSessionEvents {
     const life = this.lifecycle(taskId)
-      const active = (kind?: string, terminal = false) => {
+    const active = (kind?: string, terminal = false) => {
+      if (!this.isCurrentRun(claim)) return false
       const task = this.store.get(taskId)
       life.setStatus(task?.status ?? 'queued')
-      const token = context ? { generation: context.generation, sessionOwner: context.sessionOwner } : life.gate.token()
       return life.accepts(token, { kind, terminal })
     }
     return {
       onEvent: (e: Omit<TaskEvent, 'seq'>) => {
-        if (!active(e.kind)) return
-        this.touchWatchdog(taskId)
-        if (e.kind === 'text') this.sniffDelegates(taskId, e.text)
+        if (!active(e.kind)) {
+          // 标题回合的普通事件被静默，但线级进展照样给看门狗续命
+          if (life.gate.state.titleMode && life.accepts(token)) this.touchWatchdog(taskId)
+          return
+        }
         if (e.kind === 'tool') {
-          this.observeToolCall(taskId, e)
           // The runner owns the live PermissionBroker decision in production.
           // Mark the forwarded event so GoalController does not run a second
           // doom-loop state machine for the same tool invocation.
           const data = e.data && typeof e.data === 'object' ? e.data as Record<string, unknown> : {}
           e = { ...e, data: { ...data, runnerDoomHandled: true } }
         }
+        // The durable append is conditional on the claimed Run: events from an
+        // abandoned turn are rejected by the store, not just by this process.
+        // Host-side consumers only see events the store accepted for this Run.
+        const full = this.store.appendEvent(taskId, e, runCondition(claim))
+        if (!full) return
+        if (!active(e.kind)) return
+        this.touchWatchdog(taskId)
+        if (e.kind === 'text') this.sniffDelegates(taskId, e.text)
+        if (e.kind === 'tool') this.observeToolCall(taskId, e, claim)
         this.ports.onTaskEvent?.(taskId, e)
-        const full = this.store.appendEvent(taskId, e)
-        if (full) this.pushEvent(taskId, full)
+        this.pushEvent(taskId, full)
       },
       onHeartbeat: () => { if (active()) this.touchWatchdog(taskId) },
       onTurnEnd: (r: BackendTurnResult) => {
-        if (!active('final', true)) return
-        const token = context ? { generation: context.generation, sessionOwner: context.sessionOwner } : life.gate.token()
+        if (!active('final', true)) {
+          // 终态没被接受（运行器已换代/任务已终态）：本回合就此作废，回调不再可投递
+          router.abandonTurn(stamp.id)
+          return
+        }
         const response = typeof r.response === 'string' ? r.response.trim() : ''
+        // 同一回合的重复终态按内容去重（标题回合不可被复述的旧终态顶掉）。回合保持
+        // 开启，真正属于它的终态仍能落地。回合身份明确的适配器不需要这条，退回复用
+        // 连接的老后端仍然依赖它。
         if (life.gate.state.titleMode && this.lastTerminalResponses.get(taskId) === response) return
         this.lastTerminalResponses.set(taskId, response)
+        // 先收口本回合再投递：投递可能同步开启下一回合（标题/回灌）。
+        router.closeTurn(stamp.id)
         onTurnEnd?.(r)
         // TurnLifecycle owns the one-shot waiter and generation check. This
         // keeps terminal admission on the same gate as ordinary events.
         life.resolveResume(token, r)
       },
-      onLaunch: (handle: { stop: () => void | Promise<unknown> }) => {
-        if (!active()) {
-          void Promise.resolve(handle.stop()).catch(() => {})
-          return
-        }
-        this.launchHandles.set(taskId, handle)
-        life.registerLaunch(handle.stop)
-      },
       onSessionId: (sessionId: string) => {
         if (!active() || !sessionId) return
         const task = this.store.get(taskId)
         if (!task || task.sessionId === sessionId) return
-        if (context) context.sessionOwner = sessionId
+        // A resume id belongs to one Run. Binding it conditionally keeps a
+        // delayed session callback from repointing a newer Run.
+        if (!this.store.updateIf(taskId, runCondition(claim), { sessionId })) return
         life.gate.setSessionOwner(sessionId)
-        this.store.update(taskId, { sessionId })
         this.pushTask(taskId)
       },
       onPermission: (req: PermissionRequest) => active()
         ? this.askPermission(taskId, req)
         : Promise.resolve({ decision: 'deny' as const })
     }
+  }
+
+  /**
+   * 会话级通道（一个 BackendSession 一个，交给适配器后不再改变）：把适配器回调
+   * 连同它携带的回合身份交给路由器。身份不明的回调在这里被丢弃，不会被记到
+   * "当前回合"头上。
+   */
+  private sessionChannel(router: SessionTurnRouter): BackendSessionEvents {
+    const pick = (stamp?: BackendTurnStamp) => router.resolve(stamp)
+    return {
+      onEvent: (e, stamp) => { pick(stamp)?.events.onEvent(e) },
+      onHeartbeat: (stamp) => { pick(stamp)?.events.onHeartbeat?.() },
+      onTurnEnd: (r, stamp) => { pick(stamp)?.events.onTurnEnd(r) },
+      onPermission: (req, stamp) => {
+        const record = pick(stamp)
+        return record?.events.onPermission?.(req) ?? Promise.resolve({ decision: 'deny' as const })
+      },
+      onSessionId: (sessionId, stamp) => { pick(stamp)?.events.onSessionId?.(sessionId) },
+      onLaunch: (handle) => {
+        const record = router.current()
+        if (!record || !this.isCurrentRun(record.claim) || !this.lifecycle(record.taskId).accepts(record.token)) {
+          void Promise.resolve(handle.stop()).catch(() => {})
+          return
+        }
+        this.launchHandles.set(record.taskId, handle)
+        this.lifecycle(record.taskId).registerLaunch(handle.stop)
+      }
+    }
+  }
+
+  /** 开启一个回合：身份一经创建即冻结，之后只读。 */
+  private openTurn(
+    taskId: string,
+    router: SessionTurnRouter,
+    claim: RunClaim,
+    generation: number,
+    sessionOwner: string | undefined,
+    onTurnEnd?: (r: BackendTurnResult) => void
+  ): TurnRecord {
+    const seq = router.nextSeq()
+    const stamp: BackendTurnStamp = Object.freeze({
+      seq,
+      id: `turn_${taskId}_${generation}_${++this.turnSeq}_${Math.random().toString(36).slice(2, 8)}`
+    })
+    const token: EventGateToken = Object.freeze({ generation, sessionOwner })
+    const events = this.makeTurnEvents(taskId, router, claim, token, stamp, onTurnEnd)
+    const record: TurnRecord = { taskId, seq, stamp, generation, claim, token, events }
+    router.lastClaim = claim
+    router.openTurn(record)
+    return record
+  }
+
+  /** 会话仍是当前运行、且能证明新回合归属时，才允许在同一连接上开新回合。 */
+  private sessionMayOpenNewTurn(session: BackendSession): boolean {
+    const router = this.sessionTurns.get(session)
+    if (!router) return false
+    return session.turnScoped === true && router.mayOpenNewTurn()
+  }
+
+  /** 关掉一个连接的归属：之后它吐出的任何回调都不再被采纳。 */
+  private retireSession(session: BackendSession, reason: 'closed' | 'replaced' = 'closed') {
+    this.sessionTurns.get(session)?.retire(reason)
   }
 
   /** 权限确认：推给 UI，5 分钟无响应自动拒绝（领队/worker 共用） */
@@ -290,7 +519,7 @@ export class TaskRunner {
   }
 
   /** Convert backend tool events into an auditable, one-shot doom-loop approval. */
-  private observeToolCall(taskId: string, event: Omit<TaskEvent, 'seq'>) {
+  private observeToolCall(taskId: string, event: Omit<TaskEvent, 'seq'>, claim: RunClaim) {
     // Doom-loop is a Goal-mode guard. Ordinary Tasks retain their existing
     // permission behavior and must not be paused by Goal policy.
     if (!this.store.get(taskId)?.goalId) return
@@ -314,8 +543,9 @@ export class TaskRunner {
       kind: 'status',
       text: `doom-loop: ${reason}`,
       data: { stopReason: 'doom_loop', toolName: event.text ?? '', args }
-    })
-    if (full) this.pushEvent(taskId, full)
+    }, runCondition(claim))
+    if (!full) return
+    this.pushEvent(taskId, full)
     const request: PermissionRequest = {
       requestId,
       toolName: String(event.text ?? ''),
@@ -328,14 +558,19 @@ export class TaskRunner {
       ]
     }
     void this.askPermission(taskId, request).then((decision) => {
+      // The answer belongs to the Run that asked for it. While the prompt was
+      // pending a newer Run may have installed its own doom-loop window; a
+      // stale answer must neither clear that window nor write into it.
+      if (!this.isCurrentRun(claim)) return
       if (decision.decision === 'allow') {
         this.toolWindows.delete(taskId)
-        const allowed = this.store.appendEvent(taskId, { ts: Date.now(), kind: 'status', text: 'doom-loop: 人工审批通过，继续执行', data: { stopReason: 'doom_loop_approved' } })
+        const allowed = this.store.appendEvent(taskId, { ts: Date.now(), kind: 'status', text: 'doom-loop: 人工审批通过，继续执行', data: { stopReason: 'doom_loop_approved' } }, runCondition(claim))
         if (allowed) this.pushEvent(taskId, allowed)
         return
       }
-      const denied = this.store.appendEvent(taskId, { ts: Date.now(), kind: 'status', text: 'doom-loop: 未获人工审批，停止当前回合', data: { stopReason: 'doom_loop_denied' } })
+      const denied = this.store.appendEvent(taskId, { ts: Date.now(), kind: 'status', text: 'doom-loop: 未获人工审批，停止当前回合', data: { stopReason: 'doom_loop_denied' } }, runCondition(claim))
       if (denied) this.pushEvent(taskId, denied)
+      if (!this.store.matches(taskId, runCondition(claim))) return
       void Promise.resolve(this.sessions.get(taskId)?.stop()).catch(() => {})
     }).catch(() => {})
   }
@@ -422,6 +657,9 @@ export class TaskRunner {
   }
   private bumpTurnGen(taskId: string) {
     const life = this.lifecycle(taskId)
+    // 换代即作废在飞回合：它的回调从此不再可投递，无法归属的连接标记为不可复用
+    const session = this.sessions.get(taskId)
+    if (session) this.sessionTurns.get(session)?.abandonOpen()
     // TurnLifecycle is the authority for callback generations. A new
     // generation starts ownerless so synchronous start callbacks can be
     // admitted; the session owner is installed as soon as start resolves.
@@ -431,18 +669,31 @@ export class TaskRunner {
     return gen
   }
 
+  /**
+   * Close a provider session that resolved for a Run this runner no longer
+   * owns. It was never installed in memory, so it is stopped directly instead
+   * of going through the task-keyed session map.
+   */
+  private async closeLateSession(session: BackendSession) {
+    await this.awaitCleanup(() => session.stop())
+    await this.awaitCleanup(() => session.close())
+  }
+
   /** 关闭并移除内存会话（容错）：防止放弃的会话继续在后台跑、往任务日志里交错写事件 */
-  async closeSession(taskId: string) {
+  async closeSession(taskId: string, expected?: TaskExpectation, preserveProviderSession = false) {
+    const s = this.sessions.get(taskId)
+    const claim = this.claims.get(taskId) ?? (s && this.sessionTurns.get(s)?.lastClaim)
+    if (expected && (!claim || claim.runId !== expected.runId || !sameExecutionOwner(claim.owner, expected.executionOwner))) return
     this.clearRetry(taskId)
     this.bumpTurnGen(taskId)
     this.earlySpawns.delete(taskId)
     this.delegateRejections.delete(taskId)
     this.lastTerminalResponses.delete(taskId)
-    const s = this.sessions.get(taskId)
     if (!s) return
     this.sessions.delete(taskId)
+    this.retireSession(s)
     await this.awaitCleanup(() => s.stop())
-    await this.awaitCleanup(() => s.close())
+    await this.awaitCleanup(() => preserveProviderSession && s.detach ? s.detach() : s.close())
   }
 
   /** Release in-memory lifecycle state after IPC removes a terminal task. */
@@ -450,12 +701,10 @@ export class TaskRunner {
     this.clearRetry(taskId)
     this.disarmWatchdog(taskId)
     this.launchHandles.delete(taskId)
+    this.claims.delete(taskId)
     const session = this.sessions.get(taskId)
     this.sessions.delete(taskId)
-    if (session) {
-      await this.awaitCleanup(() => session.stop())
-      await this.awaitCleanup(() => session.close())
-    }
+    if (session) this.retireSession(session)
     this.permissionBroker.cancelTask(taskId)
     this.toolWindows.delete(taskId)
     this.earlySpawns.delete(taskId)
@@ -463,6 +712,10 @@ export class TaskRunner {
     this.lastTerminalResponses.delete(taskId)
     this.turnLifecycles.get(taskId)?.dispose()
     this.turnLifecycles.delete(taskId)
+    if (session) {
+      await this.awaitCleanup(() => session.stop())
+      await this.awaitCleanup(() => session.close())
+    }
   }
 
   private clearRetry(taskId: string) {
@@ -474,28 +727,42 @@ export class TaskRunner {
   }
 
   /** 回合成功后的收尾：取最终结果 + git 快照 + 用量聚合 + 状态落盘 */
-  private async finalizeDone(taskId: string, directResult?: string) {
-    await this.finalizer.finalizeDone(taskId, directResult)
+  private async finalizeDone(taskId: string, directResult: string | undefined, claim: RunClaim) {
+    await this.finalizer.finalizeDone(taskId, directResult, runCondition(claim))
   }
 
-  /** 失败落库：原始错误 + 分类解读（P1） */
-  private failTask(taskId: string, error: string, expectedRunId?: string) {
+  /** 失败落库：原始错误 + 分类解读（P1）。
+   *  `claim` 是启动该回合前捕获的运行身份；只有它仍是当前运行才允许落终态。 */
+  private failTask(taskId: string, error: string, claim?: RunClaim) {
     const task = this.store.get(taskId)
-    if (!task || (expectedRunId !== undefined && !this.isRunningRun(taskId, expectedRunId))) return false
+    if (!task) return false
     // A queued task with an unavailable backend never entered execution, but
     // it still needs a terminal state so the scheduler cannot dispatch it forever.
     if (task.status !== 'queued' && !canTransition(task.status, 'failed', 'runner')) return false
+    // Both paths write conditionally on the identity observed before the
+    // failure was decided: a run that lost its claim cannot fail a newer one.
+    const expected: TaskExpectation = claim
+      ? runCondition(claim)
+      : { status: 'queued', runId: task.runId, executionOwner: task.executionOwner }
     // 回合失败：流式期间基于半截输出提前建的单一并撤销（无人收编/回灌，也不该被信任）
+    if (!this.store.updateIf(taskId, expected, { status: 'failed', endedAt: Date.now(), error, failure: classifyFailure({ error }) })) return false
     this.abandonEarlySpawns(taskId)
-    this.store.update(taskId, { status: 'failed', endedAt: Date.now(), error, failure: classifyFailure({ error }) })
+    if (claim && this.claims.get(taskId) === claim) this.claims.delete(taskId)
     this.lifecycle(taskId).setStatus('failed')
     this.pushTask(taskId)
     return true
   }
 
-  private isRunningRun(taskId: string, runId: string | undefined) {
-    const task = this.store.get(taskId)
-    return task?.status === 'running' && task.runId === runId
+  /** Resolve a caller-supplied run id to the claim this runner committed.
+   *  A run id this runner never claimed cannot authorize turns or writes. */
+  private claimForRun(taskId: string, runId?: string): RunClaim | undefined {
+    const claim = this.claims.get(taskId)
+    return claim && (runId === undefined || claim.runId === runId) ? claim : undefined
+  }
+
+  /** True while the exact claimed Run is still the committed running one. */
+  private isCurrentRun(claim: RunClaim | undefined): claim is RunClaim {
+    return !!claim && this.store.matches(claim.taskId, runCondition(claim))
   }
 
   enqueue(task: Task) {
@@ -557,9 +824,9 @@ export class TaskRunner {
     this.issueOps?.addIssueComment?.(issueId, text)
   }
 
-  /** 执行日志留痕（状态类事件：落盘 + 推 UI） */
-  private note(taskId: string, text: string) {
-    const full = this.store.appendEvent(taskId, { ts: Date.now(), kind: 'status' as const, text })
+  /** 执行日志留痕（状态类事件：落盘 + 推 UI）；expected 限定该事件属于哪次运行 */
+  private note(taskId: string, text: string, expected: TaskExpectation = {}) {
+    const full = this.store.appendEvent(taskId, { ts: Date.now(), kind: 'status' as const, text }, expected)
     if (full) this.pushEvent(taskId, full)
   }
 
@@ -605,10 +872,15 @@ export class TaskRunner {
    * 派单 key——**永不清空**。缓冲区里旧标签文本随会话一直存在，若 take 清掉登记，
    * 之后任何一条 text 事件的重扫描都会把同一派单再建一遍（生产事故：同一任务派两次）。
    */
-  async takeEarlySpawns(taskId: string): Promise<{ entries: Array<{ call: DelegateCall; childId: string }>; seenKeys: Set<string> }> {
+  async takeEarlySpawns(taskId: string, expectedRunId?: string): Promise<{ entries: Array<{ call: DelegateCall; childId: string }>; seenKeys: Set<string> }> {
+    const empty = () => ({ entries: [] as Array<{ call: DelegateCall; childId: string }>, seenKeys: new Set<string>() })
+    // 只收编仍属于该运行的内存状态：陈旧委派循环不得偷走替换运行的提前建单
+    if (expectedRunId !== undefined && this.claims.get(taskId)?.runId !== expectedRunId) return empty()
     const state = this.earlySpawns.get(taskId)
-    if (!state) return { entries: [], seenKeys: new Set() }
+    if (!state) return empty()
     if (state.pending.length) await Promise.allSettled(state.pending)
+    // 等待期间运行可能已被替换：收编前重新核对归属
+    if (expectedRunId !== undefined && this.claims.get(taskId)?.runId !== expectedRunId) return empty()
     state.pending = []
     const entries: Array<{ call: DelegateCall; childId: string }> = []
     for (const [key, entry] of state.spawned) {
@@ -625,8 +897,10 @@ export class TaskRunner {
     list.push(reason)
     this.delegateRejections.set(taskId, list)
   }
-  /** 取走并清空本任务被拒派单的原因（委派循环每轮回灌用；不残留到后续轮） */
-  takeDelegateRejections(taskId: string): string[] {
+  /** 取走并清空本任务被拒派单的原因（委派循环每轮回灌用；不残留到后续轮）。
+   *  expectedRunId 限定只有仍持有该运行的循环才能取走，替换运行不被陈旧循环掏空。 */
+  takeDelegateRejections(taskId: string, expectedRunId?: string): string[] {
+    if (expectedRunId !== undefined && this.claims.get(taskId)?.runId !== expectedRunId) return []
     const list = this.delegateRejections.get(taskId) ?? []
     this.delegateRejections.delete(taskId)
     return list
@@ -689,10 +963,17 @@ export class TaskRunner {
   async spawnDelegateChild(taskId: string, call: DelegateCall, expectedRunId = this.store.get(taskId)?.runId): Promise<Task | null> {
     const task = this.store.get(taskId)
     if (!task) return null
-    const active = () => expectedRunId === undefined
-      ? this.store.get(taskId)?.runId === undefined
-      : this.isRunningRun(taskId, expectedRunId)
+    const claim = this.claimForRun(taskId, expectedRunId)
+    // Only a committed claim may drive a running parent. A parent that is not
+    // running yet (queued/parked) has no Run to invalidate, so the observed
+    // record is the whole condition; a running record this runner never
+    // claimed is foreign and is never adopted.
+    const expected: TaskExpectation = claim ? runCondition(claim) : { runId: expectedRunId }
+    const active = () => claim
+      ? this.store.matches(taskId, expected)
+      : this.store.get(taskId)?.status !== 'running' && this.store.get(taskId)?.runId === expectedRunId
     if (!active()) return null
+    const guardedNote = (text: string) => this.note(taskId, text, expected)
     const team = this.getTeam?.() ?? []
     const me = team.find((a) => a.id === task.agentId)
     const subs = (me?.subordinates ?? []).map((id) => team.find((a) => a.id === id)).filter(Boolean) as AgentLike[]
@@ -706,7 +987,7 @@ export class TaskRunner {
       const why = elsewhere
         ? `在团队里但不是你的队员（${(elsewhere.subordinates?.length ?? 0) > 0 ? '它是队长' : '它不归你管'}；只能 <consult> 咨询，不能被派活）`
         : '不在你的队员名单里'
-      this.note(taskId, `⚠ 未找到可驱使的队员 "${call.to}"（${why}；你的队员：${rosterText}），跳过`)
+      guardedNote(`⚠ 未找到可驱使的队员 "${call.to}"（${why}；你的队员：${rosterText}），跳过`)
       this.recordDelegateRejection(taskId, `to="${call.to}"：${why}`)
       return null
     }
@@ -715,17 +996,17 @@ export class TaskRunner {
     ancestors.add(me?.id ?? `@${task.backend}`)
     const targetKey = target.id || `@${target.backend}`
     if (ancestors.has(targetKey)) {
-      this.note(taskId, `⚠ 拒绝派给 ${call.to}：它在当前委派链上（防环），请改派他人或自己做`)
+      guardedNote(`⚠ 拒绝派给 ${call.to}：它在当前委派链上（防环），请改派他人或自己做`)
       return null
     }
     const delegateMaxDepth = this.opts().delegateMaxDepth ?? MAX_DEPTH
     const delegateTotalRounds = this.opts().delegateMaxTotalRounds ?? MAX_TOTAL_ROUNDS
     if (depth >= delegateMaxDepth) {
-      this.note(taskId, `⚠ 委派层级已达上限（${delegateMaxDepth} 层），拒绝派给 ${call.to}`)
+      guardedNote(`⚠ 委派层级已达上限（${delegateMaxDepth} 层），拒绝派给 ${call.to}`)
       return null
     }
     if (delegateTotalRounds - inherited <= 0) {
-      this.note(taskId, `⚠ 全链委派轮数预算已耗尽，拒绝派给 ${call.to}`)
+      guardedNote(`⚠ 全链委派轮数预算已耗尽，拒绝派给 ${call.to}`)
       return null
     }
     let workdir = task.workdir
@@ -788,13 +1069,15 @@ export class TaskRunner {
     if (worktree) {
       await setWorktreeOwner(worktree.path, child.id)
       worktree = { ...worktree, ownerTaskId: child.id }
-      this.store.update(child.id, { worktree })
+      // The child was just created and has not been dispatched yet; bind the
+      // metadata to the exact record so a concurrent claim cannot be rewritten.
+      this.store.updateIf(child.id, { status: 'queued', runId: child.runId, executionOwner: child.executionOwner }, { worktree })
     }
     if (!active()) {
       await this.cancel(child.id)
       return null
     }
-    this.note(taskId, `⚡ 已接单：${target.name} ← ${call.prompt.slice(0, 50).replace(/\n/g, ' ')}${call.prompt.length > 50 ? '…' : ''}`)
+    guardedNote(`⚡ 已接单：${target.name} ← ${call.prompt.slice(0, 50).replace(/\n/g, ' ')}${call.prompt.length > 50 ? '…' : ''}`)
     this.enqueue(this.store.get(child.id)!)
     return child
   }
@@ -803,16 +1086,22 @@ export class TaskRunner {
   async spawnInvestigateChild(taskId: string, call: InvestigateCall): Promise<Task | null> {
     const task = this.store.get(taskId)
     if (!task || task.parentTaskId) return null
+    // Investigation runs on behalf of one claimed Run; round accounting must not
+    // be charged to a run that replaced it (or that this runner never owned).
+    const claim = this.claimForRun(taskId)
+    if (!claim) return null
+    const expected = runCondition(claim)
+    if (!this.store.matches(taskId, expected)) return null
     const team = this.getTeam?.() ?? []
     const me = team.find((agent) => agent.id === task.agentId)
     const subs = (me?.subordinates ?? []).map((id) => team.find((agent) => agent.id === id)).filter(Boolean) as AgentLike[]
     const target = subs.find((agent) => agent.name.toLowerCase() === call.to.toLowerCase())
       ?? subs.find((agent) => agent.backend.toLowerCase() === call.to.toLowerCase())
-    if (!target) { this.note(taskId, `⚠ 未找到可调查队员 "${call.to}"，跳过`); return null }
+    if (!target) { this.note(taskId, `⚠ 未找到可调查队员 "${call.to}"，跳过`, expected); return null }
     const { inherited } = ancestorBudget(this.store, taskId)
     const budget = this.opts().delegateMaxTotalRounds ?? MAX_TOTAL_ROUNDS
-    if (budget - inherited <= 0) { this.note(taskId, '⚠ 全链委派轮数预算已耗尽，拒绝调查'); return null }
-    this.store.update(taskId, { roundsUsed: (task.roundsUsed ?? 0) + 1 })
+    if (budget - inherited <= 0) { this.note(taskId, '⚠ 全链委派轮数预算已耗尽，拒绝调查', expected); return null }
+    this.store.updateIf(taskId, expected, { roundsUsed: (task.roundsUsed ?? 0) + 1 })
     const childInput = {
       title: `${target.name}: 调查 ${call.prompt.slice(0, 40).replace(/\n/g, ' ')}`,
       prompt: buildChildPrompt(`只读调查：${call.prompt}\n不要修改代码、不要创建提交，只返回可核验事实与引用。`, task.prompt),
@@ -828,7 +1117,7 @@ export class TaskRunner {
     const child = this.taskCreator
       ? (typeof this.taskCreator === 'function' ? this.taskCreator(childInput) : this.taskCreator.createChildTask(childInput))
       : this.store.create(childInput)
-    this.note(taskId, `⚡ 已接单（调查）：${target.name} ← ${call.prompt.slice(0, 60).replace(/\n/g, ' ')}`)
+    this.note(taskId, `⚡ 已接单（调查）：${target.name} ← ${call.prompt.slice(0, 60).replace(/\n/g, ' ')}`, expected)
     this.enqueue(this.store.get(child.id)!)
     return child
   }
@@ -858,9 +1147,8 @@ export class TaskRunner {
   }
 
   /** Finish one successful turn, including any delegation emitted before the final message. */
-  private async completeTurn(taskId: string, session: BackendSession, r: BackendTurnResult, consultDepth = 0): Promise<string> {
+  private async completeTurn(taskId: string, session: BackendSession, r: BackendTurnResult, claim: RunClaim, consultDepth = 0): Promise<string> {
     const task = this.store.get(taskId)!
-    const runId = task.runId
       const isInvestigation = !!task.suppressIssue && !!task.parentTaskId
       const team = this.getTeam?.() ?? []
       const me = team.find((a) => a.id === task.agentId)
@@ -868,7 +1156,10 @@ export class TaskRunner {
       /** <continue> 与 delegate 同源解析：领队用委派循环的全部回合文本，普通任务用首回合两源 */
       let scanTexts: string[] = [r.delegationText ?? '', r.response]
       if (me?.subordinates?.length && task.backend !== 'dsh' && !isInvestigation) {
-        const outcome = await runDelegationLoop(taskId, session, r, {
+        // The loop receives this Run's full execution expectation explicitly:
+        // it must never rediscover the identity from whatever record is latest
+        // by the time the turn's response is processed.
+        const outcome = await runDelegationLoop(taskId, session, r, runCondition(claim), {
           store: this.store,
           runner: this,
           getTeam: () => this.getTeam?.() ?? [],
@@ -888,21 +1179,21 @@ export class TaskRunner {
         finalText = outcome.finalText || r.response
         scanTexts = outcome.scanTexts
       }
-      if (!this.isRunningRun(taskId, runId)) return finalText
+      if (!this.isCurrentRun(claim)) return finalText
       if (this.onInvestigate) {
-        const investigation = await this.completeInvestigates(taskId, session, finalText, scanTexts, task.parentTaskId ? 1 : 0, runId)
+        const investigation = await this.completeInvestigates(taskId, session, finalText, scanTexts, task.parentTaskId ? 1 : 0, claim)
         finalText = investigation.finalText
         scanTexts = investigation.scanTexts
       }
-      if (!this.isRunningRun(taskId, runId)) return finalText
+      if (!this.isCurrentRun(claim)) return finalText
       if (this.onConsult) {
-        const consultation = await this.completeConsults(taskId, session, finalText, scanTexts, consultDepth, runId)
+        const consultation = await this.completeConsults(taskId, session, finalText, scanTexts, consultDepth, claim)
         finalText = consultation.finalText
         scanTexts = consultation.scanTexts
       }
-      if (!this.isRunningRun(taskId, runId)) return finalText
-      finalText = this.handleContinue(taskId, task, scanTexts, finalText)
-      await this.finalizeDone(taskId, finalText)
+      if (!this.isCurrentRun(claim)) return finalText
+      finalText = this.handleContinue(taskId, task, scanTexts, finalText, claim)
+      await this.finalizeDone(taskId, finalText, claim)
     return finalText
   }
 
@@ -912,7 +1203,7 @@ export class TaskRunner {
     initialText: string,
     initialScanTexts: string[],
     depth: number,
-    runId: string | undefined
+    claim: RunClaim
   ): Promise<{ finalText: string; scanTexts: string[] }> {
     let finalText = initialText
     let scanTexts = initialScanTexts
@@ -926,14 +1217,14 @@ export class TaskRunner {
     if (!calls.length) return { finalText: stripInvestigates(finalText), scanTexts }
     const reports: string[] = []
     for (const call of calls) {
-      if (!this.isRunningRun(taskId, runId)) return { finalText, scanTexts }
+      if (!this.isCurrentRun(claim)) return { finalText, scanTexts }
       const report = await this.onInvestigate?.({ sourceTaskId: taskId, call, depth })
-      if (!this.isRunningRun(taskId, runId)) return { finalText, scanTexts }
+      if (!this.isCurrentRun(claim)) return { finalText, scanTexts }
       if (report?.trim()) reports.push(`### 调查 ${call.to} 的结果\n${report.trim()}`)
     }
     if (!reports.length) return { finalText: stripInvestigates(finalText), scanTexts }
-    const turn = await this.sendTurn(taskId, session, `【系统·调查结果】\n${reports.join('\n\n')}\n\n请基于以上只读调查继续处理原任务。`, runId)
-    if (!this.isRunningRun(taskId, runId)) return { finalText, scanTexts }
+    const turn = await this.sendTurn(taskId, session, `【系统·调查结果】\n${reports.join('\n\n')}\n\n请基于以上只读调查继续处理原任务。`, claim)
+    if (!this.isCurrentRun(claim)) return { finalText, scanTexts }
     if (!turn.ok) throw new Error(turn.error || '调查结果回灌回合失败')
     finalText = turn.response
     scanTexts = [turn.delegationText ?? '', turn.response]
@@ -952,7 +1243,7 @@ export class TaskRunner {
     initialText: string,
     initialScanTexts: string[],
     consultDepth: number,
-    runId: string | undefined
+    claim: RunClaim
   ): Promise<{ finalText: string; scanTexts: string[] }> {
     let finalText = initialText
     let scanTexts = initialScanTexts
@@ -970,14 +1261,14 @@ export class TaskRunner {
       rounds++
       const answers: string[] = []
       for (const call of calls) {
-        if (!this.isRunningRun(taskId, runId)) return { finalText, scanTexts }
+        if (!this.isCurrentRun(claim)) return { finalText, scanTexts }
         const answer = await this.onConsult?.({ sourceTaskId: taskId, call, depth: consultDepth })
-        if (!this.isRunningRun(taskId, runId)) return { finalText, scanTexts }
+        if (!this.isCurrentRun(claim)) return { finalText, scanTexts }
         if (answer?.trim()) answers.push(`### 队长 ${call.to} 的意见\n${answer.trim()}`)
       }
       if (!answers.length) return { finalText: stripConsults(finalText), scanTexts }
-      const turn = await this.sendTurn(taskId, session, `【系统·咨询回复】\n${answers.join('\n\n')}\n\n请基于以上咨询继续处理原任务。`, runId)
-      if (!this.isRunningRun(taskId, runId)) return { finalText, scanTexts }
+      const turn = await this.sendTurn(taskId, session, `【系统·咨询回复】\n${answers.join('\n\n')}\n\n请基于以上咨询继续处理原任务。`, claim)
+      if (!this.isCurrentRun(claim)) return { finalText, scanTexts }
       if (!turn.ok) throw new Error(turn.error || '咨询回灌回合失败')
       finalText = turn.response
       scanTexts = [turn.delegationText ?? '', turn.response]
@@ -989,16 +1280,22 @@ export class TaskRunner {
    * 护栏：委派子任务不参与（生命周期归委派循环）；同 issue handoff 任务 ≥ 8 拒绝；
    * 剥掉标记防止外漏，并在结果末尾留指向。
    */
-  private handleContinue(taskId: string, task: Task, scanTexts: string[], finalText: string): string {
+  private handleContinue(taskId: string, task: Task, scanTexts: string[], finalText: string, claim?: RunClaim): string {
     const issueId = task.issueId
     if (task.parentTaskId || !issueId) return finalText
+    // The caller normally passes the claim captured before the turn started.
+    // Standalone harnesses may call this with the record they just read; that
+    // record is the observation, never a freshly re-read newer Run.
+    const expected: TaskExpectation = claim
+      ? runCondition(claim)
+      : { status: 'running', runId: task.runId, executionOwner: task.executionOwner }
     const cont = parseContinueMerged(...scanTexts)
     if (!cont) {
       // 可观测性：回复里出现过标记字样却没解析成功（未闭合/围栏内/示例复述），留痕说明为何没接力——
       // 否则用户只看到"硬切从没触发过"，无从分辨是 agent 没输出还是解析拒收
       if (scanTexts.some((text) => text.includes('<continue'))) {
         const e = { ts: Date.now(), kind: 'status' as const, text: '⚠ 检测到 <continue> 字样但未构成有效接力（需完整闭合且位于回复末尾；不在末尾的标记必须显式 start="auto" 才走兜底），未触发' }
-        const full = this.store.appendEvent(taskId, e)
+        const full = this.store.appendEvent(taskId, e, expected)
         if (full) this.pushEvent(taskId, full)
       }
       return finalText
@@ -1006,18 +1303,23 @@ export class TaskRunner {
     const stripped = stripContinue(finalText)
     const note = (text: string) => {
       const e = { ts: Date.now(), kind: 'status' as const, text }
-      const full = this.store.appendEvent(taskId, e)
+      const full = this.store.appendEvent(taskId, e, expected)
       if (full) this.pushEvent(taskId, full)
     }
     if (cont.loose) note('阶段接力标记不在回复末尾（其后仍有内容），已按显式 start="auto" 兜底解析')
+    const existing = findHandoffSuccessor(this.store.list(), task)
+    if (!existing && repeatsHandoffPhase(task, cont.brief)) {
+      note('阶段接力已阻止：简报仍指向当前阶段，请在当前会话继续处理或等待用户回复')
+      return `${stripped}\n\n已阻止重复交接当前阶段，保留当前会话。`
+    }
     // Cancelled handoffs are abandoned attempts and must not consume the
     // finite relay chain budget. Failed, queued, running and completed
     // handoffs remain durable chain members for audit and loop prevention.
     const chainLimit = this.opts().maxHandoffChain ?? MAX_HANDOFF_CHAIN
-    const handoffCount = this.store.list().filter((t) =>
+    const handoffCount = new Set(this.store.list().filter((t) =>
       t.issueId === task.issueId && t.trigger === 'handoff' && t.status !== 'cancelled'
-    ).length
-    if (handoffCount >= chainLimit) {
+    ).map((t) => t.continuesFrom ?? t.id)).size
+    if (!existing && handoffCount >= chainLimit) {
       note(`⚠ 阶段接力已达上限（${chainLimit} 次），<continue> 被拒绝；请人工推进后续阶段`)
       return stripped
     }
@@ -1034,8 +1336,12 @@ export class TaskRunner {
       note('⚠ 阶段接力未生效：处理器未挂接或拒绝创建后继，标记已剥除')
       return stripped
     }
-    note(`阶段接力：下一阶段已${cont.start === 'auto' ? '开始执行' : '备好（等你启动）'}（同一 Issue 的新执行 #${handoffCount + 1}）`)
-    return `${stripped}\n\n→ 阶段接力：下一阶段已${cont.start === 'auto' ? '开始执行' : '备好（等你启动，见该 Issue 的「▶ 启动」）'}，见该 Issue 的最新执行。`
+    if (existing) {
+      note(`阶段接力后继已存在（${existing.id}），已忽略重复交接`)
+      return `${stripped}\n\n阶段接力后继已存在，未创建或启动新的执行。`
+    }
+    note(`阶段接力：下一阶段已${cont.start === 'auto' ? '排队（本阶段收尾后自动执行）' : '备好（等你启动）'}（同一 Issue 的新执行 #${handoffCount + 1}）`)
+    return `${stripped}\n\n→ 阶段接力：下一阶段已${cont.start === 'auto' ? '排队（本阶段收尾后自动执行）' : '备好（等你启动，见该 Issue 的「▶ 启动」）'}，见该 Issue 的最新执行。`
   }
 
   /**
@@ -1043,17 +1349,17 @@ export class TaskRunner {
    * 调用方需先把事件管道切到静默（titleMode），失败静默返回 false，不影响任务本体。
    * 硬预算：标题是装饰性收尾，绝不许把已完成的回合拖在 running。
    */
-  private async retitleByAgent(taskId: string, session: BackendSession): Promise<boolean> {
-    const runId = this.store.get(taskId)?.runId
+  private async retitleByAgent(taskId: string, session: BackendSession, claim: RunClaim): Promise<boolean> {
+    const expected = runCondition(claim)
     let budgetTimer: NodeJS.Timeout | undefined
     try {
       const r = await Promise.race([
-        this.sendTurn(taskId, session, RETITLE_PROMPT, runId),
+        this.sendTurn(taskId, session, RETITLE_PROMPT, claim),
         new Promise<BackendTurnResult>((resolve) => {
           budgetTimer = setTimeout(() => resolve({ ok: false, response: '', error: RETITLE_BUDGET_EXCEEDED }), RETITLE_TURN_BUDGET_MS)
         })
       ])
-      if (!this.isRunningRun(taskId, runId)) return false
+      if (!this.store.matches(taskId, expected)) return false
       if (!r.ok) {
         if (r.error === RETITLE_BUDGET_EXCEEDED) {
           // 预算耗尽：作废标题回合的代数（迟到的终态/回调一律拒绝）、停掉服务端
@@ -1061,9 +1367,9 @@ export class TaskRunner {
           this.bumpTurnGen(taskId)
           this.disarmWatchdog(taskId)
           void Promise.resolve(session.stop()).catch(() => {})
-          this.note(taskId, `标题生成超时（${Math.round(RETITLE_TURN_BUDGET_MS / 1000)}s 无响应），保留原标题收尾`)
+          this.note(taskId, `标题生成超时（${Math.round(RETITLE_TURN_BUDGET_MS / 1000)}s 无响应），保留原标题收尾`, expected)
         } else {
-          this.note(taskId, `标题生成失败（${r.error || '未知原因'}），保留原标题收尾`)
+          this.note(taskId, `标题生成失败（${r.error || '未知原因'}），保留原标题收尾`, expected)
         }
         return false
       }
@@ -1072,8 +1378,9 @@ export class TaskRunner {
         .map((s) => s.replace(/^[#>*\-\s]+/, '').replace(/["'「」《》`*]/g, '').trim())
         .find((s) => s.length > 0)
       if (!line) return false
-      this.store.update(taskId, { title: line.slice(0, 60), titleAuto: false })
-      return true
+      // A decorative title belongs to the Run that produced it; a stale title
+      // turn must not rename a newer Run's Task.
+      return !!this.store.updateIf(taskId, expected, { title: line.slice(0, 60), titleAuto: false })
     } catch {
       return false
     } finally {
@@ -1085,41 +1392,119 @@ export class TaskRunner {
    * Send one follow-up and return the exact turn payload, including prior messages.
    * 等待全程由空转看门狗护送：有事件就续命；真超时时先停回合再返回错误，
    * 后端不会留一个还在跑的僵尸回合跟下一次操作抢会话。
+   * `expected` 只接受本 runner 已提交的运行身份：外部传入的 runId 必须能解析到
+   * 该次认领，否则视为已被新运行取代，不再驱动会话。
+   *
+   * 每个回合在这里拿到**自己的**不可变身份（新 generation + 新 stamp）；不会去改写
+   * 任何既有回合的身份对象，旧回调因此不可能被"续命"成新回合的回调。
    */
-  async sendTurn(taskId: string, session: BackendSession, content: string, expectedRunId = this.store.get(taskId)?.runId): Promise<BackendTurnResult> {
-    const current = this.store.get(taskId)
-    if (!current || !this.isRunningRun(taskId, expectedRunId) || this.sessions.get(taskId) !== session) {
+  private async startIsolatedTurn(taskId: string, content: string, claim: RunClaim): Promise<BackendTurnResult> {
+    const task = this.store.get(taskId)
+    const backend = task && this.backends.get(task.backend)
+    if (!task || !backend || !this.isCurrentRun(claim)) return { ok: false, response: '', error: 'Task execution is no longer active' }
+    const previous = this.sessions.get(taskId)
+    const resumeSessionId = task.sessionId || previous?.sessionId
+    if (!resumeSessionId) return { ok: false, response: '', error: TURN_ISOLATION_REQUIRED }
+    if (previous) {
+      this.sessions.delete(taskId)
+      this.retireSession(previous, 'replaced')
+      this.launchHandles.delete(taskId)
+      await this.awaitCleanup(() => previous.stop())
+      await this.awaitCleanup(() => previous.detach ? previous.detach() : previous.close())
+    }
+    if (!this.isCurrentRun(claim)) return { ok: false, response: '', error: 'Task execution is no longer active' }
+
+    const generation = this.bumpTurnGen(taskId)
+    const life = this.lifecycle(taskId)
+    const router = new SessionTurnRouter()
+    const channel = this.sessionChannel(router)
+    const turn = this.openTurn(taskId, router, claim, generation, undefined)
+    let unregister: () => void = () => {}
+    const result = new Promise<BackendTurnResult>((resolve) => {
+      unregister = life.registerResume(turn.token, (value) => resolve(value as BackendTurnResult))
+    })
+    const sentinel = this.idleSentinel(taskId)
+    const me = (this.getTeam?.() ?? []).find((agent) => agent.id === task.agentId)
+    try {
+      const session = await this.executor.start(
+        () => backend.start({
+          prompt: content,
+          workdir: task.workdir,
+          mode: this.opts().mode,
+          model: me?.model,
+          connection: this.resolveConnection(task.agentId),
+          resumeSessionId,
+          turn: turn.stamp,
+          events: channel
+        }),
+        sentinel.timeout,
+        () => this.isCurrentRun(claim) && life.accepts(turn.token)
+      )
+      let bound: Task | undefined
+      try {
+        bound = this.store.updateIf(taskId, runCondition(claim), session.sessionId ? { sessionId: session.sessionId } : {})
+      } catch (error) {
+        await this.closeLateSession(session)
+        throw error
+      }
+      if (!bound) {
+        await this.closeLateSession(session)
+        return { ok: false, response: '', error: 'Task execution is no longer active' }
+      }
+      life.gate.setSessionOwner(session.sessionId)
+      void life.attachSession({ generation, sessionOwner: session.sessionId }, session)
+      router.legacy = session.turnScoped !== true
+      router.owner = session.sessionId
+      this.sessionTurns.set(session, router)
+      this.sessions.set(taskId, session)
+      this.pushTask(taskId)
+      return await Promise.race([result, sentinel.timeout])
+    } catch (error) {
+      return { ok: false, response: '', error: error instanceof Error ? error.message : String(error) }
+    } finally {
+      sentinel.cancel()
+      if (life.generation === generation) unregister()
+    }
+  }
+
+  async sendTurn(taskId: string, session: BackendSession, content: string, expected?: string | RunClaim): Promise<BackendTurnResult> {
+    const claim = typeof expected === 'object' && expected !== null ? expected : this.claimForRun(taskId, expected)
+    const installed = this.sessions.get(taskId)
+    if (!claim || !this.store.matches(taskId, runCondition(claim)) || !installed) {
       return { ok: false, response: '', error: 'Task execution is no longer active' }
     }
+    session = installed
+    const router = this.sessionTurns.get(session)
+    if (!router) return { ok: false, response: '', error: TURN_ISOLATION_REQUIRED }
     // A task owns at most one provider turn. This also prevents a delayed
     // orchestration callback from replacing the waiter for a live turn.
     const life = this.lifecycle(taskId)
     if (life.pendingResume) {
       return { ok: false, response: '', error: 'Task already has an active turn' }
     }
+    if (!this.sessionMayOpenNewTurn(session)) {
+      return this.startIsolatedTurn(taskId, content, claim)
+    }
+    // 换代先作废在飞回合（含"没有终态就被放弃"的判定），再开启已证明可复用的连接。
     const gen = this.bumpTurnGen(taskId)
-    const context = this.sessionEventContexts.get(session)
-    // A live BackendSession owns one callback multiplexer for all sends, so its
-    // active generation must be advanced for follow-up turns. The context is
-    // still owner-bound; callbacks from a replaced/late session are rejected by
-    // EventGate before this generation can be observed.
-    if (context) context.generation = gen
+    const turn = this.openTurn(taskId, router, claim, gen, router.owner)
     let settleTurn: (v: BackendTurnResult) => void = () => {}
     let unregisterResume: () => void = () => {}
-    const turn = new Promise<BackendTurnResult>((resolve) => {
+    const settled = new Promise<BackendTurnResult>((resolve) => {
       settleTurn = resolve
-      const token = life.gate.token()
-      unregisterResume = life.registerResume(token, (v) => resolve(v as BackendTurnResult))
+      unregisterResume = life.registerResume(turn.token, (v) => resolve(v as BackendTurnResult))
     })
     let idleFired = false
     const { timeout, cancel } = this.idleSentinel(taskId, () => { idleFired = true })
     try {
       // send 不阻塞裁决：立即失败（连接已死等）要马上浮出，不能干等空转上限；
       // 看门狗触发的 stop 会让 send 以 reject 收尾，统一按超时语义上报
-      void session.send(content).catch((e) => {
+      void session.send(content, turn.stamp).catch((e) => {
+        // 只有这一回合自己的失败才作废它；迟到的 reject 不得连累后继回合
+        router.abandonTurn(turn.stamp.id)
         settleTurn(idleFired ? turnTimeoutError(this.turnBudgetMs(taskId)) : { ok: false, response: '', error: e instanceof Error ? e.message : String(e) })
       })
-      const result = await Promise.race([turn, timeout])
+      const result = await Promise.race([settled, timeout])
       return result ?? { ok: false, response: '', error: '回合已失效' }
     } finally {
       cancel()
@@ -1142,17 +1527,37 @@ export class TaskRunner {
     }
     const isWorker = !!task.parentTaskId
     const runId = this.newRunId(taskId)
-    this.store.update(taskId, { status: 'running', startedAt: Date.now(), runId, error: undefined, failure: undefined })
+    // Start a backend only after the queued -> running claim commits. The
+    // expectation is the exact record observed when the scheduler decided to
+    // dispatch: another instance (or another callback) that already claimed
+    // this Task makes the claim fail, so the backend is never started twice.
+    const owner = createExecutionOwner()
+    const claimed = this.store.claimRun(taskId, {
+      status: 'queued',
+      runId: task.runId,
+      executionOwner: task.executionOwner
+    }, runId, owner, { startedAt: Date.now(), endedAt: undefined, error: undefined, failure: undefined })
+    if (!claimed) {
+      // Nothing was started: the Task either moved on (foreign running owner is
+      // never adopted) or is parked. Re-project the durable state and stop.
+      this.pushTask(taskId)
+      return
+    }
+    const claim: RunClaim = { taskId, runId, owner }
+    this.claims.set(taskId, claim)
     this.pushTask(taskId)
-    this.recordUser(taskId, task.prompt)
+    this.recordUser(taskId, task.prompt, runCondition(claim))
     const runGen = this.bumpTurnGen(taskId)
-    const eventContext: { generation: number; sessionOwner?: string } = { generation: runGen }
+    // 本会话的回合路由器：会话级通道只负责把回调交给它，归属判定集中在路由器里
+    const router = new SessionTurnRouter()
+    const channel = this.sessionChannel(router)
 
     // 首回合完成信号
     let firstTurnDone: ((v: BackendTurnResult) => void) | null = null
     const firstTurnPromise = new Promise<BackendTurnResult>((resolve) => {
       firstTurnDone = resolve
     })
+    const firstTurn = this.openTurn(taskId, router, claim, runGen, undefined, (r) => firstTurnDone?.(r))
 
     // agent 身份注入：人设 + （领队时）委派协议
     const team = this.getTeam?.() ?? []
@@ -1170,6 +1575,10 @@ export class TaskRunner {
     }
     // 阶段接力协议（非委派子任务：worker 的生命周期归委派循环管）
     if (!isWorker) prompt = `${prompt}\n\n${CONTINUE_BLOCK}`
+    if (!isWorker && task.continuesFrom) {
+      prompt = `${prompt}\n\n${HANDOFF_RECEIVE_CUE}`
+      if (task.manualStartConfirmedAt && Number.isFinite(task.manualStartConfirmedAt)) prompt = `${prompt}\n\n${HANDOFF_START_CONFIRMED_CUE}`
+    }
     // 领队会话武装流式派单嗅探：闭合一个 <delegate> 即提前建单（回灌仍只在回合末）
     const isLeader = !!me?.subordinates?.length && task.backend !== 'dsh' && !(task.suppressIssue && task.parentTaskId)
     if (isLeader) this.armDelegateSniffer(taskId)
@@ -1178,8 +1587,8 @@ export class TaskRunner {
     // 不再永久卡住 running 状态与并发槽；启动期间的线级心跳照常续命
     const sentinel = this.idleSentinel(taskId)
     try {
-      // 标题回合的事件不进对话流（text/final/usage 静默），onTurnEnd 照常驱动 sendTurn
-      const baseEvents = this.makeEvents(taskId, (r) => firstTurnDone?.(r), eventContext)
+      // 标题回合的事件不进对话流（text/final/usage 静默），onTurnEnd 照常驱动 sendTurn。
+      // 会话级通道 + 首回合身份：回调只在身份对得上时才会被投递。
       const session = await this.executor.start(
         () => backend.start({
           prompt,
@@ -1190,24 +1599,40 @@ export class TaskRunner {
           // 自动重试第 1 次带会话续跑（maybeAutoRetry 故意保留 sessionId）：从失败处接着干，
           // 不再整任务从头重来；手动"重新运行"会清 sessionId，恒新会话不受影响
           resumeSessionId: task.sessionId || undefined,
-          events: {
-            ...baseEvents,
-            onEvent: (e) => {
-              if (!this.lifecycle(taskId).accepts({ generation: eventContext.generation, sessionOwner: eventContext.sessionOwner })) return
-              this.touchWatchdog(taskId) // 静默事件（标题回合增量）不进日志，但同样是进展信号
-              baseEvents.onEvent(e)
-            }
-          }
+          turn: firstTurn.stamp,
+          events: channel
         }),
         sentinel.timeout,
-        () => this.lifecycle(taskId).accepts({ generation: eventContext.generation, sessionOwner: eventContext.sessionOwner })
+        // The accept check captures this Run's claim: a start that resolves
+        // after an external replacement (another instance, explicit cancel)
+        // must be rejected, not installed under the newer Run.
+        () => this.isCurrentRun(claim)
+          && this.lifecycle(taskId).accepts(firstTurn.token)
       )
-      eventContext.sessionOwner = session.sessionId
+      // The durable session binding is the commit point. Only a session whose
+      // conditional write succeeded may be installed in memory: a start whose
+      // Run was replaced while it was pending is closed as-is and never keeps
+      // the scheduler slot waiting for its turn.
+      let bound: Task | undefined
+      try {
+        bound = this.store.updateIf(taskId, runCondition(claim), session.sessionId ? { sessionId: session.sessionId } : {})
+      } catch (error) {
+        await this.closeLateSession(session)
+        throw error
+      }
+      if (!bound) {
+        await this.closeLateSession(session)
+        if (!this.isCurrentRun(claim)) return
+        throw new Error('会话绑定失败：执行归属已变化')
+      }
       this.lifecycle(taskId).gate.setSessionOwner(session.sessionId)
       void this.lifecycle(taskId).attachSession({ generation: runGen, sessionOwner: session.sessionId }, session)
-      this.sessionEventContexts.set(session, eventContext)
+      // 适配器声明了回合身份才允许在同一连接上继续跑回合；否则连接一旦失去
+      // 归属确定性（有回合没收终态就被放弃）就必须重建。
+      router.legacy = session.turnScoped !== true
+      router.owner = session.sessionId
+      this.sessionTurns.set(session, router)
       this.sessions.set(taskId, session)
-      this.store.update(taskId, { sessionId: session.sessionId })
       this.pushTask(taskId)
 
       // 首回合由同一哨兵继续护送：长时间无任何进展先停回合再判失败，不再无限等待
@@ -1217,39 +1642,39 @@ export class TaskRunner {
       } finally {
         sentinel.cancel()
       }
-      if (!this.isRunningRun(taskId, runId)) return
+      if (!this.isCurrentRun(claim)) return
       if (r.ok) {
         // 自动派生标题的任务：让 agent 总结重起标题（隐藏回合；worker/dsh 除外——前者会与回灌争用会话，后者不支持续聊）
         if (task.titleAuto && !task.parentTaskId && task.backend !== 'dsh') {
           this.lifecycle(taskId).setTitleMode(true)
-          const titled = await this.retitleByAgent(taskId, session)
-          if (!this.isRunningRun(taskId, runId)) return
+          const titled = await this.retitleByAgent(taskId, session, claim)
+          if (!this.isCurrentRun(claim)) return
           this.lifecycle(taskId).setTitleMode(false)
           if (titled) this.pushTask(taskId)
         }
         // 领队：进入委派循环（截获 <delegate> 标记 → 并行子任务 → 回灌 → 继续）
         // 0.7.0 起 worker 也可以是子领队（带 subordinates 即生效；delegate 内有防环与层级/预算闸）
-        const finalText = await this.completeTurn(taskId, session, r)
-        if (this.store.get(taskId)?.runId === runId && this.store.get(taskId)?.status === 'done' && this.opts().notify) this.notify(task, '完成', finalText)
+        const finalText = await this.completeTurn(taskId, session, r, claim)
+        if (this.store.matches(taskId, runIdentity(claim, { status: 'done' })) && this.opts().notify) this.notify(task, '完成', finalText)
       } else {
-        await this.closeSession(taskId)
-        if (this.failTask(taskId, r.error || '回合失败', runId)) {
-          this.maybeAutoRetry(taskId)
+        await this.closeSession(taskId, runIdentity(claim))
+        if (this.failTask(taskId, r.error || '回合失败', claim)) {
+          this.maybeAutoRetry(taskId, claim)
           this.notifyFailure(taskId, task, r.error || '')
         }
       }
     } catch (e) {
-      if (!this.isRunningRun(taskId, runId)) return
+      if (!this.isCurrentRun(claim)) return
       const msg = e instanceof Error ? e.message : String(e)
-      await this.closeSession(taskId)
-      if (this.failTask(taskId, msg, runId)) {
-        this.maybeAutoRetry(taskId)
+      await this.closeSession(taskId, runIdentity(claim))
+      if (this.failTask(taskId, msg, claim)) {
+        this.maybeAutoRetry(taskId, claim)
         this.notifyFailure(taskId, task, msg)
       }
     } finally {
       sentinel.cancel()
       this.store.flushEvents(taskId)
-      if (this.store.get(taskId)?.runId === runId) {
+      if (this.store.matches(taskId, runIdentity(claim))) {
         this.launchHandles.delete(taskId)
         // Session-level seenKeys are intentionally retained for follow-up turns.
         this.lastTerminalResponses.delete(taskId)
@@ -1264,7 +1689,7 @@ export class TaskRunner {
    * 手动"重新运行"不受此影响（恒新会话、attempt 清零）。
    * 限流（429）退避后再重试：立即重打只会继续 429（各重试叠加请求量形成正反馈）。
    */
-  private maybeAutoRetry(taskId: string) {
+  private maybeAutoRetry(taskId: string, claim?: RunClaim) {
     const task = this.store.get(taskId)
     if (!task || task.status !== 'failed') return
     const failure = task.failure
@@ -1274,22 +1699,29 @@ export class TaskRunner {
     const next = decision.attempt
     const fresh = decision.freshSession
     const goalBudget = task.goalId ? ` · Phase execution ${next + 1}/${maxAttempts + 1}` : ''
+    // The retry belongs to the Run that just failed. Its identity was captured
+    // before the retry was decided, so a user cancel or a newer Run always wins.
+    const failedRun: TaskExpectation = claim
+      ? runIdentity(claim, { status: 'failed' })
+      : { status: 'failed', runId: task.runId, executionOwner: task.executionOwner }
     const schedule = () => {
       this.retryTimers.delete(taskId)
-      // 退避等待期间用户可能已取消/手动处理：不再是 failed 态就放弃重试
-      if (this.store.get(taskId)?.status !== 'failed') return
-      this.store.update(taskId, {
+      const requeued = this.store.updateIf(taskId, failedRun, {
         status: 'queued',
         endedAt: undefined,
         runId: undefined,
+        executionOwner: undefined,
         attempt: next,
         ...(fresh ? { sessionId: undefined } : {})
       })
+      // 退避等待期间用户可能已取消/手动处理：不再是原失败运行就放弃重试
+      if (!requeued) return
+      if (claim) this.claims.delete(taskId)
       const full = this.store.appendEvent(taskId, {
         ts: Date.now(),
         kind: 'status',
         text: `⟳ 自动重试 ${next}/2（${failure.title}）${fresh ? '· 新会话' : '· 续会话'}${goalBudget}`
-      })
+      }, { status: 'queued', runId: undefined, executionOwner: undefined })
       if (full) this.pushEvent(taskId, full)
       this.pushTask(taskId)
       this.enqueue(this.store.get(taskId)!)
@@ -1301,7 +1733,7 @@ export class TaskRunner {
         ts: Date.now(),
         kind: 'status',
         text: `⟳ ${failure.title}：退避 ${Math.round(delayMs / 1000)}s 后自动重试 ${next}/2（${fresh ? '新会话' : '续会话'}）${goalBudget}`
-      })
+      }, failedRun)
       if (full) this.pushEvent(taskId, full)
       this.pushTask(taskId)
       const timer = setTimeout(schedule, delayMs)
@@ -1333,40 +1765,67 @@ export class TaskRunner {
     if (task.status === 'running') return { ok: false, error: '任务正在运行（长时间无输出时可先「停止」再「重新运行」）' }
     // cancelled 也放行：目标模式停止/用户取消后的任务仍可追问续聊，别把 Issue 卡死在"任务尚未完成"
     if (task.status !== 'done' && task.status !== 'failed' && task.status !== 'cancelled') return { ok: false, error: '任务尚未完成' }
-    const backend = this.backends.get(task.backend)
-    if (!backend) return { ok: false, error: '后端不可用' }
-    if (!this.sessions.get(taskId) && !task.sessionId) return { ok: false, error: '无会话可恢复' }
-    this.recordUser(taskId, message)
     // 显式接力入口（按钮）：把人工意图翻译成协议标记指令（recordUser 仍记原话）；
     // 追问正文里出现"下一阶段"等字样不会被再当成接力信号
     const wantsHandoff = !task.parentTaskId && opts?.relay === true
+    if (wantsHandoff) {
+      const existing = findHandoffSuccessor(this.store.list(), task)
+      if (existing) {
+        try {
+          if (this.onContinue && !this.onContinue({ sourceTaskId: taskId, issueId: task.issueId!, brief: existing.prompt, start: 'parked' })) {
+            return { ok: false, error: '阶段接力后继无法复用' }
+          }
+        } catch (error) {
+          return { ok: false, error: error instanceof Error ? error.message : String(error) }
+        }
+        this.recordUser(taskId, message)
+        const started = prepareManualTaskStart(this.store, existing.id)
+        if (started) this.enqueue(started)
+        return { ok: true, ...(opts?.collectFinal ? { finalText: '阶段接力后继已存在，未重复创建。' } : {}) }
+      }
+    }
+    const backend = this.backends.get(task.backend)
+    if (!backend) return { ok: false, error: '后端不可用' }
+    if (!this.sessions.get(taskId) && !task.sessionId) return { ok: false, error: '无会话可恢复' }
     const turnContent = wantsHandoff ? `${HANDOFF_CUE}\n（用户原话：${message}）` : message
     // 领队续聊同样武装流式派单嗅探（追问里派发 → 提前建单）
     const me = (this.getTeam?.() ?? []).find((a) => a.id === task.agentId)
     if (me?.subordinates?.length && task.backend !== 'dsh' && !(task.suppressIssue && task.parentTaskId)) this.armDelegateSniffer(taskId)
 
     const runId = this.newRunId(taskId)
-    const beginRun = () => {
+    const beginRun = (): RunClaim | null => {
       this.toolWindows.delete(taskId)
-      const current = this.store.get(taskId)
-      this.store.update(taskId, {
-        status: 'running',
+      // Claim exactly the record this follow-up was built from. Only a
+      // committed claim may start the backend; a Task that already moved on
+      // (another instance, an explicit cancel, a newer Run) is left untouched.
+      const owner = createExecutionOwner()
+      const claimed = this.store.claimRun(taskId, {
+        status: task.status,
+        runId: task.runId,
+        executionOwner: task.executionOwner,
+        phaseIndex: task.phaseIndex
+      }, runId, owner, {
         startedAt: Date.now(),
-        runId,
         // A follow-up on the same compatibility Task is still a new Goal
         // phase. Advance the phase index so maxRuns/runCount account for
         // continuation turns instead of remaining pinned at phase zero.
-        ...(current?.goalId ? { phaseIndex: (current.phaseIndex ?? 0) + 1 } : {}),
+        ...(task.goalId ? { phaseIndex: (task.phaseIndex ?? 0) + 1 } : {}),
         endedAt: undefined,
         error: undefined,
         failure: undefined
       })
+      if (!claimed) return null
+      const claim: RunClaim = { taskId, runId, owner }
+      this.claims.set(taskId, claim)
+      this.recordUser(taskId, message, runCondition(claim))
       this.pushTask(taskId)
+      return claim
     }
 
     // A dead live session may fall through to resume. Both paths belong to
     // this one follow-up Run, so initialize its identity exactly once.
-    beginRun()
+    const claim = beginRun()
+    if (!claim) return { ok: false, error: '任务已开始新的执行，本次追问未生效' }
 
     // UI 追问传 wait:false：回合在后台跑、IPC 在 beginRun 后即返回——渲染层 busy 不
     // 锁整轮，否则「停止」会禁用到回合结束。默认（goal/meeting/sidecar 等自动化
@@ -1374,54 +1833,62 @@ export class TaskRunner {
     const runTurn = async (): Promise<{ ok: boolean; error?: string; finalText?: string }> => {
       // 1) 内存会话健在：直接续聊
       let liveSession = this.sessions.get(taskId)
+      // 连接无法证明新回合的归属（没有回合标识且上一回合归属已不可信）：不复用，
+      // 关掉它走下面的 resume 重建——隔离连接 + 恢复，而不是猜回调属于谁。
+      if (liveSession && !this.sessionMayOpenNewTurn(liveSession)) {
+        await this.closeSession(taskId, runIdentity(claim), true)
+        liveSession = undefined
+      }
       if (liveSession) {
         try {
-          const r = await this.sendTurn(taskId, liveSession, turnContent, runId)
-          if (!this.isRunningRun(taskId, runId)) return { ok: false, error: '回合已失效' }
+          const r = await this.sendTurn(taskId, liveSession, turnContent, claim)
+          if (!this.isCurrentRun(claim)) return { ok: false, error: '回合已失效' }
           if (!r.ok) throw new Error(r.error || '续聊回合失败')
-          const finalText = await this.completeTurn(taskId, liveSession, r, opts?.consultDepth ?? 0)
-          if (this.store.get(taskId)?.runId !== runId || this.store.get(taskId)?.status !== 'done') return { ok: false, error: '回合已失效' }
+          const finalText = await this.completeTurn(taskId, liveSession, r, claim, opts?.consultDepth ?? 0)
+          if (!this.store.matches(taskId, runIdentity(claim, { status: 'done' }))) return { ok: false, error: '回合已失效' }
           if (this.opts().notify) this.notify(task, '完成', finalText)
           return opts?.collectFinal ? { ok: true, finalText } : { ok: true }
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e)
-          if (!this.isRunningRun(taskId, runId)) return { ok: false, error: msg }
-          if (!SESSION_DEAD_RE.test(msg)) {
+          if (!this.isCurrentRun(claim)) return { ok: false, error: msg }
+          if (!SESSION_DEAD_RE.test(msg) && msg !== TURN_ISOLATION_REQUIRED) {
             // A failed follow-up turn invalidates the provider session as well;
             // close it before dropping the session-wide delegate ledger.
-            await this.closeSession(taskId)
-            this.failTask(taskId, msg, runId)
+            await this.closeSession(taskId, runIdentity(claim))
+            this.failTask(taskId, msg, claim)
             this.pushTask(taskId)
             return { ok: false, error: msg }
           }
           // 后端连接已死（进程退出/管道断开）：丢弃内存会话，走下面的 resume 重建——
           // 以前这种情况只能重启应用，现在等价于把重启后的恢复路径内置
-          await this.closeSession(taskId)
-          if (!this.isRunningRun(taskId, runId)) return { ok: false, error: '回合已失效' }
+          await this.closeSession(taskId, runIdentity(claim), true)
+          if (!this.isCurrentRun(claim)) return { ok: false, error: '回合已失效' }
           liveSession = undefined
         }
       }
 
-      // 2) resume 路径：内存会话丢失（应用重启/连接死亡）时按 sessionId 重建
+      // 2) resume 路径：内存会话丢失（应用重启/连接死亡/归属不可信）时按 sessionId 重建
       if (!task.sessionId) {
         const msg = '无会话可恢复'
-        this.failTask(taskId, msg, runId)
+        this.failTask(taskId, msg, claim)
         this.pushTask(taskId)
         return { ok: false, error: msg }
       }
       // 续聊沿用 agent 钉死的模型（zcode resume 后用 session/setModel 补设；CLI --model 与 --resume 正交）
       let resumeSession: BackendSession
       // 看门狗在 backend.start 之前武装：resume 重建阶段挂死同样按空转判败，
-      // 不永久卡住 running 状态（此前只能重启应用）
+      // 不永久挂住 running 状态（此前只能重启应用）
       const sentinel = this.idleSentinel(taskId)
       let unregisterResume: () => void = () => {}
       try {
         const gen = this.bumpTurnGen(taskId)
-        const eventContext: { generation: number; sessionOwner?: string } = { generation: gen }
         const life = this.lifecycle(taskId)
+        // 重建连接是独立会话：自己的通道、自己的回合身份，不与旧连接共享任何状态
+        const router = new SessionTurnRouter()
+        const channel = this.sessionChannel(router)
+        const turnRecord = this.openTurn(taskId, router, claim, gen, undefined)
         const turn = new Promise<BackendTurnResult>((resolve) => {
-          const token = life.gate.token()
-          unregisterResume = life.registerResume(token, (v) => resolve(v as BackendTurnResult))
+          unregisterResume = life.registerResume(turnRecord.token, (v) => resolve(v as BackendTurnResult))
         })
         resumeSession = await this.executor.start(
           () => backend.start({
@@ -1431,25 +1898,43 @@ export class TaskRunner {
             model: me?.model,
             connection: this.resolveConnection(task.agentId),
             resumeSessionId: task.sessionId,
-            events: this.makeEvents(taskId, undefined, eventContext)
+            turn: turnRecord.stamp,
+            events: channel
           }),
           sentinel.timeout,
-          () => this.lifecycle(taskId).accepts({ generation: eventContext.generation, sessionOwner: eventContext.sessionOwner })
+          // Same captured-claim accept as the first run: a resume that resolves
+          // after a replacement is closed instead of installed.
+          () => this.isCurrentRun(claim)
+            && this.lifecycle(taskId).accepts(turnRecord.token)
         )
-        this.sessionEventContexts.set(resumeSession, eventContext)
-        eventContext.sessionOwner = resumeSession.sessionId
+        // Bind the resumed session to this Run before installing anything in
+        // memory; a failed binding closes the exact session and writes no map.
+        let bound: Task | undefined
+        try {
+          bound = this.store.updateIf(taskId, runCondition(claim), resumeSession.sessionId ? { sessionId: resumeSession.sessionId } : {})
+        } catch (error) {
+          await this.closeLateSession(resumeSession)
+          throw error
+        }
+        if (!bound) {
+          await this.closeLateSession(resumeSession)
+          if (!this.isCurrentRun(claim)) return { ok: false, error: '回合已失效' }
+          throw new Error('会话绑定失败：执行归属已变化')
+        }
         this.lifecycle(taskId).gate.setSessionOwner(resumeSession.sessionId)
         void this.lifecycle(taskId).attachSession({ generation: gen, sessionOwner: resumeSession.sessionId }, resumeSession)
+        router.legacy = resumeSession.turnScoped !== true
+        router.owner = resumeSession.sessionId
+        this.sessionTurns.set(resumeSession, router)
         this.sessions.set(taskId, resumeSession)
-        this.store.update(taskId, { sessionId: resumeSession.sessionId })
         this.pushTask(taskId)
         try {
           const r = await Promise.race([turn, sentinel.timeout])
           sentinel.cancel()
-          if (!this.isRunningRun(taskId, runId)) return { ok: false, error: '回合已失效' }
+          if (!this.isCurrentRun(claim)) return { ok: false, error: '回合已失效' }
           if (!r?.ok) throw new Error(r?.error || '续聊回合失败')
-          const finalText = await this.completeTurn(taskId, resumeSession, r, opts?.consultDepth ?? 0)
-          if (this.store.get(taskId)?.runId !== runId || this.store.get(taskId)?.status !== 'done') return { ok: false, error: '回合已失效' }
+          const finalText = await this.completeTurn(taskId, resumeSession, r, claim, opts?.consultDepth ?? 0)
+          if (!this.store.matches(taskId, runIdentity(claim, { status: 'done' }))) return { ok: false, error: '回合已失效' }
           if (this.opts().notify) this.notify(task, '完成', finalText)
           return opts?.collectFinal ? { ok: true, finalText } : { ok: true }
         } finally {
@@ -1459,7 +1944,7 @@ export class TaskRunner {
       } catch (e) {
         unregisterResume()
         const msg = e instanceof Error ? e.message : String(e)
-        this.failTask(taskId, msg, runId)
+        this.failTask(taskId, msg, claim)
         this.pushTask(taskId)
         return { ok: false, error: msg }
       } finally {
@@ -1471,7 +1956,7 @@ export class TaskRunner {
       // 后台回合自身失败已走 failTask→pushTask 广播显错；这里只兜意外抛出，防静默挂 running
       void runTurn().catch((e) => {
         const msg = e instanceof Error ? e.message : String(e)
-        this.failTask(taskId, msg, runId)
+        this.failTask(taskId, msg, claim)
         this.pushTask(taskId)
       })
       return { ok: true }
@@ -1482,18 +1967,26 @@ export class TaskRunner {
   async cancel(taskId: string): Promise<{ ok: boolean; error?: string }> {
     const task = this.store.get(taskId)
     if (!task) return { ok: false, error: '任务不存在' }
-    const retryPending = this.clearRetry(taskId)
+    // Cancel the execution this call observed. The condition is captured before
+    // any teardown, so a Run that replaced the observed one keeps running.
+    const observed: TaskExpectation = { status: task.status, runId: task.runId, executionOwner: task.executionOwner }
+    const cancelObserved = () => this.store.updateIf(taskId, observed, { status: 'cancelled', endedAt: Date.now() })
+    const retryPending = this.retryTimers.has(taskId)
     if (task.status === 'failed' && retryPending) {
+      if (!cancelObserved()) return { ok: false, error: '任务状态已变化，取消未生效' }
+      this.clearRetry(taskId)
       this.bumpTurnGen(taskId)
-      this.store.update(taskId, { status: 'cancelled', endedAt: Date.now() })
+      this.claims.delete(taskId)
       this.lifecycle(taskId).dispose()
       this.pushTask(taskId)
       this.store.flushEvents(taskId)
       return { ok: true }
     }
     if (task.status === 'queued') {
+      if (!cancelObserved()) return { ok: false, error: '任务状态已变化，取消未生效' }
+      this.clearRetry(taskId)
       this.bumpTurnGen(taskId)
-      this.store.update(taskId, { status: 'cancelled', endedAt: Date.now() })
+      this.claims.delete(taskId)
       this.lifecycle(taskId).dispose()
       this.pushTask(taskId)
       return { ok: true }
@@ -1501,8 +1994,12 @@ export class TaskRunner {
     if (task.status !== 'running') return { ok: false, error: '任务不在运行中' }
     const session = this.sessions.get(taskId)
     const launchHandle = this.launchHandles.get(taskId)
-    this.store.update(taskId, { status: 'cancelled', endedAt: Date.now() })
-    this.pushTask(taskId)
+    const claim = this.claims.get(taskId)
+    if (!claim || !this.isCurrentRun(claim)) return { ok: false, error: '执行归属不在当前运行器，未取消任务' }
+    const cancelled = this.store.updateIf(taskId, runCondition(claim), { status: 'cancelled', endedAt: Date.now() })
+    if (!cancelled) return { ok: false, error: '任务状态已变化，取消未生效' }
+    this.clearRetry(taskId)
+    this.claims.delete(taskId)
     // Resolve start/send races immediately. Waiting for the idle timeout would
     // keep a scheduler slot occupied after cancellation.
     this.turnWatchdogs.get(taskId)?.expire()
@@ -1514,6 +2011,7 @@ export class TaskRunner {
     // already be using this taskId when stop/close eventually settles.
     this.launchHandles.delete(taskId)
     this.sessions.delete(taskId)
+    if (session) this.retireSession(session)
     this.permissionBroker.cancelTask(taskId)
     this.toolWindows.delete(taskId)
     this.disarmWatchdog(taskId)
@@ -1521,6 +2019,7 @@ export class TaskRunner {
     this.delegateRejections.delete(taskId)
     this.lifecycle(taskId).dispose()
     this.lastTerminalResponses.delete(taskId)
+    this.pushTask(taskId)
     if (!session) {
       try { await this.awaitCleanup(() => launchHandle?.stop()) } catch {}
     }
@@ -1543,7 +2042,7 @@ export class TaskRunner {
     for (const [taskId, handle] of this.launchHandles) {
       this.bumpTurnGen(taskId)
       if (!this.sessions.has(taskId)) {
-        try { await Promise.resolve(handle.stop()) } catch {}
+        await this.awaitCleanup(() => handle.stop())
       }
     }
     this.launchHandles.clear()
@@ -1556,10 +2055,12 @@ export class TaskRunner {
     }
     this.turnWatchdogs.clear()
     for (const [, s] of this.sessions) {
+      this.retireSession(s, 'replaced')
       await this.awaitCleanup(() => s.stop())
       await this.awaitCleanup(() => s.close())
     }
     this.sessions.clear()
+    this.claims.clear()
     this.earlySpawns.clear()
     this.delegateRejections.clear()
     this.lastTerminalResponses.clear()

@@ -45,7 +45,7 @@ export class Executor {
       throw new Error(outcome.error.error || '回合失败')
     }
     if (!accept()) {
-      await outcome.session.close().catch(() => {})
+      await this.closeLateSession(outcome.session)
       throw new Error('Task execution was cancelled')
     }
     return outcome.session

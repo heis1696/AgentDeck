@@ -1,6 +1,7 @@
 import type { Task, RunTrigger, WorktreeInfo } from '../shared/types'
-import type { TaskStore } from './store'
+import { sameExecutionOwner, type TaskStore } from './store'
 import type { IssueStore } from './issue-store'
+import { findHandoffSuccessor, repeatsHandoffPhase } from './handoff'
 
 /** The small agent shape needed to resolve a task's execution backend. */
 export interface TaskAgentRef {
@@ -124,12 +125,26 @@ export class TaskService {
     const tasks = this.taskCascade(taskIds)
     const terminal = (items: Task[]) => items.every((task) => ['done', 'failed', 'cancelled'].includes(task.status))
     if (!terminal(tasks) || !validate(tasks)) return null
-    for (const task of tasks) await forget(task.id)
-    const current = this.taskCascade(taskIds)
-    if (current.length !== tasks.length || !current.every((task) => tasks.some((item) => item.id === task.id)) || !terminal(current) || !validate(current)) return null
-    for (const task of current) this.store.delete(task.id)
+    const deleted = this.store.transaction((tx) => {
+      const ids = new Set(taskIds)
+      const all = tx.list()
+      let grew = true
+      while (grew) {
+        grew = false
+        for (const task of all) if (task.parentTaskId && ids.has(task.parentTaskId) && !ids.has(task.id)) { ids.add(task.id); grew = true }
+      }
+      const current = all.filter((task) => ids.has(task.id))
+      if (current.some((task) => task.gitOperation !== undefined)) return null
+      if (current.length !== tasks.length || !terminal(current) || !current.every((task) => tasks.some((prior) => prior.id === task.id && prior.runId === task.runId && sameExecutionOwner(prior.executionOwner, task.executionOwner))) || !validate(current)) return null
+      for (const task of current) tx.delete(task.id)
+      return current.map((task) => task.id)
+    })
+    // Deletion wins the claim race before cleanup can stop any local session.
+    // Failed validation must have no effects on a replacement execution.
+    if (!deleted) return null
+    for (const id of deleted) await forget(id)
     this.store.flush()
-    return current.map((task) => task.id)
+    return deleted
   }
 
   /** Return the task registered for a durable idempotency key. */
@@ -162,50 +177,36 @@ export class TaskService {
 
   createTask(input: TaskCreateInput, trigger: RunTrigger = input.trigger ?? 'assignment'): Task {
     const dedupeKey = this.normalizeDedupeKey(input)
-    if (dedupeKey) {
-      const existing = this.deduped(dedupeKey)
-      if (existing) {
-        if (existing.status === 'queued' && existing.parked && input.startNow !== false && !input.parked) {
-          this.store.update(existing.id, { parked: undefined })
-        }
-        return this.store.get(existing.id) ?? existing
-      }
-    }
     const agent = input.agentId ? this.getAgent?.(input.agentId) : undefined
     const backend = agent?.backend ?? input.backend ?? this.defaultBackend
     const title = input.title.trim() || '未命名任务'
     const prompt = input.prompt.trim()
-    const task = this.store.create({
-      title,
-      prompt,
-      workdir: input.workdir ?? '',
-      backend,
-      trigger,
-      ...(agent ? { agentId: agent.id } : (!this.getAgent && input.agentId) ? { agentId: input.agentId } : {}),
-      ...(input.handoff?.trim() ? { handoff: input.handoff.trim() } : {}),
-      ...(input.startNow === false || input.parked ? { parked: true } : {}),
-      ...(input.backgroundRunning ? { backgroundRunning: true } : {}),
-      ...(input.suppressIssue ? { suppressIssue: true } : {}),
-      ...(input.issueId?.trim() ? { issueId: input.issueId.trim() } : {}),
-      ...(input.continuesFrom ? { continuesFrom: input.continuesFrom } : {}),
-      ...(input.goalId ? { goalId: input.goalId } : {}),
-      ...(input.phaseIndex !== undefined ? { phaseIndex: input.phaseIndex } : {}),
-      ...(input.parentTaskId ? { parentTaskId: input.parentTaskId } : {}),
-      ...(input.workerIndex !== undefined ? { workerIndex: input.workerIndex } : {}),
-      ...(input.unavailableReason ? { unavailableReason: input.unavailableReason } : {}),
-      ...(input.worktree ? { worktree: input.worktree } : {}),
-      ...(input.titleAuto ? { titleAuto: true } : {}),
-      ...(dedupeKey ? { dedupeKey } : {})
+    const task = this.store.transaction((tx) => {
+      const existing = dedupeKey ? tx.list().find((item) => item.dedupeKey === dedupeKey) : undefined
+      const created = existing ?? tx.create({
+        title, prompt, workdir: input.workdir ?? '', backend, trigger,
+        ...(agent ? { agentId: agent.id } : (!this.getAgent && input.agentId) ? { agentId: input.agentId } : {}),
+        ...(input.handoff?.trim() ? { handoff: input.handoff.trim() } : {}),
+        ...(input.startNow === false || input.parked ? { parked: true } : {}),
+        ...(input.backgroundRunning ? { backgroundRunning: true } : {}),
+        ...(input.suppressIssue ? { suppressIssue: true } : {}),
+        ...(input.issueId?.trim() ? { issueId: input.issueId.trim() } : {}),
+        ...(input.continuesFrom ? { continuesFrom: input.continuesFrom } : {}),
+        ...(input.goalId ? { goalId: input.goalId } : {}),
+        ...(input.phaseIndex !== undefined ? { phaseIndex: input.phaseIndex } : {}),
+        ...(input.parentTaskId ? { parentTaskId: input.parentTaskId } : {}),
+        ...(input.workerIndex !== undefined ? { workerIndex: input.workerIndex } : {}),
+        ...(input.unavailableReason ? { unavailableReason: input.unavailableReason } : {}),
+        ...(input.worktree ? { worktree: input.worktree } : {}),
+        ...(input.titleAuto ? { titleAuto: true } : {}),
+        ...(dedupeKey ? { dedupeKey } : {})
+      })
+      if (!created.suppressIssue && !created.issueId) tx.update(created.id, { issueId: 'iss_' + created.id })
+      return tx.get(created.id)!
     })
-    // A caller may explicitly own an Issue. Otherwise every visible Task gets
-    // one stable Issue id before projection; run-only automation is explicit.
-    if (!task.suppressIssue && !task.issueId) {
-      this.store.update(task.id, { issueId: `iss_${task.id}` })
-    }
-    const projected = this.store.get(task.id)!
-    this.issueStore?.sync(this.store.list())
-    if (dedupeKey) this.dedupe.set(dedupeKey, projected.id)
-    return projected
+    this.issueStore?.syncEventually(this.store.list())
+    if (dedupeKey) this.dedupe.set(dedupeKey, task.id)
+    return task
   }
 
   createChildTask(input: ChildTaskCreateInput): Task {
@@ -226,51 +227,41 @@ export class TaskService {
 
   /**
    * Create the next phase on the same Issue. Handoffs are idempotent for a
-   * source/brief pair so duplicate stream/replay callbacks cannot add runs.
+   * source so reworded stream/replay callbacks cannot add parallel successors.
    */
   createHandoffTask(input: HandoffTaskCreateInput): Task | null {
-    const source = this.store.get(input.sourceTaskId)
-    if (!source) return null
-    const brief = input.brief.trim()
-    if (!brief) return null
-    // The source Task is authoritative for Issue ownership. The explicit
-    // argument is retained for legacy callers but cannot redirect a handoff
-    // to another Issue (or accidentally create a fresh one when omitted).
-    const issueId = source.issueId ?? input.issueId.trim()
-    if (!issueId) return null
-    const existing = this.store.list().find((task) =>
-      task.issueId === issueId
-      && task.continuesFrom === source.id
-      && task.prompt === brief
-    )
-    const phaseIndex = source.goalId === undefined
-      ? undefined
-      : (source.phaseIndex ?? 0) + 1
-    if (existing) {
-      // Repair a handoff persisted by the pre-stage-2 path. Reusing the task
-      // preserves its Issue/Run history while making the Goal projection
-      // complete after restart or replay.
-      if (source.goalId && (existing.goalId !== source.goalId || existing.phaseIndex !== phaseIndex)) {
-        this.store.update(existing.id, { goalId: source.goalId, phaseIndex })
-        this.issueStore?.sync(this.store.list())
+    return this.resolveHandoffTask(input)?.task ?? null
+  }
+
+  resolveHandoffTask(input: HandoffTaskCreateInput): { task: Task; created: boolean } | null {
+    const resolved = this.store.transaction((tx) => {
+      const source = tx.get(input.sourceTaskId)
+      if (!source) return null
+      const brief = input.brief.trim()
+      if (!brief) return null
+      const issueId = source.issueId ?? input.issueId.trim()
+      if (!issueId) return null
+      const existing = findHandoffSuccessor(tx.list(), { id: source.id, issueId })
+      const phaseIndex = source.goalId === undefined ? undefined : (source.phaseIndex ?? 0) + 1
+      if (existing) {
+        if (source.goalId && (existing.goalId !== source.goalId || existing.phaseIndex !== phaseIndex)) {
+          tx.update(existing.id, { goalId: source.goalId, phaseIndex })
+        }
+        return { task: tx.get(existing.id)!, created: false }
       }
-      if (input.start === 'auto' && existing.status === 'queued' && existing.parked) {
-        this.store.update(existing.id, { parked: undefined })
-      }
-      return this.store.get(existing.id) ?? existing
-    }
-    const firstLine = brief.split(/\r?\n/).map((line) => line.trim()).find(Boolean)
-    return this.createTask({
-      title: `▶ ${firstLine?.slice(0, 40) ?? `${source.title} (next phase)`}`,
-      prompt: brief,
-      workdir: source.workdir,
-      agentId: source.agentId,
-      backend: source.backend,
-      issueId,
-      continuesFrom: source.id,
-      ...(source.goalId ? { goalId: source.goalId } : {}),
-      ...(phaseIndex !== undefined ? { phaseIndex } : {}),
-      startNow: input.start !== 'parked'
-    }, 'handoff')
+      if (repeatsHandoffPhase(source, brief)) return null
+      const firstLine = brief.split(/\r?\n/).map((line) => line.trim()).find(Boolean)
+      const task = tx.create({
+        title: '▶ ' + (firstLine?.slice(0, 40) ?? source.title + ' (next phase)'),
+        prompt: brief, workdir: source.workdir, agentId: source.agentId, backend: source.backend,
+        issueId, continuesFrom: source.id, trigger: 'handoff',
+        ...(source.goalId ? { goalId: source.goalId } : {}),
+        ...(phaseIndex !== undefined ? { phaseIndex } : {}),
+        ...(input.start === 'parked' ? { parked: true } : {})
+      })
+      return { task, created: true }
+    })
+    if (resolved) this.issueStore?.syncEventually(this.store.list())
+    return resolved
   }
 }

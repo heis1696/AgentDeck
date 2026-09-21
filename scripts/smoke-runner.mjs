@@ -51,22 +51,27 @@ const store = new TaskStore(tmp)
 function makeFakeBackend() {
   /** @type {any} */
   let session
-  const makeSession = (emitter, behavior) => ({
+  const makeSession = (emitter, behavior, firstTurn) => {
+    let activeTurn = firstTurn
+    return ({
     sessionId: 'sess_fake_' + Math.random().toString(36).slice(2, 8),
-    async send(content) {
+    turnScoped: true,
+    async send(content, turn) {
+      activeTurn = turn
       const isTitleTurn = content.includes('重起一个简短标题')
-      emitter.onEvent({ ts: Date.now(), kind: 'text', text: `[followup:${content}]` })
+      emitter.onEvent({ ts: Date.now(), kind: 'text', text: `[followup:${content}]` }, activeTurn)
       behavior.followupCount++
       setTimeout(() => {
-        emitter.onEvent({ ts: Date.now(), kind: 'usage', data: { tokenCount: 600, durationMs: 1500 } })
-        emitter.onEvent({ ts: Date.now(), kind: 'final', text: isTitleTurn ? '修复登录超时问题' : '追问回复' })
-        emitter.onTurnEnd({ response: isTitleTurn ? '修复登录超时问题' : '追问回复', ok: true })
+        emitter.onEvent({ ts: Date.now(), kind: 'usage', data: { tokenCount: 600, durationMs: 1500 } }, activeTurn)
+        emitter.onEvent({ ts: Date.now(), kind: 'final', text: isTitleTurn ? '修复登录超时问题' : '追问回复' }, activeTurn)
+        emitter.onTurnEnd({ response: isTitleTurn ? '修复登录超时问题' : '追问回复', ok: true }, activeTurn)
       }, 30)
       await new Promise((r) => setTimeout(r, 60))
     },
     async stop() { behavior.stopped = true },
     async close() { behavior.closed = true }
-  })
+    })
+  }
   // The runner appends protocol instructions to the initial prompt. The fake
   // backend should model the provider's business response, not echo those
   // internal instructions into the task result.
@@ -79,16 +84,16 @@ function makeFakeBackend() {
     id: 'fake',
     label: 'Fake',
     async probe() { return { ok: true, detail: 'fake' } },
-    async start({ prompt, events }) {
+    async start({ prompt, events, turn }) {
       const behavior = { followupCount: 0, stopped: false, closed: false }
-      session = makeSession(events, behavior)
+      session = makeSession(events, behavior, turn)
       const userPrompt = taskPrompt(prompt)
       // 异步完成首回合
       setTimeout(() => {
-        events.onEvent({ ts: Date.now(), kind: 'text', text: '流式片段' })
-        events.onEvent({ ts: Date.now(), kind: 'usage', data: { input_tokens: 1200, output_tokens: 300, total_cost_usd: 0.012 } })
-        events.onEvent({ ts: Date.now(), kind: 'final', text: `done:${userPrompt}` })
-        events.onTurnEnd({ response: `done:${userPrompt}`, ok: true })
+        events.onEvent({ ts: Date.now(), kind: 'text', text: '流式片段' }, turn)
+        events.onEvent({ ts: Date.now(), kind: 'usage', data: { input_tokens: 1200, output_tokens: 300, total_cost_usd: 0.012 } }, turn)
+        events.onEvent({ ts: Date.now(), kind: 'final', text: `done:${userPrompt}` }, turn)
+        events.onTurnEnd({ response: `done:${userPrompt}`, ok: true }, turn)
       }, 50)
       session.__behavior = behavior
       return session
@@ -263,6 +268,32 @@ const lateBackend = {
     }, 200))
   }
 }
+// Shutdown must not wait forever for a launch handle, and a session that
+// resolves after shutdown must not restore the task through late callbacks.
+const shutdownState = { stopCalls: 0, sessionClosed: false }
+const shutdownLateBackend = {
+  id: 'shutdown-late',
+  label: 'Shutdown late start',
+  async probe() { return { ok: true, detail: '' } },
+  async start({ events }) {
+    events.onLaunch?.({ stop: () => {
+      shutdownState.stopCalls++
+      return new Promise(() => {})
+    } })
+    return new Promise((resolve) => setTimeout(() => {
+      resolve({
+        sessionId: 'sess_shutdown_late',
+        async send() {},
+        async stop() {},
+        async close() { shutdownState.sessionClosed = true }
+      })
+      setTimeout(() => {
+        events.onEvent({ ts: Date.now(), kind: 'final', text: 'shutdown late result' })
+        events.onTurnEnd({ response: 'shutdown late result', ok: true })
+      }, 20)
+    }, 360))
+  }
+}
 const runner3 = new TaskRunner(store, new Map([
   ['slow', slowBackend], ['hb', hbBackend], ['hang', hangBackend], ['late', lateBackend], ['fake', backend]
 ]), () => ({ concurrency: 1, mode: 'yolo', notify: false }))
@@ -323,6 +354,20 @@ assert(lateState.launchStopped && lateState.sessionClosed, 'launch stopped and l
 assert(!store.readEvents(t9.id).some((e) => e.text === 'late result'), 'late terminal event ignored')
 assert(store.get(t10.id).status === 'done', 'cancel during start releases concurrency slot')
 
+const shutdownRunner = new TaskRunner(store, new Map([['shutdown-late', shutdownLateBackend]]), () => ({ concurrency: 1, mode: 'yolo', notify: false }))
+const shutdownTask = store.create({ title: 'shutdown late start', prompt: 'shutdown late start', workdir: '', backend: 'shutdown-late' })
+shutdownRunner.enqueue(shutdownTask)
+await wait(40)
+const shutdownFinished = await Promise.race([
+  shutdownRunner.shutdown().then(() => true),
+  wait(3500).then(() => false)
+])
+assert(shutdownFinished, 'shutdown bounds a launch handle whose stop never settles')
+assert(shutdownState.stopCalls > 0, 'shutdown invokes the launch stop handle')
+assert(shutdownState.sessionClosed, 'late startup session is closed after shutdown')
+assert(store.get(shutdownTask.id).status === 'failed', 'late startup cannot revive a closed task')
+assert(!store.readEvents(shutdownTask.id).some((e) => e.text === 'shutdown late result'), 'late shutdown terminal event is ignored')
+
 // Two live sessions must be isolated: cancelling one task cannot stop or
 // suppress the other task's provider process and terminal event.
 const isolated = { stopped: [], closed: [] }
@@ -362,17 +407,18 @@ const staleTitleBackend = {
   id: 'stale-title',
   label: 'Stale title',
   async probe() { return { ok: true, detail: '' } },
-  async start({ events }) {
+  async start({ events, turn }) {
     const session = {
       sessionId: 'sess_stale_title',
-      async send() {
+      turnScoped: true,
+      async send(_content, titleTurn) {
         setTimeout(() => {
-          events.onEvent({ ts: Date.now(), kind: 'final', text: 'initial response' })
-          events.onTurnEnd({ response: 'initial response', ok: true })
+          events.onEvent({ ts: Date.now(), kind: 'final', text: 'initial response' }, turn)
+          events.onTurnEnd({ response: 'initial response', ok: true }, turn)
         }, 15)
         setTimeout(() => {
-          events.onEvent({ ts: Date.now(), kind: 'final', text: 'generated title' })
-          events.onTurnEnd({ response: 'generated title', ok: true })
+          events.onEvent({ ts: Date.now(), kind: 'final', text: 'generated title' }, titleTurn)
+          events.onTurnEnd({ response: 'generated title', ok: true }, titleTurn)
         }, 45)
         await wait(60)
       },
@@ -380,8 +426,8 @@ const staleTitleBackend = {
       async close() {}
     }
     setTimeout(() => {
-      events.onEvent({ ts: Date.now(), kind: 'final', text: 'initial response' })
-      events.onTurnEnd({ response: 'initial response', ok: true })
+      events.onEvent({ ts: Date.now(), kind: 'final', text: 'initial response' }, turn)
+      events.onTurnEnd({ response: 'initial response', ok: true }, turn)
     }, 10)
     return session
   }
@@ -402,6 +448,7 @@ assert(collected.ok && collected.finalText === '杩介棶鍥炲', 'collectFin
 assert(collected.ok && typeof collected.finalText === 'string' && collected.finalText.length > 0, 'collectFinal returns finalText on a real follow-up')
 await runner.shutdown()
 await runner3.shutdown()
+await shutdownRunner.shutdown()
 await runner4.shutdown()
 console.log('\n✅ RUNNER SMOKE PASSED')
 process.exit(0)

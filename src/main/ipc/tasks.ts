@@ -5,9 +5,23 @@ import { fileDiff, fileDiffFailure, removeWorktree } from '../git'
 import { parseContent, parseFollowUpOptions, parseId, parseNonNegativeInteger, parsePermissionDecision, parseRepoRelativePath, parseTaskCreate, parseTaskStatus } from '../ipc-validation'
 import type { IpcContext } from './context'
 import type { Task } from '../../shared/types'
+import { sameExecutionOwner } from '../store'
+import { prepareManualTaskStart, taskIdentity } from '../handoff'
 
 export function registerTaskIpc(ctx: IpcContext) {
   const send = (channel: string, payload: unknown) => ctx.getWindow()?.webContents.send(channel, payload)
+  const projectTasks = () => {
+    try {
+      // Projection is an outbox-like side effect of the committed Task. Keep
+      // the compatibility fallback for lightweight IPC fixtures, but never
+      // let a projection failure change the IPC result or suppress broadcasts.
+      const issueStore = ctx.issueStore as typeof ctx.issueStore & { syncEventually?: (tasks: Task[]) => void }
+      if (typeof issueStore.syncEventually === 'function') issueStore.syncEventually(ctx.store.list())
+      else issueStore.sync(ctx.store.list())
+    } catch (error) {
+      console.error('[Task IPC] Issue projection pending; committed Task retained', error)
+    }
+  }
   const syncTask = (taskId: string) => {
     const task = ctx.store.get(taskId)
     if (!task) return
@@ -39,14 +53,16 @@ export function registerTaskIpc(ctx: IpcContext) {
     // parked 与非 parked 的 queued 都放行：非 parked 排队（如硬切后继）若因故滞留，
     // 这是用户唯一的手动解卡入口
     if (task.status !== 'queued') return { ok: false, error: '任务不在排队中' }
-    ctx.store.update(taskId, { parked: undefined })
-    ctx.runner.enqueue(ctx.store.get(taskId)!)
-    ctx.issueStore.sync(ctx.store.list())
+    // 捕获身份后再条件改状态：并发改到别的状态（如已被接管/已启动）时不覆盖新运行
+    const started = prepareManualTaskStart(ctx.store, taskId)
+    if (!started) return { ok: false, error: '任务不在排队中' }
+    ctx.runner.enqueue(started)
+    projectTasks()
     return { ok: true }
   })
   ipcMain.handle('tasks:cancel', async (_e, id: unknown) => {
     const result = await ctx.runner.cancel(parseId(id))
-    ctx.issueStore.sync(ctx.store.list())
+    projectTasks()
     return result
   })
   ipcMain.handle('tasks:followup', (_e, id: unknown, content: unknown, options: unknown) => ctx.runner.followUp(parseId(id), parseContent(content, '追问'), parseFollowUpOptions(options)))
@@ -59,16 +75,26 @@ export function registerTaskIpc(ctx: IpcContext) {
     if (task.status === 'running') return { ok: false, error: '请先取消运行中的任务' }
     const children = ctx.store.list().filter((item) => item.parentTaskId === taskId)
     if (children.some((item) => item.status === 'running')) return { ok: false, error: '请先取消运行中的子任务' }
-    const deleted = [taskId, ...children.map((item) => item.id)]
-    // 删除前先取 workdir（store.delete 之后任务对象就没了）
-    const workdirs = deleted.map((id) => ctx.store.get(id)?.workdir).filter((w): w is string => !!w)
-    for (const childId of deleted) {
-      await Promise.resolve(ctx.runner.forget?.(childId))
-      ctx.store.delete(childId)
-    }
+    const observed = [task, ...children]
+    // 删除前先取 workdir（索引里没了任务对象就取不到了）
+    const workdirs = observed.map((item) => item.workdir).filter((w): w is string => !!w)
+    // 先按捕获身份校验并提交删除，再清理内存会话：校验失败不留任何副作用，
+    // 也不可能让清理先于删除去伤及替换执行（新运行仍持有该任务身份）。
+    const deleted = ctx.store.transaction((tx) => {
+      for (const item of observed) {
+        const current = tx.get(item.id)
+        if (!current || current.status === 'running' || current.gitOperation !== undefined) return null
+        if (current.status !== item.status || current.runId !== item.runId) return null
+        if (!sameExecutionOwner(current.executionOwner, item.executionOwner)) return null
+      }
+      for (const item of observed) tx.delete(item.id, taskIdentity(item))
+      return observed.map((item) => item.id)
+    })
+    if (!deleted) return { ok: false, error: '任务状态已变化，请重试' }
+    for (const childId of deleted) await Promise.resolve(ctx.runner.forget?.(childId))
     // 回收该任务（含子任务）的委派 worktree，防累积；失败不阻塞删除，留待启动清扫兜底
     for (const wd of workdirs) void removeWorktree(wd).catch(() => {})
-    ctx.issueStore.sync(ctx.store.list())
+    projectTasks()
     for (const childId of deleted) send('task:deleted', childId)
     return { ok: true }
   })
@@ -78,10 +104,16 @@ export function registerTaskIpc(ctx: IpcContext) {
     if (!task) return { ok: false, error: '任务不存在' }
     if (task.status === 'running') return { ok: false, error: '任务正在运行，如长时间无输出可先「停止」再重新运行' }
     if (task.status === 'queued') return { ok: false, error: '任务已在队列中等待并发槽位' }
-    await ctx.runner.closeSession(taskId)
-    ctx.store.update(taskId, { status: 'queued', error: undefined, failure: undefined, result: undefined, sessionId: undefined, attempt: undefined, runId: undefined })
-    ctx.runner.enqueue(ctx.store.get(taskId)!)
-    ctx.issueStore.sync(ctx.store.list())
+    const captured = taskIdentity(task)
+    // Validate first, clean up second: the conditional requeue proves the
+    // observed run still owns the record, so a rejected retry leaves the
+    // replacement run and its session untouched.
+    const requeued = ctx.store.updateIf(taskId, captured, { status: 'queued', error: undefined, failure: undefined, result: undefined, sessionId: undefined, attempt: undefined, runId: undefined, executionOwner: undefined })
+    if (!requeued) return { ok: false, error: '任务状态已变化，请重试' }
+    // 只关闭属于这次捕获运行的内存会话，陈旧清理不会碰到替换执行
+    await ctx.runner.closeSession(taskId, { runId: task.runId, executionOwner: task.executionOwner })
+    ctx.runner.enqueue(requeued)
+    projectTasks()
     return { ok: true }
   })
   ipcMain.handle('tasks:rewind', (_e, id: unknown, toSeq: unknown) => {
@@ -89,18 +121,21 @@ export function registerTaskIpc(ctx: IpcContext) {
     const task = ctx.store.get(taskId)
     if (!task) return { ok: false, error: '任务不存在' }
     if (task.status === 'running' || task.status === 'queued') return { ok: false, error: '任务运行中，不能回退' }
-    if (!ctx.store.truncateEvents(taskId, parseNonNegativeInteger(toSeq, 'toSeq'))) return { ok: false, error: '回退失败' }
+    const captured = taskIdentity(task)
+    // 截断与结果回写都按捕获身份条件提交：期间被替换成新运行就不再回退
+    if (!ctx.store.truncateEvents(taskId, parseNonNegativeInteger(toSeq, 'toSeq'), captured)) return { ok: false, error: '回退失败' }
     const events = ctx.store.readEvents(taskId)
     const finalEvent = [...events].reverse().find((event) => event.kind === 'final' && event.text)
-    ctx.store.update(taskId, { result: finalEvent?.text, usage: aggregateUsage(events) })
+    if (!ctx.store.updateIf(taskId, captured, { result: finalEvent?.text, usage: aggregateUsage(events) })) return { ok: false, error: '回退失败' }
     ctx.runner.pushTask(taskId)
     BrowserWindow.getAllWindows().forEach((window) => window.webContents.send('task:events-invalidated', { taskId }))
     return { ok: true }
   })
   ipcMain.handle('tasks:rename', (_e, id: unknown, title: unknown) => {
     const taskId = parseId(id)
-    ctx.store.update(taskId, { title: parseContent(title, '标题').slice(0, 120), titleAuto: false })
-    const task = ctx.store.get(taskId)
+    const current = ctx.store.get(taskId)
+    if (!current) return null
+    const task = ctx.store.updateIf(taskId, taskIdentity(current), { title: parseContent(title, '标题').slice(0, 120), titleAuto: false })
     if (task) ctx.runner.pushTask(taskId)
     return task ?? null
   })
@@ -143,18 +178,20 @@ export function registerTaskIpc(ctx: IpcContext) {
     if (!transition.ok) return transition
     if (task.status === parsedStatus) return { ok: true }
     if (task.status === 'running') return { ok: false, error: '请先取消运行中的任务' }
+    const captured = taskIdentity(task)
     if (parsedStatus === 'running') {
       if (task.status !== 'queued') return { ok: false, error: '只有排队中的任务可以启动' }
-      ctx.store.update(taskId, { parked: undefined })
-      ctx.runner.enqueue(ctx.store.get(taskId)!)
+      const started = prepareManualTaskStart(ctx.store, taskId)
+      if (!started) return { ok: false, error: '任务不在排队中' }
+      ctx.runner.enqueue(started)
     } else if (parsedStatus === 'queued') {
-      ctx.store.update(taskId, { status: 'queued', parked: true, error: undefined, failure: undefined, result: undefined, endedAt: undefined })
+      if (!ctx.store.updateIf(taskId, captured, { status: 'queued', parked: true, error: undefined, failure: undefined, result: undefined, endedAt: undefined })) return { ok: false, error: '任务状态已变化，请重试' }
       syncTask(taskId)
     } else {
-      ctx.store.update(taskId, { status: parsedStatus, parked: undefined, endedAt: Date.now() })
+      if (!ctx.store.updateIf(taskId, captured, { status: parsedStatus, parked: undefined, endedAt: Date.now() })) return { ok: false, error: '任务状态已变化，请重试' }
       syncTask(taskId)
     }
-    ctx.issueStore.sync(ctx.store.list())
+    projectTasks()
     return { ok: true }
   })
 }
