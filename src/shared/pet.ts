@@ -502,3 +502,111 @@ export function petSheetSizeForGrid(grid: { cols: number; rows: number }): strin
   if (grid.cols < grid.rows) return '1024x1536'
   return '1024x1024'
 }
+
+// —— PetHostContract（阶段 1）：主进程 → 桌宠的事件契约 + 桌宠 deck.* 工具契约 ——
+// 事件源改道：notifyTaskChanged 直调 onTaskChanged → host.emit（开关位闸门在 host 边界收口）。
+
+/** 契约事件种类。workflow.milestone 的发射点（runner onTaskEvent 样板）留阶段 2，本阶段类型与开关位先行 */
+export type PetHostEventKind = 'task.running' | 'task.done' | 'task.failed' | 'workflow.milestone' | 'board.snapshot'
+
+export interface PetHostEvent {
+  kind: PetHostEventKind
+  taskId: string
+  title: string
+  at: number
+  /** 里程碑说明等附注（workflow.milestone 用；可选） */
+  detail?: string
+}
+
+/** 事件开关位：默认全开，持久化在 pet.json（PetConfig.hostSwitches）；关 = host 边界直接丢弃（不转发不记忆） */
+export interface PetHostSwitches {
+  taskRunning: boolean
+  taskDone: boolean
+  taskFailed: boolean
+  workflowMilestone: boolean
+  boardSnapshot: boolean
+}
+
+export const DEFAULT_PET_HOST_SWITCHES: PetHostSwitches = {
+  taskRunning: true,
+  taskDone: true,
+  taskFailed: true,
+  workflowMilestone: true,
+  boardSnapshot: true
+}
+
+/** 事件种类 → 开关位（host emit 边界的闸门依据）；未知种类返回 null（直接丢弃） */
+export function petHostSwitchKeyFor(kind: PetHostEventKind): keyof PetHostSwitches | null {
+  switch (kind) {
+    case 'task.running': return 'taskRunning'
+    case 'task.done': return 'taskDone'
+    case 'task.failed': return 'taskFailed'
+    case 'workflow.milestone': return 'workflowMilestone'
+    case 'board.snapshot': return 'boardSnapshot'
+    default: return null
+  }
+}
+
+/** pet.json 脏数据容错：逐位布尔归一，缺省/非法位回默认 true */
+export function normalizePetHostSwitches(value: unknown): PetHostSwitches {
+  const raw = value && typeof value === 'object' ? (value as Partial<PetHostSwitches>) : {}
+  const out = { ...DEFAULT_PET_HOST_SWITCHES }
+  for (const key of Object.keys(DEFAULT_PET_HOST_SWITCHES) as Array<keyof PetHostSwitches>) {
+    if (typeof raw[key] === 'boolean') out[key] = raw[key] as boolean
+  }
+  return out
+}
+
+/** deck.queryBoard 出参行：白名单取字段——prompt/workdir/密钥/日志正文（result/gitDiff/error 等）一概不出现 */
+export interface PetBoardTaskRow {
+  id: string
+  title: string
+  status: string
+  /** 执行队员；空 = 默认队员 */
+  agentId: string
+  backend: string
+  createdAt: number
+  endedAt?: number
+}
+
+/** deck.createTask 入参：只建草稿（主进程侧固定 startNow:false → parked，绝不 enqueue 执行） */
+export interface PetHostCreateTaskInput {
+  title: string
+  prompt: string
+  workdir?: string
+  agentId?: string
+}
+
+export interface PetHostCreateTaskResult {
+  ok: boolean
+  taskId: string
+  title: string
+  /** 恒 true：草稿语义（parked 待用户手动启动） */
+  parked: boolean
+  reason?: string
+}
+
+/** deck.annotateTask 入参：二选一定位（taskId 经看板反查 issueId，或直接给 issueId） */
+export interface PetHostAnnotateTaskInput {
+  taskId?: string
+  issueId?: string
+  text: string
+}
+
+export interface PetHostAnnotateTaskResult {
+  ok: boolean
+  issueId: string
+  reason?: string
+}
+
+// —— 事件合并窗（批处理）：批量终态合成一次聚合反应（好感/心情合计一次 + 一次 brain 调用） ——
+
+/** 合并窗上限：从首事件起最多等 15s */
+export const PET_HOST_BATCH_MAX_MS = 15_000
+/** 静默收口：最近一次事件后 2.5s 无新事件即冲刷 */
+export const PET_HOST_BATCH_QUIET_MS = 2_500
+
+/** 合并窗到期时刻：at = min(firstAt + 15s, lastAt + 2.5s)——单定时器每次 push 重算 */
+export function petBatchFlushAt(firstAt: number, lastAt: number): number {
+  return Math.min(firstAt + PET_HOST_BATCH_MAX_MS, lastAt + PET_HOST_BATCH_QUIET_MS)
+}

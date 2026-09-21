@@ -3,8 +3,8 @@
 // D 期起兼存养成数值（好感/心情）、长期记忆与问候日期；数值公式在 shared/pet-life。
 import fs from 'node:fs'
 import path from 'node:path'
-import type { PetChatMessage } from '../../shared/pet'
-import { normalizePetZoom } from '../../shared/pet'
+import type { PetChatMessage, PetHostSwitches } from '../../shared/pet'
+import { normalizePetHostSwitches, normalizePetZoom } from '../../shared/pet'
 
 export interface PetConfig {
   enabled: boolean
@@ -36,6 +36,8 @@ export interface PetConfig {
   greetedDate: string
   /** 缩放档（1/1.5/2）：窗体与精灵同缩放 */
   zoom: number
+  /** 契约事件开关位（PetHostContract）：默认全开，关 = host 边界丢弃事件 */
+  hostSwitches: PetHostSwitches
 }
 
 export const PET_CHAT_HISTORY_CAP = 20
@@ -59,7 +61,8 @@ export function defaultPetConfig(): PetConfig {
     memory: '',
     memoryQueue: [],
     greetedDate: '',
-    zoom: 1
+    zoom: 1,
+    hostSwitches: normalizePetHostSwitches(undefined)
   }
 }
 
@@ -100,7 +103,8 @@ function normalizeConfig(value: unknown): PetConfig {
     memory: typeof raw.memory === 'string' ? raw.memory : base.memory,
     memoryQueue: Array.isArray(raw.memoryQueue) ? raw.memoryQueue.filter(isChatMessage) : base.memoryQueue,
     greetedDate: typeof raw.greetedDate === 'string' ? raw.greetedDate : base.greetedDate,
-    zoom: normalizePetZoom(raw.zoom)
+    zoom: normalizePetZoom(raw.zoom),
+    hostSwitches: normalizePetHostSwitches(raw.hostSwitches)
   }
 }
 
@@ -124,7 +128,8 @@ export class PetStore {
       ...this.config,
       chatHistory: [...this.config.chatHistory],
       memoryQueue: [...this.config.memoryQueue],
-      bounds: this.config.bounds ? { ...this.config.bounds } : null
+      bounds: this.config.bounds ? { ...this.config.bounds } : null,
+      hostSwitches: { ...this.config.hostSwitches }
     }
   }
   patch(partial: Partial<PetConfig>): PetConfig {
@@ -153,6 +158,8 @@ export class PetStore {
   }
   setGreeted(date: string) { return this.patch({ greetedDate: date }) }
   setMemory(memory: string) { return this.patch({ memory }) }
+  /** 契约事件开关位写入（阶段 2 开关 UI 接这里；非法位归一为默认开） */
+  setHostSwitches(hostSwitches: PetHostSwitches) { return this.patch({ hostSwitches: normalizePetHostSwitches(hostSwitches) }) }
   /** 追加一条聊天并环形截断到上限；返回截断后的历史。滚出窗口的溢出消息进 memoryQueue（攒够触发摘要） */
   appendChat(message: Omit<PetChatMessage, 'at'> & { at?: number }): PetChatMessage[] {
     const entry: PetChatMessage = { role: message.role, text: message.text.slice(0, 500), at: message.at ?? Date.now() }
