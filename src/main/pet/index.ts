@@ -8,17 +8,18 @@ import { PetWindowController } from './pet-window'
 import { PetSettingsWindowController } from './pet-settings-window'
 import { PetGenController } from './pet-gen'
 import { PetBrainLoop, resolveActivePreset, timeOfDay, type PetSay, type PetTaskHint } from './pet-brain'
+import { PetEventBatchWindow, timeoutScheduler, type PetHost } from './host'
 import { inferPresetProtocol } from './pet-llm'
 import { listPacks, readUserPackAssets } from './packs'
-import { normalizePetZoom, petWindowSize, type PackAssets, type PetLifeSnapshot, type PetSayPayload, type PetStateSnapshot, type PetWindowEvent } from '../../shared/pet'
-import { addAffection, addMood, affectionTier, boardReactionFor, decayAffection, feedEffect, firstSeenToday, interactionEffect, moodLabel, todayKey } from '../../shared/pet-life'
+import { normalizePetZoom, petWindowSize, type PackAssets, type PetHostEvent, type PetLifeSnapshot, type PetSayPayload, type PetStateSnapshot, type PetWindowEvent } from '../../shared/pet'
+import { addAffection, addMood, affectionTier, boardReactionFor, decayAffection, feedEffect, firstSeenToday, interactionEffect, moodLabel, todayKey, type PetBoardReaction } from '../../shared/pet-life'
 
 export interface PetControllerDeps {
   userDataDir: string
   getPresets: () => ApiPreset[]
   getMainWindow: () => BrowserWindow | null
-  /** 看板摘要宏来源（{board_summary}；取不到返回「暂无任务摘要」由宏层兜底） */
-  getBoardSummary: () => string
+  /** 契约宿主（阶段 1 改道）：事件流订阅 + {board_summary} 快照通道 + deck.* 工具 */
+  host: PetHost
 }
 
 const BOUNDS_FLUSH_MS = 3000
@@ -32,6 +33,25 @@ function eventText(kind: 'start' | 'done' | 'failed', title: string): string {
   return `任务「${title}」开始执行`
 }
 
+/** 合并窗批次（去重后的待反应事件） */
+interface PetBatchedEvent {
+  task: PetTaskHint
+  reaction: PetBoardReaction
+}
+
+/** 批量终态的聚合文案（{recent_event} 宏同源）：按种类计数，不逐条铺标题 */
+function batchEventText(items: PetBatchedEvent[]): string {
+  const count = (kind: PetBoardReaction['kind']) => items.filter((item) => item.reaction.kind === kind).length
+  const parts: string[] = []
+  const starts = count('start')
+  const done = count('done')
+  const failed = count('failed')
+  if (starts) parts.push(`${starts} 个任务开工`)
+  if (done) parts.push(`${done} 个任务完成`)
+  if (failed) parts.push(`${failed} 个任务失败`)
+  return `看板刚热闹起来：${parts.join('、')}`
+}
+
 export class PetController {
   readonly store: PetStore
   readonly windows: PetWindowController
@@ -40,16 +60,27 @@ export class PetController {
   readonly settingsWindow: PetSettingsWindowController
   /** 应用内素材包生成（pet:gen-* IPC 背后） */
   readonly gen: PetGenController
+  /** 契约宿主（事件流/开关位/deck.* 工具）：notifyTaskChanged 经 host.emitTaskChanged 进来 */
+  readonly host: PetHost
   private pendingBounds: { x: number; y: number } | null = null
   private boundsFlushTimer: NodeJS.Timeout | undefined
   private lifeFlushTimer: NodeJS.Timeout | undefined
   /** 任务状态迁移追踪：同一任务只在状态变化时反应（runner 会高频重复上报） */
   private taskStatuses = new Map<string, string>()
+  /** 事件合并窗：批量终态合成一次聚合反应（好感/心情合计一次 + 一次 brain 调用） */
+  private batchWindow: PetEventBatchWindow<PetBatchedEvent>
   private recentEvent = ''
   private disposed = false
 
   constructor(private readonly deps: PetControllerDeps) {
     this.store = new PetStore(deps.userDataDir)
+    this.host = deps.host
+    // 契约事件流驱动：task.* 事件 → 去重 + 合并窗；board.snapshot → 看板状态对账（补契约外状态）
+    deps.host.addListener((event) => this.onHostEvent(event))
+    this.batchWindow = new PetEventBatchWindow<PetBatchedEvent>({
+      onFlush: (items) => this.flushBatch(items),
+      scheduler: timeoutScheduler()
+    })
     this.windows = new PetWindowController({
       getWindow: () => deps.getMainWindow(),
       getZoom: () => this.store.get().zoom,
@@ -74,7 +105,8 @@ export class PetController {
       store: this.store,
       getPresets: deps.getPresets,
       getWindow: () => this.windows.getWindow(),
-      getBoardSummary: deps.getBoardSummary,
+      // {board_summary} 宏改走快照通道：host 缓存最近一次 board.snapshot 捕获的摘要（宏注入行为保持）
+      getBoardSummary: () => this.host.getBoardSummary(),
       getRecentEvent: () => this.recentEvent,
       onSay: (say: PetSay) => {
         // 自主发言：宠物窗播报（PetSayPayload 契约 {text,action}，渲染层按此解包）+ 落聊天历史
@@ -192,7 +224,37 @@ export class PetController {
     } catch { /* 问候失败静默：不打断启动 */ }
   }
 
-  /** 看板任务状态迁移入口（index.ts notifyTaskChanged 转发）：事件反应 + 好感/心情联动 */
+  /** 契约事件流入口（index.ts notifyTaskChanged → host.emitTaskChanged 改道后由此驱动反应） */
+  private onHostEvent(event: PetHostEvent): void {
+    if (this.disposed) return
+    if (event.kind === 'board.snapshot') {
+      // 快照不带状态：借 deck.queryBoard 对账补齐契约外状态（cancelled/queued/parked），
+      // 否则取消后同 id 重跑的 start 反应会被去重吞掉
+      this.syncTaskStatusFromBoard(event.taskId)
+      return
+    }
+    if (event.kind !== 'task.running' && event.kind !== 'task.done' && event.kind !== 'task.failed') return
+    const status = event.kind === 'task.running' ? 'running' : event.kind === 'task.done' ? 'done' : 'failed'
+    this.onTaskChanged({ id: event.taskId, status, title: event.title })
+  }
+
+  /** 看板对账：把契约事件面之外的状态变化同步进去重表（终态顺手排期清理） */
+  private syncTaskStatusFromBoard(taskId: string): void {
+    if (!taskId) return
+    const row = this.host.queryBoard().find((item) => item.id === taskId)
+    if (!row || this.taskStatuses.get(taskId) === row.status) return
+    this.taskStatuses.set(taskId, row.status)
+    if (row.status === 'done' || row.status === 'failed' || row.status === 'cancelled') {
+      setTimeout(() => {
+        if (this.taskStatuses.get(taskId) === row.status) this.taskStatuses.delete(taskId)
+      }, 60_000)
+    }
+  }
+
+  /**
+   * 看板任务状态迁移入口（契约事件流驱动）：taskStatuses 去重后进合并窗——
+   * 批量终态在冲刷时合成一次聚合反应（好感/心情合计一次落盘 + 一次 brain 调用）。
+   */
   onTaskChanged(task: PetTaskHint): void {
     if (this.disposed || !this.store.get().enabled) return
     const prev = this.taskStatuses.get(task.id)
@@ -206,14 +268,28 @@ export class PetController {
     }
     const reaction = boardReactionFor(prev, task.status)
     if (!reaction) return
-    this.recentEvent = eventText(reaction.kind, task.title)
+    this.batchWindow.push({ task, reaction })
+  }
+
+  /** 合并窗冲刷：好感/心情按批次合计一次写盘 + 一次 brain 调用（brain 的 10s 冷却保留作兜底） */
+  private flushBatch(items: PetBatchedEvent[]): void {
+    if (this.disposed || !items.length) return
+    let affection = 0
+    let mood = 0
+    for (const item of items) {
+      affection += item.reaction.affection
+      mood += item.reaction.mood
+    }
+    // 台词取批次最后一棒（时间线最新）；批量走聚合文案，单发保持原有逐事件文案
+    const last = items[items.length - 1]
+    this.recentEvent = items.length > 1 ? batchEventText(items) : eventText(last.reaction.kind, last.task.title)
     const config = this.store.get()
     this.store.setLife({
-      affection: addAffection(config.affection, reaction.affection),
-      mood: addMood(config.mood, reaction.mood),
+      affection: addAffection(config.affection, affection),
+      mood: addMood(config.mood, mood),
       lastInteractAt: config.lastInteractAt || Date.now()
     })
-    void this.brain.reactToBoardEvent(task, reaction).then((say) => {
+    void this.brain.reactToBoardEvent(last.task, last.reaction).then((say) => {
       if (!this.disposed) this.announce(say)
     }).catch(() => { /* 反应失败静默 */ })
   }
@@ -309,6 +385,10 @@ export class PetController {
       return
     }
     if (event.type === 'drag-end') this.flushBounds()
+    // 拖拽/聊天进行中扣住合并窗（松开/关闭时若有到点批次立即冲出）
+    if (event.type === 'drag-start') this.batchWindow.hold()
+    if (event.type === 'drag-end') this.batchWindow.release()
+    if (event.type === 'chat') (event.open ? this.batchWindow.hold() : this.batchWindow.release())
     if (event.type === 'interact') this.bumpLife(event.kind, false)
     if (event.type === 'open-settings') {
       // 右键菜单「设置」：打开/聚焦独立小助理设置窗（主窗可能在托盘里也不影响）
@@ -362,6 +442,7 @@ export class PetController {
   dispose(): void {
     this.disposed = true
     this.brain.stop()
+    this.batchWindow.clear()
     if (this.lifeFlushTimer) clearTimeout(this.lifeFlushTimer)
     this.lifeFlushTimer = undefined
     this.store.flush()

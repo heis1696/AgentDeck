@@ -30,6 +30,8 @@ import { shouldKeepTaskWorktree, sweepWorktrees } from './git'
 import { registerIpcHandlers, type CreateTaskInput } from './ipc/register'
 import { SidecarManager } from './sidecar'
 import { PetController } from './pet'
+import { PetHost, toPetHostDraftCreateInput } from './pet/host'
+import { DEFAULT_PET_HOST_SWITCHES } from '../shared/pet'
 import { verifyAcceptance } from './acceptance-verifier'
 import { resolveHotState } from './hot/resolve'
 import { clearPointer, readPointer } from './hot/pointer'
@@ -153,8 +155,9 @@ function notifyTaskChanged(task: Task | null) {
   if (!task) return
   publishIssueUpdate(task)
   goalController?.onTaskChanged(task)
-  // 桌宠事件联动：任务开始/完成/失败的即时反应（动画+台词）与好感/心情联动
-  petController?.onTaskChanged(task)
+  // 桌宠事件联动（阶段 1 改道）：直调 onTaskChanged → 契约事件流——开关位闸门在 host 边界，
+  // 反应与好感/心情联动改由 pet 域的合并窗批处理收口；其他扇出目标不动
+  petController?.host.emitTaskChanged(task)
 }
 
 function createWindow() {
@@ -599,11 +602,28 @@ const initMain = async (): Promise<void> => {
     if (activeGoals) parts.push(`活跃目标 ${activeGoals} 个`)
     return parts.join('、')
   }
+  // 桌宠宿主（阶段 1）：契约事件通道 + deck.* 工具；开关位持久化在 pet.json（经 petController.store 读，
+  // 构造前闭包不触发，无空引用窗口）。deck.createTask 经 toPetHostDraftCreateInput 钉死 startNow:false
+  // = parked 草稿（taskService 语义：绝不 enqueue，等用户手动启动）；deck.annotateTask 直连
+  // issueStore.addComment 的独立通道，不走解析 @mention 的 issues:add-comment 路径。
+  const petHost = new PetHost({
+    getSwitches: () => petController?.store.get().hostSwitches ?? DEFAULT_PET_HOST_SWITCHES,
+    buildBoardSummary,
+    queryBoard: () => store.list(),
+    createDraftTask: (input) => {
+      const task = createTask(toPetHostDraftCreateInput(input), 'assignment')
+      return { id: task.id, title: task.title, status: task.status }
+    },
+    annotateIssue: (issueId, text) => { issueStore.addComment(issueId, text, { type: 'agent', id: 'pet' }) },
+    resolveTask: (taskId) => store.get(taskId)
+  })
+  // 桌宠：配置存储 + 透明窗 + AI 脑；enabled 时启动即亮窗。{board_summary} 宏改走快照通道
+  //（host 缓存 board.snapshot 捕获的摘要，宏注入行为保持），buildBoardSummary 作为快照构建源
   petController = new PetController({
     userDataDir: app.getPath('userData'),
     getPresets: () => presets,
     getMainWindow: () => mainWindow,
-    getBoardSummary: buildBoardSummary
+    host: petHost
   })
 
   registerIpcHandlers({
