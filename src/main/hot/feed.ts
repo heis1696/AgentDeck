@@ -60,9 +60,14 @@ export async function fetchManifest(baseUrl: string, channel: string): Promise<F
   return { manifestBytes, payload }
 }
 
-/** 下载 artifact 到 dest（整体 sha256 由调用方核对）。超时语义：停滞 30s 才中止（按块重置），
- *  总时长上限 30 分钟——不能用固定总超时：慢带宽下 314MB 壳包会被"20 秒到点"腰斩
- *  （实测 4Mbps 带宽 20s ≈ 8.6MB，每次都死在同一位置）。失败自动清 .part 并重试 3 次。 */
+/** 下载 artifact 到 dest（整体 sha256 由调用方核对）。断点续传语义（2026-09-22 现场回归重写）：
+ *  - .part 固定为 `<dest>.part` 且失败不删：重试与下一次 apply 都按 Range 从已收字节续传；
+ *    服务端不支持 Range（200 全量）时自动弃残件从头下（append 全量会拼出必过不了 sha256 的坏包）。
+ *  - 停滞 30s 才中止（按块重置）；不设总时长帽——慢链路大包（实测 446MB 壳包 @ ~200KB/s ≈ 37min）
+ *    会被 30min 总帽反复腰斩且残件即进度，删了等于每次归零（0.23.0 壳包 19 个半截 .part 的根因）。
+ *  - WriteStream 全程挂 error 监听，finally destroy 并等 close：abort/异常路径句柄若泄漏，
+ *    重试的 open/unlink 在 Windows 上 EPERM → 未处理 error 事件以 uncaughtException 冒泡
+ *    → 主进程弹 "A JavaScript error occurred"（现场实测弹窗根因，见 .part 残留 + pid 15380）。 */
 export async function downloadArtifact(
   baseUrl: string,
   channel: string,
@@ -81,7 +86,7 @@ export async function downloadArtifact(
       return
     } catch (error) {
       lastError = error
-      try { fs.unlinkSync(tmp) } catch { /* 无残留 */ }
+      // .part 保留即进度：续传交给下一次尝试 / 下一次 apply
     }
     if (attempt < 2) await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt] ?? 4_000))
   }
@@ -89,38 +94,69 @@ export async function downloadArtifact(
 }
 
 const DOWNLOAD_IDLE_TIMEOUT_MS = 30_000
-const DOWNLOAD_TOTAL_CAP_MS = 30 * 60_000
 
 async function downloadOnce(url: string, tmp: string, onProgress?: (progress: DownloadProgress) => void): Promise<void> {
   const controller = new AbortController()
   const armIdle = () => setTimeout(() => controller.abort(new FeedError('下载停滞超时（30 秒无数据）')), DOWNLOAD_IDLE_TIMEOUT_MS)
   let idle = armIdle()
-  const cap = setTimeout(() => controller.abort(new FeedError('下载总时长超限（30 分钟）')), DOWNLOAD_TOTAL_CAP_MS)
   try {
-    const response = await fetch(url, { signal: controller.signal, redirect: 'follow' })
+    let offset = 0
+    try {
+      offset = fs.statSync(tmp).size
+    } catch { /* 无残件，从头下 */ }
+    const headers: Record<string, string> = {}
+    if (offset > 0) headers.range = `bytes=${offset}-`
+    const response = await fetch(url, { signal: controller.signal, redirect: 'follow', headers })
+    // 残件比服务端产物还长（产物换血/残件损坏）：416 说明 Range 越界，重置残件重下
+    if (response.status === 416 && offset > 0) {
+      try { fs.rmSync(tmp, { force: true }) } catch { /* 删不掉留给重试 */ }
+      throw new FeedError('残件超出产物大小，已重置重下')
+    }
     if (!response.ok) throw new FeedError(`HTTP ${response.status} for ${url}`)
-    const totalBytes = Number(response.headers.get('content-length')) || 0
+    const resume = offset > 0 && response.status === 206
+    if (!resume) offset = 0
+    const totalBytes = offset + (Number(response.headers.get('content-length')) || 0)
     if (!response.body) {
       const buf = Buffer.from(await response.arrayBuffer())
       fs.writeFileSync(tmp, buf)
       onProgress?.({ receivedBytes: buf.length, totalBytes: totalBytes || buf.length })
       return
     }
-    const file = fs.createWriteStream(tmp)
-    let received = 0
-    const reader = response.body.getReader()
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      clearTimeout(idle)
-      idle = armIdle()
-      received += value.byteLength
-      file.write(value)
-      onProgress?.({ receivedBytes: received, totalBytes })
+    const file = fs.createWriteStream(tmp, { flags: resume ? 'a' : 'w' })
+    // 不挂 error 监听 = 写盘失败以 uncaughtException 冒泡（主进程弹窗），必须接管
+    let streamError: Error | null = null
+    file.on('error', (error) => { streamError = error })
+    let received = offset
+    try {
+      const reader = response.body.getReader()
+      for (;;) {
+        if (streamError) throw streamError
+        const { done, value } = await reader.read()
+        if (done) break
+        clearTimeout(idle)
+        idle = armIdle()
+        received += value.byteLength
+        file.write(value)
+        onProgress?.({ receivedBytes: received, totalBytes })
+      }
+      if (streamError) throw streamError
+      await new Promise<void>((resolve, reject) =>
+        file.end((error?: Error | null) => {
+          if (streamError) reject(streamError)
+          else if (error) reject(error)
+          else resolve()
+        })
+      )
+    } finally {
+      // 句柄彻底关闭再返回：rename/unlink/重开才不会撞 Windows 文件锁
+      file.destroy()
+      await new Promise<void>((resolve) => {
+        if (file.closed) resolve()
+        else file.once('close', () => resolve())
+      })
+      controller.abort() // 成功路径是 no-op；异常路径释放连接，不留半开 socket
     }
-    await new Promise<void>((resolve, reject) => file.end((error?: Error | null) => (error ? reject(error) : resolve())))
   } finally {
     clearTimeout(idle)
-    clearTimeout(cap)
   }
 }

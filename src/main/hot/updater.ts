@@ -45,6 +45,40 @@ class StaleUpdateError extends Error {
 type StageOptions = { relaunch?: boolean; loadRenderer?: boolean }
 type StageResult = 'applied' | 'staged' | 'noop'
 
+/** 壳包落点校验：大小 + sha256 全对才算本地已有完整包（命中则跳过下载直接 staging） */
+const hasVerifiedZip = (zipPath: string, artifact: { sha256: string; size: number }): boolean => {
+  try {
+    return fs.existsSync(zipPath)
+      && fs.statSync(zipPath).size === artifact.size
+      && sha256File(zipPath) === artifact.sha256
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 壳下载目录清扫：只保留当前产物的 zip 与 .part（续传源），其余一律清掉——
+ * 旧时间戳命名（.download-<ts>，2026-09-22 前的残件，本机曾积到 ~480MB）与换代后的旧产物。
+ */
+const sweepShellDownloads = (downloadDir: string, keepArtifactName: string): void => {
+  const keep = new Set([keepArtifactName, `${keepArtifactName}.part`])
+  let entries: fs.Dirent[]
+  try {
+    entries = fs.readdirSync(downloadDir, { withFileTypes: true })
+  } catch {
+    return
+  }
+  for (const entry of entries) {
+    if (!entry.isFile()) continue
+    if (keep.has(entry.name)) continue
+    if (/\.zip$/.test(entry.name) || /\.zip\.part$/.test(entry.name) || /^\.download-/.test(entry.name)) {
+      try {
+        fs.rmSync(path.join(downloadDir, entry.name), { force: true })
+      } catch { /* 占用：下次再试 */ }
+    }
+  }
+}
+
 /** 版本目录名过滤：排除指针/留证/staging/隔离物 */
 const isVersionDir = (name: string) =>
   !name.startsWith('.') && !name.includes('.quarantine-') && !name.startsWith('current.json')
@@ -496,14 +530,23 @@ export class HotUpdater {
     this.emit({ phase: 'downloading', channel: 'shell', error: undefined })
     const downloadDir = path.join(this.deps.getUserDataDir(), 'hot-shell')
     fs.mkdirSync(downloadDir, { recursive: true })
-    const zipPath = path.join(downloadDir, `.download-${Date.now()}.zip`)
+    sweepShellDownloads(downloadDir, payload.artifact.name)
+    // 产物名定点落盘：.part 跨 apply / 跨重启续传（feed.ts 断点续传语义），完整包命中则免下载
+    const zipPath = path.join(downloadDir, payload.artifact.name)
     let staged: string | null = null
     try {
-      await downloadArtifact(this.feedBase(), 'shell', payload.artifact.name, zipPath, (progress) => {
-        this.emit({ phase: 'downloading', channel: 'shell', progress })
-      })
+      const haveZip = hasVerifiedZip(zipPath, payload.artifact)
+      if (!haveZip) {
+        await downloadArtifact(this.feedBase(), 'shell', payload.artifact.name, zipPath, (progress) => {
+          this.emit({ phase: 'downloading', channel: 'shell', progress })
+        })
+      }
       this.emit({ phase: 'verifying', channel: 'shell', progress: undefined })
-      if (sha256File(zipPath) !== payload.artifact.sha256) throw new Error('壳下载产物 sha256 与 manifest 不符')
+      if (!hasVerifiedZip(zipPath, payload.artifact)) {
+        // 坏的完整包不留：留着会让后续 apply 在同一包上确定性失败（.part 已随 rename 进 dest，无从续传）
+        try { fs.unlinkSync(zipPath) } catch { /* 删不掉维持现状 */ }
+        throw new Error('壳下载产物 sha256 与 manifest 不符')
+      }
       staged = stageShellZip(zipPath, appDir)
       for (const file of payload.files ?? []) {
         // Electron 的 fs-asar 拦截层会把 .asar 后缀路径当归档打开（readFileSync 抛 Invalid package），
@@ -523,9 +566,8 @@ export class HotUpdater {
       }
       this.emit({ phase: 'failed', channel: 'shell', error: error instanceof Error ? error.message : String(error) })
       throw error
-    } finally {
-      try { fs.unlinkSync(zipPath) } catch { /* 临时 zip 清理失败无碍 */ }
     }
+    // 完整 zip 留在下载目录：staging 失败重试 / 换代清扫前可免下载复用（446MB 包重下即半小时）
   }
 
   /** 指针翻转 + 通道专属后动作（renderer=loadFile 新路径； payload=清 L2 指针+relaunch，P6） */
