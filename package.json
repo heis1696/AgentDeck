@@ -1,6 +1,6 @@
 {
   "name": "agentdeck",
-  "version": "0.22.0",
+  "version": "0.23.0",
   "description": "本地任务看板 — 把任务派给本地 agent 执行",
   "main": "./out/main/bootstrap.js",
   "author": "agentdeck",
