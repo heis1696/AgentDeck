@@ -410,7 +410,10 @@ export class EventLog {
         continue
       }
       if (isTaskEventLiveOnly(normalized)) {
-        normalized.seq = this.maxSeq + (++this.liveSequence / 1_000_000)
+        // `next` includes durable events already staged in this batch. Using
+        // maxSeq here would place a live event after a staged durable event
+        // before the batch has been indexed, reversing renderer order.
+        normalized.seq = next + (++this.liveSequence / 1_000_000)
         normalized.durability = 'live'
         normalized.durable = false
         if (identity) this.eventsByIdentity.set(identity, normalized)

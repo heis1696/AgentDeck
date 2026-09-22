@@ -1424,6 +1424,15 @@
       "valid": true
     },
     {
+      "source": "src/main/event-batcher.ts",
+      "dependencies": [],
+      "dependents": [
+        "src/main/runner.ts"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
       "source": "src/main/event-log.ts",
       "dependencies": [
         {
@@ -4426,6 +4435,23 @@
             "import"
           ],
           "resolved": "src/main/delegate.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "./event-batcher",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/event-batcher.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -9704,8 +9730,8 @@
     "info": 0,
     "ignore": 0,
     "advisedExitCode": 0,
-    "totalCruised": 186,
-    "totalDependenciesCruised": 444,
+    "totalCruised": 187,
+    "totalDependenciesCruised": 445,
     "optionsUsed": {
       "baseDir": "C:\\Projects\\AgentDeck",
       "combinedDependencies": false,
@@ -9721,7 +9747,7 @@
         "tsd",
         "amd"
       ],
-      "outputTo": "docs/graph/deps.json",
+      "outputTo": "-",
       "outputType": "json",
       "preserveSymlinks": false,
       "skipAnalysisNotInRules": false,
@@ -9743,8 +9769,8 @@
         {
           "name": "babel",
           "version": ">=7.0.0 <8.0.0",
-          "available": false,
-          "currentVersion": "-"
+          "available": true,
+          "currentVersion": "@babel/core@7.29.7"
         },
         {
           "name": "coffee-script",

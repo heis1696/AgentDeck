@@ -186,6 +186,7 @@ export interface TaskTransaction {
   update(id: string, patch: Partial<Task>, expected?: TaskExpectation): Task | undefined
   delete(id: string, expected?: TaskExpectation): boolean
   appendEvent(id: string, event: Omit<TaskEvent, 'seq'>, expected?: TaskExpectation): TaskEvent | null
+  appendEvents(id: string, events: readonly Omit<TaskEvent, 'seq'>[], expected?: TaskExpectation): TaskEvent[]
 }
 
 export class TaskStore {
@@ -382,6 +383,20 @@ export class TaskStore {
             this.scheduleFlush()
           }
           return full
+        },
+        appendEvents: (id, events, expected = {}) => {
+          active()
+          const task = tasks.get(id)
+          if (!task || !matchesTask(task, expected) || events.length === 0) return []
+          const log = this.eventLog(id)
+          const full = log.appendBatch(events)
+          if (full.some(isTaskEventDurable)) {
+            task.eventCount = log.count()
+            this.pendingSnapshots.add(id)
+            this.indexDirty = true
+            this.scheduleFlush()
+          }
+          return full
         }
       }
       const result = action(view)
@@ -531,6 +546,10 @@ export class TaskStore {
 
   appendEvent(id: string, event: Omit<TaskEvent, 'seq'>, expected: TaskExpectation = {}): TaskEvent | null {
     return this.transaction((tx) => tx.appendEvent(id, event, expected))
+  }
+
+  appendEvents(id: string, events: readonly Omit<TaskEvent, 'seq'>[], expected: TaskExpectation = {}): TaskEvent[] {
+    return this.transaction((tx) => tx.appendEvents(id, events, expected))
   }
 
   flush() {

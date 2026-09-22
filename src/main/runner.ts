@@ -44,6 +44,7 @@ import { Executor } from './executor'
 import { decideRetry } from './retry-policy'
 import { TurnLifecycle, type EventGateToken } from './turn-lifecycle'
 import { DSH_TURN_BUDGET_MS } from './backends/dsh'
+import { BoundedEventBatcher } from './event-batcher'
 
 /** Main-process task creation dependency. Kept structural to avoid coupling
  * the runner to persistence/projection implementation details. */
@@ -69,6 +70,41 @@ export interface RunnerPorts {
   send: (channel: string, payload: unknown) => void
   notify: (task: Task, what: string, body: string) => void
   onTaskEvent?: (taskId: string, event: Omit<TaskEvent, 'seq'>) => void
+}
+
+type RunnerEvent = Omit<TaskEvent, 'seq'>
+
+const STREAM_DELTA_TYPES = new Set(['text.delta', 'reasoning.delta', 'tool.input.delta', 'compaction.delta'])
+
+function isStreamDeltaEvent(event: RunnerEvent): boolean {
+  return event.kind === 'text' && (!event.type || event.type.endsWith('.delta') || STREAM_DELTA_TYPES.has(event.type))
+}
+
+function hasStableEventIdentity(event: RunnerEvent): boolean {
+  return (typeof event.eventId === 'string' && event.eventId.length > 0)
+    || (typeof event.id === 'string' && event.id.length > 0)
+}
+
+function streamType(event: RunnerEvent): string {
+  return event.type || 'text.delta'
+}
+
+function streamPersistence(event: RunnerEvent): 'live' | 'durable' {
+  if (event.durability === 'durable' || event.durable === true || (event.durable && typeof event.durable === 'object')) return 'durable'
+  if (event.durability === 'live' || event.durable === false || STREAM_DELTA_TYPES.has(event.type ?? '')) return 'live'
+  return 'durable'
+}
+
+function mergeStreamEvents(previous: RunnerEvent, next: RunnerEvent): RunnerEvent {
+  return {
+    ...previous,
+    text: `${previous.text ?? ''}${next.text ?? ''}`,
+    data: next.data ?? previous.data
+  }
+}
+
+function eventSize(event: RunnerEvent): number {
+  return Buffer.byteLength(JSON.stringify(event), 'utf8') + 1
 }
 
 /**
@@ -259,11 +295,13 @@ export class TaskRunner {
   private executor = new Executor()
   private ports: RunnerPorts
   /** 回合空转看门狗：等待终态期间任务有新事件即续命，长时间无进展才判超时 */
-  private turnWatchdogs = new Map<string, { timer: NodeJS.Timeout; expire: () => void }>()
+  private turnWatchdogs = new Map<string, { timer: NodeJS.Timeout; expire: () => void; budgetMs: number }>()
   /** Lifecycle gate: prevents abandoned-turn callbacks from resolving a newer waiter. */
   /** One gate/lifecycle per task. The Task remains the durable compatibility
    * record; these objects only own in-memory callback admission state. */
   private turnLifecycles = new Map<string, TurnLifecycle>()
+  /** Pending provider batches are flushed at turn and process lifecycle boundaries. */
+  private eventBatchers = new Map<BoundedEventBatcher<RunnerEvent>, string>()
   private readonly onTaskChanged?: (task: Task) => void
   /** 流式派单嗅探：领队会话期间逐条 text 事件累计扫描，闭合一个 <delegate> 即提前建单入队。
    *  回灌仍只在回合末（委派循环）发生，不会打断领队正在进行的主运行。 */
@@ -343,6 +381,24 @@ export class TaskRunner {
     this.ports.send('task:event', { taskId, event: e })
   }
 
+  private async closeEventBatches(taskId?: string): Promise<boolean> {
+    const selected = [...this.eventBatchers].filter(([, owner]) => taskId === undefined || owner === taskId)
+    const committed = await Promise.all(selected.map(async ([batcher]) => {
+      const ok = await batcher.close()
+      if (ok) this.eventBatchers.delete(batcher)
+      return ok
+    }))
+    return committed.every(Boolean)
+  }
+
+  private disposeEventBatches(taskId?: string) {
+    for (const [batcher, owner] of this.eventBatchers) {
+      if (taskId !== undefined && owner !== taskId) continue
+      batcher.dispose()
+      this.eventBatchers.delete(batcher)
+    }
+  }
+
   private lifecycle(taskId: string) {
     let lifecycle = this.turnLifecycles.get(taskId)
     if (!lifecycle) {
@@ -368,13 +424,89 @@ export class TaskRunner {
   ): BackendSessionEvents {
     const life = this.lifecycle(taskId)
     const active = (kind?: string, terminal = false) => {
-      if (!this.isCurrentRun(claim)) return false
-      const task = this.store.get(taskId)
-      life.setStatus(task?.status ?? 'queued')
+      if (this.claims.get(taskId) !== claim) return false
       return life.accepts(token, { kind, terminal })
     }
+    let ownershipCheckedAt = 0
+    let ownershipValid = true
+    const durableActive = (kind?: string, terminal = false, throttleMs = 0) => {
+      if (!active(kind, terminal)) return false
+      const now = Date.now()
+      if (throttleMs > 0 && now - ownershipCheckedAt < throttleMs) return ownershipValid
+      ownershipCheckedAt = now
+      ownershipValid = this.isCurrentRun(claim)
+      if (ownershipValid) life.setStatus('running')
+      return ownershipValid && life.accepts(token, { kind, terminal })
+    }
+    let eventSequence = 0
+    let terminalStarted = false
+    let batcher!: BoundedEventBatcher<RunnerEvent>
+    batcher = new BoundedEventBatcher<RunnerEvent>({
+      // 20ms keeps normal streaming responsive while bounding synchronous
+      // provider bursts to one persistence transaction and one IPC update.
+      maxDelayMs: 20,
+      maxRetryDelayMs: 5_000,
+      maxItems: 32,
+      maxBytes: 64 * 1024,
+      sizeOf: eventSize,
+      canMerge: (previous, next) => isStreamDeltaEvent(previous)
+        && isStreamDeltaEvent(next)
+        && !hasStableEventIdentity(previous)
+        && !hasStableEventIdentity(next)
+        && streamType(previous) === streamType(next)
+        && streamPersistence(previous) === streamPersistence(next),
+      merge: mergeStreamEvents,
+      onFlush: (events) => {
+        // Local lifecycle checks stay memory-only on the per-delta hot path.
+        // The conditional batch append below is the durable ownership gate.
+        if (!events.length) return true
+        if (!active(events[0].kind)) return true
+        this.touchWatchdog(taskId)
+        // These objects stay queued after a failed commit. Assigning identity
+        // once makes partial-write and uncertain-fsync retries idempotent.
+        for (const event of events) {
+          if (!hasStableEventIdentity(event)) {
+            event.eventId = `agentdeck:batch:${stamp.id}:${++eventSequence}`
+          }
+        }
+        let full: TaskEvent[]
+        try {
+          full = this.store.appendEvents(taskId, events, runCondition(claim))
+        } catch {
+          return false
+        }
+        if (full.length !== events.length) {
+          // A replaced Run must discard its stale batch. A still-current Run
+          // retains the same identified events and retries with backoff.
+          return !durableActive(events[0].kind)
+        }
+        ownershipCheckedAt = Date.now()
+        ownershipValid = true
+        for (let index = 0; index < events.length; index++) {
+          const event = events[index]
+          if (!active(event.kind)) continue
+          try {
+            this.touchWatchdog(taskId)
+            if (event.kind === 'text') this.sniffDelegates(taskId, event.text)
+            if (event.kind === 'tool') this.observeToolCall(taskId, event, claim)
+            this.ports.onTaskEvent?.(taskId, event)
+            this.pushEvent(taskId, full[index])
+          } catch (error) {
+            // The batch is already durable. Do not retry it after a host/UI
+            // callback failure, or the same events could be appended twice.
+            console.error('[TaskRunner] Event delivery failed after commit', error)
+          }
+        }
+        return true
+      }
+    })
+    this.eventBatchers.set(batcher, taskId)
     return {
-      onEvent: (e: Omit<TaskEvent, 'seq'>) => {
+      onEvent: (incoming: RunnerEvent) => {
+        // Legacy zcode, dsh ACP, and OpenCode CLI fallback text events are
+        // durable by contract. Explicit provider live markers stay live, but
+        // ordinary text is merged without changing its persistence semantics.
+        let e = { ...incoming }
         if (!active(e.kind)) {
           // 标题回合的普通事件被静默，但线级进展照样给看门狗续命
           if (life.gate.state.titleMode && life.accepts(token)) this.touchWatchdog(taskId)
@@ -387,37 +519,41 @@ export class TaskRunner {
           const data = e.data && typeof e.data === 'object' ? e.data as Record<string, unknown> : {}
           e = { ...e, data: { ...data, runnerDoomHandled: true } }
         }
-        // The durable append is conditional on the claimed Run: events from an
-        // abandoned turn are rejected by the store, not just by this process.
-        // Host-side consumers only see events the store accepted for this Run.
-        const full = this.store.appendEvent(taskId, e, runCondition(claim))
-        if (!full) return
-        if (!active(e.kind)) return
-        this.touchWatchdog(taskId)
-        if (e.kind === 'text') this.sniffDelegates(taskId, e.text)
-        if (e.kind === 'tool') this.observeToolCall(taskId, e, claim)
-        this.ports.onTaskEvent?.(taskId, e)
-        this.pushEvent(taskId, full)
+        // The append, side effects, and renderer broadcast happen once per
+        // bounded batch. A final event remains in the same ordered queue and
+        // is flushed synchronously by onTurnEnd below.
+        batcher.add(e)
       },
-      onHeartbeat: () => { if (active()) this.touchWatchdog(taskId) },
+      onHeartbeat: () => { if (durableActive(undefined, false, 1_000)) this.touchWatchdog(taskId) },
       onTurnEnd: (r: BackendTurnResult) => {
-        if (!active('final', true)) {
+        if (terminalStarted) return
+        const response = typeof r.response === 'string' ? r.response.trim() : ''
+        if (life.gate.state.titleMode && this.lastTerminalResponses.get(taskId) === response) return
+        terminalStarted = true
+        if (!durableActive('final', true)) {
+          batcher.dispose()
+          this.eventBatchers.delete(batcher)
           // 终态没被接受（运行器已换代/任务已终态）：本回合就此作废，回调不再可投递
           router.abandonTurn(stamp.id)
           return
         }
-        const response = typeof r.response === 'string' ? r.response.trim() : ''
-        // 同一回合的重复终态按内容去重（标题回合不可被复述的旧终态顶掉）。回合保持
-        // 开启，真正属于它的终态仍能落地。回合身份明确的适配器不需要这条，退回复用
-        // 连接的老后端仍然依赖它。
-        if (life.gate.state.titleMode && this.lastTerminalResponses.get(taskId) === response) return
-        this.lastTerminalResponses.set(taskId, response)
-        // 先收口本回合再投递：投递可能同步开启下一回合（标题/回灌）。
-        router.closeTurn(stamp.id)
-        onTurnEnd?.(r)
-        // TurnLifecycle owns the one-shot waiter and generation check. This
-        // keeps terminal admission on the same gate as ordinary events.
-        life.resolveResume(token, r)
+        void batcher.close().then((committed) => {
+          this.eventBatchers.delete(batcher)
+          if (!committed || !durableActive('final', true)) {
+            router.abandonTurn(stamp.id)
+            return
+          }
+          // 同一回合的重复终态按内容去重（标题回合不可被复述的旧终态顶掉）。回合保持
+          // 开启，真正属于它的终态仍能落地。回合身份明确的适配器不需要这条，退回复用
+          // 连接的老后端仍然依赖它。
+          this.lastTerminalResponses.set(taskId, response)
+          // 先收口本回合再投递：投递可能同步开启下一回合（标题/回灌）。
+          router.closeTurn(stamp.id)
+          onTurnEnd?.(r)
+          // TurnLifecycle owns the one-shot waiter and generation check. This
+          // keeps terminal admission on the same gate as ordinary events.
+          life.resolveResume(token, r)
+        })
       },
       onSessionId: (sessionId: string) => {
         if (!active() || !sessionId) return
@@ -429,7 +565,7 @@ export class TaskRunner {
         life.gate.setSessionOwner(sessionId)
         this.pushTask(taskId)
       },
-      onPermission: (req: PermissionRequest) => active()
+      onPermission: (req: PermissionRequest) => durableActive()
         ? this.askPermission(taskId, req)
         : Promise.resolve({ decision: 'deny' as const })
     }
@@ -600,8 +736,9 @@ export class TaskRunner {
     // 哨兵只裁决自己武装的那一回合：零延迟自动重试会在上一回合收尾（finally cancel）
     // 之前就用同一 taskId 换上新看门狗，过期/取消必须先核对记录身份，
     // 否则会误删后继回合的定时器——后继回合从此无人看护，永久卡在 running。
-    const record: { timer: NodeJS.Timeout; expire: () => void } = {
+    const record: { timer: NodeJS.Timeout; expire: () => void; budgetMs: number } = {
       timer: undefined as unknown as NodeJS.Timeout,
+      budgetMs,
       expire: () => {
         if (this.turnWatchdogs.get(taskId) !== record) return
         this.turnWatchdogs.delete(taskId)
@@ -634,7 +771,7 @@ export class TaskRunner {
     const w = this.turnWatchdogs.get(taskId)
     if (!w) return
     clearTimeout(w.timer)
-    w.timer = setTimeout(w.expire, this.turnBudgetMs(taskId))
+    w.timer = setTimeout(w.expire, w.budgetMs)
   }
   /**
    * 该任务当前回合的看门狗预算：常规后端按空闲语义（有事件续命），
@@ -684,6 +821,7 @@ export class TaskRunner {
     const s = this.sessions.get(taskId)
     const claim = this.claims.get(taskId) ?? (s && this.sessionTurns.get(s)?.lastClaim)
     if (expected && (!claim || claim.runId !== expected.runId || !sameExecutionOwner(claim.owner, expected.executionOwner))) return
+    await this.closeEventBatches(taskId)
     this.clearRetry(taskId)
     this.bumpTurnGen(taskId)
     this.earlySpawns.delete(taskId)
@@ -698,6 +836,7 @@ export class TaskRunner {
 
   /** Release in-memory lifecycle state after IPC removes a terminal task. */
   async forget(taskId: string) {
+    this.disposeEventBatches(taskId)
     this.clearRetry(taskId)
     this.disarmWatchdog(taskId)
     this.launchHandles.delete(taskId)
@@ -1992,6 +2131,11 @@ export class TaskRunner {
       return { ok: true }
     }
     if (task.status !== 'running') return { ok: false, error: '任务不在运行中' }
+    // The Run claim is still valid here, so buffered provider data can be
+    // committed before cancellation rejects late callbacks.
+    if (!await this.closeEventBatches(taskId)) {
+      return { ok: false, error: '事件持久化尚未完成，任务仍保持运行状态' }
+    }
     const session = this.sessions.get(taskId)
     const launchHandle = this.launchHandles.get(taskId)
     const claim = this.claims.get(taskId)
@@ -2031,10 +2175,15 @@ export class TaskRunner {
 
   /** 空闲判定（热更 L1 apply 门控，设计 §7.4）：无在跑会话、无启动竞态句柄、store 无 running 任务。 */
   isIdle(): boolean {
-    return this.sessions.size === 0 && this.launchHandles.size === 0 && this.store.list().every((task) => task.status !== 'running')
+    return this.sessions.size === 0 && this.launchHandles.size === 0 && this.eventBatchers.size === 0
+      && this.store.list().every((task) => task.status !== 'running')
   }
 
   async shutdown() {
+    // Drain accepted events while current Run claims are still valid, then
+    // stop accepting provider callbacks before lifecycle invalidation.
+    await this.awaitCleanup(() => this.closeEventBatches(), 2_000)
+    this.disposeEventBatches()
     // First invalidate callbacks and stop owned sessions, then wait for any
     // Executor start races that resolve late and still need closing.
     for (const timer of this.retryTimers.values()) clearTimeout(timer)
