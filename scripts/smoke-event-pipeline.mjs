@@ -251,10 +251,10 @@ runner.enqueue(streamTask)
 runner.enqueue(stableTask)
 await waitFor(() => store.get(streamTask.id)?.status === 'done' && store.get(stableTask.id)?.status === 'done', 'normal batched turns')
 
-assert.equal(appendCalls.get(streamTask.id), 3, '65 deltas plus final obey the 32-input batch boundary')
+assert.equal(appendCalls.get(streamTask.id), 2, '65 deltas plus final obey the 64-input batch boundary')
 assert.ok(hotPathOwnershipReads <= 2, `stream hot path performs one throttled ownership check (got ${hotPathOwnershipReads} store calls)`)
 const streamPackets = ipcEvents.filter((packet) => packet.taskId === streamTask.id && packet.event.kind === 'text')
-assert.equal(streamPackets.length, 3)
+assert.equal(streamPackets.length, 2)
 assert.equal(streamPackets.map((packet) => packet.event.text).join(''), streamText)
 
 const stableHistory = store.readEvents(stableTask.id)

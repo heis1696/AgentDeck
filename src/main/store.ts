@@ -247,7 +247,7 @@ export class TaskStore {
     atomicWriteJson(this.indexFile(), document)
   }
 
-  private scheduleFlush(delayMs = 25) {
+  private scheduleFlush(delayMs = 250) {
     if (this.indexTimer) return
     this.indexTimer = setTimeout(() => {
       this.indexTimer = undefined
@@ -257,7 +257,7 @@ export class TaskStore {
         console.error('[TaskStore] Background flush failed; pending writes retained', error)
       }
     }, delayMs)
-    if (delayMs > 25) this.indexTimer.unref()
+    this.indexTimer.unref()
   }
 
   private retainSnapshotWork(document: TaskIndexDocument) {

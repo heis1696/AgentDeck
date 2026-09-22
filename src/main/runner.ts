@@ -442,12 +442,12 @@ export class TaskRunner {
     let terminalStarted = false
     let batcher!: BoundedEventBatcher<RunnerEvent>
     batcher = new BoundedEventBatcher<RunnerEvent>({
-      // 20ms keeps normal streaming responsive while bounding synchronous
-      // provider bursts to one persistence transaction and one IPC update.
-      maxDelayMs: 20,
+      // Ten UI updates per second remain visually responsive while keeping
+      // synchronous durable commits off the per-token cadence.
+      maxDelayMs: 100,
       maxRetryDelayMs: 5_000,
-      maxItems: 32,
-      maxBytes: 64 * 1024,
+      maxItems: 64,
+      maxBytes: 128 * 1024,
       sizeOf: eventSize,
       canMerge: (previous, next) => isStreamDeltaEvent(previous)
         && isStreamDeltaEvent(next)
