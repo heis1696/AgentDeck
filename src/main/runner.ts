@@ -14,7 +14,6 @@ import { isGitRepo, createWorktree, currentBranch, setWorktreeOwner, reclaimWork
 interface PresetLike {
   id: string
   name: string
-  backend: string
   baseURL: string
   apiKey: string
   protocol?: 'anthropic' | 'openai'

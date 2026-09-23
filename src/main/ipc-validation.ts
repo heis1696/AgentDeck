@@ -379,18 +379,15 @@ export function parsePresets(value: unknown): ApiPreset[] {
   const ids = new Set<string>()
   return value.map((item, index) => {
     const input = record(item, `preset[${index}]`)
-    assertKeys(input, ['id', 'name', 'backend', 'baseURL', 'apiKey', 'protocol', 'note', 'createdAt'], `preset[${index}]`)
+    assertKeys(input, ['id', 'name', 'baseURL', 'apiKey', 'protocol', 'note', 'createdAt'], `preset[${index}]`)
     const id = stringValue(input.id, `preset[${index}].id`)!
-    const backend = stringValue(input.backend, `preset[${index}].backend`)!
     const protocol = input.protocol
     if (ids.has(id)) throw new Error(`preset id 重复: ${id}`)
-    if (!backendIds.has(backend)) throw new Error(`preset backend 无效: ${backend}`)
     if (protocol !== undefined && (typeof protocol !== 'string' || !presetProtocols.has(protocol as NonNullable<ApiPreset['protocol']>))) throw new Error(`preset protocol 无效: ${String(protocol)}`)
     ids.add(id)
     return {
       id,
       name: stringValue(input.name, `preset[${index}].name`)! ,
-      backend,
       baseURL: stringValue(input.baseURL, `preset[${index}].baseURL`)! ,
       apiKey: stringValue(input.apiKey, `preset[${index}].apiKey`)! ,
       // 显式协议必须原样回传：丢字段会让保存后的预设退回 baseURL 推断，用户选的 openai 被静默改回 anthropic

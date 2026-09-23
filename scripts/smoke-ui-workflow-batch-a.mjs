@@ -73,7 +73,7 @@ bridge.store.agents = [
   { id: 'ag_forge', name: 'Forge Agent', backend: 'zcode', color: '#999' },
   ...Array.from({ length: 20 }, (_, i) => ({ id: `agent-${i}`, name: `Long named execution Agent ${i}`, role: i === 0 ? '领队' : '执行者', backend: i % 2 ? 'codex' : 'zcode', model: `model-${i}`, color: '#3aa99f', ...(i === 0 ? { presetId: 'preset-1' } : {}) }))
 ]
-bridge.store.presets = [{ id: 'preset-1', name: 'Smoke preset', backend: 'zcode', baseURL: 'https://example.test', apiKey: 'smoke-key-1234', createdAt: now }]
+bridge.store.presets = [{ id: 'preset-1', name: 'Smoke preset', baseURL: 'https://example.test', apiKey: 'smoke-key-1234', createdAt: now }]
 
 let appRoot = null
 ui.reset()

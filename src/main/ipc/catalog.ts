@@ -107,6 +107,6 @@ export function registerCatalogIpc(ctx: IpcContext) {
   ipcMain.handle('presets:models', async (_e, id: unknown) => {
     const preset = ctx.presets.find((item) => item.id === parseId(id, 'presetId'))
     if (!preset) throw new Error('预设不存在')
-    return { backend: preset.backend, source: 'catalog', models: await fetchPresetModels(preset) } as const
+    return { source: 'catalog', models: await fetchPresetModels(preset) } as const
   })
 }

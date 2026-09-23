@@ -65,7 +65,7 @@ Issue（目标、状态、负责人、评论时间线）
 
 - **身份**：定位 + 系统提示词，注入该队员的每个任务（`buildAgentPrompt`）
 - **能力**：`subordinates` 非空即领队——任务提示自动附加委派协议，对话中可派工
-- **模型/连接**：可钉死模型（`model`）或绑定 API 预设（`presetId`，baseURL/apiKey 按会话内存注入，不写全局配置）；平台模型目录经 `agents:models` 拉取
+- **模型/连接**：可钉死模型（`model`）或绑定 API 预设（`presetId`——预设是全局连接档案，不绑定平台；baseURL/apiKey 按会话内存注入，不写全局配置，注入执行目前仅 zcode / claude 支持）；平台模型目录经 `agents:models` 拉取
 - 同一平台可建多个队员（如"Claude 审查员"），身份互不相同
 - 预置五名：ZetCode（领队，GLM）、Claude、Codex、OpenCode、DeepSeek
 

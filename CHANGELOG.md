@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### 变更
+
+- **API 预设去平台绑定（全局连接档案）**：`ApiPreset` 删除 `backend` 字段——预设只存连接（baseURL/apiKey/协议），不再锁定所属平台，任何 agent 按平台能力引用（同一中转站可同时服务 zcode 与 claude，不必建两份）。IPC 校验、normalize 同步收窄；旧 presets.json 兼容（`backend` 字段加载即忽略、下次保存自然消失）；AgentsView 预设表单与引用芯片简化（-55 行）。
+
 ## [0.23.0] - 2026-09-21
 
 ### 修复

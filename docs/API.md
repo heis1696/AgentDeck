@@ -73,7 +73,7 @@ preload 以 `contextBridge` 暴露，全部经 `ipcRenderer.invoke/on` 与主进
 | `agents.list` | `() => Promise<AgentInfo[]>` | 全部队员 |
 | `agents.save` | `(list: AgentInfo[]) => Promise<AgentInfo[]>` | 整表保存（校验 name 与 backend），落 `userData/agents.json` |
 | `agents.models` | `(backend) => Promise<AgentModelCatalog>` | 平台模型目录：`{ backend, source: 'catalog'\|'freeform', default?, models[] }` |
-| `presets.list / save` | `PresetInfo[]` 读写 | API 预设（`{ id, name, backend, baseURL, apiKey, note? }`），落 `userData/api-presets.json` |
+| `presets.list / save` | `PresetInfo[]` 读写 | API 预设（`{ id, name, baseURL, apiKey, note? }`，全局连接档案、不绑定平台），落 `userData/api-presets.json` |
 | `presets.newId` | `() => Promise<string>` | 生成预设 id |
 | `presets.models` | `(presetId) => Promise<AgentModelCatalog>` | 经预设连通探测拉模型目录 |
 

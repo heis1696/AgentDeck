@@ -18,7 +18,7 @@ window.HTMLElement.prototype.getClientRects = function () { return [{ width: 100
 
 const emptyApi = {
   agents: { list: async () => [], save: async (list) => list },
-  presets: { list: async () => [], save: async (list) => list, newId: async () => 'preset-test', models: async () => ({ backend: 'zcode', source: 'catalog', models: [] }) },
+  presets: { list: async () => [], save: async (list) => list, newId: async () => 'preset-test', models: async () => ({ source: 'catalog', models: [] }) },
   settings: { get: async () => ({}), set: async (patch) => patch, onUpdated: () => () => {} }
 }
 window.agentdeck = emptyApi
@@ -81,7 +81,7 @@ const retry = () => [...host.querySelectorAll('button')].find((node) => node.tex
 try {
   // Real page: unread lists cannot be saved; successful retry preserves existing entries.
   const existing = (await original.agents.list()).map((agent, i) => ({ ...agent, presetId: i === 0 ? 'p1' : i === 1 ? 'p2' : undefined }))
-  const presets = ['p1', 'p2'].map((id) => ({ id, name: id, backend: 'zcode', baseURL: 'https://example.test', apiKey: 'fixture-only', createdAt: 1 }))
+  const presets = ['p1', 'p2'].map((id) => ({ id, name: id, baseURL: 'https://example.test', apiKey: 'fixture-only', createdAt: 1 }))
   const saves = []
   const presetSaves = []
   let finishSave

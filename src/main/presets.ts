@@ -1,16 +1,13 @@
-// API 预设（连接档案）：cc-switch 式"按平台多套 provider 配置"，但零全局切换——
-// 预设只在 agent 引用它的会话里注入（zcode upsert 进 v2 注册表按 id 引用，claude 走 spawn env）。
-// 预设只存连接（baseURL/apiKey），模型在 agent 表单里从预设在线拉取后单独钉选。
+// API 预设（全局连接档案）：预设只存连接（baseURL/apiKey），不绑定平台——
+// agent 按平台能力引用预设（zcode upsert 进 v2 注册表按 id 引用，claude 走 spawn env）。
+// 模型在 agent 表单里从预设在线拉取后单独钉选。
 import fs from 'node:fs'
 import path from 'node:path'
 import { app } from 'electron'
-import { BACKEND_IDS } from '../shared/types'
 
 export interface ApiPreset {
   id: string
   name: string
-  /** 所属平台：zcode | claude | codex | opencode | dsh */
-  backend: string
   baseURL: string
   apiKey: string
   /** 线协议：openai（OpenAI 兼容 /chat/completions，OpenRouter/OneAPI/DeepSeek 等）| anthropic（/messages）。
@@ -20,21 +17,17 @@ export interface ApiPreset {
   createdAt: number
 }
 
-const BACKEND_SET = new Set<string>(BACKEND_IDS)
-
 export function normalizePreset(value: unknown, fallback?: ApiPreset): ApiPreset | null {
   if (!value || typeof value !== 'object') return fallback ?? null
   const raw = value as Partial<ApiPreset>
   const id = typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : fallback?.id
   const name = typeof raw.name === 'string' ? raw.name.trim() : ''
-  const backend = typeof raw.backend === 'string' ? raw.backend.trim().toLowerCase() : ''
   const baseURL = typeof raw.baseURL === 'string' ? raw.baseURL.trim().replace(/\/+$/, '') : ''
   const apiKey = typeof raw.apiKey === 'string' ? raw.apiKey.trim() : ''
-  if (!id || !name || !BACKEND_SET.has(backend) || !baseURL || !apiKey) return fallback ?? null
+  if (!id || !name || !baseURL || !apiKey) return fallback ?? null
   return {
     id,
     name,
-    backend: backend as ApiPreset['backend'],
     baseURL,
     apiKey,
     ...(raw.protocol === 'openai' || raw.protocol === 'anthropic' ? { protocol: raw.protocol } : {}),

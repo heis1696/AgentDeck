@@ -9,8 +9,8 @@ import { EmptyState } from '../ui/EmptyState'
 import { BACKEND_IDS } from '../../../shared/types'
 import { isForgeAgent } from '../../../shared/forge'
 
-/** v1 支持预设注入执行的平台：zcode（runtimeModel）/ claude（spawn env） */
-const PRESET_BACKENDS = ['zcode', 'claude']
+/** v1 支持预设注入执行的后端面（Agent 表单的预设提示文案据此区分，非预设归属）：zcode（runtimeModel）/ claude（spawn env） */
+const CONNECTION_BACKENDS = ['zcode', 'claude']
 
 export type ListLoadState = 'loading' | 'ready' | 'error'
 
@@ -19,7 +19,7 @@ export function canPersistList<T>(state: ListLoadState, list: T[] | null, refres
 }
 
 /** Agent 管理页（顶级 tab）：Agent 身份 + API 预设（连接档案）两个分区。
- *  预设按平台存多套（cc-switch 式），但零全局切换——agent 引用预设后，
+ *  预设是全局连接档案，不绑定平台——agent 引用预设后，
  *  连接与模型只在它的会话里内存注入。模型列表从预设在线拉取。 */
 export function AgentsView() {
   const [agents, setAgents] = useState<Agent[]>([])
@@ -401,7 +401,7 @@ export function AgentsView() {
     setCreatingPreset(true)
     try {
       const id = await bridge.presets.newId()
-      setEditingPreset({ id, name: '', backend: 'zcode', baseURL: '', apiKey: '', note: '', createdAt: Date.now() })
+      setEditingPreset({ id, name: '', baseURL: '', apiKey: '', note: '', createdAt: Date.now() })
     } catch (cause) {
       ui.toast.error('新建预设失败：' + (cause instanceof Error ? cause.message : String(cause)))
     } finally {
@@ -468,7 +468,6 @@ export function AgentsView() {
       ] as Array<[string, string, string, string]>).filter(([, , oldV, newV]) => oldV !== newV)
     : []
   const editingPresetRef = editing?.presetId ? presets.find((p) => p.id === editing.presetId) : undefined
-  const backendPresets = presets.filter((p) => p.backend === editing?.backend)
   const filteredAgents = agents.filter((agent) => {
     const query = agentQuery.trim().toLowerCase()
     return !query || [agent.name, agent.role, agent.backend].filter(Boolean).join(' ').toLowerCase().includes(query)
@@ -487,7 +486,7 @@ export function AgentsView() {
     <section className="tm-section">
       <div className="tm-section-head">
         <h3><KeyRound size={13} className="tm-hicon" />API 预设</h3>
-        <span className="tm-section-desc">按平台存多套连接（baseURL / 密钥）；Agent 选取后在它的会话里生效，不改全局配置。zcode / claude 支持注入执行。</span>
+        <span className="tm-section-desc">全局连接档案（baseURL / 密钥），不绑定平台；Agent 选取后在它的会话里生效，不改全局配置。zcode / claude 支持注入执行。</span>
       </div>
       <div className="tm-grid">
         {presetsLoadState === 'loading' && <EmptyState compact icon={KeyRound} title="预设加载中" description="正在读取 API 预设。" />}
@@ -505,9 +504,6 @@ export function AgentsView() {
                 <button className="tm-act" title="拉取模型列表" disabled={testingPresetId === p.id} onClick={(e) => { e.stopPropagation(); testPreset(p) }}><RefreshCw size={13} className={testingPresetId === p.id ? 'spin' : undefined} /></button>
                 <button className="tm-act tm-act-danger" title="删除" disabled={!canWriteAgents || !canWritePresets || deletingPresetRef.current.has(p.id)} onClick={(e) => { e.stopPropagation(); void removePreset(p.id) }}><X size={13} /></button>
               </div>
-            </div>
-            <div className="tm-badges">
-              <span className="tm-badge">{p.backend}</span>
             </div>
             <p className="tm-note tm-note-mono">{p.baseURL}<br />密钥 ••••{p.apiKey.slice(-4)}</p>
           </div>
@@ -591,17 +587,6 @@ export function AgentsView() {
           <div className="dialog">
             <h2>{presets.some((p) => p.id === editingPreset.id) ? '编辑 API 预设' : '新建 API 预设'}</h2>
             <label className="field"><span>名称 *</span><input value={editingPreset.name} onChange={(e) => setEditingPreset({ ...editingPreset, name: e.target.value })} placeholder="如：智谱官方 / 某中转站" autoFocus /></label>
-            <label className="field">
-              <span>平台 *</span>
-              <Menu
-                items={PRESET_BACKENDS.map((b) => ({ value: b, label: b }))}
-                value={editingPreset.backend}
-                onChange={(v) => setEditingPreset({ ...editingPreset, backend: v })}
-                trigger={(cur, open) => (
-                  <button className="btn menu-trigger" type="button">{cur?.label ?? editingPreset.backend} <span className="menu-caret">{open ? '▴' : '▾'}</span></button>
-                )}
-              />
-            </label>
             <label className="field"><span>Base URL *</span><input value={editingPreset.baseURL} onChange={(e) => setEditingPreset({ ...editingPreset, baseURL: e.target.value })} placeholder="https://api.z.ai/api/anthropic" /></label>
             <label className="field"><span>API Key *</span><input type="password" value={editingPreset.apiKey} onChange={(e) => setEditingPreset({ ...editingPreset, apiKey: e.target.value })} placeholder="sk-…" /></label>
             <label className="field"><span>线协议</span>
@@ -783,7 +768,7 @@ export function AgentsView() {
               <Menu
                 items={BACKEND_IDS.map((b) => ({ value: b, label: b }))}
                 value={editing.backend}
-                onChange={(v) => update(editing, { backend: v, ...(editing.presetId ? { presetId: '' } : {}) })}
+                onChange={(v) => update(editing, { backend: v })}
                 trigger={(cur, open) => (
                   <button className="btn menu-trigger" type="button">
                     {cur?.label ?? editing.backend} <span className="menu-caret">{open ? '▴' : '▾'}</span>
@@ -791,21 +776,19 @@ export function AgentsView() {
                 )}
               />
             </label>
-            {PRESET_BACKENDS.includes(editing.backend) && (
-              <label className="field">
-                <span>API 预设（连接覆盖；可空 = 平台默认连接）</span>
-                <Menu
-                  items={[{ value: '', label: '不使用（平台默认）' }, ...backendPresets.map((p) => ({ value: p.id, label: `${p.name}（${p.baseURL}）` }))]}
-                  value={editing.presetId ?? ''}
-                  onChange={(v) => update(editing, { presetId: v })}
-                  trigger={(cur, open) => (
-                    <button className="btn menu-trigger" type="button">
-                      {cur?.label ?? '不使用（平台默认）'} <span className="menu-caret">{open ? '▴' : '▾'}</span>
-                    </button>
-                  )}
-                />
-              </label>
-            )}
+            <label className="field">
+              <span>{CONNECTION_BACKENDS.includes(editing.backend) ? 'API 预设（连接覆盖；可空 = 平台默认连接）' : 'API 预设（可空 = 平台默认连接；该平台暂不支持注入，绑定保留、切回 zcode / claude 后生效）'}</span>
+              <Menu
+                items={[{ value: '', label: '不使用（平台默认）' }, ...presets.map((p) => ({ value: p.id, label: `${p.name}（${p.baseURL}）` }))]}
+                value={editing.presetId ?? ''}
+                onChange={(v) => update(editing, { presetId: v })}
+                trigger={(cur, open) => (
+                  <button className="btn menu-trigger" type="button">
+                    {cur?.label ?? '不使用（平台默认）'} <span className="menu-caret">{open ? '▴' : '▾'}</span>
+                  </button>
+                )}
+              />
+            </label>
             <label className="field">
               <span>模型{editingPresetRef ? '（从预设拉取）' : '（空 = 平台默认）'}；同平台多个 Agent 可各钉不同模型</span>
               <div className="row" style={{ gap: 8 }}>

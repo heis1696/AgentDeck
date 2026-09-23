@@ -24,7 +24,7 @@ let failed = 0
 const ok = (cond, msg) => { console.log(`  ${cond ? '✓' : '✗'} ${msg}`); if (!cond) failed++ }
 
 const SECRET = 'sk-gen-smoke-secret-xyz'
-const PRESET = { id: 'p1', name: 'Gen Smoke', backend: 'zcode', baseURL: 'http://gen.test/v1', apiKey: SECRET, createdAt: 0 }
+const PRESET = { id: 'p1', name: 'Gen Smoke', baseURL: 'http://gen.test/v1', apiKey: SECRET, createdAt: 0 }
 const SEVEN_STATES = { idle: 1, walk: 1, fall: 1, dragged: 1, sleep: 1, happy: 1, think: 1 }
 const EIGHT_STATES = { idle: 3, walk: 4, fall: 2, dragged: 1, sleep: 2, happy: 2, think: 2, eat: 3 }
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
