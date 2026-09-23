@@ -66,7 +66,8 @@ export interface AgentInfo {
 }
 
 export interface AgentModelCatalog {
-  backend: string
+  /** 请求回显：agents.models(backend) 带回执行后端；presets.models 不带（预设不归属平台） */
+  backend?: string
   source: 'catalog' | 'freeform'
   default?: string
   models: string[]
@@ -75,7 +76,6 @@ export interface AgentModelCatalog {
 export interface PresetInfo {
   id: string
   name: string
-  backend: string
   baseURL: string
   apiKey: string
   /** 线协议：openai = OpenAI 兼容（OpenRouter/OneAPI 等 /chat/completions），anthropic = /messages；缺省按 baseURL 推断 */
