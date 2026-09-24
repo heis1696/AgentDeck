@@ -331,6 +331,9 @@ export interface WorktreeInfo {
   cleanupReason?: string
   cleanedAt?: number
   manualKeep?: boolean
+  /** 子单基线回放：领队未提交增量以一个提交（baseSha 即该提交）回放进子 worktree，
+   *  digest/集成以它为基线——领队改动不算子产出。files 为回放增量文件数。 */
+  replay?: { commitSha: string; files: number; at: number }
 }
 
 /** 任务累计用量（finalize 时从 events 聚合） */
@@ -352,6 +355,8 @@ export interface TaskGitSnapshot {
   runId?: string
   phaseIndex?: number
   startedAt?: number
+  /** 采集时点的分支 HEAD（scope=integration 时记录）：finalizer 直接观测分支是否移动的依据 */
+  headSha?: string
   reason?: string
   truncated?: boolean
 }

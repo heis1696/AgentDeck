@@ -154,17 +154,34 @@ try {
   start(task.id)
   const current = store.get(task.id)
   store.update(task.id, {
+    integration: { branch: 'integration', note: 'smoke' },
     gitDiff: branch.diff, gitStat: branch.stat,
     gitSnapshot: { ...branch.snapshot, runId: current.runId, phaseIndex: current.phaseIndex, startedAt: current.startedAt }
   })
   saved = await finish(task.id)
   assert.equal(saved.gitSnapshot.scope, 'integration')
+  assert.equal(saved.gitSnapshot.headSha, branch.snapshot.headSha, 'integration snapshots record the branch head at capture time')
   assert(saved.gitDiff.includes('integrated.txt'))
   assert(render(saved, 'available').includes('集成分支快照'))
+  // J2/M3：跨轮保留不再凭「工作副本干净」推断——直接观测集成分支 HEAD。分支未动时
+  // 旧证据仍然精确，重盖本轮时间戳保留；分支已前进（部分失败轮不写证据的形状）时
+  // 过期 diff 被拒绝重盖为本轮证据。
   start(task.id)
   saved = await finish(task.id)
-  assert.equal(saved.gitSnapshot.scope, 'workspace')
-  assert.equal(saved.gitDiff, '', 'old-run integration snapshots must not survive')
+  assert.equal(saved.gitSnapshot.scope, 'integration')
+  assert(saved.gitDiff.includes('integrated.txt'), 'an unmoved integration branch keeps the prior evidence across runs')
+  assert.equal(saved.gitSnapshot.runId, saved.runId, 'the preserved evidence is re-stamped to the current run')
+  git(repo, 'checkout', 'integration')
+  fs.writeFileSync(path.join(repo, 'partial.txt'), 'merged without evidence\n')
+  git(repo, 'add', '.')
+  commit(repo, 'partial round advanced the branch')
+  git(repo, 'checkout', 'main')
+  start(task.id)
+  saved = await finish(task.id)
+  assert.equal(saved.gitSnapshot.scope, 'workspace', 'a moved branch voids the stale integration snapshot')
+  assert.equal(saved.gitDiff, '', 'the stale diff must not be re-stamped as this round evidence')
+  assert.equal(saved.gitSnapshot.headSha, undefined)
+  render(saved, 'clean')
   assert.equal((await branchDiffSummary(repo, 'missing', 'integration')).snapshot.state, 'error')
 
   start(task.id)

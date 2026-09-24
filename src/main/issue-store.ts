@@ -402,6 +402,9 @@ export class IssueStore {
       const current = this.readDataLocked()
       const issue = this.findIssue(current, issueId)
       if (!issue) {
+        // 暗坑补灯：返回 null 是"未送达"而非"已送达但没人看"——必须留下可查的痕迹，
+        // 调用方据此降级到任务证据/事件通道
+        console.warn(`[issue-store] addComment dropped: issue ${issueId} not found (${content.length} chars discarded)`)
         this.data = current
         return null
       }

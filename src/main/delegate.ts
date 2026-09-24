@@ -18,10 +18,35 @@ import {
   buildRejectNotice,
   REVIEW_INSTRUCTION,
   undeliveredReportComment,
-  leftoverRejectsComment
+  leftoverRejectsComment,
+  workerFullReportComment,
+  reportCopyMarkdown,
+  fullTextPointerLines
 } from './prompts'
-import { isGitRepo, mergeBranchInto, branchDiffSummary, currentBranch, commitAll, branchExists, reclaimWorktree, deleteBranch, markWorktreeCleanup } from './git'
+import {
+  branchExists,
+  branchDiffSummary,
+  branchHead,
+  commitAll,
+  createWorktreeAtBranch,
+  currentBranch,
+  deleteBranch,
+  isGitRepo,
+  markWorktreeCleanup,
+  mergeBranchInto,
+  mergeIntoManagedWorktree,
+  reclaimWorktree,
+  snapshotGitAfter,
+  worktreeChangeDigest,
+  writeReportCopy,
+  type WorktreeChangeDigest
+} from './git'
 import { currentGitChanges } from '../shared/git-snapshot'
+
+/** Issue 评论的最小形状：addComment 成功返回；null = Issue 不存在（调用方必须降级，不静默丢） */
+export interface IssueCommentLike {
+  id: string
+}
 
 export interface DelegateCall {
   to: string
@@ -315,8 +340,9 @@ export interface DelegationContext {
   pushEvent: (taskId: string, e: TaskEvent) => void
   /** 审核子任务（pass → done，fail → blocked） */
   applyReview?: (childId: string, verdict: 'pass' | 'fail', note?: string) => void
-  /** Issue 评论（回灌失败兜底：领队已死时把队员报告摘要落到用户看得到的地方） */
-  addIssueComment?: (issueId: string, text: string) => void
+  /** Issue 评论（队员全文报告与回灌失败兜底的落点）。返回 null = Issue 不存在，未送达——
+   *  调用方必须降级到任务证据/事件通道，绝不静默丢弃。 */
+  addIssueComment?: (issueId: string, text: string) => IssueCommentLike | null
 }
 
 export interface DelegationOutcome {
@@ -363,6 +389,132 @@ export function delegateChildBranch(
 ): string {
   if (child.worktree?.branch) return child.worktree.branch
   return currentGitChanges(child) ? `agentdeck/${leaderTaskId}_c${index}` : ''
+}
+
+// ---- 回灌报告的 git 改动小节（修复「队员改了文件队长拿不到」：领队在反馈里直接看到改动面） ----
+
+/** 体量界：整节 ≤2KB（按 UTF-8 字节计）、文件清单 ≤50 行（且 ≤800 字符），未跟踪文件名 ≤8 个；超限截断留标记 */
+export const GIT_REPORT_SECTION_MAX_CHARS = 2048
+const GIT_REPORT_STAT_MAX_LINES = 50
+const GIT_REPORT_STAT_MAX_CHARS = 800
+const GIT_REPORT_UNTRACKED_MAX = 8
+
+// M4 注入面：小节内容全部来自队员可控的文件/改动文本，可伪造 ###/【系统】/六类协议
+// 标记骗领队当成结构或指令。六个回合解析器全部是非锚定子串正则（行中同样命中），
+// 行首加「\」前缀拦不住——防护用序列内部破坏：对六类标记的开/闭形态、```、行首 ###
+// 与【系统 前缀字面量，在末字符前插一个「\」（如 <delegat\e、##\#），原字面量子串
+// 不再连续出现、人读几乎无损；diff 行的 +/- 前缀只是普通文本，全局替换天然覆盖。
+// 整节再用 ```text 围栏包裹（内容里的 ``` 已被破坏，关不掉围栏）。
+const REPORT_LITERAL_RE = /<\/?(?:delegate|consult|investigate|review|round|continue)\b|```|【系统|###/g
+const REPORT_FENCE_OPEN = '```text'
+const REPORT_FENCE_CLOSE = '```'
+
+/** 序列内部破坏：命中字面量在末字符前插「\」；破坏后的形态不再命中，重复处理幂等 */
+function escapeProtocolLiterals(text: string): string {
+  return text.replace(REPORT_LITERAL_RE, (m) => `${m.slice(0, -1)}\\${m.slice(-1)}`)
+}
+
+/** 把 worktreeChangeDigest 的原始摘录组装成回灌小节；无任何改动时返回 null（不留空小节） */
+export function buildGitReportSection(digest: WorktreeChangeDigest): string | null {
+  if (!digest.ok) return null
+  if (!digest.stat.trim() && !digest.diff.trim() && !digest.untracked.length && !digest.nameStatus.trim()) return null
+  const head = `【git 改动摘录】工作分支 \`${digest.branch || '（无元数据）'}\`（基线 ${digest.baseSha.slice(0, 8)}，对基线的全部改动）：`
+  let statBlock = ''
+  if (digest.stat.trim()) {
+    const body = escapeProtocolLiterals(digest.stat.split('\n').map((line) => ` ${line}`).join('\n'))
+    statBlock = `文件改动：\n${body}${digest.statTruncated ? '\n…（文件清单截断）' : ''}`
+  }
+  // B5 二进制可见性：--name-status 逐文件一行（A/M/D/R），diff 摘录被文本改动挤爆时
+  // 二进制/删除/重命名仍凭这份清单可见
+  let nameStatusBlock = ''
+  if (digest.nameStatus.trim()) {
+    const body = escapeProtocolLiterals(digest.nameStatus.split('\n').map((line) => ` ${line}`).join('\n'))
+    nameStatusBlock = `文件状态（含二进制）：\n${body}${digest.nameStatusTruncated ? '\n…（状态清单截断）' : ''}`
+  }
+  // 未跟踪文件名逐项独立转义后再拼接：不靠对拼接结果的行级处理兜底（文件名可内嵌换行）
+  const untrackedBlock = digest.untracked.length
+    ? `未跟踪：${digest.untracked.map((name) => escapeProtocolLiterals(name)).join('、')}${digest.untrackedTruncated ? '…' : ''}`
+    : ''
+  // m2：「diff 摘要：」标题与 diff 块同生同死——没有可展示的 diff 就不留悬空标题
+  const marker = '\n…（diff 截断）'
+  const fixedBytes = (withDiffTitle: boolean) => Buffer.byteLength(
+    [REPORT_FENCE_OPEN, head, statBlock, nameStatusBlock, untrackedBlock, ...(withDiffTitle ? ['diff 摘要：'] : []), REPORT_FENCE_CLOSE]
+      .filter(Boolean).join('\n'), 'utf8')
+  let diffBlock = ''
+  if (digest.diff.trim()) {
+    // m1：体量界按字节计——截断标记等中文字面量的 .length 远小于其实际字节数
+    let budget = GIT_REPORT_SECTION_MAX_CHARS - fixedBytes(true) - Buffer.byteLength(marker, 'utf8')
+    // 字面量破坏插入的反斜杠余量：命中数未知，统一留 32B，最终还有整节级的字节兜底
+    budget -= 32
+    if (budget > 0) {
+      let text = digest.diff.replace(/\n$/, '')
+      let truncated = digest.diffTruncated
+      if (Buffer.byteLength(text, 'utf8') > budget) {
+        truncated = true
+        while (text.length > 0 && Buffer.byteLength(text, 'utf8') > budget) text = text.slice(0, Math.floor(text.length * 0.9))
+        const boundary = text.lastIndexOf('\n')
+        text = boundary > 0 ? text.slice(0, boundary) : text
+      }
+      diffBlock = text + (truncated ? marker : '')
+    }
+  }
+  const content = [head, statBlock, nameStatusBlock, untrackedBlock, ...(diffBlock ? ['diff 摘要：', diffBlock] : [])]
+    .filter(Boolean).join('\n')
+  const fence = (inner: string) => {
+    const escaped = escapeProtocolLiterals(inner).split('\n')
+    // 首行是我们自己的小节标题（【git 改动摘录】…），不属于队员可控文本，不转义
+    const headLine = inner.split('\n')[0]
+    if (escaped[0] !== headLine) escaped[0] = headLine
+    return `${REPORT_FENCE_OPEN}\n${escaped.join('\n')}\n${REPORT_FENCE_CLOSE}`
+  }
+  // 终保：极端多字节内容（长中文路径等）+ 破坏插入的字节超出体量界时按字节收缩并留标记
+  if (Buffer.byteLength(fence(content), 'utf8') <= GIT_REPORT_SECTION_MAX_CHARS) return fence(content)
+  const endMark = '\n…（截断）'
+  let inner = content
+  while (inner.length > 0 && Buffer.byteLength(fence(inner) + endMark, 'utf8') > GIT_REPORT_SECTION_MAX_CHARS) {
+    inner = inner.slice(0, Math.floor(inner.length * 0.9))
+  }
+  return `${fence(inner)}${endMark}`
+}
+
+// ---- 单条回灌摘要的结构化组装（A1：结论段有界 + git 小节 + 全文入口指引；4000 只兜底） ----
+
+/** 结论段摘录字数：result 首部进摘要的量；全文走双落通道（Issue 评论 + 报告副本） */
+export const REPORT_CONCLUSION_CHARS = 1200
+/** 摘要物理硬顶：结构化摘要下正常到不了这里，只是最后防线；触发必须带「N 字未送」标记 */
+export const REPORT_BODY_HARD_CAP = 4000
+
+export interface ChildReportBodyInput {
+  status: string
+  result?: string
+  error?: string
+  /** git 改动小节（buildGitReportSection 产物；自带围栏与转义） */
+  gitSection?: string | null
+  /** 全文入口指引行（原文；这里统一过转义防护） */
+  pointers?: string[]
+}
+
+/** 结构化摘要体：结论段（result 首部有界）+ git 改动小节 + 全文入口指引。
+ *  队员可控文本（结论段、指引里的路径）不做伪装结构承诺，指引行统一过字面量破坏转义。 */
+export function buildChildReportBody(input: ChildReportBodyInput): string {
+  const parts: string[] = []
+  if (input.status === 'done') {
+    const result = input.result ?? ''
+    const head = result.slice(0, REPORT_CONCLUSION_CHARS)
+    parts.push(head)
+    if (result.length > head.length) {
+      parts.push(`…（结论段只摘前 ${REPORT_CONCLUSION_CHARS} 字，后 ${result.length - head.length} 字未进摘要；全文见下方入口）`)
+    }
+  } else {
+    parts.push(`状态 ${input.status}${input.error ? ': ' + input.error.slice(0, 300) : ''}`)
+  }
+  if (input.gitSection) parts.push(input.gitSection)
+  if (input.pointers?.length) parts.push(input.pointers.map((line) => escapeProtocolLiterals(line)).join('\n'))
+  const body = parts.filter((part) => part !== '').join('\n\n')
+  const overflow = body.length - REPORT_BODY_HARD_CAP
+  if (overflow <= 0) return body
+  return body.slice(0, REPORT_BODY_HARD_CAP)
+    + `\n…（回灌正文超 ${REPORT_BODY_HARD_CAP} 字触发最后防线截断：后 ${overflow} 字未送；全文见 Issue 评论与报告副本）`
 }
 
 /**
@@ -516,20 +668,87 @@ export async function runDelegationLoop(
     })
     if (!active()) return abandoned()
 
-    // 汇报回灌（带单号；审核协议追加）
+    // multica「nothing silently discarded」：队员终态（含 failed）即把 worktree 改动 commitAll
+    // 落盘到其工作分支，不等集成期——此后即便领队被替换/取消（本循环任何一步早退），
+    // 队员的实际改动都已留在可发现的分支提交里，而不是悬在随时可能被清扫的未提交状态。
+    // 只对带 worktree 元数据的队员执行（workdir 属于隔离 worktree）；cancelled 不在此列，
+    // 其现场保持原样交由保留判定与人工处理。
+    for (const id of childIds) {
+      const c = store.get(id)
+      if (!c?.worktree || !c.workdir || (c.status !== 'done' && c.status !== 'failed')) continue
+      await commitAll(c.workdir, `agentdeck: ${c.title}`)
+      if (!active()) return abandoned()
+    }
+
+    // ---- 全文双落（队员终态即执行，不随摘要回灌的成败）：完整 result 同时落到
+    // ① 领队 Issue 评论（store 无上限，截断只发生在调用点）与 ② 领队 workdir 的
+    // .agentdeck-reports/<单号>.md（info/exclude 忽略，零污染；二层领队落自己的
+    // workdir，机制相同）。评论未送达（返回 null）必须留痕降级，绝不静默丢弃。
+    const fullTextEntries = new Map<string, { seq: number; issueOk: boolean; copyPath: string }>()
+    for (let idx = 0; idx < childIds.length; idx++) {
+      const id = childIds[idx]
+      const c = store.get(id)
+      if (!c || (c.status !== 'done' && c.status !== 'failed')) continue
+      const seq = idx + 1
+      const fullBody = c.status === 'done'
+        ? (c.result ?? '').trim() || '（无最终输出）'
+        : `状态 ${c.status}${c.error ? ': ' + c.error : ''}`
+      let issueOk = false
+      if (task.issueId) {
+        const comment = ctx.addIssueComment?.(task.issueId, workerFullReportComment(c.title, seq, c.status, c.runId ?? '', fullBody)) ?? null
+        issueOk = !!comment
+        if (!issueOk) note(`⚠ 单 #${seq} 的全文评论未送达（Issue 不存在或已删除），全文以报告副本与任务时间线为准`)
+      }
+      let copyPath = ''
+      if (task.workdir && hasRepo) {
+        const written = await writeReportCopy(task.workdir, id, reportCopyMarkdown({
+          childId: id, title: c.title, seq, status: c.status, runId: c.runId ?? '', finishedAt: Date.now(), body: fullBody
+        }))
+        if (!active()) return abandoned()
+        if (written) copyPath = written
+        else note(`⚠ 单 #${seq} 的报告副本写入失败（领队工作区不可写），全文仅存 Issue 评论`)
+      }
+      fullTextEntries.set(id, { seq, issueOk, copyPath })
+    }
+
+    // 汇报回灌（带单号；审核协议追加）。摘要改为结构化组装：单号+状态在条目标题，
+    // 体是「结论段（result 首部有界）+ git 改动小节 + 全文入口指引」——4000 字物理截断
+    // 只是最后防线（触发带截断标记），全文已双落，摘要不再承担携带全文的职责。
+    // done 单的 git 小节：集成期 commitAll 在循环之后才跑，此刻 worktree 里是未提交
+    // 改动——digest 只读计算（对 worktree 基线 sha diff + 未跟踪列名），让领队不依赖
+    // 集成就能「验收」改动面。
     const childSeqMap = new Map<string, number>()
-    const report = childIds
-      .map((id, idx) => {
-        const c = store.get(id)!
-        if (!c) return childReportEntry('worker', 'cancelled', idx + 1, 'Task was removed')
-        reportedChildren.set(id, c)
-        const call = roundChildren.get(id)
-        const seq = idx + 1
-        childSeqMap.set(id, seq)
-        const body = c.status === 'done' ? (c.result ?? '').slice(0, 4000) : `状态 ${c.status}${c.error ? ': ' + c.error.slice(0, 300) : ''}`
-        return childReportEntry(call?.to ?? c.agentId ?? c.backend, c.status, seq, body)
+    const reportEntries: string[] = []
+    for (let idx = 0; idx < childIds.length; idx++) {
+      const id = childIds[idx]
+      const c = store.get(id)
+      if (!c) {
+        reportEntries.push(childReportEntry('worker', 'cancelled', idx + 1, 'Task was removed'))
+        continue
+      }
+      reportedChildren.set(id, c)
+      const call = roundChildren.get(id)
+      const seq = idx + 1
+      childSeqMap.set(id, seq)
+      let gitSection: string | null = null
+      if (c.status === 'done' && c.worktree && c.workdir) {
+        const digest = await worktreeChangeDigest(c.workdir, c.worktree, {
+          diffChars: 1200, statLines: GIT_REPORT_STAT_MAX_LINES, statChars: GIT_REPORT_STAT_MAX_CHARS, untrackedNames: GIT_REPORT_UNTRACKED_MAX
+        })
+        if (!active()) return abandoned()
+        gitSection = buildGitReportSection(digest)
+      }
+      const full = fullTextEntries.get(id)
+      const body = buildChildReportBody({
+        status: c.status,
+        result: c.result,
+        error: c.error,
+        gitSection,
+        pointers: full ? fullTextPointerLines(full.copyPath, full.issueOk, full.seq) : []
       })
-      .join('\n\n')
+      reportEntries.push(childReportEntry(call?.to ?? c.agentId ?? c.backend, c.status, seq, body))
+    }
+    const report = reportEntries.join('\n\n')
     // 拒单随报告捎带：只靠「整轮零新单」兜底送达的话，领队每轮都有新单时永远收不到，
     // 会带着「该单在途」的幻觉继续排计划（iss_t_mu5t2em6_ymbllw 实测：混合轮里一单被拒，
     // 领队连着多轮评估「仍在途等回灌」，该工作项无人领）。take 即清空，兜底通道不会重复送。
@@ -581,7 +800,8 @@ export async function runDelegationLoop(
           const child = store.get(id)
           return `- **${child?.title ?? id}**（${child?.status ?? '?'}）：${(child?.result ?? '').slice(0, 400) || '（无最终输出）'}`
         }).join('\n')
-        ctx.addIssueComment?.(issueId, undeliveredReportComment(excerpts))
+        const comment = ctx.addIssueComment?.(issueId, undeliveredReportComment(excerpts)) ?? null
+        if (!comment) note(`⚠ Issue 评论未送达（Issue 不存在），队员报告摘要转投任务时间线：\n${excerpts}`)
       }
       break
     }
@@ -593,13 +813,15 @@ export async function runDelegationLoop(
   if (leftoverRejects.length) {
     note(`⚠ 委派结束仍有 ${leftoverRejects.length} 条派单被拒且未回灌：${leftoverRejects.map((r) => r.slice(0, 80)).join('；')}`)
     if (task.issueId) {
-      ctx.addIssueComment?.(task.issueId, leftoverRejectsComment(leftoverRejects))
+      const comment = ctx.addIssueComment?.(task.issueId, leftoverRejectsComment(leftoverRejects)) ?? null
+      if (!comment) note('⚠ Issue 评论未送达（Issue 不存在），被拒派单以任务时间线留痕为准')
     }
   }
 
   // ---- git 集成（有仓库且产生了子任务时） ----
   let integrationNote = ''
   let integrationBranch = ''
+  let pendingFollow: Awaited<ReturnType<typeof createWorktreeAtBranch>> = null
   let gitDiff = ''
   let gitStat = ''
   let gitSnapshot: Task['gitSnapshot']
@@ -620,6 +842,13 @@ export async function runDelegationLoop(
     } else {
       try {
         integrationBranch = `agentdeck/task-${taskId}`
+        // 续链二次集成：领队 workdir 已是检出集成分支的托管 worktree（上一轮集成切过基线）。
+        // 临时 worktree 再检出同一分支会被 git 拒绝——此轮 merge 就地做（mergeIntoManagedWorktree
+        // 只接受 .agentdeck-worktrees 托管目录，用户工作副本绝不就地改）；证据 diff 改用本轮
+        // 集成起点 sha（此时 base 分支即集成分支自身，base...integration 会得到空证据）。
+        const leaderOnIntegration = baseBranch === integrationBranch
+        const roundBaseSha = leaderOnIntegration ? await branchHead(task.workdir, integrationBranch) : ''
+        if (!active()) return abandoned()
         let allOk = true
         const problems: string[] = []
         let idx = 0
@@ -656,8 +885,15 @@ export async function runDelegationLoop(
           if (ownBranch) await commitAll(c.workdir, `agentdeck: ${c.title}`)
           if (!active()) return abandoned()
           let childOk = true
+          let childAdvanced = false
           for (const b of [ownBranch, subIntegration].filter(Boolean)) {
-            const r = await mergeBranchInto(task.workdir, integrationBranch, b!)
+            // M3：merge 对 Already-up-to-date 的分支返回成功但不产生新提交——
+            // 只有集成分支 HEAD 真实前进才计入 mergedCount，否则空 diff 会清掉既有证据
+            const headBefore = await branchHead(task.workdir, integrationBranch)
+            if (!active()) return abandoned()
+            const r = leaderOnIntegration
+              ? await mergeIntoManagedWorktree(task.workdir, b!, taskId)
+              : await mergeBranchInto(task.workdir, integrationBranch, b!)
             if (!active()) return abandoned()
             if (!r.ok) {
               childOk = false
@@ -668,9 +904,11 @@ export async function runDelegationLoop(
               })
               if (r.conflict) break
             } else {
-              mergedCount++
+              const headAfter = await branchHead(task.workdir, integrationBranch)
+              if (headAfter && headAfter !== headBefore) childAdvanced = true
             }
           }
+          if (childAdvanced) mergedCount++
           // 收尾回收：全部合入集成分支后 worktree 即无保留价值（改动都在集成分支上），
           // 顺带删掉已合并的工作分支；有失败/冲突则保留现场便于排查，留待任务删除时回收
           if (childOk) {
@@ -704,20 +942,55 @@ export async function runDelegationLoop(
           if (!allOk) break
         }
         if (allOk && mergedCount > 0) {
-          const sum = await branchDiffSummary(task.workdir, baseBranch, integrationBranch)
+          const sum = await branchDiffSummary(task.workdir, leaderOnIntegration && roundBaseSha ? roundBaseSha : baseBranch, integrationBranch)
           if (!active()) return abandoned()
           gitDiff = sum.diff
           gitStat = sum.stat
           gitSnapshot = sum.snapshot
-          integrationNote = `改动已合入集成分支 ${integrationBranch}（基线 ${baseBranch}，${mergedCount} 个子任务），确认后可自行 merge`
-          note(`集成完成 → ${integrationBranch}`)
+          // B4 取舍标注：领队未提交基线经回放提交进了集成分支，领队原工作区仍持同一份
+          // 未提交改动（跨线合并是人/后续流程的事）——集成证据与 UI 说明必须亮明这一点
+          const replayedFiles = [...reportedChildren.values()]
+            .reduce((total, child) => total + (child.worktree?.replay?.files ?? 0), 0)
+          integrationNote = `改动已合入集成分支 ${integrationBranch}（基线 ${baseBranch}，${mergedCount} 个子任务${replayedFiles ? `；含领队回放基线 ${replayedFiles} 文件` : ''}），确认后可自行 merge`
+          note(`集成完成 → ${integrationBranch}${replayedFiles ? `（含领队回放基线 ${replayedFiles} 文件）` : ''}`)
+          // ---- 续链换基线：领队工作目录切到集成分支的托管 worktree ----
+          // 只在首次集成成功（本轮基线还不是集成分支）时切换；用户当前分支/仓库根副本绝不改——
+          // 只新建 .agentdeck-worktrees 下的 worktree 并把 task.workdir 指过去（owner metadata
+          // 登记 + 删任务连带回收 + 启动清扫走既有渠道）。此后 followUp/续聊/二次派单自然以
+          // 集成结果为基线（子单 base=集成分支）。早退/无改动/失败路径不切换。
+          if (!leaderOnIntegration) {
+            // M2 快照口径（切换前收编）：workdir 切走后，领队留在原目录的未提交改动不再属于
+            // 任何快照——切换前先摘录进本轮证据，不从 gitDiff/gitStat 静默消失。
+            const prior = await snapshotGitAfter(task.workdir)
+            if (!active()) return abandoned()
+            if (prior.diff.trim() || prior.stat.trim()) {
+              const label = `\n\n--- 领队原目录未提交改动（切换前收编自 ${task.workdir}） ---\n`
+              gitDiff = (gitDiff + label + prior.diff).slice(0, 200_000)
+              gitStat = `${gitStat}\n${prior.stat}`.slice(0, 10_000)
+              note(`领队原目录的未提交改动已收编进本轮证据（切换后原目录不再属于快照口径）`)
+            }
+            const wt = await createWorktreeAtBranch(task.workdir, `task-${taskId}-integrated`, integrationBranch, taskId)
+            if (!wt) {
+              note(`⚠ 续链基线切换失败：集成分支 ${integrationBranch} 已可用，但领队工作目录保持原位`)
+            } else {
+              // M1 拆两步：目录建好后只在此挂起，落盘挪到 git operation 释放后的第一条语句
+              // （下方）——operation 持有期内 store 禁止 workVersion 变化，而改 workdir 必然
+              // 触发自动 bump，落盘只能放在释放之后；从释放到落盘之间零 await、零 active()
+              // 早退，窗口同样消除。若落盘仍失败（任务已被替换/取消），回滚目录、分支保留。
+              pendingFollow = wt
+            }
+          }
         } else if (allOk) {
-          // 没有任何子任务产生可合并改动（可能都改在了主目录或无改动）
-          const dirty = await import('./git').then((g) => g.snapshotGitAfter(task.workdir))
+          // 没有任何子任务产生可合并改动（可能都改在了主目录或无改动）。
+          // M3：工作副本也干净时整段省略证据键——否则一个 clean workspace 快照会顶掉
+          // 既有集成快照，finalizer 随即把上一轮的 gitDiff/gitStat 当无证据清空。
+          const dirty = await snapshotGitAfter(task.workdir)
           if (!active()) return abandoned()
-          gitDiff = dirty.diff || ""
-          gitStat = dirty.stat || ""
-          gitSnapshot = dirty.snapshot
+          if (dirty.diff.trim() || dirty.stat.trim()) {
+            gitDiff = dirty.diff || ''
+            gitStat = dirty.stat || ''
+            gitSnapshot = dirty.snapshot
+          }
           integrationNote = '子任务无独立分支改动；领队若自己改了文件，改动保留在主目录工作区（未提交）'
         } else {
           // 一次性告知：失败原因只进时间线事件（收件箱/看板等错误面亦可散见），
@@ -726,6 +999,25 @@ export async function runDelegationLoop(
         }
       } finally {
         store.releaseGitOperation(operation)
+      }
+      // M1 拆两步（续）：operation 一释放立刻落盘续链 worktree 的归属——从上面的 finally
+      // 到这里零 await、零 active() 早退，窗口消除。落盘成功后任何早退留下的都是已登记的
+      // 续链 worktree（清扫按 owner.integration.branch 保留）；落盘失败（任务已被替换/
+      // 取消）则回滚刚建的目录：集成分支保留（结果都在分支上），绝不留孤儿 worktree。
+      if (pendingFollow) {
+        const persisted = store.updateIf(taskId, expected, {
+          integration: { branch: integrationBranch, note: integrationNote },
+          workdir: pendingFollow.path,
+          worktree: pendingFollow.metadata
+        })
+        if (persisted) {
+          pushTask(taskId)
+          note(`续链基线已切换：领队工作区 → 集成 worktree（检出 ${integrationBranch}），后续追问/续聊/派单以集成结果为基线`)
+        } else {
+          await reclaimWorktree(pendingFollow.path)
+          note('⚠ 续链基线切换未落盘（任务归属已变化），集成结果保留在集成分支上')
+        }
+        pendingFollow = null
       }
     }
   }
@@ -736,9 +1028,11 @@ export async function runDelegationLoop(
   const current = store.get(taskId)
   const updated = store.updateIf(taskId, expected, {
     ...(integrationBranch ? { integration: { branch: integrationBranch, note: integrationNote } } : {}),
-    gitDiff: gitDiff || undefined,
-    gitStat: gitStat || undefined,
-    gitSnapshot: gitSnapshot ? { ...gitSnapshot, runId, phaseIndex: current?.phaseIndex, startedAt: current?.startedAt } : undefined,
+    // M3：本轮没有产生新证据时不带这些键——store.update 走 Object.assign，连 undefined
+    // 也会覆盖；显式省略才能保住上一轮的 gitDiff/gitStat/gitSnapshot（如二轮无净新增）。
+    ...(gitDiff ? { gitDiff } : {}),
+    ...(gitStat ? { gitStat } : {}),
+    ...(gitSnapshot ? { gitSnapshot: { ...gitSnapshot, runId, phaseIndex: current?.phaseIndex, startedAt: current?.startedAt } } : {}),
     roundsUsed: round
   } as Partial<Task>)
   if (updated) pushTask(taskId)

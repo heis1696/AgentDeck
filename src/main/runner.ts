@@ -2,13 +2,14 @@
 // 状态机：queued → running → done | failed | cancelled
 import type { ExecutionOwner, Task, TaskEvent, WorktreeInfo } from '../shared/types'
 import { createHash } from 'node:crypto'
+import path from 'node:path'
 import { sameExecutionOwner, type TaskExpectation, type TaskStore } from './store'
 import { createExecutionOwner } from './persistence'
 import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnStamp, PermissionRequest, BackendTurnResult } from './backends/types'
-import { runDelegationLoop, parseContinueMerged, stripContinue, parseDelegates, parseConsultsMerged, stripConsults, parseInvestigatesMerged, stripInvestigates, ancestorBudget, sanitizeChildPrompt, MAX_DEPTH, MAX_TOTAL_ROUNDS, type AgentLike, type DelegateCall, type ConsultCall, type InvestigateCall } from './delegate'
+import { runDelegationLoop, parseContinueMerged, stripContinue, parseDelegates, parseConsultsMerged, stripConsults, parseInvestigatesMerged, stripInvestigates, ancestorBudget, sanitizeChildPrompt, MAX_DEPTH, MAX_TOTAL_ROUNDS, type AgentLike, type DelegateCall, type ConsultCall, type InvestigateCall, type IssueCommentLike } from './delegate'
 import { buildAgentPrompt, buildDelegationBlock, buildChildPrompt, CONTINUE_BLOCK, HANDOFF_CUE, HANDOFF_RECEIVE_CUE, HANDOFF_START_CONFIRMED_CUE, RETITLE_PROMPT } from './prompts'
 import { findHandoffSuccessor, prepareManualTaskStart, repeatsHandoffPhase } from './handoff'
-import { isGitRepo, createWorktree, currentBranch, setWorktreeOwner, reclaimWorktree } from './git'
+import { isGitRepo, createWorktree, currentBranch, setWorktreeOwner, reclaimWorktree, replayLeaderBaseline } from './git'
 
 /** API 预设（主进程 presets.ts 的 ApiPreset 的运行时子集，避免环依赖） */
 interface PresetLike {
@@ -272,6 +273,9 @@ export class TaskRunner {
     doomLoopThreshold?: number
   }
   private sessions = new Map<string, BackendSession>()
+  /** 会话绑定的工作目录（安装该会话时 backend.start 用的 cwd）。续链换基线后
+   *  task.workdir 变更，followUp 凭它发现内存会话还跑在旧目录，强制走 resume 重建。 */
+  private sessionWorkdirs = new Map<string, string>()
   /** Runs this runner committed to. Only a committed claim may start a backend
    *  or authorize a later write; the durable record is the tie-breaker. */
   private claims = new Map<string, RunClaim>()
@@ -828,6 +832,7 @@ export class TaskRunner {
     this.lastTerminalResponses.delete(taskId)
     if (!s) return
     this.sessions.delete(taskId)
+    this.sessionWorkdirs.delete(taskId)
     this.retireSession(s)
     await this.awaitCleanup(() => s.stop())
     await this.awaitCleanup(() => preserveProviderSession && s.detach ? s.detach() : s.close())
@@ -842,6 +847,7 @@ export class TaskRunner {
     this.claims.delete(taskId)
     const session = this.sessions.get(taskId)
     this.sessions.delete(taskId)
+    this.sessionWorkdirs.delete(taskId)
     if (session) this.retireSession(session)
     this.permissionBroker.cancelTask(taskId)
     this.toolWindows.delete(taskId)
@@ -946,9 +952,10 @@ export class TaskRunner {
     this.attachTaskCreator(creator)
   }
 
-  private issueOps: { reviewStatus: (childId: string, verdict: 'pass' | 'fail', note?: string) => void; addIssueComment?: (issueId: string, text: string) => void } | null = null
-  /** Issue 操作接口（委派审核流用；addIssueComment 供回灌失败兜底落评论） */
-  attachIssueOps(ops: { reviewStatus: (childId: string, verdict: 'pass' | 'fail', note?: string) => void; addIssueComment?: (issueId: string, text: string) => void }) {
+  private issueOps: { reviewStatus: (childId: string, verdict: 'pass' | 'fail', note?: string) => void; addIssueComment?: (issueId: string, text: string) => IssueCommentLike | null } | null = null
+  /** Issue 操作接口（委派审核流用；addIssueComment 供全文/兜底落评论，返回 null = Issue 不存在，
+   *  调用方必须降级任务证据/事件通道，绝不静默丢弃） */
+  attachIssueOps(ops: { reviewStatus: (childId: string, verdict: 'pass' | 'fail', note?: string) => void; addIssueComment?: (issueId: string, text: string) => IssueCommentLike | null }) {
     this.issueOps = ops
   }
 
@@ -957,9 +964,9 @@ export class TaskRunner {
     this.issueOps?.reviewStatus(childId, verdict, note)
   }
 
-  /** Issue 评论（委派回灌失败兜底：报告摘要落到用户可见渠道） */
-  addIssueComment(issueId: string, text: string) {
-    this.issueOps?.addIssueComment?.(issueId, text)
+  /** Issue 评论（队员全文报告与回灌失败兜底的落点）；返回 null = 未送达（Issue 不存在） */
+  addIssueComment(issueId: string, text: string): IssueCommentLike | null {
+    return this.issueOps?.addIssueComment?.(issueId, text) ?? null
   }
 
   /** 执行日志留痕（状态类事件：落盘 + 推 UI）；expected 限定该事件属于哪次运行 */
@@ -1169,6 +1176,30 @@ export class TaskRunner {
       if (wt) {
         workdir = wt.path
         worktree = wt.metadata
+        // 子单基线回放（multica「工作区即状态」不变量）：领队的未提交增量此刻只存在于
+        // 领队工作区，子单的隔离 worktree 看不见就等于白派单。在子 agent 拿到 cwd 之前，
+        // 用私有 index 把增量采集成一个提交回放进子 worktree（零副作用：不 stash/不 reset
+        // 用户区）。回放提交随即成为子分支起始提交（B2 防双算：digest/集成以它为基线，
+        // 领队改动不算子产出）；无增量零开销跳过；采集/应用失败具名拒建单回灌原因。
+        const replay = await replayLeaderBaseline(task.workdir, wt.path, wt.metadata.baseSha)
+        if (!active()) {
+          await reclaimWorktree(wt.path, { force: true, deleteBranch: true })
+          return null
+        }
+        if (replay.status === 'refused') {
+          await reclaimWorktree(wt.path, { force: true, deleteBranch: true })
+          guardedNote(`⚠ 拒绝派给 ${call.to}：领队基线回放失败，拒建单——${replay.reason}`)
+          this.recordDelegateRejection(taskId, `to="${call.to}"：领队基线回放失败，拒建单——${replay.reason}`)
+          return null
+        }
+        if (replay.status === 'applied') {
+          worktree = {
+            ...wt.metadata,
+            baseSha: replay.commitSha,
+            replay: { commitSha: replay.commitSha, files: replay.files, at: Date.now() }
+          }
+          guardedNote(`↧ 领队未提交基线已回放进子单（${replay.files} 个文件），子单以回放提交为基线`)
+        }
       } else {
         unavailableReason = 'Git worktree creation failed; using the shared workspace'
       }
@@ -1545,6 +1576,7 @@ export class TaskRunner {
     if (!resumeSessionId) return { ok: false, response: '', error: TURN_ISOLATION_REQUIRED }
     if (previous) {
       this.sessions.delete(taskId)
+      this.sessionWorkdirs.delete(taskId)
       this.retireSession(previous, 'replaced')
       this.launchHandles.delete(taskId)
       await this.awaitCleanup(() => previous.stop())
@@ -1595,6 +1627,7 @@ export class TaskRunner {
       router.owner = session.sessionId
       this.sessionTurns.set(session, router)
       this.sessions.set(taskId, session)
+      this.sessionWorkdirs.set(taskId, task.workdir)
       this.pushTask(taskId)
       return await Promise.race([result, sentinel.timeout])
     } catch (error) {
@@ -1771,6 +1804,7 @@ export class TaskRunner {
       router.owner = session.sessionId
       this.sessionTurns.set(session, router)
       this.sessions.set(taskId, session)
+      this.sessionWorkdirs.set(taskId, task.workdir)
       this.pushTask(taskId)
 
       // 首回合由同一哨兵继续护送：长时间无任何进展先停回合再判失败，不再无限等待
@@ -1971,6 +2005,15 @@ export class TaskRunner {
     const runTurn = async (): Promise<{ ok: boolean; error?: string; finalText?: string }> => {
       // 1) 内存会话健在：直接续聊
       let liveSession = this.sessions.get(taskId)
+      // M2 会话绑定工作目录：内存会话跑在安装时的 cwd 上。集成后续链换基线
+      // （task.workdir 指向集成分支的托管 worktree）后，直续会把追问跑回旧目录、
+      // 拿旧基线重复劳动——强制丢弃内存会话走 resume 重建（新连接以新 workdir 启动，
+      // 会话内容经 sessionId 恢复；detach 保证 provider 会话不被销毁）。
+      const liveWorkdir = this.sessionWorkdirs.get(taskId)
+      if (liveSession && task.workdir && liveWorkdir && path.resolve(liveWorkdir) !== path.resolve(task.workdir)) {
+        await this.closeSession(taskId, runIdentity(claim), true)
+        liveSession = undefined
+      }
       // 连接无法证明新回合的归属（没有回合标识且上一回合归属已不可信）：不复用，
       // 关掉它走下面的 resume 重建——隔离连接 + 恢复，而不是猜回调属于谁。
       if (liveSession && !this.sessionMayOpenNewTurn(liveSession)) {
@@ -2065,6 +2108,7 @@ export class TaskRunner {
         router.owner = resumeSession.sessionId
         this.sessionTurns.set(resumeSession, router)
         this.sessions.set(taskId, resumeSession)
+        this.sessionWorkdirs.set(taskId, task.workdir)
         this.pushTask(taskId)
         try {
           const r = await Promise.race([turn, sentinel.timeout])
@@ -2154,6 +2198,7 @@ export class TaskRunner {
     // already be using this taskId when stop/close eventually settles.
     this.launchHandles.delete(taskId)
     this.sessions.delete(taskId)
+    this.sessionWorkdirs.delete(taskId)
     if (session) this.retireSession(session)
     this.permissionBroker.cancelTask(taskId)
     this.toolWindows.delete(taskId)
@@ -2208,6 +2253,9 @@ export class TaskRunner {
       await this.awaitCleanup(() => s.close())
     }
     this.sessions.clear()
+    // 会话清空必须连带清目录绑定：sessionWorkdirs 的键值只在随会话安装/关闭时增删，
+    // 留着旧 taskId→workdir 就是悬空脏数据，下个生命周期读到的是上个生命周期的 cwd
+    this.sessionWorkdirs.clear()
     this.claims.clear()
     this.earlySpawns.clear()
     this.delegateRejections.clear()

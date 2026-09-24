@@ -19,7 +19,7 @@
 >
 > **② 正文有、代码已不存在（0.18.0 移除收件箱）**：§1.3 的 `notifications` / `markNotificationRead` 与 §2.3 的 `Notification` 类型均已删除。
 >
-> **③ 契约形状变化**：`PresetInfo` 增 `protocol?`（anthropic/openai 线协议）；`AppSettings` 增调优字段（turnIdleTimeoutMs / permissionTimeoutMs / maxRetryAttempts / retryBackoffMs / maxHandoffChain / delegateMaxRounds / delegateMaxTotalRounds / delegateMaxDepth / doomLoopThreshold / worktreeMaxAgeDays）与 `updateFeedUrl?`；`Task` 增 `unavailableReason? / worktree? / backgroundRunning? / workVersion? / dedupeKey?`；`followUp` opts 增 `collectFinal? / wait?`；Goal 族增 GoalSpecSnapshot / GoalSpecDecision / GoalApprovalSnapshot；新增 Meeting（`src/shared/meeting.ts`）、锻造（`src/shared/forge.ts`）、扩展（`src/shared/extensions.ts`）与热更类型族。
+> **③ 契约形状变化**：`PresetInfo` 增 `protocol?`（anthropic/openai 线协议）；`AppSettings` 增调优字段（turnIdleTimeoutMs / permissionTimeoutMs / maxRetryAttempts / retryBackoffMs / maxHandoffChain / delegateMaxRounds / delegateMaxTotalRounds / delegateMaxDepth / doomLoopThreshold / worktreeMaxAgeDays）与 `updateFeedUrl?`；`Task` 增 `unavailableReason? / worktree? / backgroundRunning? / workVersion? / dedupeKey?`；`WorktreeInfo` 增 `replay?`（子单基线回放元数据 `{commitSha, files, at}`——子分支 tip 即回放提交、digest/集成基线指向它）；`TaskGitSnapshot` 增 `headSha?`（scope=integration 快照采集时点的分支 HEAD，finalizer 跨轮保留的观测依据）；`followUp` opts 增 `collectFinal? / wait?`；Goal 族增 GoalSpecSnapshot / GoalSpecDecision / GoalApprovalSnapshot；新增 Meeting（`src/shared/meeting.ts`）、锻造（`src/shared/forge.ts`）、扩展（`src/shared/extensions.ts`）与热更类型族。
 >
 > 精确签名以 `src/shared/contracts.ts` 与 `src/preload/index.ts` 为准。
 
@@ -190,7 +190,7 @@ Task 是本地执行兼容记录，不是用户工作单元。一个 Issue 可�
 interface Task {
   id: string                    // t_<base36时间>_<随机>
   title: string; prompt: string
-  workdir: string               // '' = 无绑定
+  workdir: string               // '' = 无绑定；领队集成成功后会指向集成分支的托管 worktree（续链基线）
   backend: string               // zcode | claude | codex | opencode | dsh
   agentId?: string              // 执行队员
   trigger?: RunTrigger          // assignment | mention | autopilot | manual | handoff
@@ -544,17 +544,51 @@ const scoped = bindTurn(events, turn)
 首回合结束 → 解析 delegate 标记
   ├─ 无标记 → 结束（领队自己干完了）
   ├─ 有标记 → 逐个：解析队员（名字/平台 id，忽略大小写，限 subordinates 内）
-  │           sanitizeChildPrompt → 建 worktree（仓库时）→ 建子任务入队
-  ├─ 等本轮子任务全部终态 → 结果格式化回灌（报告带单号）并等待完整回合结果
+  │           sanitizeChildPrompt → 建 worktree（仓库时）→ 子单基线回放 → 建子任务入队
+  │           （回放：领队未提交增量经私有 index 采集为回放提交（parent=子基线 sha），
+  │             子 worktree cherry-pick --no-commit 应用后子分支 tip=回放提交，worktree
+  │             元数据 baseSha 改写指向它——领队改动不算子产出、不进子 git 小节；
+  │             全程不碰领队 index/工作区/refs；无增量零开销跳过；体量闸 2000 文件/
+  │             200MiB/软链（ls-files --others 配 lstat），超限或采集/应用失败一律
+  │             具名拒建单并把原因回灌给领队改派，不静默）
+  ├─ 等本轮子任务全部终态 → 终态（含 failed）即对队员 worktree commitAll 落盘
+  │     （nothing silently discarded，不等集成期；cancelled 例外）
+  │     → 终态全文双落：完整 result → ① 领队 Issue 评论（addComment 返回 null =
+  │       Issue 不存在，必须降级任务事件通道留痕，不静默丢弃）+ ② 领队 workdir 下
+  │       .agentdeck-reports/<单号>.md（info/exclude 追加忽略零污染，文件头带 runId
+  │       防串轮；二层领队落自己的 workdir 机制相同）
+  │     → 结果格式化回灌（结构化摘要：条目标题=单号+状态；结论段=result 首部 1200 字
+  │       有界；done 单附 ≤2KB 的 git 改动小节：工作分支/--name-status 文件状态清单
+  │       （二进制可见）/文件 stat/diff 摘要，对子分支基线（回放后=回放提交）的全部
+  │       改动；摘要尾带全文入口指引（报告副本相对路径 + Issue 评论，指引文本与
+  │       小节同过转义防护）；整节按 UTF-8 字节计、围栏包裹且协议字面量做序列内部
+  │       破坏：六类回合标记（delegate/review/consult/investigate/round/continue）
+  │       开闭形态、行首三连井、【系统 前缀与 ``` 在末字符前插 \（原字面量子串不再
+  │       连续出现——六个解析器是非锚定子串正则，行首前缀转义无效）；diff +/- 行与
+  │       未跟踪文件名（逐项）一视同仁，超限留截断标记；4000 字物理截断只是最后
+  │       防线，触发必须带「后 N 字未送」）
   ├─ 领队对报告里每个 done 单输出 <review> 审核结论
   │      pass → 看板归档 done / fail → blocked / 无结论 → 不动状态留人工审核
   └─ 领队继续输出 → 再解析（单领队最多 6 轮，全链共享 8 轮预算）
 结束 → 子任务分支 commitAll + 依序 merge 进 agentdeck/task-<领队id> 集成分支
-       → 集成成功即回收 worktree + 删工作分支；branchDiffSummary 生成总 diff
+       （只计集成分支 HEAD 真实前进，Already-up-to-date 不计入；本轮无净新增时省略
+         证据键，上一轮 gitDiff/gitStat/gitSnapshot 保留——finalizer 跨轮保留同样直接
+         观测集成分支 HEAD 与快照记录的采集时点 headSha 一致才重盖时间戳，部分失败
+         轮（分支已前进但不写证据）的过期 diff 拒绝重盖为本轮证据）
+       （领队 workdir 已是集成 worktree 的续链轮：在托管 worktree 内就地 merge——
+         前置校验 owner 归属 + 工作副本干净，不干净/归属不符拒绝并保留现场）
+       → 集成成功即回收 worktree + 删工作分支；branchDiffSummary 生成总 diff；
+         子单带回放元数据时集成说明与时间线标注「含领队回放基线 N 文件」
        无实际合并时如实标注
+首次集成成功 → createWorktreeAtBranch 新建托管 worktree 检出集成分支；切换前把领队
+       留在原目录的未提交改动摘录收编进本轮证据；git operation 释放后立即落盘
+       task.workdir 切换（此后追问/续聊/二次派单以集成为基线；会话绑定工作目录，
+       followUp 强制走 resume 重建；用户工作区不动；无改动早退/集成失败不切换）
 ```
 
-约束：取消领队级联取消子任务；领队自己的改动留在主工作区不自动提交；dsh 不能当领队（runner 侧守卫保留——ACP 虽已支持 send，但委派链路未对 dsh 开放）；子任务未绑定 Issue 时审核结论只留痕、不写看板状态；二层委派时子领队的集成分支递归合入领队集成分支。
+基线回放的已知取舍（文档化，不做自动去重）：集成分支会含回放提交，领队原工作区仍持同一份未提交改动——跨线合并是人/后续流程的事，集成证据与 UI 说明标注「含领队回放基线 N 文件」。`.gitignore` 排除的依赖目录（node_modules 等）不参与回放：回放只采集 `--exclude-standard` 视角内的增量，子单需要完整依赖时领队应先提交 lockfile——这是写明的边界而非缺陷。
+
+约束：取消领队级联取消子任务；领队自己的改动留在主工作区不自动提交；dsh 不能当领队（runner 侧守卫保留——ACP 虽已支持 send，但委派链路未对 dsh 开放）；子任务未绑定 Issue 时审核结论只留痕、不写看板状态；二层委派时子领队的集成分支递归合入领队集成分支；续链集成 worktree 走既有回收渠道（owner metadata 登记 + 删任务连带回收）；保留判定只按 owner.integration.branch 认归属（不依赖 task.workdir 仍指向它），启动清扫一律不删集成分支——集成分支只有 tasks:delete 的显式回收路径可以带走；owner 任务在册且终态 cancelled 的子单 worktree 同样跳过清扫回收（终态即落盘对 cancelled 例外，现场原样保留，目录与分支都留，删任务的显式路径统一回收）。
 
 ---
 

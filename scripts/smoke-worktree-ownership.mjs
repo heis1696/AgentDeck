@@ -92,7 +92,16 @@ try {
     let release
     const paused = new Promise((resolve) => { entered = resolve })
     const resume = new Promise((resolve) => { release = resolve })
-    globalThis.__gitGate = async (at) => { if (at === stage) { entered(); await resume } }
+    // M1 终态即落盘：循环在等待终态解析后先对队员 worktree 跑一次 commitAll（无 Git
+    // operation 持有）——gate 只拦集成期（operation 已认领）的那次调用
+    let gateCalls = 0
+    globalThis.__gitGate = async (at) => {
+      if (at === stage) {
+        gateCalls++
+        if (stage === 'commitAll' && gateCalls === 1) return
+        entered(); await resume
+      }
+    }
     const integration = f.execute()
     let timer
     try {
@@ -141,13 +150,16 @@ try {
     return { ok: true, response: 'finished' }
   }
   await f.execute()
-  assert.equal(runGit(f.worktree.path, 'rev-parse', 'HEAD'), base, 'the old report cannot commit the replacement workspace')
+  // M1 终态即落盘：已交付改动在终态解析时即提交（先于任何替换写），替换写永远不会被收编
+  assert.notEqual(runGit(f.worktree.path, 'rev-parse', 'HEAD'), base, 'the terminal delivery is committed at terminal time')
+  assert.equal(runGit(f.worktree.path, 'log', '-1', '--format=%s'), 'agentdeck: child', 'the terminal commit is the child delivery commit')
+  assert.equal(runGit(f.worktree.path, 'show', 'HEAD:result.txt'), 'delivered', 'the terminal commit captured the delivered content')
   assert.equal(fs.readFileSync(path.join(f.worktree.path, 'result.txt'), 'utf8'), 'replacement in progress\n')
   assert.equal(await git.branchExists(f.repo, 'agentdeck/task-' + f.parent.id), false, 'the old report cannot merge the replacement work')
   assert.equal(f.store.get(f.child.id).gitOperation, undefined)
   f.store.flush()
   f.peer.flush()
-  console.log('PASS legacy status/attempt identity rejects integration of a retried child')
+  console.log('PASS terminal-time commit captures the delivery; a retried child replacement is never integrated')
 
   const releasing = await fixture('release-retry')
   const operation = releasing.store.claimGitOperation([
@@ -203,6 +215,111 @@ try {
   cleanup.store.flush()
   cleanup.peer.flush()
   console.log('PASS cleanup-first ordering is mutually exclusive with restart and integration')
+
+  // cancelled 子单的现场原样保留：终态即落盘对 cancelled 例外，清扫不得代替删任务的
+  // 显式路径收走现场——目录与分支都留，否则「保留现场」只活到下次重启。
+  const cancelled = await fixture('cancelled-keep')
+  cancelled.peer.updateIf(cancelled.parent.id, identity(cancelled.peer.get(cancelled.parent.id)), { status: 'done', endedAt: Date.now() })
+  const cancelledChildDone = cancelled.peer.get(cancelled.child.id)
+  assert.equal(git.shouldKeepTaskWorktree(cancelled.peer.list(), cancelled.repo, cancelled.child.id), false, 'control: a done child under a done parent stays reclaimable')
+  cancelled.peer.updateIf(cancelledChildDone.id, identity(cancelledChildDone), { status: 'cancelled' })
+  // 现场先落盘成干净副本：排除「脏目录保留」的旧通道，让断言只考验 cancelled 规则本身
+  const cancelledMeta = git.listWorktreeMetadata(cancelled.repo).find((item) => item.ownerTaskId === cancelled.child.id)
+  assert.ok(cancelledMeta, 'the cancelled child worktree carries owner metadata')
+  runGit(cancelledMeta.path, 'add', '-A')
+  runGit(cancelledMeta.path, 'commit', '-qm', 'cancelled scene committed')
+  assert.equal(git.shouldKeepTaskWorktree(cancelled.peer.list(), cancelled.repo, cancelled.child.id, cancelledMeta), true, 'a cancelled child keeps its worktree scene')
+  const cancelledSweep = await git.pruneWorktrees(cancelled.repo, (owner, worktree) => git.shouldKeepTaskWorktree(cancelled.peer.list(), cancelled.repo, owner, worktree), {
+    maxAgeMs: 0,
+    claimWorktree: (owner) => {
+      const claim = cancelled.peer.claimWorktreeCleanup(cancelled.repo, owner, false)
+      return claim ? { release: () => cancelled.peer.releaseGitOperation(claim) } : undefined
+    }
+  })
+  assert.ok(fs.existsSync(cancelledMeta.path) && cancelledSweep.retained.some((item) => item.name === path.basename(cancelledMeta.path)), 'the sweep retains the cancelled scene (directory included)')
+  assert.equal(await git.branchExists(cancelled.repo, cancelledMeta.branch), true, 'the sweep never deletes the cancelled child branch')
+  // 删任务的显式路径统一回收：目录与分支一起带走
+  registerTaskIpc({ store: cancelled.peer, runner: { pushTask() {} }, issueStore: { sync() {}, syncEventually() {} }, getWindow: () => null })
+  const cancelledDelete = await globalThis.__worktreeHandlers.get('tasks:delete')(null, cancelled.child.id)
+  assert.ok(cancelledDelete.ok, 'explicit deletion of the cancelled child succeeds')
+  const cancelledDeadline = Date.now() + 8000
+  while (Date.now() < cancelledDeadline && (fs.existsSync(cancelledMeta.path) || await git.branchExists(cancelled.repo, cancelledMeta.branch))) {
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+  assert.ok(!fs.existsSync(cancelledMeta.path), 'explicit deletion reclaims the cancelled worktree directory')
+  assert.equal(await git.branchExists(cancelled.repo, cancelledMeta.branch), false, 'explicit deletion takes the cancelled child branch with it')
+  cancelled.store.flush()
+  cancelled.peer.flush()
+  console.log('PASS cancelled child worktree: sweep keeps directory and branch, explicit deletion reclaims both')
+
+  // 续链集成 worktree 的保留判定：领队（含 done）的 integration worktree 持有未合并的
+  // 集成结果，任务存在期间清扫不回收；任务删除后回归既有清扫渠道。
+  const chain = await fixture('chain-keep')
+  await chain.execute()
+  const chainParentDone = chain.peer.get(chain.parent.id)
+  chain.peer.updateIf(chainParentDone.id, identity(chainParentDone), { status: 'done', endedAt: Date.now() })
+  const chainWtPath = chain.peer.get(chain.parent.id).workdir
+  assert.ok(chainWtPath && chainWtPath.includes('.agentdeck-worktrees'), 'the integration switched the leader workdir to a managed worktree')
+  const chainMeta = git.listWorktreeMetadata(chain.repo).find((item) => item.path === chainWtPath)
+  assert.ok(chainMeta && chainMeta.branch === 'agentdeck/task-' + chain.parent.id, 'the integration worktree is registered with owner metadata')
+  assert.equal(git.shouldKeepTaskWorktree(chain.peer.list(), chain.repo, chain.parent.id, chainMeta), true, 'a done leader keeps its integration worktree (unmerged result)')
+  assert.equal(git.shouldKeepTaskWorktree(chain.peer.list(), chain.repo, chain.parent.id), false, 'without metadata the legacy keep answer stays false')
+  const chainSweep = await git.pruneWorktrees(chain.repo, (owner, worktree) => git.shouldKeepTaskWorktree(chain.peer.list(), chain.repo, owner, worktree), { maxAgeMs: 0 })
+  assert.ok(fs.existsSync(chainWtPath) && chainSweep.retained.some((item) => item.name === `task-${chain.parent.id}-integrated`), 'the sweep retains the integration worktree while the leader task exists')
+  // M1：保留判定只按 owner.integration.branch 认归属——领队 workdir 被改绑/解绑（放弃窗口、
+  // 用户改目录）都不构成清扫回收集成分支的理由
+  chain.peer.updateIf(chain.parent.id, identity(chain.peer.get(chain.parent.id)), { workdir: chain.repo })
+  assert.equal(git.shouldKeepTaskWorktree(chain.peer.list(), chain.repo, chain.parent.id, chainMeta), true, 'keep matches by integration.branch alone: a repointed workdir does not release the result')
+  const chainSweepRepointed = await git.pruneWorktrees(chain.repo, (owner, worktree) => git.shouldKeepTaskWorktree(chain.peer.list(), chain.repo, owner, worktree), { maxAgeMs: 0 })
+  assert.ok(fs.existsSync(chainWtPath) && chainSweepRepointed.retained.some((item) => item.name === `task-${chain.parent.id}-integrated`), 'the sweep still retains the integration worktree after the workdir moved away')
+  assert.equal(await git.branchExists(chain.repo, 'agentdeck/task-' + chain.parent.id), true, 'the integration branch survives the abandon window')
+
+  // m3：mergeIntoManagedWorktree 前置校验——脏目录 / 归属不符都拒绝并明示，不静默合并
+  fs.writeFileSync(path.join(chainWtPath, 'dirty.txt'), '领队未提交的本地改动\n')
+  const dirtyRefused = await git.mergeIntoManagedWorktree(chainWtPath, 'main', chain.parent.id)
+  assert.equal(dirtyRefused.ok, false, 'm3: a dirty managed worktree refuses the in-place merge')
+  assert.match(dirtyRefused.message, /uncommitted changes/, 'm3: the refusal names the uncommitted changes')
+  const foreignRefused = await git.mergeIntoManagedWorktree(chainWtPath, 'main', 'task-someone-else')
+  assert.equal(foreignRefused.ok, false, 'm3: a foreign owner refuses the in-place merge')
+  assert.match(foreignRefused.message, /owner/, 'm3: the refusal names the ownership mismatch')
+  fs.unlinkSync(path.join(chainWtPath, 'dirty.txt'))
+  const cleanMerged = await git.mergeIntoManagedWorktree(chainWtPath, 'main', chain.parent.id)
+  assert.equal(cleanMerged.ok, true, 'm3: a clean owned managed worktree accepts the in-place merge')
+
+  // M1：清扫路径绝不删集成分支——即使 owner 记录已删除（借 repo 内其他任务的 claim 回收目录）
+  chain.peer.delete(chain.parent.id)
+  const orphanSweep = await git.pruneWorktrees(chain.repo, (owner, worktree) => git.shouldKeepTaskWorktree(chain.peer.list(), chain.repo, owner, worktree), {
+    maxAgeMs: 0,
+    claimWorktree: (owner) => {
+      const claim = chain.peer.claimWorktreeCleanup(chain.repo, owner, true)
+      return claim ? { release: () => chain.peer.releaseGitOperation(claim) } : undefined
+    }
+  })
+  assert.ok(!fs.existsSync(chainWtPath) && orphanSweep.removed.includes(`task-${chain.parent.id}-integrated`), 'the sweep reclaims the orphaned integration worktree directory')
+  assert.equal(await git.branchExists(chain.repo, 'agentdeck/task-' + chain.parent.id), true, 'the sweep never deletes an integration branch — only explicit task deletion may')
+  chain.store.flush()
+  chain.peer.flush()
+  console.log('PASS chain continuation worktree: kept by integration.branch alone, sweep keeps the branch, explicit delete reclaims it')
+
+  // 显式删除路径（tasks:delete → removeWorktree）才允许带走集成分支
+  const chain2 = await fixture('chain-explicit-delete')
+  await chain2.execute()
+  const chain2WtPath = chain2.peer.get(chain2.parent.id).workdir
+  assert.ok(chain2WtPath && chain2WtPath.includes('.agentdeck-worktrees'), 'the second fixture switched its leader workdir too')
+  chain2.peer.updateIf(chain2.parent.id, identity(chain2.peer.get(chain2.parent.id)), { status: 'done', endedAt: Date.now() })
+  registerTaskIpc({ store: chain2.peer, runner: { pushTask() {} }, issueStore: { sync() {}, syncEventually() {} }, getWindow: () => null })
+  const deleteResult = await globalThis.__worktreeHandlers.get('tasks:delete')(null, chain2.parent.id)
+  assert.ok(deleteResult.ok, 'explicit task deletion succeeds')
+  // removeWorktree 是删除处理器里的 fire-and-forget：轮询到目录与分支都消失
+  const explicitDeadline = Date.now() + 8000
+  while (Date.now() < explicitDeadline && (fs.existsSync(chain2WtPath) || await git.branchExists(chain2.repo, 'agentdeck/task-' + chain2.parent.id))) {
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+  assert.ok(!fs.existsSync(chain2WtPath), 'explicit deletion reclaims the integration worktree')
+  assert.equal(await git.branchExists(chain2.repo, 'agentdeck/task-' + chain2.parent.id), false, 'explicit deletion takes the integration branch with it')
+  chain2.store.flush()
+  chain2.peer.flush()
+  console.log('PASS explicit task deletion takes the integration branch with it')
 
   const deadData = path.join(temp, 'dead-operation', 'data')
   const deadStore = new TaskStore(deadData)

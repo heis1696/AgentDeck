@@ -31,7 +31,7 @@ export function registerSystemIpc(ctx: IpcContext) {
     const maxAgeMs = ctx.settings.worktreeMaxAgeDays * 24 * 60 * 60 * 1000
     const results = []
     for (const repoDir of dirs) {
-      results.push(await pruneWorktrees(repoDir, (owner) => shouldKeepTaskWorktree(ctx.store.list(), repoDir, owner), {
+      results.push(await pruneWorktrees(repoDir, (owner, worktree) => shouldKeepTaskWorktree(ctx.store.list(), repoDir, owner, worktree), {
         maxAgeMs,
         claimWorktree: (owner, merge) => {
           const claim = ctx.store.claimWorktreeCleanup(repoDir, owner, merge)

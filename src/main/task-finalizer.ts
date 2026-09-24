@@ -1,6 +1,6 @@
 import type { Task, TaskGitSnapshot } from '../shared/types'
 import type { TaskExpectation, TaskStore } from './store'
-import { snapshotGitAfter } from './git'
+import { branchHead, snapshotGitAfter } from './git'
 import { aggregateUsage } from './usage'
 import { canTransition } from '../shared/taskflow'
 import { currentGitSnapshot } from '../shared/git-snapshot'
@@ -52,10 +52,27 @@ export class TaskFinalizer {
     const previous = currentGitSnapshot(current)
     // Integration diffs describe another branch. Keep only a proven same-run
     // integration snapshot when the final working-tree capture is clean.
-    const keepIntegration = captured.snapshot?.state === 'clean'
-      && previous?.scope === 'integration'
+    // M3（二轮无净新增）：本轮集成没有产生新提交时，loop 不再写新证据，留存在记录里的
+    // 是上一轮的 integration 快照——runId 已经过期，currentGitSnapshot 会拒绝它。若此刻
+    // 工作副本捕获是干净的（本轮既没改集成 worktree 也没改主目录）且任务确实登记了
+    // 集成分支（current.integration.branch——没有集成归属的旧快照一律不存活），说明集成
+    // 状态未变，上一轮的集成 diff 仍然精确：把它重盖本轮时间戳保留，而不是让证据被
+    // 清空快照静默抹掉。
+    // 观测量是集成分支 HEAD 本身（快照记录采集时点的 headSha），不是「工作副本干净」：
+    // 部分失败轮不写证据但分支已前进——干净副本证明不了分支没动，过期 diff 在此被拒绝
+    // 重盖为本轮证据。无 headSha 的旧数据一律不保留（无法证明没有过期）。
+    const observedHead = captured.snapshot?.state === 'clean' && current.integration?.branch
+      ? await branchHead(task.workdir, current.integration.branch)
+      : ''
+    const priorIntegration = previous ?? ((current.integration?.branch
+      && current.gitSnapshot?.scope === 'integration' && (current.gitDiff ?? '').trim())
+      ? { ...current.gitSnapshot, runId: current.runId, phaseIndex: current.phaseIndex, startedAt: current.startedAt }
+      : undefined)
+    const keepIntegration = !!observedHead
+      && priorIntegration?.scope === 'integration'
+      && priorIntegration.headSha === observedHead
     const gitFields: Pick<Task, 'gitDiff' | 'gitStat' | 'gitSnapshot'> = keepIntegration
-      ? { gitDiff: current.gitDiff, gitStat: current.gitStat, gitSnapshot: previous }
+      ? { gitDiff: current.gitDiff, gitStat: current.gitStat, gitSnapshot: priorIntegration }
       : {
           gitDiff: captured.diff,
           gitStat: captured.stat,

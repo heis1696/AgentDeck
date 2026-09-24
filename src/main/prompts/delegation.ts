@@ -128,3 +128,31 @@ export function undeliveredReportComment(excerpts: string): string {
 export function leftoverRejectsComment(rejectLines: string[]): string {
   return `⚠ 以下派单始终未执行（队员未收到任何指令），需要人工跟进或重新派发：\n${rejectLines.map((r) => `- ${r}`).join('\n')}`
 }
+
+// ---- 队员报告全文双落（摘要回灌之外的持久全文通道：Issue 评论 + 领队 workdir 报告副本） ----
+
+/** 队员终态全文落 Issue 评论的文案（单号/状态/runId 标识 + 完整输出，不在评论里截断） */
+export function workerFullReportComment(title: string, seq: number, status: string, runId: string, body: string): string {
+  return `📄 队员报告全文（单号 #${seq}，${title}，状态 ${status}，run ${runId}）：\n\n${body}`
+}
+
+/** 队员终态全文的报告副本 markdown（写入领队 workdir/.agentdeck-reports/<单号>.md；头带 runId 防串轮） */
+export function reportCopyMarkdown(opts: { childId: string; title: string; seq: number; status: string; runId: string; finishedAt: number; body: string }): string {
+  const head = [
+    `# 队员报告：${opts.title}`,
+    `- 单号：#${opts.seq}（${opts.childId}）`,
+    `- 状态：${opts.status}`,
+    `- 运行：${opts.runId}`,
+    `- 终态时间：${new Date(opts.finishedAt).toISOString()}`
+  ].join('\n')
+  return `${head}\n\n${opts.body}\n`
+}
+
+/** 摘要尾的全文入口指引行（报告副本相对路径 + Issue 评论）；原文由调用方统一过转义防护 */
+export function fullTextPointerLines(copyPath: string, issueOk: boolean, seq: number): string[] {
+  const lines: string[] = []
+  if (copyPath) lines.push(`· 报告副本：${copyPath}（领队工作区内）`)
+  if (issueOk) lines.push(`· Issue 评论「队员报告全文（单号 #${seq}）」`)
+  if (lines.length) lines.unshift('— 全文入口 —')
+  return lines
+}

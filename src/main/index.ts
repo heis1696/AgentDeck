@@ -316,7 +316,7 @@ const initMain = async (): Promise<void> => {
   issueStore.syncEventually(store.list())
   // 启动清扫：回收上次会话遗留的委派 worktree（合并临时目录 + 已删任务的目录），后台执行不阻塞启动
   for (const dir of new Set(store.list().map((t) => t.worktree?.repoDir || t.workdir).filter(Boolean))) {
-    void sweepWorktrees(dir, (owner) => shouldKeepTaskWorktree(store.list(), dir, owner), {
+    void sweepWorktrees(dir, (owner, worktree) => shouldKeepTaskWorktree(store.list(), dir, owner, worktree), {
       claimWorktree: (owner, merge) => {
         const claim = store.claimWorktreeCleanup(dir, owner, merge)
         return claim ? { release: () => { try { store.releaseGitOperation(claim) } catch {} } } : undefined
@@ -427,7 +427,12 @@ const initMain = async (): Promise<void> => {
     relayInterruptedLeader: (stale, kids) => {
       if (!stale.issueId) return
       const excerpts = kids.slice(0, 5).map((kid) => `- **${kid.title}**（${kid.status}）：${(kid.result ?? '').slice(0, 400) || '（无最终输出）'}`).join('\n')
-      issueStore.addComment(stale.issueId, `⚠ 委派报告未送达：领队执行被应用重启打断。以下为队员报告摘要：\n${excerpts}`, { type: 'agent', id: 'relay' })
+      const comment = issueStore.addComment(stale.issueId, `⚠ 委派报告未送达：领队执行被应用重启打断。以下为队员报告摘要：\n${excerpts}`, { type: 'agent', id: 'relay' })
+      if (!comment) {
+        // null = Issue 已不存在：降级到任务证据/事件通道，报告摘要绝不静默丢弃
+        const event = store.appendEvent(stale.id, { ts: Date.now(), kind: 'status', text: `⚠ Issue 评论未送达（Issue 不存在），队员报告摘要转投任务时间线：\n${excerpts}` })
+        if (event) runner.pushEvent(stale.id, event)
+      }
     }
   })
   presets = loadPresets()
@@ -438,12 +443,17 @@ const initMain = async (): Promise<void> => {
       if (!child?.issueId) return
       issueStore.updateWorkflow(child.issueId, verdict === 'pass' ? 'done' : 'blocked')
       if (note) {
-        issueStore.addComment(child.issueId, `审核${verdict === 'pass' ? '通过' : '退回'}：${note}`, { type: 'agent', id: 'reviewer' })
+        const comment = issueStore.addComment(child.issueId, `审核${verdict === 'pass' ? '通过' : '退回'}：${note}`, { type: 'agent', id: 'reviewer' })
+        if (!comment) {
+          // null = Issue 已不存在：审核结论降级为子任务事件留痕
+          const event = store.appendEvent(childId, { ts: Date.now(), kind: 'status', text: `⚠ 审核评论未送达（Issue 不存在）；审核${verdict === 'pass' ? '通过' : '退回'}：${note}` })
+          if (event) runner.pushEvent(childId, event)
+        }
       }
       publishIssueUpdate(child)
     },
     addIssueComment: (issueId, text) => {
-      issueStore.addComment(issueId, text, { type: 'agent', id: 'relay' })
+      return issueStore.addComment(issueId, text, { type: 'agent', id: 'relay' })
     }
   })
 
@@ -518,7 +528,12 @@ const initMain = async (): Promise<void> => {
       // Only a newly created successor gets a visible handoff notice.
       if (task.parked && task.issueId) {
         const firstLine = task.prompt.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? task.title
-        issueStore.addComment(task.issueId, `⏸ 阶段接力已备好：${firstLine.slice(0, 80)}——下一阶段在等你启动（打开该 Issue 的最新执行，点「▶ 启动」）`, { type: 'agent', id: source.agentId ?? 'relay' })
+        const comment = issueStore.addComment(task.issueId, `⏸ 阶段接力已备好：${firstLine.slice(0, 80)}——下一阶段在等你启动（打开该 Issue 的最新执行，点「▶ 启动」）`, { type: 'agent', id: source.agentId ?? 'relay' })
+        if (!comment) {
+          // null = Issue 已不存在：停放通知降级为后继任务事件留痕
+          const event = store.appendEvent(task.id, { ts: Date.now(), kind: 'status', text: `⚠ 停放通知未送达（Issue 不存在）：阶段接力已备好，等用户启动` })
+          if (event) runner.pushEvent(task.id, event)
+        }
       }
     }
     return task

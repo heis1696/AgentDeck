@@ -118,7 +118,12 @@ export class SidecarRuntime {
       // 落一条 Issue 评论把"等你启动"喊到用户看得到的地方，只在新建时追加。
       if (task.parked && task.issueId) {
         const firstLine = task.prompt.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? task.title
-        this.issueStore.addComment(task.issueId, `⏸ 阶段接力已备好：${firstLine.slice(0, 80)}——下一阶段在等你启动（打开该 Issue 的最新执行，点「▶ 启动」）`, { type: 'agent', id: source?.agentId ?? 'relay' })
+        const comment = this.issueStore.addComment(task.issueId, `⏸ 阶段接力已备好：${firstLine.slice(0, 80)}——下一阶段在等你启动（打开该 Issue 的最新执行，点「▶ 启动」）`, { type: 'agent', id: source?.agentId ?? 'relay' })
+        if (!comment) {
+          // null = Issue 已不存在：停放通知降级为后继任务事件留痕（sidecar 无推送通道，落盘即证据）
+          const event = this.store.appendEvent(task.id, { ts: Date.now(), kind: 'status', text: `⚠ 停放通知未送达（Issue 不存在）：阶段接力已备好，等用户启动` })
+          if (event) this.runner.pushEvent(task.id, event)
+        }
       }
       return task
     })

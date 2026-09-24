@@ -1,6 +1,7 @@
 // git 快照与委派 worktree 支持
 import { execFile } from 'node:child_process'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import type { FileDiffErrorCode, FileDiffResult } from '../shared/contracts'
 import type { Task, TaskGitSnapshot, WorktreeCleanupStatus, WorktreeInfo } from '../shared/types'
@@ -38,6 +39,27 @@ const DEFAULT_WORKTREE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
 const WORKTREE_METADATA_DIR = '.metadata'
 const MANAGED_BRANCH_PREFIX = 'agentdeck/'
 const AGENT_GIT_IDENTITY = ['-c', 'user.email=agentdeck@local', '-c', 'user.name=AgentDeck Worker'] as const
+
+/** 运行时系统目录：领队/子单工作区里的委派 sidecar，回放与 status 视角都不该看见它们。
+ *  统一走 info/exclude 忽略（不改 tracked 文件，零污染），代码里再做一层路径过滤兜底。 */
+export const SYSTEM_SIDECAR_DIRS = ['.agentdeck-worktrees', '.agentdeck-reports'] as const
+
+/** 把系统目录追加进 gitdir 的 info/exclude；幂等，只追加缺失项 */
+function appendGitExcludes(gitDir: string, entries: readonly string[]) {
+  const excludeFile = path.join(gitDir, 'info', 'exclude')
+  try {
+    fs.mkdirSync(path.dirname(excludeFile), { recursive: true })
+    const cur = fs.existsSync(excludeFile) ? fs.readFileSync(excludeFile, 'utf8') : ''
+    const missing = entries.filter((entry) => !cur.includes(entry))
+    if (missing.length) fs.appendFileSync(excludeFile, '\n' + missing.map((entry) => `${entry}/\n`).join(''))
+  } catch {}
+}
+
+/** 集成分支（agentdeck/task-<taskId>）持有用户尚未 merge 的唯一集成结果：
+ *  启动清扫一律不得删除，只有删任务的显式回收路径（tasks:delete → removeWorktree）可以带走它。 */
+export function isIntegrationBranch(name: string | undefined | null): boolean {
+  return !!name && /^agentdeck\/task-[^/]+$/.test(name)
+}
 
 /** Preserve process exit status and stderr. Empty stdout is a valid result. */
 export function runGit(workdir: string, args: string[], timeout = 15000, env?: NodeJS.ProcessEnv): Promise<GitCommandResult> {
@@ -77,6 +99,12 @@ export async function branchExists(workdir: string, name: string): Promise<boole
   return (await git(workdir, ['rev-parse', '--verify', '--quiet', name])).trim() !== ''
 }
 
+/** 解析 ref（分支名/sha）到完整 sha；不存在返回空串（续链二次集成的本轮起点基线用） */
+export async function branchHead(workdir: string, ref: string): Promise<string> {
+  if (!workdir || !ref) return ''
+  return (await git(workdir, ['rev-parse', '--verify', '--quiet', ref])).trim()
+}
+
 export interface GitSnapshotResult {
   diff: string
   stat: string
@@ -85,8 +113,18 @@ export interface GitSnapshotResult {
 
 export interface WorktreePruneLease { release(): void }
 
-/** Preserve live task worktrees and every repository with an in-flight Git reservation. */
-export function shouldKeepTaskWorktree(tasks: readonly Task[], repoDir: string, ownerTaskId: string): boolean {
+/** Preserve live task worktrees and every repository with an in-flight Git reservation.
+ *  `worktree` 传入了待清理目录的 owner metadata（pruneWorktrees 注入）：续链集成 worktree
+ *  （task-<id>-integrated 检出集成分支）持有用户尚未 merge 的唯一集成结果，owner 任务还在
+ *  看板上就不算遗留目录——只按 owner.integration.branch 认归属，不要求 task.workdir 仍指向
+ *  它（放弃窗口/用户改绑工作目录都不构成丢弃集成分支的理由；删除任务仍走连带回收）。
+ *  owner 任务在册且终态 cancelled 的 worktree 同样保留（现场原样留待人工排查/删任务统一回收）。 */
+export function shouldKeepTaskWorktree(
+  tasks: readonly Task[],
+  repoDir: string,
+  ownerTaskId: string,
+  worktree?: Pick<WorktreeInfo, 'path' | 'branch'>
+): boolean {
   const byId = new Map(tasks.map((task) => [task.id, task]))
   const owner = tasks.find((task) => task.id === ownerTaskId)
   let related = owner
@@ -96,6 +134,11 @@ export function shouldKeepTaskWorktree(tasks: readonly Task[], repoDir: string, 
     if (related.status === 'queued' || related.status === 'running' || related.gitOperation !== undefined) return true
     related = related.parentTaskId ? byId.get(related.parentTaskId) : undefined
   }
+  // cancelled 终态的现场原样保留（目录与分支都留）：终态即落盘对 cancelled 是例外，
+  // 清扫若连分支一起收走，「保留现场」就只活到下次重启——回收统一走删任务的显式路径
+  //（tasks:delete → removeWorktree 连目录带分支），清扫不得代替它。
+  if (owner?.status === 'cancelled') return true
+  if (owner && worktree && owner.integration?.branch && owner.integration.branch === worktree.branch) return true
   if (!ownerTaskId.startsWith('.agentdeck-merge-')) return false
   const root = path.resolve(repoDir)
   return tasks.some((task) => (task.status === 'queued' || task.status === 'running' || task.gitOperation !== undefined) && [task.worktree?.repoDir, task.workdir].some((candidate) => {
@@ -399,14 +442,7 @@ export async function createWorktree(
   const out = await runGit(repoDir, ['worktree', 'add', '-b', branch, wtPath, ...(baseBranch ? [baseBranch] : [])], 60000)
   if (!out.ok && !(await isGitRepo(wtPath))) return null
   // 把 worktree 目录从主仓库状态里排除，避免污染主目录的 status
-  const excludeFile = path.join(gitDir, 'info', 'exclude')
-  try {
-    fs.mkdirSync(path.dirname(excludeFile), { recursive: true })
-    const cur = fs.existsSync(excludeFile) ? fs.readFileSync(excludeFile, 'utf8') : ''
-    if (!cur.includes('.agentdeck-worktrees/')) {
-      fs.appendFileSync(excludeFile, '\n.agentdeck-worktrees/\n')
-    }
-  } catch {}
+  appendGitExcludes(gitDir, SYSTEM_SIDECAR_DIRS)
   const metadata: WorktreeInfo = {
     ownerTaskId,
     repoDir: root,
@@ -427,6 +463,140 @@ export async function createWorktree(
   return { path: wtPath, branch, metadata }
 }
 
+/** 为领队创建检出**既有分支**（集成分支）的托管 worktree——不建新分支。
+ *  与 createWorktree 同一登记/回收渠道（owner metadata + 删任务连带回收 + 启动清扫）；
+ *  元数据写失败回滚 worktree 但**绝不删分支**：集成分支承载集成结果。
+ *  同名目录已存在（上一轮集成建过）时，仅当它恰好检出目标分支才复用；失败返回 null。 */
+export async function createWorktreeAtBranch(
+  repoDir: string,
+  name: string,
+  branch: string,
+  ownerTaskId = ''
+): Promise<WorktreeCreateResult | null> {
+  if (!(await isGitRepo(repoDir)) || !validWorktreeName(name) || !branch) return null
+  const gcd = (await git(repoDir, ['rev-parse', '--git-common-dir'])).trim()
+  const gitDir = commonGitDir(repoDir, gcd)
+  const root = path.dirname(gitDir)
+  const worktreeDir = managedRoot(root)
+  const wtPath = path.join(worktreeDir, name)
+  if (!isWithin(worktreeDir, wtPath)) return null
+  const baseSha = (await git(root, ['rev-parse', '--verify', '--quiet', branch])).trim()
+  if (!baseSha) return null
+  fs.mkdirSync(worktreeDir, { recursive: true })
+  const added = await runGit(root, ['worktree', 'add', wtPath, branch], 60000)
+  if (!added.ok && (!(await isGitRepo(wtPath)) || (await currentBranch(wtPath)) !== branch)) return null
+  // 把 worktree 目录从主仓库状态里排除，避免污染主目录的 status（与 createWorktree 同一约定）
+  appendGitExcludes(gitDir, SYSTEM_SIDECAR_DIRS)
+  const metadata: WorktreeInfo = {
+    ownerTaskId,
+    repoDir: root,
+    path: wtPath,
+    branch,
+    baseSha,
+    createdAt: Date.now(),
+    cleanupStatus: 'active'
+  }
+  try { writeMetadata(metadata) } catch {
+    await runGit(root, ['worktree', 'remove', '--force', wtPath], 30000)
+    return null
+  }
+  return { path: wtPath, branch, metadata }
+}
+
+// ---- 队员终态回灌的改动摘录（只读；集成期 commitAll 在循环后才跑，反馈时全是未提交改动） ----
+
+export interface WorktreeChangeDigest {
+  ok: boolean
+  branch: string
+  /** diff 基线（worktree 创建点的 baseSha；缺失时退回 HEAD） */
+  baseSha: string
+  stat: string
+  statTruncated: boolean
+  /** `--name-status` 改动清单：A/M/D/R 逐文件一行，二进制文件也占一行——diff 摘录
+   *  被文本改动挤掉时，二进制/删除等改动仍凭这份清单可见 */
+  nameStatus: string
+  nameStatusTruncated: boolean
+  diff: string
+  diffTruncated: boolean
+  untracked: string[]
+  untrackedTruncated: boolean
+  reason?: string
+}
+
+export interface WorktreeChangeDigestBudgets {
+  /** diff 摘要字符预算（超限按行截断并留标记） */
+  diffChars: number
+  /** 文件清单行数上限 */
+  statLines: number
+  /** 文件清单字符预算（超长路径的清单也要截） */
+  statChars: number
+  /** 未跟踪文件名数量上限 */
+  untrackedNames: number
+  /** name-status 清单行数上限（缺省 40） */
+  nameStatusLines?: number
+}
+
+/** 对 worktree 基线 sha 做 `git diff`（覆盖已暂存+未暂存的已跟踪改动）并列出未跟踪文件。
+ *  全程只读；任何 git 失败都降级为 ok:false——回灌绝不因摘录失败而阻塞。 */
+export async function worktreeChangeDigest(
+  wtDir: string,
+  meta: Pick<WorktreeInfo, 'branch' | 'baseSha'>,
+  budgets: WorktreeChangeDigestBudgets
+): Promise<WorktreeChangeDigest> {
+  const empty = (reason: string): WorktreeChangeDigest => ({
+    ok: false, branch: meta?.branch ?? '', baseSha: meta?.baseSha ?? '',
+    stat: '', statTruncated: false, nameStatus: '', nameStatusTruncated: false,
+    diff: '', diffTruncated: false, untracked: [], untrackedTruncated: false, reason
+  })
+  if (!wtDir) return empty('no workdir')
+  const baseRef = meta?.baseSha || 'HEAD'
+  const [stat, diff, nameStatus, untracked] = await Promise.all([
+    runGit(wtDir, ['diff', '--no-ext-diff', '--no-textconv', '--stat', baseRef]),
+    runGit(wtDir, ['diff', '--no-ext-diff', '--no-textconv', baseRef]),
+    runGit(wtDir, ['diff', '--no-ext-diff', '--no-textconv', '--name-status', baseRef]),
+    runGit(wtDir, ['ls-files', '--others', '--exclude-standard', '-z'])
+  ])
+  if (!stat.ok || !diff.ok || !nameStatus.ok) return empty(gitError(!stat.ok ? stat : !diff.ok ? diff : nameStatus))
+  const untrackedPaths = untracked.ok ? untracked.stdout.split('\0').filter(Boolean) : []
+  const cutLines = (text: string, maxLines: number, maxChars: number): { text: string; truncated: boolean } => {
+    const lines = text.replace(/\n$/, '').split('\n').filter((line) => line.trim() !== '')
+    const kept: string[] = []
+    let used = 0
+    let truncated = false
+    for (const line of lines) {
+      if (kept.length >= maxLines || used + line.length + 1 > maxChars) {
+        truncated = kept.length < lines.length
+        break
+      }
+      kept.push(line)
+      used += line.length + 1
+    }
+    return { text: kept.join('\n'), truncated }
+  }
+  const cutDiff = (text: string): { text: string; truncated: boolean } => {
+    if (text.length <= budgets.diffChars) return { text: text.replace(/\n$/, ''), truncated: false }
+    const head = text.slice(0, budgets.diffChars)
+    const boundary = head.lastIndexOf('\n')
+    return { text: (boundary > 0 ? head.slice(0, boundary) : head).replace(/\n$/, ''), truncated: true }
+  }
+  const statCut = cutLines(stat.stdout, budgets.statLines, budgets.statChars)
+  const nameStatusCut = cutLines(nameStatus.stdout, budgets.nameStatusLines ?? 40, Number.MAX_SAFE_INTEGER)
+  const diffCut = cutDiff(diff.stdout)
+  return {
+    ok: true,
+    branch: meta?.branch ?? '',
+    baseSha: baseRef,
+    stat: statCut.text,
+    statTruncated: statCut.truncated,
+    nameStatus: nameStatusCut.text,
+    nameStatusTruncated: nameStatusCut.truncated,
+    diff: diffCut.text,
+    diffTruncated: diffCut.truncated,
+    untracked: untrackedPaths.slice(0, budgets.untrackedNames),
+    untrackedTruncated: untrackedPaths.length > budgets.untrackedNames
+  }
+}
+
 /** 把 workdir 里所有改动（含未跟踪）提交到当前分支；agent 身份；无改动返回 false */
 export async function commitAll(workdir: string, message: string): Promise<boolean> {
   if (!(await isGitRepo(workdir))) return false
@@ -439,6 +609,172 @@ export async function commitAll(workdir: string, message: string): Promise<boole
   if (!staged.ok || !staged.stdout.trim()) return false
   const committed = await runGit(workdir, [...AGENT_GIT_IDENTITY, 'commit', '-m', message], 30000)
   return committed.ok
+}
+
+// ---- 队员报告全文副本（领队 workdir 下 .agentdeck-reports/，摘要回灌之外的持久全文通道） ----
+
+/** 报告副本目录名（相对领队 workdir；info/exclude 忽略，不污染 status） */
+export const REPORTS_DIR_NAME = '.agentdeck-reports'
+
+/** 把一份队员报告全文写进领队 workdir 的报告目录；返回仓库相对路径，失败返回 null（best-effort，
+ *  绝不阻塞回灌主链路）。同名单被后到的终态覆盖，文件头自带 runId 防串轮。 */
+export async function writeReportCopy(leaderWorkdir: string, childId: string, markdown: string): Promise<string | null> {
+  if (!leaderWorkdir || !childId || !markdown.trim()) return null
+  try {
+    if (await isGitRepo(leaderWorkdir)) {
+      const gcd = (await git(leaderWorkdir, ['rev-parse', '--git-common-dir'])).trim()
+      if (gcd) appendGitExcludes(path.resolve(leaderWorkdir, gcd), SYSTEM_SIDECAR_DIRS)
+    }
+    const dir = path.join(leaderWorkdir, REPORTS_DIR_NAME)
+    fs.mkdirSync(dir, { recursive: true })
+    const file = path.join(dir, `${childId}.md`)
+    const tmp = `${file}.tmp`
+    fs.writeFileSync(tmp, markdown)
+    fs.renameSync(tmp, file)
+    return `${REPORTS_DIR_NAME}/${childId}.md`
+  } catch {
+    return null
+  }
+}
+
+// ---- 子单基线回放（B：领队未提交增量进子单，multica「工作区即状态」不变量的移植） ----
+
+/** 回放增量体量闸：文件数与总体积上限（对齐 multica 的 untracked replayable 检查） */
+export const REPLAY_MAX_FILES = 2000
+export const REPLAY_MAX_BYTES = 200 * 1024 * 1024
+
+export interface BaselineReplayResult {
+  /** applied = 已回放并改写子分支基线；skipped = 领队无未提交增量（零开销路径）；
+   *  refused = 采集/应用失败或体量超限（调用方具名拒建单，不静默） */
+  status: 'applied' | 'skipped' | 'refused'
+  /** applied 时的回放提交（子分支新 tip，digest/集成以它为基线） */
+  commitSha: string
+  /** 回放增量文件数（已跟踪改动 + 未跟踪；UI 说明「含领队回放基线 N 文件」用） */
+  files: number
+  /** 未跟踪部分总字节（体量说明用） */
+  bytes: number
+  reason: string
+}
+
+const replayRefused = (reason: string): BaselineReplayResult => ({ status: 'refused', commitSha: '', files: 0, bytes: 0, reason })
+const replaySkipped = (reason: string): BaselineReplayResult => ({ status: 'skipped', commitSha: '', files: 0, bytes: 0, reason })
+
+/** 领队 workdir 的未跟踪文件清单（排除系统目录；--exclude-standard 已剔除 .gitignore 面） */
+function untrackedInLeader(leaderWorkdir: string): Promise<GitCommandResult> {
+  return runGit(leaderWorkdir, ['ls-files', '--others', '--exclude-standard', '-z'])
+}
+
+function splitUntracked(stdout: string): string[] {
+  return stdout.split('\0').filter(Boolean).filter((rel) => !SYSTEM_SIDECAR_DIRS.some((dir) => rel === dir || rel.startsWith(`${dir}/`) || rel.startsWith(`${dir}\\`)))
+}
+
+function pathspecExcludes(): string[] {
+  // glob 形态：直接点名被忽略目录本身会触发 git 的 ignored-paths 报错（exit 1），
+  // glob 深度形态不会——与 multica 的 snapshot excludes 同一写法
+  return SYSTEM_SIDECAR_DIRS.flatMap((dir) => [`:(exclude,glob)**/${dir}/**`])
+}
+
+/**
+ * 把领队工作区的未提交增量（已跟踪改动 + 未提交文件）回放进刚建好的子 worktree：
+ * 私有临时 index（GIT_INDEX_FILE 指向副本）上 add -A → write-tree → commit-tree
+ * （parent = 子基线 sha）→ 子 worktree cherry-pick --no-commit 应用 → reset --soft
+ * 推进子分支到回放提交。全程不碰领队 index/工作区/refs，零 stash 零 reset 用户区。
+ *
+ * 回放提交即子分支起始提交（子分支 tip = 回放提交）：此后 digest/集成都以它为基线，
+ * 领队的改动不算子产出、不进子 git 小节。失败一律 refused + 具名原因，由调用方拒建单。
+ * 体量闸先行：未跟踪文件数 >2000、总体积 >200MiB 或含软链 → 拒（gitignore 掉的依赖
+ * 目录本就不在增量里；子单需要完整依赖时领队应先提交 lockfile——文档写明的边界）。
+ */
+export async function replayLeaderBaseline(leaderWorkdir: string, childWorkdir: string, childBaseSha: string): Promise<BaselineReplayResult> {
+  if (!leaderWorkdir || !childWorkdir || !childBaseSha) return replayRefused('回放前置缺失：workdir 或子基线为空')
+  // 体量闸先行（只读）：未跟踪清单 + 已跟踪改动一次盘明，零增量直接走零开销路径
+  const [list, quiet, trackedNames] = await Promise.all([
+    untrackedInLeader(leaderWorkdir),
+    runGit(leaderWorkdir, ['diff', '--quiet', 'HEAD']),
+    runGit(leaderWorkdir, ['diff', '--name-only', 'HEAD'])
+  ])
+  if (!list.ok) return replayRefused(`无法盘点领队未跟踪文件：${gitError(list)}`)
+  if (!quiet.ok && quiet.code !== 1) return replayRefused(`无法对比领队工作区与 HEAD：${gitError(quiet)}`)
+  if (!trackedNames.ok) return replayRefused(`无法列出领队已跟踪改动：${gitError(trackedNames)}`)
+  const untracked = splitUntracked(list.stdout)
+  const trackedCount = trackedNames.stdout.split('\n').filter((line) => line.trim() !== '').length
+  if (!trackedCount && !untracked.length) return replaySkipped('领队无未提交增量，子单零开销跳过回放')
+
+  // lstat 体量闸：只针对未跟踪部分（已跟踪改动体量天然受仓库约束）
+  let files = 0
+  let bytes = 0
+  const symlinks: string[] = []
+  for (const rel of untracked) {
+    let info: fs.Stats
+    try { info = fs.lstatSync(path.join(leaderWorkdir, rel)) } catch { continue }
+    if (info.isSymbolicLink()) { symlinks.push(rel); continue }
+    if (!info.isFile()) continue
+    files++
+    bytes += info.size
+    if (files > REPLAY_MAX_FILES || bytes > REPLAY_MAX_BYTES) {
+      return replayRefused(`回放增量超限：未跟踪 ${files} 个文件 / ${Math.ceil(bytes / 1024 / 1024)}MiB（上限 ${REPLAY_MAX_FILES} 个 / ${REPLAY_MAX_BYTES / 1024 / 1024}MiB）——请 gitignore 或先提交`)
+    }
+  }
+  if (symlinks.length) {
+    return replayRefused(`回放增量含软链（${symlinks[0]}${symlinks.length > 1 ? ` 等 ${symlinks.length} 个` : ''}），回放不追随软链`)
+  }
+
+  // 私有 index 采集：副本播种失败不可怕，read-tree 重建只是冷缓存
+  const head = (await git(leaderWorkdir, ['rev-parse', 'HEAD'])).trim()
+  if (!head) return replayRefused('领队工作区无 HEAD（空仓库），无法回放')
+  const tmpIndex = path.join(os.tmpdir(), `agentdeck-replay-${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}.index`)
+  const env = { ...process.env, GIT_INDEX_FILE: tmpIndex }
+  const addArgs = ['add', '-A', '--', '.', ...pathspecExcludes()]
+  try {
+    let seeded = false
+    try {
+      const rel = (await git(leaderWorkdir, ['rev-parse', '--git-path', 'index'])).trim()
+      if (rel) {
+        const src = path.isAbsolute(rel) ? rel : path.join(leaderWorkdir, rel)
+        fs.copyFileSync(src, tmpIndex)
+        seeded = true
+      }
+    } catch {}
+    let added = await runGit(leaderWorkdir, addArgs, 60000, env)
+    if (!added.ok && seeded) {
+      const rebuilt = await runGit(leaderWorkdir, ['read-tree', head], 30000, env)
+      if (rebuilt.ok) added = await runGit(leaderWorkdir, addArgs, 60000, env)
+    }
+    if (!added.ok) return replayRefused(`私有 index 采集失败：${gitError(added)}`)
+    const tree = (await runGit(leaderWorkdir, ['write-tree'], 60000, env)).stdout.trim()
+    if (!tree) return replayRefused('write-tree 未产出树对象')
+    const committed = await runGit(leaderWorkdir, [...AGENT_GIT_IDENTITY, 'commit-tree', tree, '-p', childBaseSha, '-m', 'agentdeck: 领队未提交基线回放（子单以本提交为基线）'], 30000)
+    if (!committed.ok) return replayRefused(`commit-tree 失败：${gitError(committed)}`)
+    const replaySha = committed.stdout.trim()
+    if (!replaySha) return replayRefused('commit-tree 未产出提交')
+
+    // 子 worktree 应用：parent==子基线 ⇒ cherry-pick 就是精确增量；--quit 清理 sequencer 残留，
+    // reset --soft 把子分支推进到回放提交（index/worktree 已与该树一致，status 归零）
+    const pick = await runGit(childWorkdir, ['cherry-pick', '--no-commit', replaySha], 60000)
+    if (!pick.ok) {
+      await runGit(childWorkdir, ['cherry-pick', '--abort'], 15000)
+      return replayRefused(`子单回放应用失败：${gitError(pick)}`)
+    }
+    await runGit(childWorkdir, ['cherry-pick', '--quit'], 15000)
+    const soft = await runGit(childWorkdir, ['reset', '--soft', replaySha], 30000)
+    if (!soft.ok) {
+      await runGit(childWorkdir, ['reset', '--hard', childBaseSha], 30000)
+      return replayRefused(`子分支推进到回放提交失败：${gitError(soft)}`)
+    }
+    const clean = await runGit(childWorkdir, ['status', '--porcelain'], 15000)
+    if (clean.ok && clean.stdout.trim()) {
+      await runGit(childWorkdir, ['reset', '--hard', childBaseSha], 30000)
+      return replayRefused('回放后子 worktree 状态不自洽（status 非空），已回滚')
+    }
+    // 子 worktree 元数据的 baseSha 同步改写：digest/集成的基线指向回放提交（防双算）
+    const resolved = await resolveManagedWorktree(childWorkdir)
+    if (resolved?.metadata) {
+      try { updateMetadata(resolved.metadata, { baseSha: replaySha }) } catch {}
+    }
+    return { status: 'applied', commitSha: replaySha, files: trackedCount + files, bytes, reason: '' }
+  } finally {
+    try { fs.unlinkSync(tmpIndex) } catch {}
+  }
 }
 
 /** 在 repoDir 上把 sourceBranch merge 进 targetBranch（fast-forward 优先，不切换用户分支：用 worktree 上的 merge）
@@ -497,12 +833,17 @@ export async function branchDiffSummary(
   baseBranch: string,
   integrationBranch: string
 ): Promise<GitSnapshotResult> {
-  const [stat, diff] = await Promise.all([
+  const [stat, diff, head] = await Promise.all([
     runGit(repoDir, ['diff', '--no-ext-diff', '--no-textconv', '--stat', `${baseBranch}...${integrationBranch}`]),
-    runGit(repoDir, ['diff', '--no-ext-diff', '--no-textconv', `${baseBranch}...${integrationBranch}`])
+    runGit(repoDir, ['diff', '--no-ext-diff', '--no-textconv', `${baseBranch}...${integrationBranch}`]),
+    branchHead(repoDir, integrationBranch)
   ])
   const failed = [stat, diff].find((result) => !result.ok)
-  return failed ? snapshotFailure('integration', 'error', gitError(failed)) : snapshotSuccess('integration', diff.stdout, stat.stdout.trim())
+  if (failed) return snapshotFailure('integration', 'error', gitError(failed))
+  const result = snapshotSuccess('integration', diff.stdout, stat.stdout.trim())
+  // 记录采集时点的分支 HEAD：finalizer 据此直接观测「集成分支没动」，不从工作副本干净推断
+  result.snapshot.headSha = head || undefined
+  return result
 }
 
 function metadataForPath(repoDir: string, wtDir: string) {
@@ -639,10 +980,11 @@ export async function deleteBranch(workdir: string, name: string): Promise<boole
 
 /** 启动清扫：回收上次会话遗留的 worktree——合并临时目录（.agentdeck-merge-*，其 finally 兜不住进程被杀）
  *  和已不存在任务的委派目录（<taskId>_c<N>）。任务仍在的目录不动：可能存有未提交改动，
- *  交给任务删除钩子或人工处理。返回回收的目录名列表。 */
+ *  交给任务删除钩子或人工处理。返回回收的目录名列表。
+ *  keepTask 第二参传入该目录的 owner metadata（若有）：续链集成 worktree 的保留判定需要它。 */
 export async function pruneWorktrees(
   repoDir: string,
-  keepTask: (taskId: string) => boolean = () => false,
+  keepTask: (taskId: string, worktree?: WorktreeInfo) => boolean = () => false,
   options: { maxAgeMs?: number; now?: number; claimWorktree?: (taskId: string, mergeWorktree: boolean) => WorktreePruneLease | undefined } = {}
 ): Promise<WorktreePruneResult> {
   const root = await repositoryRoot(repoDir)
@@ -660,7 +1002,7 @@ export async function pruneWorktrees(
     const metadata = readMetadataFile(metadataFile(root, name))
     result.scanned++
     const owner = metadata?.ownerTaskId || name.replace(/_c\d+$/, '')
-    if (owner && keepTask(owner)) {
+    if (owner && keepTask(owner, metadata ?? undefined)) {
       result.retained.push({ name, reason: 'owner task or Git operation is still active' })
       continue
     }
@@ -675,7 +1017,11 @@ export async function pruneWorktrees(
           // Already fully reclaimed; retain the sidecar as an audit record.
           continue
         }
-        if (metadata.branch.startsWith(MANAGED_BRANCH_PREFIX) && await deleteBranch(root, metadata.branch)) {
+        if (isIntegrationBranch(metadata.branch)) {
+          // 清扫路径禁止删集成分支：它持有用户尚未 merge 的集成结果，只有删任务的
+          // 显式回收路径可以带走它（分支还在，侧车记录也随之保留作审计凭据）。
+          result.retained.push({ name, reason: 'integration branch is only deletable via explicit task deletion' })
+        } else if (metadata.branch.startsWith(MANAGED_BRANCH_PREFIX) && await deleteBranch(root, metadata.branch)) {
           result.removed.push(name)
         } else {
           result.retained.push({ name, reason: 'worktree already removed; managed branch retained' })
@@ -702,7 +1048,9 @@ export async function pruneWorktrees(
       continue
     }
     try {
-      const reclaimed = await reclaimWorktree(wtPath, { deleteBranch: true })
+      // 集成分支对清扫路径只减目录、不减分支（isIntegrationBranch 守卫）：
+      // 集成结果在分支上，目录只是检出；删任务的显式路径才允许连分支一起删。
+      const reclaimed = await reclaimWorktree(wtPath, { deleteBranch: !isIntegrationBranch(metadata?.branch) })
       if (reclaimed.ok) result.removed.push(name)
       else if (reclaimed.status === 'retained') result.retained.push({ name, reason: reclaimed.reason ?? 'retained by policy' })
       else result.failed.push({ name, reason: reclaimed.reason ?? 'cleanup failed' })
@@ -716,7 +1064,7 @@ export async function pruneWorktrees(
 /** Startup compatibility wrapper returning only removed directory names. */
 export async function sweepWorktrees(
   repoDir: string,
-  keepTask: (taskId: string) => boolean,
+  keepTask: (taskId: string, worktree?: WorktreeInfo) => boolean,
   options: { maxAgeMs?: number; now?: number; claimWorktree?: (taskId: string, mergeWorktree: boolean) => WorktreePruneLease | undefined } = {}
 ): Promise<string[]> {
   // Preserve the legacy startup behavior: ownerless clean worktrees are
@@ -756,4 +1104,47 @@ export async function mergeBranchInto(
   } finally {
     await runGit(repoDir, ['worktree', 'remove', '--force', wtPath], 30000)
   }
+}
+
+/** 就地把 sourceBranch merge 进托管 worktree 当前检出的分支（续链二次集成：
+ *  领队 worktree 已检出集成分支，临时 worktree 再检出同一分支会被 git 拒绝）。
+ *  只接受 `.agentdeck-worktrees` 下的托管目录——绝不就地改用户工作副本。
+ *  前置校验（fail-closed，问题显式回报而非静默合并）：
+ *  ① owner metadata 存在且（传入 expectedOwner 时）归属一致，目录的 git-common-dir
+ *    确实落在声称的主仓库下——防外来仓库伪装托管路径；
+ *  ② status --porcelain 干净——领队留在托管 worktree 的未提交改动不该被卷进合并。
+ *  冲突即 abort，返回形状与 mergeBranchInto 一致。 */
+export async function mergeIntoManagedWorktree(
+  wtDir: string,
+  sourceBranch: string,
+  expectedOwner = ''
+): Promise<{ ok: boolean; conflict: boolean; message: string }> {
+  const refuse = (message: string) => ({ ok: false, conflict: false, message })
+  const resolved = await resolveManagedWorktree(wtDir)
+  if (!resolved) return refuse('refusing in-place merge outside .agentdeck-worktrees')
+  const { repoDir, metadata } = resolved
+  if (!metadata) return refuse('refusing in-place merge: worktree has no owner metadata')
+  if (expectedOwner && metadata.ownerTaskId !== expectedOwner) {
+    return refuse(`refusing in-place merge: worktree owner ${metadata.ownerTaskId} does not match ${expectedOwner}`)
+  }
+  const gcd = await runGit(wtDir, ['rev-parse', '--git-common-dir'], 15000)
+  if (!gcd.ok) return refuse(`refusing in-place merge: cannot resolve git dir: ${gitError(gcd)}`)
+  const gitDir = path.resolve(wtDir, gcd.stdout.trim())
+  if (!(gitDir === path.resolve(repoDir, '.git') || isWithin(path.resolve(repoDir, '.git'), gitDir))) {
+    return refuse(`refusing in-place merge: worktree does not belong to ${repoDir}`)
+  }
+  const cleanliness = await worktreeDirty(wtDir)
+  if (!cleanliness.ok) return refuse('refusing in-place merge: could not determine worktree status')
+  if (cleanliness.dirty) {
+    return refuse('refusing in-place merge: managed worktree has uncommitted changes (commit or clean first); scene preserved')
+  }
+  const merged = await runGit(wtDir, [...AGENT_GIT_IDENTITY, 'merge', '--no-ff', '-m', `merge ${sourceBranch} (chain continuation)`, sourceBranch], 60000)
+  const detail = `${merged.stderr}\n${merged.stdout}`.trim()
+  const conflict = /conflict|automatic merge failed/i.test(detail)
+  if (conflict) {
+    await runGit(wtDir, ['merge', '--abort'], 30000)
+    return { ok: false, conflict: true, message: `merge conflict: ${detail.slice(0, 400)}` }
+  }
+  if (!merged.ok) return { ok: false, conflict: false, message: detail.slice(0, 400) || `git exit ${merged.code ?? 'unknown'}` }
+  return { ok: true, conflict: false, message: '' }
 }

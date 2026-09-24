@@ -73,6 +73,16 @@ Issue（目标、状态、负责人、评论时间线）
 
 子任务通过 `parentTaskId` 挂在领队下（侧栏缩进展示）；领队集成结果记 `Task.integration {branch, note}`。支持二层委派：队员带 subordinates 即为子领队，可继续下派——防环（祖先链检测）+ 层级上限 3 层 + 全链共享 8 轮预算；派工可带 reason 留痕；集成递归合入子领队的集成分支；worktree 一律归位主仓库根。
 
+回灌增厚：每轮结果汇报为**结构化摘要**——条目标题即单号+状态，体由「结论段（result 首部 1200 字有界）+ **git 改动小节**（工作分支名、`--name-status` 文件状态清单、文件 stat、有界 diff 摘要；整节 ≤2KB 按 UTF-8 字节计、文件清单 ≤50 行，超限按字节收缩留标记）+ **全文入口指引**（报告副本相对路径 + Issue 评论）」组装；4000 字物理截断只是最后防线，触发必须带「后 N 字未送」标记。摘要之外是**全文双落**（multica「nothing silently discarded」）：队员到达终态（含 failed）即把完整 result 同时落到 ① 领队 Issue 评论（存储无上限，截断只发生在调用点；`addComment` 因 Issue 不存在返回 null 时必须降级留痕——委派循环写任务事件、主进程四个承重调用点写任务事件通道，绝不静默丢弃）与 ② 领队 workdir 下 `.agentdeck-reports/<单号>.md`（目录自建，`.git/info/exclude` 追加忽略，不改 tracked 文件零污染；二层领队落自己的 workdir 机制相同；文件头带 runId 防串轮）。指引文本与 git 小节同源（队员可控文本），整体用围栏包裹，协议字面量再做**序列内部破坏**：六类回合标记（delegate/review/consult/investigate/round/continue）的开闭形态、行首三连井、`【系统` 前缀与 ``` 围栏字面量，在末字符前插 `\`（如标记字样呈 `<delegat\e` 形）——六个回合解析器全是非锚定子串正则（行中同样命中），行首加前缀转义拦不住，必须让原字面量子串不再连续出现；diff `+/-` 行与未跟踪文件名（逐项独立转义）一视同仁，人读几乎无损。队员改的文件里不能伪造领队协议；无 diff 可展示时不留悬空的「diff 摘要：」标题。
+
+子单基线回放（multica「工作区即状态」不变量）：worktree 隔离曾导致队员看不见领队的未提交改动——派单等于让队员在旧基线上白写。现在 `spawnDelegateChild` 在建好 worktree 之后、子 agent 拿到 cwd 之前，把领队工作区的未提交增量（已跟踪改动 + 未跟踪未忽略文件）**只读采集**回放进子单：`GIT_INDEX_FILE` 指向私有临时 index（从领队 index 副本播种，失败退 `read-tree` 重建）→ `add -A`（排除 `.agentdeck-worktrees`/`.agentdeck-reports` 系统目录）→ `write-tree` → `commit-tree`（parent=子基线 sha）得回放提交 → 子 worktree `cherry-pick --no-commit` 应用 → `reset --soft` 推进子分支到回放提交。**硬约束：领队工作区与用户 index 零副作用**——全程私有 index，绝不 stash/reset 用户区。防双算：回放提交即子分支起始提交（tip），worktree 元数据的 `baseSha` 改写指向它——此后 digest/集成证据都以它为基线，领队改动不算子产出、不进子 git 小节；集成说明与时间线事件标注「含领队回放基线 N 文件」。失败路径不静默：采集或应用失败、或体量闸超限（未跟踪文件数 >2000、总体积 >200MiB、含软链——lstat 逐一检查），一律具名拒建单并把原因回灌给领队改派；领队无增量时零开销跳过（一次 `diff --quiet` + 一次 `ls-files` 即返回）。
+
+基线回放的已知取舍（文档化，不做自动去重）：集成分支会含回放提交，而领队原工作区仍持同一份未提交改动——跨线合并是人/后续流程的事（对齐 multica 立场），集成证据与 UI 说明负责把这件事说清。`.gitignore` 排除的依赖目录（node_modules 等）不参与回放——子单需要完整依赖时领队应先提交 lockfile，这是写明的边界而非缺陷。
+
+续链换基线：集成成功后系统为领队新建托管 worktree 检出集成分支 `agentdeck/task-<id>`，并把 `task.workdir` 指过去——此后追问/续聊/目标模式及二次派单自然以集成结果为基线（子单 base=集成分支；基线已切换后的再集成在托管 worktree 内就地 merge，就地 merge 前置校验托管 worktree 的 owner 归属与工作副本干净，不干净/归属不符拒绝并明示保留现场）。会话绑定工作目录：`task.workdir` 变更后追问不再直续旧目录里的内存会话，强制走 resume 重建（新连接以新 workdir 启动，会话内容经 sessionId 恢复）；切换前领队留在原目录的未提交改动先摘录收编进本轮证据，不从 gitDiff/gitStat 静默消失。用户当前分支与仓库根工作副本绝不被自动改；无改动早退、集成失败路径不切换。
+
+集成结果与清扫的不变量：merge 只在集成分支 HEAD 真实前进时计入（Already-up-to-date 不产生新提交，本轮无净新增时整体省略证据键，上一轮 gitDiff/gitStat/gitSnapshot 保留——finalizer 跨轮保留直接观测集成分支 HEAD 与快照记录的采集时点 headSha 一致才重盖时间戳，不从工作副本干净推断；部分失败轮（分支已前进但不写证据）的过期 diff 拒绝重盖为本轮证据）；续链 worktree 的保留判定只按 `owner.integration.branch` 认归属（不依赖 task.workdir 仍指向它），启动清扫一律**不删集成分支**——集成分支只有删任务的显式回收路径（tasks:delete）可以带走；owner 任务在册且终态 cancelled 的子单 worktree 同样跳过清扫回收（cancelled 对终态落盘是例外，现场原样保留，目录与分支都留，删任务显式路径统一回收）；worktree 落盘与目录创建拆两步，operation 释放后立即落盘归属，放弃窗口留下的也是已登记的续链 worktree。
+
 没有"协同模式"开关——**委派是领队队员的内在能力**：
 
 ```
@@ -82,7 +92,7 @@ Issue（目标、状态、负责人、评论时间线）
    ├─ 子任务各自执行（真并行，互不污染）
    └─ 全部终态后结果带单号回灌领队会话
 领队回合2：对每个 done 单输出 <review> 审核 → 核验、收尾（可再派/可自己做）→ 最终总结（无标记）
-系统：子任务分支合入 agentdeck/task-<id> 集成分支；领队结果剥除标记落盘
+系统：子任务分支合入 agentdeck/task-<id> 集成分支；领队结果剥除标记落盘；领队 workdir 切到集成 worktree（续链基线）
 ```
 
 设计取舍：
@@ -91,7 +101,12 @@ Issue（目标、状态、负责人、评论时间线）
 |---|---|
 | 协议用输出标记而非注入原生工具 | 各 CLI 无统一工具注入面；标记法对任何可续聊后端成立 |
 | 子任务在独立 git worktree | 真并行 + 零冲突合并；用户当前分支永不被自动改 |
-| worktree 用后即回收 | 合入集成分支后立即 removeWorktree + 删工作分支；删任务连带回收；启动清扫兜底 |
+| worktree 用后即回收 | 合入集成分支后立即 removeWorktree + 删工作分支；删任务连带回收；启动清扫兜底（续链集成 worktree 例外：只按 integration.branch 认归属、任务存在期间保留，且清扫路径绝不删集成分支——它持有未合并的唯一集成结果） |
+| 回灌附 git 改动小节（≤2KB 有界） | 集成前领队就能看到队员真实改动面（分支/stat/diff/name-status），不再只信文字总结 |
+| 摘要只带结论段（1200 字有界）+ 全文双落（Issue 评论 + 报告副本） | 摘要回灌是索引不是载体：全文不随领队会话生死、不因 Issue 缺失静默丢失；4000 字截断只是最后防线且必须留痕 |
+| 子单基线回放（领队未提交增量进子单） | 队员在真实最新基线上干活，不再「队员看不见领队改动＝白派单」；私有 index 采集，用户区零副作用；无增量零开销 |
+| 集成分支含回放提交（已知取舍，不做自动去重） | 领队原工作区仍持同一份未提交改动，跨线合并是人/后续流程的事；集成证据与 UI 说明标注「含领队回放基线 N 文件」；gitignore 掉的依赖目录不回放（子单需完整依赖时领队先提交 lockfile） |
+| 集成后续链换基线（workdir → 集成 worktree） | 追问/二次派单跑在集成结果之上，不再拿旧基线重复劳动；只动托管目录，不碰用户工作副本 |
 | 结果回灌而非子任务直连领队 | 领队保有完整决策上下文，可多轮调整；单号 + `<review>` 审核（maker/checker）落看板状态 |
 | 领队编排不占并发槽 | 避免 concurrency=1 时领队等子任务、子任务等领队的死锁 |
 | 子任务并发独立通道 | 委派扇出不受普通任务节流影响 |
@@ -213,14 +228,38 @@ create → queued → pump 取队 → running
 delegate 标记 → 目标解析（限 subordinates，名字/平台 id 忽略大小写）
   → sanitizeChildPrompt（绝对路径→相对，防改错目录）
   → createWorktree（.agentdeck-worktrees/<taskId>_cN，记录 owner/base SHA/branch/cleanup metadata）
+  → 子单基线回放（领队未提交增量 → 私有 index add -A → write-tree → commit-tree（parent=子
+    基线 sha）→ 子 worktree cherry-pick --no-commit + reset --soft 推进子分支；领队区零副作用；
+    无增量零开销跳过；体量闸 2000 文件/200MiB/软链，超限或失败一律具名拒建单回灌原因）
   → 子任务入队（worker 并发通道）→ 独立执行/日志/权限
-  → 终态后：commitAll（排除 __pycache__ 等）→ mergeBranchInto 集成分支
-  → 集成成功即回收：removeWorktree + deleteBranch（失败/冲突保留现场）
-  → branchDiffSummary 总 diff → 领队任务 gitStat/gitDiff
-兜底回收：tasks:delete 连带回收名下 worktree；启动时 sweepWorktrees/pruneWorktrees 清扫
-          已删任务目录与 .agentdeck-merge-* 临时目录（进程被杀时 finally 兜不住）。
-          脏目录、冲突现场和 manualKeep 标记 fail-closed 保留并记录原因；
-          仅带 agentdeck/ 前缀且已脱离 worktree 的临时分支允许自动删除。
+  → 终态（含 failed）即 commitAll 落盘到工作分支（nothing silently discarded，不等集成期；
+    cancelled 例外，现场原样保留）
+  → 终态全文双落：完整 result → ① 领队 Issue 评论（addComment 返回 null = Issue 不存在，
+    必须降级任务事件通道留痕）+ ② 领队 workdir/.agentdeck-reports/<单号>.md（info/exclude
+    忽略零污染，文件头带 runId 防串轮；二层领队落自己的 workdir）
+  → 终态回灌：结构化摘要（单号+状态标题；结论段=result 首部 1200 字有界；git 改动小节=
+    对子分支基线（回放后即回放提交）的全部改动，分支/name-status/stat/diff 摘要，≤2KB 按字节
+    计，围栏包裹+协议字面量序列内部破坏，超限留截断标记；全文入口指引）——4000 字物理截断
+    只是最后防线，触发带「后 N 字未送」
+  → 领队对每个 done 单输出 <review> 审核结论
+  → 循环结束后：commitAll → merge 进集成分支（只计 HEAD 真实前进，Already-up-to-date 不计入）
+     （基线=集成分支自身时在领队托管 worktree 内就地 merge——前置校验 owner 归属 + 工作副本
+       干净，不干净/归属不符拒绝并保留现场；临时检出同分支会被 git 拒绝）
+  → 集成成功即回收子 worktree + 删工作分支（失败/冲突保留现场）
+  → branchDiffSummary 总 diff（续链轮以本轮集成起点 sha 为基，快照记录采集时点的分支
+    HEAD）→ 领队任务 gitStat/gitDiff（本轮无净新增时省略证据键，上一轮证据保留；
+    finalizer 跨轮保留直接观测集成分支 HEAD 与快照 headSha 一致才重盖时间戳——部分
+    失败轮（分支已前进但不写证据）的过期 diff 拒绝重盖为本轮证据）
+  → 首次集成成功：createWorktreeAtBranch 建续链 worktree 检出集成分支；切换前把领队留在
+    原目录的未提交改动摘录收编进本轮证据；operation 释放后立即落盘 workdir 归属（拆两步
+    消除放弃窗口，落盘失败回滚目录、分支保留；无改动早退/集成失败不切换；用户工作区不动）
+    → 换基线后 followUp 强制 resume 重建会话（会话绑定 workdir，直续会跑旧目录）
+兜底回收：tasks:delete 连带回收名下 worktree（含领队续链 worktree，集成分支随显式删除回收——
+          唯一允许删集成分支的路径）；启动时 sweepWorktrees/pruneWorktrees 清扫已删任务目录与
+          .agentdeck-merge-* 临时目录（进程被杀时 finally 兜不住）。脏目录、冲突现场和
+          manualKeep 标记 fail-closed 保留并记录原因；仅带 agentdeck/ 前缀且已脱离 worktree 的
+          临时分支允许自动删除；续链集成 worktree 的保留判定只按 owner.integration.branch 认
+          归属（领队任务存在期间清扫保留，且清扫路径绝不删集成分支）。
 ```
 
 ### 4.3 权限确认（非 yolo 模式）

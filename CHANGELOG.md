@@ -8,6 +8,13 @@
 
 - **API 预设去平台绑定（全局连接档案）**：`ApiPreset` 删除 `backend` 字段——预设只存连接（baseURL/apiKey/协议），不再锁定所属平台，任何 agent 按平台能力引用（同一中转站可同时服务 zcode 与 claude，不必建两份）。IPC 校验、normalize 同步收窄；旧 presets.json 兼容（`backend` 字段加载即忽略、下次保存自然消失）；AgentsView 预设表单与引用芯片简化（-55 行）。
 
+### 修复
+
+- **队员报告全文双落（摘要回灌之外的持久全文通道）**：队员终态全文镜像进 Issue 评论（单号/状态/runId 标识，不截断）+ 写入领队 workdir `.agentdeck-reports/<单号>.md` 报告副本（头带 runId 防串轮）；摘要尾附全文入口指引（副本相对路径 + Issue 评论锚点）——摘要回灌丢细节时全文永远可查。
+- **子单基线回放（领队未提交增量的归属切分）**：领队未提交增量以一个提交（baseSha 即该提交）回放进子 worktree，digest/集成以它为基线——领队自己的改动不再混进子产出；`replay` 元数据记录回放提交/文件数/时间。
+- **集成分支防误清**：`agentdeck/task-*` 集成分支持有用户尚未 merge 的唯一集成结果，启动清扫一律不删，只有删任务的显式回收路径（tasks:delete）可以带走。
+- **委派系统目录排除**：`.agentdeck-worktrees/`、`.agentdeck-reports/` 统一走 gitdir info/exclude 忽略（不改 tracked 文件零污染）+ 代码路径过滤兜底，回放与 status 视角都不可见。
+
 ## [0.23.0] - 2026-09-21
 
 ### 修复
