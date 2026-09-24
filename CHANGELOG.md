@@ -6,6 +6,8 @@
 
 ### 新增
 
+- **Worktree 池化复用（大仓派单提速）**：子单完成回收时优先归还进程内复用池（detach + 删子分支 + 元数据挂 `.agentdeck-pool`，目录与 git 注册保留），下一次派单 `switch -c` 换基线秒级复用——只重写基线间差异文件，8 万文件级 Unity 仓从全量 checkout 4-6 分钟降到秒级。池容量每仓库 2（覆盖并行双队员），复用失败逐出并回落全量 `worktree add`（池是加速捷径而非正确性依赖）；池为会话级资产，跨重启由启动清扫按无名残肢回收；`WorktreeCreateResult.pooled` / `cleanupStatus: 'pooled'` 为观测出口，smoke:worktrees 补池化生命周期用例。
+- **只读协作队员免建树（`Agent.sharedWorkspace`）**：agents.json 可给审码/咨询类队员标 `"sharedWorkspace": true`——派单直接共享领队工作区、零建树开销（与 meeting 调查模式同一约定）；写代码队员仍一律走隔离 worktree。字段经 normalizeAgent 保留、IPC 白名单收窄（仅接受 true）。
 - **Agent 思考强度配置（端到端）**：`Agent` 增 `thinking` 档位（关/低/中/高/极致，空 = 平台默认），runner 按后端原生协议分发——zcode 选目录 variant（缺档就近上调，非推理模型忽略）或预设 optionSpecs 单值档（关=不发参数，其余交给 zcode 内置映射发 thinking/reasoning_effort）；claude 注入 `MAX_THINKING_TOKENS`（off=0 … max=31999）；codex 拼 `-c model_reasoning_effort`（off=minimal、max=xhigh，新会话与 resume 都带）；dsh 经 `AGENTDECK_DSH_THINKING/EFFORT` 环境变量参数化 ACP 组合模板（headless 回退不受影响）。opencode 显式不支持（表单禁用，提示走其配置文件 variants）。AgentsView 表单与卡片 badge 同步；IPC 白名单收窄非法档位。
 
 ### 变更
@@ -14,6 +16,8 @@
 
 ### 修复
 
+- **worktree add 非超时失败同样清残肢**：add 中途真实报错（长路径/磁盘/文件占用）此前不清残肢即返回，内置重试紧跟着撞 `branch already exists` 且拒单文案只见余波——现在与超时路径同一清理通道（`cleanupWorktreeAddResidue`），部分失败经 `onCleanupResidue` 记 owner 时间线，重派拿到干净现场。
+- **建树重试保留首次失败原因**：runner 三次建树重试此前 `lastWtError` 逐次覆盖，首因（如 `Filename too long`）被重试余波（`branch already exists`）顶掉、真凶不可观测——现在只记首次错误，余波不再掩盖原因。
 - **队员报告全文双落（摘要回灌之外的持久全文通道）**：队员终态全文镜像进 Issue 评论（单号/状态/runId 标识，不截断）+ 写入领队 workdir `.agentdeck-reports/<单号>.md` 报告副本（头带 runId 防串轮）；摘要尾附全文入口指引（副本相对路径 + Issue 评论锚点）——摘要回灌丢细节时全文永远可查。
 - **子单基线回放（领队未提交增量的归属切分）**：领队未提交增量以一个提交（baseSha 即该提交）回放进子 worktree，digest/集成以它为基线——领队自己的改动不再混进子产出；`replay` 元数据记录回放提交/文件数/时间。
 - **集成分支防误清**：`agentdeck/task-*` 集成分支持有用户尚未 merge 的唯一集成结果，启动清扫一律不删，只有删任务的显式回收路径（tasks:delete）可以带走。

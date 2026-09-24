@@ -264,6 +264,8 @@ export interface AgentLike {
   presetId?: string
   /** 思考强度档位（Agent.thinking 透传给 backend.start） */
   thinking?: ThinkingLevel
+  /** 只读协作标记：true 时派单直接共享领队工作区、不建隔离 worktree（审码/咨询类零建树开销） */
+  sharedWorkspace?: boolean
   note?: string
 }
 
@@ -923,8 +925,8 @@ export async function runDelegationLoop(
           const subIntegration = await branchExists(task.workdir, `agentdeck/task-${cid}`) ? `agentdeck/task-${cid}` : ''
           if (!active()) return abandoned()
           if (!ownBranch && !subIntegration) {
-            // 没有任何可集成改动，worktree 里没有值得保留的东西：直接回收
-            const reclaimed = await reclaimWorktree(c.workdir)
+            // 没有任何可集成改动，worktree 里没有值得保留的东西：直接回收（优先归池复用）
+            const reclaimed = await reclaimWorktree(c.workdir, { repool: true })
             if (!active()) return abandoned()
             if (c.worktree) store.updateIf(cid, capturedChild, {
               worktree: {
@@ -979,9 +981,10 @@ export async function runDelegationLoop(
           }
           if (childAdvanced) mergedCount++
           // 收尾回收：全部合入集成分支后 worktree 即无保留价值（改动都在集成分支上），
-          // 顺带删掉已合并的工作分支；有失败/冲突则保留现场便于排查，留待任务删除时回收
+          // 顺带删掉已合并的工作分支（优先归池，供下一次派单换基线秒级复用）；
+          // 有失败/冲突则保留现场便于排查，留待任务删除时回收
           if (childOk) {
-            const reclaimed = await reclaimWorktree(c.workdir)
+            const reclaimed = await reclaimWorktree(c.workdir, { repool: true })
             if (!active()) return abandoned()
             if (c.worktree) store.updateIf(cid, capturedChild, {
               worktree: {

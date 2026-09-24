@@ -357,7 +357,7 @@ export function parseAgents(value: unknown): Agent[] {
   const ids = new Set<string>()
   return value.map((item, index) => {
     const input = record(item, `agent[${index}]`)
-    assertKeys(input, ['id', 'name', 'backend', 'role', 'systemPrompt', 'subordinates', 'model', 'presetId', 'thinking', 'note', 'color'], `agent[${index}]`)
+    assertKeys(input, ['id', 'name', 'backend', 'role', 'systemPrompt', 'subordinates', 'model', 'presetId', 'thinking', 'sharedWorkspace', 'note', 'color'], `agent[${index}]`)
     const id = stringValue(input.id, `agent[${index}].id`)!
     const backend = stringValue(input.backend, `agent[${index}].backend`)!
     if (ids.has(id)) throw new Error(`agent id 重复: ${id}`)
@@ -375,6 +375,7 @@ export function parseAgents(value: unknown): Agent[] {
       ...(optionalString(input.model, `agent[${index}].model`) ? { model: optionalString(input.model, `agent[${index}].model`) } : {}),
       ...(optionalString(input.presetId, `agent[${index}].presetId`) ? { presetId: optionalString(input.presetId, `agent[${index}].presetId`) } : {}),
       ...(optionalThinking(input.thinking, `agent[${index}].thinking`) ? { thinking: optionalThinking(input.thinking, `agent[${index}].thinking`) } : {}),
+      ...(input.sharedWorkspace === true ? { sharedWorkspace: true } : {}),
       ...(optionalString(input.note, `agent[${index}].note`) ? { note: optionalString(input.note, `agent[${index}].note`) } : {})
     }
   })

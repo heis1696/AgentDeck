@@ -321,8 +321,10 @@ export interface IntegrationInfo {
   note?: string
 }
 
-/** Durable ownership and cleanup record for an isolated delegate worktree. */
-export type WorktreeCleanupStatus = 'active' | 'removed' | 'retained' | 'failed'
+/** Durable ownership and cleanup record for an isolated delegate worktree.
+ *  pooled = 已归还进程内复用池：目录与 git 注册保留、子分支已删、owner 挂池标记，
+ *  下一次派单秒级换基线复用（只重写差异文件）；池是会话级资产，跨重启由启动清扫回收。 */
+export type WorktreeCleanupStatus = 'active' | 'removed' | 'retained' | 'failed' | 'pooled'
 
 export interface WorktreeInfo {
   ownerTaskId: string

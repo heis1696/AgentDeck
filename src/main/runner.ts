@@ -1157,19 +1157,25 @@ export class TaskRunner {
     let workdir = task.workdir
     let unavailableReason: string | undefined
     let worktree: WorktreeInfo | undefined
-    if (task.workdir && (await this.gitUsable(task.workdir))) {
+    if (target.sharedWorkspace) {
+      // 只读协作队员（审码/咨询类）显式声明共享工作区：零建树开销，直接用领队现场——
+      // 与 meeting 调查模式同一约定；写代码的队员仍一律走隔离 worktree
+      unavailableReason = 'Agent 标记共享工作区（只读协作）：直接使用领队工作区，不建 worktree'
+    } else if (task.workdir && (await this.gitUsable(task.workdir))) {
       if (!active()) return null
       // 基线分支显式传（缺省会从当前 HEAD 建——领队若中途动过分支，子任务基线会漂移）
       const base = (await currentBranch(task.workdir)) || undefined
       if (!active()) return null
-      // worktree 创建与领队/其他子任务的 git 操作可能撞 index.lock：重试两次再放弃
+      // worktree 创建与领队/其他子任务的 git 操作可能撞 index.lock：重试两次再放弃。
+      // lastWtError 只记首次失败——后续重试撞上的是首次失败留下的残肢（branch already
+      // exists 等），属余波而非原因；报余波会掩盖真凶（如 Filename too long 被顶掉）
       let wt: { path: string; metadata: WorktreeInfo } | null = null
       let lastWtError = ''
       const leaderDir = task.workdir
       for (let attempt = 0; attempt < 3 && !wt; attempt++) {
         if (attempt) await new Promise((r) => setTimeout(r, 500))
         if (!active()) return null
-        wt = await createWorktree(leaderDir, `${taskId}_c${this.workerCount(taskId) + 1}`, base, taskId, (m) => { lastWtError = m }, {
+        wt = await createWorktree(leaderDir, `${taskId}_c${this.workerCount(taskId) + 1}`, base, taskId, (m) => { if (!lastWtError) lastWtError = m }, {
           // 超时残肢清理部分失败（分支/注册残留）→ owner 时间线可见，重派撞
           // already exists 时现场与原因都查得到，不再静默复发
           onCleanupResidue: (failure) => { this.store.noteWorktreeCleanupFailure(leaderDir, failure) }
@@ -1208,8 +1214,8 @@ export class TaskRunner {
         }
       } else {
         // fail-closed：建树重试 3 次仍失败不再降级共享工作区——队员会在旧基线上白写、
-        // 并行队员互相踩，隔离破了等于白派单。具名拒单走既有回灌通道（含最后一条 git
-        // 错误）；仅 workdir 非 git 仓库的环境性共享降级（上方 else if 分支）保留。
+        // 并行队员互相踩，隔离破了等于白派单。具名拒单走既有回灌通道（报首次 git 错误，
+        // 重试余波不顶替）；仅 workdir 非 git 仓库/只读共享的环境性共享降级（上方分支）保留。
         const why = `worktree 建立失败，请稍后重派${lastWtError ? `——${lastWtError}` : ''}`
         guardedNote(`⚠ 拒绝派给 ${call.to}：${why}（不降级共享工作区）`)
         this.recordDelegateRejection(taskId, `to="${call.to}"：${why}`)

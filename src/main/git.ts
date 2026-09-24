@@ -25,6 +25,8 @@ export interface WorktreeCreateResult {
   addTimeoutMs?: number
   /** 规模估计的文件数（缓存命中/注入时一并带回；计数失败缺省时不带） */
   fileCount?: number
+  /** true = 从复用池换基线获得（秒级，未走全量 worktree add）——观测出口，语义无差别 */
+  pooled?: boolean
 }
 
 export interface WorktreeCleanupResult {
@@ -591,7 +593,7 @@ function readMetadataFile(file: string): WorktreeInfo | null {
     const value = JSON.parse(fs.readFileSync(file, 'utf8')) as Partial<WorktreeInfo>
     if (typeof value.ownerTaskId !== 'string' || typeof value.repoDir !== 'string' || typeof value.path !== 'string'
       || typeof value.branch !== 'string' || typeof value.baseSha !== 'string' || typeof value.createdAt !== 'number'
-      || !['active', 'removed', 'retained', 'failed'].includes(value.cleanupStatus ?? '')) return null
+      || !['active', 'removed', 'retained', 'failed', 'pooled'].includes(value.cleanupStatus ?? '')) return null
     return value as WorktreeInfo
   } catch {
     return null
@@ -690,10 +692,11 @@ interface WorktreeTimeoutCleanupResult {
   residue: string[]
 }
 
-/** 超时残肢就地清理：被击杀的 checkout 可能写了一半，注册/目录/分支全清，重派拿到干净现场
- *  （否则同名重派会撞 branch already exists）。全部 best-effort，失败不掩盖主失败原因，
- *  但不再静默——目录/注册/分支各自成败随结果返回，失败步骤进 residue 供时间线/拒单文案可见。 */
-async function cleanupTimedOutWorktree(repoDir: string, wtPath: string, branch: string, deleteBranchRef: boolean): Promise<WorktreeTimeoutCleanupResult> {
+/** 失败残肢就地清理：被击杀/中途报错的 checkout 可能写了一半，注册/目录/分支全清，
+ *  重派拿到干净现场（否则同名重派会撞 branch already exists）。全部 best-effort，
+ *  失败不掩盖主失败原因，但不再静默——目录/注册/分支各自成败随结果返回，
+ *  失败步骤进 residue 供时间线/拒单文案可见。 */
+async function cleanupWorktreeAddResidue(repoDir: string, wtPath: string, branch: string, deleteBranchRef: boolean): Promise<WorktreeTimeoutCleanupResult> {
   const residue: string[] = []
   // 目录：worktree remove --force 败（目录已缺/句柄占用）再走 rmSync，两条路都断才记残留
   const removed = await runGit(repoDir, ['worktree', 'remove', '--force', wtPath], 30_000)
@@ -733,6 +736,106 @@ async function worktreeReadyForTolerance(wtDir: string, branch: string): Promise
   return !fs.existsSync(lockPath)
 }
 
+// ---- worktree 池化复用（大仓派单提速） ----
+
+/** 每仓库池容量。8 万文件级 Unity 仓全量 checkout 要 4-6 分钟；池化后派单只重写基线间
+ *  差异文件（秒级）。容量 2 覆盖「同任务并行双队员」常态，第三个起现建，避免长尾占盘。 */
+export const WORKTREE_POOL_MAX_PER_REPO = 2
+/** 池条目的 owner 标记（非真实任务 id）：元数据/清扫据此识别池资产 */
+export const WORKTREE_POOL_OWNER = '.agentdeck-pool'
+
+/** 进程内池：repoRoot → 可复用 worktree 路径集合。会话级资产——重启即空，
+ *  留在盘上的池条目按无名残肢由启动清扫回收（owner 不在任务册，keepTask 必 false）。 */
+const worktreePoolByRepo = new Map<string, Set<string>>()
+
+function poolFor(repoRoot: string): Set<string> {
+  let pool = worktreePoolByRepo.get(repoRoot)
+  if (!pool) {
+    pool = new Set<string>()
+    worktreePoolByRepo.set(repoRoot, pool)
+  }
+  return pool
+}
+
+/** 测试出口：清空进程内池 */
+export function clearWorktreePool(): void {
+  worktreePoolByRepo.clear()
+}
+
+/** 归还入池：detach HEAD（同提交零文件重写，解除分支检出占用——否则调用方随后的
+ *  分支删除会被 "used by worktree" 拒绝）。分支删除不在此做：归调用方决策（集成完成
+ *  路径自行 deleteBranch 并跟踪失败；集成分支等保留分支不受影响）→ 元数据改挂池
+ *  owner 并登记路径。目录与 git 注册保留。任何一步失败返回 false，调用方回落常规
+ *  移除路径——归池是加速捷径，不改变回收语义。 */
+async function releaseWorktreeToPool(repoDir: string, wtDir: string, branch: string, metadata?: WorktreeInfo | null): Promise<boolean> {
+  const root = path.resolve(repoDir)
+  const pool = poolFor(root)
+  if (pool.size >= WORKTREE_POOL_MAX_PER_REPO || pool.has(wtDir)) return false
+  const detached = await runGit(wtDir, ['switch', '--detach'], 30000)
+  if (!detached.ok) return false
+  try {
+    writeMetadata({
+      ownerTaskId: WORKTREE_POOL_OWNER,
+      repoDir: root,
+      path: wtDir,
+      branch,
+      baseSha: metadata?.baseSha ?? '',
+      createdAt: Date.now(),
+      cleanupStatus: 'pooled',
+      cleanupReason: 'idle in worktree pool awaiting reuse'
+    })
+  } catch { return false }
+  pool.add(wtDir)
+  return true
+}
+
+/** 从池里取一棵复用：clean -ffd（保留系统目录）→ switch -c <新分支> <基线>（只重写差异文件）
+ *  → status 自洽核验（脏则 reset --hard 兜底一次）。任何一步失败都逐出该条目并返回 null，
+ *  调用方回落全量 worktree add——池永远是加速捷径而非正确性依赖，复用失败不改变派单语义。
+ *  switch/reset 沿用建树的规模自适应超时与进程树击杀通道（病态大差异下同样受控）。 */
+async function acquirePooledWorktree(
+  repoDir: string,
+  name: string,
+  branch: string,
+  baseSha: string,
+  ownerTaskId: string,
+  timeoutMs: number
+): Promise<WorktreeCreateResult | null> {
+  const root = path.resolve(repoDir)
+  const pool = worktreePoolByRepo.get(root)
+  if (!pool || !pool.size) return null
+  for (const wtPath of pool) {
+    pool.delete(wtPath)
+    const evict = async () => { await reclaimWorktree(wtPath, { force: true, deleteBranch: true }).catch(() => {}) }
+    if (!(await isGitRepo(wtPath))) { await evict(); continue }
+    const cleaned = await runGit(wtPath, ['clean', '-ffd', '--', ...pathspecExcludes()], 60000)
+    if (!cleaned.ok) { await evict(); continue }
+    // switch -C：不存在则建、存在则重置到基线——同名残枝（此前失败流程遗留的同名分支）
+    // 不让复用失败；其可能携带的未集成提交只在集成失败路径存在，而那条路径的 worktree
+    // 不会被归池，重置无丢失风险
+    const switched = await runGit(wtPath, ['switch', '-C', branch, baseSha], timeoutMs, undefined, true)
+    if (!switched.ok) { await evict(); continue }
+    let settled = await runGit(wtPath, ['status', '--porcelain'], 30000)
+    if (!settled.ok || settled.stdout.trim()) {
+      await runGit(wtPath, ['reset', '--hard', baseSha], timeoutMs, undefined, true)
+      settled = await runGit(wtPath, ['status', '--porcelain'], 30000)
+      if (!settled.ok || settled.stdout.trim()) { await evict(); continue }
+    }
+    const metadata: WorktreeInfo = {
+      ownerTaskId,
+      repoDir: root,
+      path: wtPath,
+      branch,
+      baseSha,
+      createdAt: Date.now(),
+      cleanupStatus: 'active'
+    }
+    try { writeMetadata(metadata) } catch { await evict(); continue }
+    return { path: wtPath, branch, metadata, pooled: true }
+  }
+  return null
+}
+
 /** 为 worker 创建隔离 worktree（含独立分支）；失败返回 null（调用方 fail-closed 拒单，
  *  不再降级共享工作区——降级会让队员在旧基线上白写、并行队员互相踩）。onError（可选）
  *  逐次带回失败现场的 git 错误细节，供具名拒单文案使用。
@@ -762,10 +865,13 @@ export async function createWorktree(
   const planned = options.addTimeoutMs !== undefined
     ? { timeoutMs: options.addTimeoutMs, fileCount: undefined as number | undefined }
     : await planWorktreeAddTimeout(root, repoDir, options.estimateFileCount)
+  // 池化复用先行：同仓池里有空闲 worktree 就换基线复用（只重写差异文件），全量 add 兜底
+  const pooled = await acquirePooledWorktree(root, name, branch, baseSha, ownerTaskId, planned.timeoutMs)
+  if (pooled) return pooled
   const out = await runGit(repoDir, ['worktree', 'add', '-b', branch, wtPath, ...(baseBranch ? [baseBranch] : [])], planned.timeoutMs, undefined, true)
   if (out.timedOut) {
     // 超时绝不当成功：树杀前的 checkout 可能写了一半，孤儿残留的 index.lock 会卡死后续回放
-    const cleaned = await cleanupTimedOutWorktree(repoDir, wtPath, branch, true)
+    const cleaned = await cleanupWorktreeAddResidue(repoDir, wtPath, branch, true)
     if (cleaned.residue.length) {
       // 清理部分失败不再静默：残留清单（含分支名）走 noteWorktreeCleanupFailure 记 owner
       // 时间线；拒单文案只报实情，绝不谎称「残肢已清理」——重派 already exists 时查得到现场
@@ -778,6 +884,12 @@ export async function createWorktree(
     return null
   }
   if (!out.ok && !(await worktreeReadyForTolerance(wtPath, branch))) {
+    // 非超时失败同样清残肢：add 中途真实报错（长路径/磁盘/文件占用）时分支/注册/目录一样
+    // 残留，内置重试紧跟着就会撞 branch already exists——与超时路径同一清理通道
+    const cleaned = await cleanupWorktreeAddResidue(repoDir, wtPath, branch, true)
+    if (cleaned.residue.length) {
+      try { options.onCleanupResidue?.({ name, reason: `失败残肢清理部分失败：${cleaned.residue.join('、')}`, ownerTaskId }) } catch { /* 时间线出口失败不掩盖主失败 */ }
+    }
     fail((out.stderr || out.stdout).trim().slice(0, 300) || `git worktree add exit ${out.code}`)
     return null
   }
@@ -828,7 +940,7 @@ export async function createWorktreeAtBranch(
   if (added.timedOut) {
     // 与 createWorktree 同一吞错封死：超时绝不当成功；集成分支绝不删（集成结果都在分支上）。
     // 清理部分失败留 console 现场（此路径无时间线出口），不静默。
-    const cleaned = await cleanupTimedOutWorktree(root, wtPath, branch, false)
+    const cleaned = await cleanupWorktreeAddResidue(root, wtPath, branch, false)
     if (cleaned.residue.length) console.warn(`[git] 集成 worktree 超时残肢清理部分失败（${wtPath}）：${cleaned.residue.join('、')}`)
     return null
   }
@@ -1295,10 +1407,12 @@ async function deleteBranchWithRetry(workdir: string, name: string): Promise<boo
   return deleteBranch(workdir, name)
 }
 
-/** Reclaim an isolated worktree with structured fail-closed status. */
+/** Reclaim an isolated worktree with structured fail-closed status.
+ *  repool: true 时（且非 force、工作区干净、管理分支）优先归还复用池而非移除——
+ *  目录与 git 注册保留、子分支删除、元数据挂池标记，下一次派单换基线秒级复用。 */
 export async function reclaimWorktree(
   wtDir: string,
-  options: { force?: boolean; deleteBranch?: boolean } = {}
+  options: { force?: boolean; deleteBranch?: boolean; repool?: boolean } = {}
 ): Promise<WorktreeCleanupResult> {
   const resolved = await resolveManagedWorktree(wtDir)
   if (!resolved) return { ok: false, status: 'failed', path: wtDir, reason: 'path is outside .agentdeck-worktrees' }
@@ -1320,6 +1434,13 @@ export async function reclaimWorktree(
   if (!options.force && cleanliness.dirty) {
     try { if (metadata) updateMetadata(metadata, { cleanupStatus: 'retained', cleanupReason: 'uncommitted changes' }) } catch {}
     return { ok: false, status: 'retained', path: wtDir, branch, reason: 'uncommitted changes' }
+  }
+  // 归池优先（仅限非 force 且干净的管理分支 worktree）：detach + 删分支 + 挂池标记，
+  // 目录与注册留给下一次派单换基线复用；归还失败回落常规移除路径，回收语义不变
+  if (options.repool && !options.force && cleanliness.ok && !cleanliness.dirty && branch.startsWith(MANAGED_BRANCH_PREFIX)) {
+    if (await releaseWorktreeToPool(repoDir, wtDir, branch, metadata)) {
+      return { ok: true, status: 'pooled', path: wtDir, branch, reason: 'returned to worktree pool for reuse' }
+    }
   }
   if (!fs.existsSync(wtDir)) {
     // 目录已被外力清掉（崩溃竞态/手工删除）：prune 从顺手一带变为受检步骤——

@@ -69,6 +69,31 @@ try {
   } finally {
     fs.rmSync(plain, { recursive: true, force: true })
   }
+
+  // ---- worktree 池化复用：完成归池 → 下次派单换基线秒级复用 → 启动清扫兜底回收 ----
+  fs.writeFileSync(path.join(dir, 'feature.txt'), 'advanced baseline\n')
+  git('add', '.')
+  git('commit', '-qm', 'advance base')
+  const advancedSha = git('rev-parse', 'main')
+
+  const first = await createWorktree(dir, 'pool_task_a_c1', 'main', 'pool_task_a')
+  check(!!first && first.pooled !== true, 'pool empty: dispatch builds a full worktree')
+  const released = await reclaimWorktree(first.path, { repool: true })
+  check(released.ok && released.status === 'pooled', 'clean completion returns worktree to the pool')
+  check(fs.existsSync(first.path), 'pooled worktree directory is retained for reuse')
+  check(git('-C', first.path, 'rev-parse', '--abbrev-ref', 'HEAD') === 'HEAD', 'pooled entry is detached: branch deletion stays with the caller')
+  check(listWorktreeMetadata(dir).some((item) => item.path === first.path && item.cleanupStatus === 'pooled'), 'pooled metadata is auditable')
+
+  const reused = await createWorktree(dir, 'pool_task_b_c1', 'main', 'pool_task_b')
+  check(!!reused && reused.pooled === true, 'next dispatch reuses the pooled worktree')
+  check(reused.path === first.path, 'reuse hands back the same directory')
+  check(reused.metadata.baseSha === advancedSha, 'reuse re-bases to the requested baseline')
+  check(reused.metadata.branch === 'agentdeck/pool_task_b_c1', 'reuse carries the new dispatch branch')
+  check(git('-C', reused.path, 'status', '--porcelain') === '', 'reused worktree is clean at the new baseline')
+  check(fs.readFileSync(path.join(reused.path, 'feature.txt'), 'utf8').includes('advanced'), 'reused files reflect the advanced baseline')
+
+  const sweepPooled = await pruneWorktrees(dir, () => false, { maxAgeMs: 0, claimWorktree: testClaim })
+  check(sweepPooled.removed.includes('pool_task_a_c1'), 'startup sweep reclaims idle pool entries (session-scoped pool)')
   console.log('\nWORKTREE LIFECYCLE SMOKE PASSED')
 } finally {
   fs.rmSync(dir, { recursive: true, force: true })

@@ -24,6 +24,8 @@ export interface Agent {
   presetId?: string
   /** 思考强度档位（可空 = 平台默认）；opencode 不支持，走其配置文件 variants */
   thinking?: ThinkingLevel
+  /** 只读协作标记：true 时被派单直接共享领队工作区、不建隔离 worktree（审码/咨询类零建树开销） */
+  sharedWorkspace?: boolean
   note?: string
   /** 主题色（UI 头像） */
   color: string
@@ -53,6 +55,7 @@ export function normalizeAgent(value: unknown, fallback?: Agent): Agent | null {
     ...(typeof raw.model === 'string' && raw.model.trim() ? { model: raw.model.trim() } : {}),
     ...(typeof raw.presetId === 'string' && raw.presetId.trim() ? { presetId: raw.presetId.trim() } : {}),
     ...(typeof raw.thinking === 'string' && THINKING_SET.has(raw.thinking) ? { thinking: raw.thinking as ThinkingLevel } : {}),
+    ...(typeof raw.sharedWorkspace === 'boolean' ? { sharedWorkspace: raw.sharedWorkspace } : {}),
     ...(typeof raw.note === 'string' && raw.note.trim() ? { note: raw.note.trim() } : {}),
     color: typeof raw.color === 'string' && raw.color.trim() ? raw.color.trim() : (fallback?.color ?? '#64748b')
   }
