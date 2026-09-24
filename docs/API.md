@@ -552,7 +552,8 @@ const scoped = bindTurn(events, turn)
   │             且撞 index.lock/Another git process 时 400-900ms 抖动退避重试 2 次，
   │             耗尽才拒且文案指明「领队 git 并发写冲突，请稍后重派」；无增量零开销
   │             跳过；体量闸 2000 文件/200MiB/软链（ls-files --others 配 lstat），
-  │             超限或采集/应用失败一律具名拒建单并把原因回灌给领队改派，不静默）
+  │             未跟踪盘点（ls-files）超时即拒单；超限或采集/应用失败一律具名拒建单
+  │             并把原因回灌给领队改派，不静默）
   ├─ 等本轮子任务全部终态 → 终态（含 failed）即对队员 worktree commitAll 落盘
   │     （nothing silently discarded，不等集成期；cancelled 例外）
   │     → 终态全文双落：完整 result → ① 领队主仓库根 .agentdeck-reports/<单号>.md

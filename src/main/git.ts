@@ -44,15 +44,20 @@ const AGENT_GIT_IDENTITY = ['-c', 'user.email=agentdeck@local', '-c', 'user.name
  *  统一走 info/exclude 忽略（不改 tracked 文件，零污染），代码里再做一层路径过滤兜底。 */
 export const SYSTEM_SIDECAR_DIRS = ['.agentdeck-worktrees', '.agentdeck-reports'] as const
 
-/** 把系统目录追加进 gitdir 的 info/exclude；幂等，只追加缺失项 */
+/** 把系统目录追加进 gitdir 的 info/exclude；幂等，只追加缺失项。
+ *  判定按行拆分后整行精确匹配（子串判定会把 .agentdeck-reports-old 误认成
+ *  .agentdeck-reports 已存在而跳过追加）；追加失败 warn 不静默。 */
 function appendGitExcludes(gitDir: string, entries: readonly string[]) {
   const excludeFile = path.join(gitDir, 'info', 'exclude')
   try {
     fs.mkdirSync(path.dirname(excludeFile), { recursive: true })
     const cur = fs.existsSync(excludeFile) ? fs.readFileSync(excludeFile, 'utf8') : ''
-    const missing = entries.filter((entry) => !cur.includes(entry))
+    const lines = new Set(cur.split(/\r?\n/).map((line) => line.trim()).filter(Boolean))
+    const missing = entries.filter((entry) => !lines.has(`${entry}/`))
     if (missing.length) fs.appendFileSync(excludeFile, '\n' + missing.map((entry) => `${entry}/\n`).join(''))
-  } catch {}
+  } catch (err) {
+    console.warn(`[git] info/exclude 追加失败（${excludeFile}），系统目录可能污染 git status：`, err)
+  }
 }
 
 /** 集成分支（agentdeck/task-<taskId>）持有用户尚未 merge 的唯一集成结果：
@@ -755,12 +760,15 @@ function pathspecExcludes(): string[] {
  * 领队的改动不算子产出、不进子 git 小节。失败一律 refused + 具名原因，由调用方拒建单。
  * 体量闸先行：未跟踪文件数 >2000、总体积 >200MiB 或含软链 → 拒（gitignore 掉的依赖
  * 目录本就不在增量里；子单需要完整依赖时领队应先提交 lockfile——文档写明的边界）。
+ * 未跟踪盘点（ls-files）超时即拒单：大仓盘点限时 15s（含锁退避重试），宁可拒建单
+ * 回灌原因让领队改派，也不拿残缺增量当基线静默回放。
  */
 export async function replayLeaderBaseline(leaderWorkdir: string, childWorkdir: string, childBaseSha: string): Promise<BaselineReplayResult> {
   if (!leaderWorkdir || !childWorkdir || !childBaseSha) return replayRefused('回放前置缺失：workdir 或子基线为空')
   // 全程禁 opportunistic index 锁：只读盘点在领队侧 index.lock 存在时也照常执行
   const lockEnv: NodeJS.ProcessEnv = { ...process.env, GIT_OPTIONAL_LOCKS: '0' }
-  // 体量闸先行（只读）：未跟踪清单 + 已跟踪改动一次盘明，零增量直接走零开销路径
+  // 体量闸先行（只读）：未跟踪清单 + 已跟踪改动一次盘明，零增量直接走零开销路径；
+  // 未跟踪盘点（ls-files）超时即拒单——不拿残缺清单当基线回放
   const [list, quiet, trackedNames] = await Promise.all([
     runGitWithLockRetry(leaderWorkdir, ['ls-files', '--others', '--exclude-standard', '-z'], 15000, lockEnv),
     runGitWithLockRetry(leaderWorkdir, ['diff', '--quiet', 'HEAD'], 15000, lockEnv),
@@ -789,7 +797,7 @@ export async function replayLeaderBaseline(leaderWorkdir: string, childWorkdir: 
     }
   }
   if (symlinks.length) {
-    return replayRefused(`回放增量含软链（${symlinks[0]}${symlinks.length > 1 ? ` 等 ${symlinks.length} 个` : ''}），回放不追随软链`)
+    return replayRefused(`回放增量含软链（${symlinks[0]}${symlinks.length > 1 ? ` 等 ${symlinks.length} 个` : ''}），回放不追随软链——请 gitignore、先提交或将软链移出领队工作区后重派`)
   }
 
   // 私有 index 采集：副本播种失败不可怕，read-tree 重建只是冷缓存

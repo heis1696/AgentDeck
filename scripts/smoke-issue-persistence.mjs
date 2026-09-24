@@ -424,6 +424,71 @@ try {
     }
   }
 
+  // m3：端到端降级——真实 IssueStore（临时目录初始化、不建任何 issue）直连 issue-relay 出口：
+  // addComment 真返回 null（非桩），降级产出任务事件+push 各一次。事件通道用真实 TaskStore
+  // （磁盘持久化）；push 在真实进程里是 runner.pushEvent（ports.send 到 renderer），smoke 以
+  // 记录端口核对推送次数与内容——推的必须是落盘那条事件本身。
+  console.log('[scenario] end-to-end degradation: real IssueStore with no issues through the relay exit')
+  {
+    const storeBundle = path.join(tempRoot, 'task-store.cjs')
+    await build({
+      entryPoints: [path.join(root, 'src/main/store.ts')],
+      outfile: storeBundle,
+      bundle: true,
+      platform: 'node',
+      format: 'cjs',
+      target: 'node18',
+      external: ['electron'],
+      logLevel: 'silent'
+    })
+    const { TaskStore } = await import(pathToFileURL(storeBundle).href)
+    const { relayIssueCommentOrEvent } = await import(pathToFileURL(path.join(tempRoot, 'issue-relay.cjs')).href)
+
+    const issues = new IssueStore(makeDir('relay-e2e-issues'))
+    const taskDir = makeDir('relay-e2e-tasks')
+    const tasks = new TaskStore(taskDir, { recoverRunning: false })
+    const created = tasks.create({ title: '降级落点任务', prompt: 'e2e degradation', workdir: '', backend: 'fake' })
+
+    const pushed = []
+    const warns = []
+    const origWarn = console.warn
+    console.warn = (...args) => warns.push(args.map(String).join(' '))
+    let delivered
+    try {
+      delivered = relayIssueCommentOrEvent(
+        {
+          addComment: (issueId, text, author) => issues.addComment(issueId, text, author),
+          appendEvent: (taskId, event) => tasks.appendEvent(taskId, event),
+          pushEvent: (taskId, event) => pushed.push({ taskId, event })
+        },
+        {
+          issueId: 'iss_never_created',
+          taskId: created.id,
+          comment: 'e2e：队员全文（Issue 不存在 → 必须降级留痕）',
+          fallbackEventText: '⚠ 全文评论未送达（Issue 不存在），已降级留痕',
+          author: { type: 'agent', id: 'relay-e2e' }
+        }
+      )
+    } finally {
+      console.warn = origWarn
+      tasks.flush()
+    }
+
+    assert.equal(delivered, false, 'e2e：真实 IssueStore 无此 issue → addComment=null → 未送达')
+    assert.equal(pushed.length, 1, 'e2e：降级 push 恰一次')
+    assert.ok(warns.some((line) => line.includes('[issue-relay]') && line.includes('iss_never_created')), 'e2e：issue-relay 留 console.warn')
+
+    // 非桩通道验证：新开 TaskStore 实例从磁盘读回，降级事件真实持久化、且推送的就是它
+    const persisted = new TaskStore(taskDir, { recoverRunning: false }).readEvents(created.id)
+    assert.equal(persisted.length, 1, 'e2e：降级事件恰好落盘一条')
+    assert.equal(persisted[0].kind, 'status', 'e2e：落盘事件为 status 类')
+    assert.equal(persisted[0].text, '⚠ 全文评论未送达（Issue 不存在），已降级留痕', 'e2e：落盘事件携带降级文案')
+    assert.equal(persisted[0].seq, pushed[0].event.seq, 'e2e：推送与落盘同一 seq')
+    assert.equal(persisted[0].ts, pushed[0].event.ts, 'e2e：推送与落盘同一 ts（同一条事件，非二次产出）')
+    assert.equal(persisted[0].seq, 1, 'e2e：事件 seq 从 1 起正常推进')
+    console.log('  PASS real missing-issue comment degrades end-to-end via persisted task event + push')
+  }
+
   console.log('SMOKE ISSUE PERSISTENCE PASSED')
 } finally {
   fs.rmSync(tempRoot, { recursive: true, force: true })

@@ -483,6 +483,22 @@ const digestBase = {
     const excludeText = fs.readFileSync(path.join(copyRepo, '.git', 'info', 'exclude'), 'utf8')
     assert(excludeText.includes(REPORTS_DIR_NAME), 'A2：.agentdeck-reports 已进 info/exclude')
     assert(execSync('git status --porcelain', { cwd: copyRepo, encoding: 'utf8' }).trim() === '', 'A2：副本不改 tracked 文件零污染（status 干净）')
+    // m2②：幂等按整行精确匹配——整行已存在时不重复追加（再写一次副本，行数不变）
+    await writeReportCopy(copyRepo, 'child_x2', '# 幂等回写\n')
+    const idempotentLines = fs.readFileSync(path.join(copyRepo, '.git', 'info', 'exclude'), 'utf8').split(/\r?\n/).map((line) => line.trim())
+    assert(idempotentLines.filter((line) => line === `${REPORTS_DIR_NAME}/`).length === 1, 'm2②：整行已存在时不重复追加')
+  }
+
+  // m2①：info/exclude 判定整行精确匹配——既有形似行（.agentdeck-reports-old）不误判跳过追加
+  {
+    const similarRepo = mkRepo('copy-m2-similar')
+    const excludeFile = path.join(similarRepo, '.git', 'info', 'exclude')
+    fs.writeFileSync(excludeFile, '.agentdeck-worktrees/\n.agentdeck-reports-old/\n')
+    const abs = await writeReportCopy(similarRepo, 'child_m2', '# 形似行不跳过\n')
+    assert(!!abs, 'm2①：报告副本写入')
+    const lines = fs.readFileSync(excludeFile, 'utf8').split(/\r?\n/).map((line) => line.trim())
+    assert(lines.includes(`${REPORTS_DIR_NAME}/`), 'm2①：既有 .agentdeck-reports-old 行不误判跳过 .agentdeck-reports 追加')
+    assert(lines.filter((line) => line === '.agentdeck-worktrees/').length === 1, 'm2①：已存在的 .agentdeck-worktrees/ 不重复追加')
   }
 
   // 块三②（先红：基线把副本写进领队所在目录）：worktree 内写入统一归位主仓库根 + 按 cwd 重算指引
