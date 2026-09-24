@@ -322,6 +322,9 @@ const initMain = async (): Promise<void> => {
         const claim = store.claimWorktreeCleanup(dir, owner, merge)
         return claim ? { release: () => { try { store.releaseGitOperation(claim) } catch {} } } : undefined
       }
+    }).then((report) => {
+      // 清扫失败不再静默：连续多轮失败时用户能从时间线发现「有删不掉的 worktree」线索
+      for (const failure of report.failed) store.noteWorktreeCleanupFailure(dir, failure)
     }).catch(() => {})
     // 报告副本 GC 挂线三（启动清扫）：孤儿副本（任务已不在册）删除，在册副本保留
     void sweepReportCopies(dir, (id) => !!store.get(id)).catch(() => {})

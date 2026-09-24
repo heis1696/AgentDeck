@@ -32,7 +32,7 @@ export interface WorktreePruneResult {
   scanned: number
   removed: string[]
   retained: Array<{ name: string; reason: string }>
-  failed: Array<{ name: string; reason: string }>
+  failed: Array<{ name: string; reason: string; ownerTaskId?: string }>
 }
 
 const DEFAULT_WORKTREE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
@@ -1151,8 +1151,13 @@ export async function pruneWorktrees(
     const wtPath = path.join(worktreeDir, name)
     const metadata = readMetadataFile(metadataFile(root, name))
     result.scanned++
+    // merge 临时目录（.agentdeck-merge-* / .agentdeck-merge-detach-*）是施工脚手架非成果载体：
+    // 集成结果都落在分支上，owner 存续（哪怕在册且检出同一集成分支）不构成保留理由——
+    // crashLeftover 判定先于 keepTask，直接进回收流程（租约照拿，拿不到 retain 待下轮）；
+    // isIntegrationBranch 守卫照旧：只删目录与侧车，集成分支仅删任务的显式路径可带走。
+    const crashLeftover = name.startsWith('.agentdeck-merge-')
     const owner = metadata?.ownerTaskId || name.replace(/_c\d+$/, '')
-    if (owner && keepTask(owner, metadata ?? undefined)) {
+    if (!crashLeftover && owner && keepTask(owner, metadata ?? undefined)) {
       result.retained.push({ name, reason: 'owner task or Git operation is still active' })
       continue
     }
@@ -1187,7 +1192,6 @@ export async function pruneWorktrees(
     }
     const stat = (() => { try { return fs.statSync(wtPath) } catch { return null } })()
     const createdAt = metadata?.createdAt ?? stat?.birthtimeMs ?? stat?.mtimeMs ?? now
-    const crashLeftover = name.startsWith('.agentdeck-merge-')
     if (!crashLeftover && maxAgeMs > 0 && now - createdAt < maxAgeMs) {
       result.retained.push({ name, reason: 'within retention window' })
       continue
@@ -1200,10 +1204,12 @@ export async function pruneWorktrees(
     try {
       // 集成分支对清扫路径只减目录、不减分支（isIntegrationBranch 守卫）：
       // 集成结果在分支上，目录只是检出；删任务的显式路径才允许连分支一起删。
-      const reclaimed = await reclaimWorktree(wtPath, { deleteBranch: !isIntegrationBranch(metadata?.branch) })
+      // 施工脚手架对脏判定豁免（force）：租约已确保无在途 Git 操作、仓库任务全部终态，
+      // 崩溃残留的冲突/半成品状态不构成保留理由。
+      const reclaimed = await reclaimWorktree(wtPath, { ...(crashLeftover ? { force: true } : {}), deleteBranch: !isIntegrationBranch(metadata?.branch) })
       if (reclaimed.ok) result.removed.push(name)
       else if (reclaimed.status === 'retained') result.retained.push({ name, reason: reclaimed.reason ?? 'retained by policy' })
-      else result.failed.push({ name, reason: reclaimed.reason ?? 'cleanup failed' })
+      else result.failed.push({ name, reason: reclaimed.reason ?? 'cleanup failed', ...(owner && owner !== name ? { ownerTaskId: owner } : {}) })
     } finally {
       lease?.release()
     }
@@ -1211,19 +1217,19 @@ export async function pruneWorktrees(
   return result
 }
 
-/** Startup compatibility wrapper returning only removed directory names. */
+/** Startup wrapper（maxAgeMs 默认 0）：返回完整报告而非仅 removed 名单——启动清扫据此把
+ *  回收失败（含 merge 尸体占用）记上时间线，不再静默丢弃。 */
 export async function sweepWorktrees(
   repoDir: string,
   keepTask: (taskId: string, worktree?: WorktreeInfo) => boolean,
   options: { maxAgeMs?: number; now?: number; claimWorktree?: (taskId: string, mergeWorktree: boolean) => WorktreePruneLease | undefined } = {}
-): Promise<string[]> {
+): Promise<WorktreePruneResult> {
   // Preserve the legacy startup behavior: ownerless clean worktrees are
   // removed immediately, while dirty/manual-kept trees remain fail-closed.
-  const result = await pruneWorktrees(repoDir, keepTask, {
+  return pruneWorktrees(repoDir, keepTask, {
     ...options,
     maxAgeMs: options.maxAgeMs ?? 0
   })
-  return result.removed
 }
 
 /** Structured merge implementation. The legacy helper above remains private for compatibility during migration. */
@@ -1231,7 +1237,7 @@ export async function mergeBranchInto(
   repoDir: string,
   targetBranch: string,
   sourceBranch: string
-): Promise<{ ok: boolean; conflict: boolean; message: string }> {
+): Promise<{ ok: boolean; conflict: boolean; message: string; cleanupWarning?: string }> {
   const exists = await runGit(repoDir, ['rev-parse', '--verify', targetBranch])
   if (!exists.ok || !exists.stdout.trim()) {
     const created = await runGit(repoDir, ['branch', targetBranch], 30000)
@@ -1241,19 +1247,32 @@ export async function mergeBranchInto(
   const wtPath = path.join(repoDir, '.agentdeck-worktrees', tmpName)
   const added = await runGit(repoDir, ['worktree', 'add', wtPath, targetBranch], 60000)
   if (!added.ok) return { ok: false, conflict: false, message: `cannot create merge worktree: ${gitError(added)}` }
+  // finally 兜不住（目录被占用等）→ 留痕不静默：目录名+原因进返回值（调用方记时间线），
+  // 同时 console.warn 留现场；尸体由下轮启动清扫的 crashLeftover 通道兜底回收。
+  let cleanupWarning: string | undefined
+  const withWarning = <T extends { ok: boolean; conflict: boolean; message: string }>(result: T): T =>
+    cleanupWarning ? { ...result, cleanupWarning } : result
+  let outcome = { ok: false, conflict: false, message: 'merge did not complete' }
   try {
     const merged = await runGit(wtPath, [...AGENT_GIT_IDENTITY, 'merge', '--no-ff', '-m', `merge ${sourceBranch} into ${targetBranch}`, sourceBranch], 60000)
     const detail = `${merged.stderr}\n${merged.stdout}`.trim()
     const conflict = /conflict|automatic merge failed/i.test(detail)
     if (conflict) {
       await runGit(wtPath, ['merge', '--abort'], 30000)
-      return { ok: false, conflict: true, message: `merge conflict: ${detail.slice(0, 400)}` }
+      outcome = { ok: false, conflict: true, message: `merge conflict: ${detail.slice(0, 400)}` }
+    } else if (!merged.ok) {
+      outcome = { ok: false, conflict: false, message: detail.slice(0, 400) || `git exit ${merged.code ?? 'unknown'}` }
+    } else {
+      outcome = { ok: true, conflict: false, message: '' }
     }
-    if (!merged.ok) return { ok: false, conflict: false, message: detail.slice(0, 400) || `git exit ${merged.code ?? 'unknown'}` }
-    return { ok: true, conflict: false, message: '' }
   } finally {
-    await runGit(repoDir, ['worktree', 'remove', '--force', wtPath], 30000)
+    const removed = await runGit(repoDir, ['worktree', 'remove', '--force', wtPath], 30000)
+    if (!removed.ok && fs.existsSync(wtPath)) {
+      cleanupWarning = `${tmpName}: ${gitError(removed)}`
+      console.warn(`[git] merge 临时 worktree 清理失败（保留现场，待下轮清扫兜底）：${tmpName} — ${gitError(removed)}`)
+    }
   }
+  return withWarning(outcome)
 }
 
 /** 就地把 sourceBranch merge 进托管 worktree 当前检出的分支（续链二次集成：
@@ -1268,7 +1287,7 @@ export async function mergeIntoManagedWorktree(
   wtDir: string,
   sourceBranch: string,
   expectedOwner = ''
-): Promise<{ ok: boolean; conflict: boolean; message: string }> {
+): Promise<{ ok: boolean; conflict: boolean; message: string; cleanupWarning?: string }> {
   const refuse = (message: string) => ({ ok: false, conflict: false, message })
   const resolved = await resolveManagedWorktree(wtDir)
   if (!resolved) return refuse('refusing in-place merge outside .agentdeck-worktrees')
@@ -1356,7 +1375,7 @@ export async function mergeIntoManagedWorktreeDetached(
   wtDir: string,
   sourceBranch: string,
   expectedOwner = ''
-): Promise<{ ok: boolean; conflict: boolean; message: string }> {
+): Promise<{ ok: boolean; conflict: boolean; message: string; cleanupWarning?: string }> {
   const refuse = (message: string) => ({ ok: false, conflict: false, message })
   const resolved = await resolveManagedWorktree(wtDir)
   if (!resolved) return refuse('refusing detached merge outside .agentdeck-worktrees')
@@ -1373,26 +1392,44 @@ export async function mergeIntoManagedWorktreeDetached(
   const wtPath = path.join(managedRoot(repoDir), tmpName)
   const added = await runGit(repoDir, ['worktree', 'add', '--detach', wtPath, head], 60000)
   if (!added.ok) return refuse(`cannot create detached merge worktree: ${gitError(added)}`)
+  // finally 兜不住（目录被占用等）→ 留痕不静默：目录名+原因进返回值（调用方记时间线），
+  // 同时 console.warn 留现场；尸体由下轮启动清扫的 crashLeftover 通道兜底回收。
+  let cleanupWarning: string | undefined
+  const withWarning = <T extends { ok: boolean; conflict: boolean; message: string }>(result: T): T =>
+    cleanupWarning ? { ...result, cleanupWarning } : result
+  let outcome = { ok: false, conflict: false, message: 'merge did not complete' }
+  let mergedOk = false
   try {
     const merged = await runGit(wtPath, [...AGENT_GIT_IDENTITY, 'merge', '--no-ff', '-m', `merge ${sourceBranch} into ${branch} (detached)`, sourceBranch], 60000)
     const detail = `${merged.stderr}\n${merged.stdout}`.trim()
     const conflict = /conflict|automatic merge failed/i.test(detail)
     if (conflict) {
       await runGit(wtPath, ['merge', '--abort'], 30000)
-      return { ok: false, conflict: true, message: `merge conflict: ${detail.slice(0, 400)}` }
+      outcome = { ok: false, conflict: true, message: `merge conflict: ${detail.slice(0, 400)}` }
+    } else if (!merged.ok) {
+      outcome = { ok: false, conflict: false, message: detail.slice(0, 400) || `git exit ${merged.code ?? 'unknown'}` }
+    } else {
+      const mergedHead = await branchHead(wtPath, 'HEAD')
+      if (!mergedHead) {
+        outcome = { ok: false, conflict: false, message: 'detached merge produced no head' }
+      } else {
+        const moved = await runGit(repoDir, ['update-ref', `refs/heads/${branch}`, mergedHead], 15000)
+        if (!moved.ok) outcome = { ok: false, conflict: false, message: `update-ref failed: ${gitError(moved)}` }
+        else mergedOk = true
+      }
     }
-    if (!merged.ok) return { ok: false, conflict: false, message: detail.slice(0, 400) || `git exit ${merged.code ?? 'unknown'}` }
-    const mergedHead = await branchHead(wtPath, 'HEAD')
-    if (!mergedHead) return { ok: false, conflict: false, message: 'detached merge produced no head' }
-    const moved = await runGit(repoDir, ['update-ref', `refs/heads/${branch}`, mergedHead], 15000)
-    if (!moved.ok) return { ok: false, conflict: false, message: `update-ref failed: ${gitError(moved)}` }
   } finally {
-    await runGit(repoDir, ['worktree', 'remove', '--force', wtPath], 30000)
+    const removed = await runGit(repoDir, ['worktree', 'remove', '--force', wtPath], 30000)
+    if (!removed.ok && fs.existsSync(wtPath)) {
+      cleanupWarning = `${tmpName}: ${gitError(removed)}`
+      console.warn(`[git] merge 临时 worktree 清理失败（保留现场，待下轮清扫兜底）：${tmpName} — ${gitError(removed)}`)
+    }
   }
+  if (!mergedOk) return withWarning(outcome)
   // 回指后托管副本停在旧提交（index 陈旧形态）：幻影暂存守卫下对齐干净副本
   const realigned = await realignCleanWorktreeToHead(wtDir)
   if (!realigned.ok) {
-    return { ok: false, conflict: false, message: `merged into ${branch} via detached worktree, but managed copy realignment failed: ${realigned.reason ?? 'unknown'}` }
+    return withWarning({ ok: false, conflict: false, message: `merged into ${branch} via detached worktree, but managed copy realignment failed: ${realigned.reason ?? 'unknown'}` })
   }
-  return { ok: true, conflict: false, message: '' }
+  return withWarning({ ok: true, conflict: false, message: '' })
 }
