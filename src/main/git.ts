@@ -692,22 +692,26 @@ interface WorktreeTimeoutCleanupResult {
   residue: string[]
 }
 
-/** 失败残肢就地清理：被击杀/中途报错的 checkout 可能写了一半，注册/目录/分支全清，
- *  重派拿到干净现场（否则同名重派会撞 branch already exists）。全部 best-effort，
- *  失败不掩盖主失败原因，但不再静默——目录/注册/分支各自成败随结果返回，
- *  失败步骤进 residue 供时间线/拒单文案可见。 */
-async function cleanupWorktreeAddResidue(repoDir: string, wtPath: string, branch: string, deleteBranchRef: boolean): Promise<WorktreeTimeoutCleanupResult> {
+/** 失败残肢就地清理：被击杀/中途报错的 checkout 可能写了一半，注册/目录/分支按归属
+ *  受控回收（deleteBranchRef / removeDirectory 只对本次尝试自己创建的资产为 true——
+ *  "branch already exists"这类秒败里既存分支/目录是外部资产，删了会夷平别人现场、
+ *  还会让内置重试意外成功改变派单语义）。全部 best-effort，失败不掩盖主失败原因，
+ *  但不再静默——失败步骤进 residue 供时间线/拒单文案可见。 */
+async function cleanupWorktreeAddResidue(repoDir: string, wtPath: string, branch: string, deleteBranchRef: boolean, removeDirectory = true): Promise<WorktreeTimeoutCleanupResult> {
   const residue: string[] = []
   // 目录：worktree remove --force 败（目录已缺/句柄占用）再走 rmSync，两条路都断才记残留
-  const removed = await runGit(repoDir, ['worktree', 'remove', '--force', wtPath], 30_000)
-  let directoryRemoved = removed.ok
-  if (!directoryRemoved) {
-    try {
-      fs.rmSync(wtPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 300 })
-      directoryRemoved = !fs.existsSync(wtPath)
-    } catch { directoryRemoved = false }
+  let directoryRemoved = true
+  if (removeDirectory) {
+    const removed = await runGit(repoDir, ['worktree', 'remove', '--force', wtPath], 30_000)
+    directoryRemoved = removed.ok
+    if (!directoryRemoved) {
+      try {
+        fs.rmSync(wtPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 300 })
+        directoryRemoved = !fs.existsSync(wtPath)
+      } catch { directoryRemoved = false }
+    }
+    if (!directoryRemoved) residue.push(`目录 ${wtPath}（留待启动清扫兜底）`)
   }
-  if (!directoryRemoved) residue.push(`目录 ${wtPath}（留待启动清扫兜底）`)
   // 注册：prune 收 .git/worktrees/<name> 注册残留
   const pruned = await runGit(repoDir, ['worktree', 'prune'], 15_000)
   if (!pruned.ok) {
@@ -862,6 +866,11 @@ export async function createWorktree(
   const baseSha = (await git(repoDir, ['rev-parse', baseBranch || 'HEAD'])).trim()
   if (!baseSha) { fail(`无法解析基线 ${baseBranch || 'HEAD'} 的提交`); return null }
   fs.mkdirSync(worktreeDir, { recursive: true })
+  // 归属前置盘点：失败清理只回收本次尝试自己创建的资产。既存同名分支/目录是外部资产
+  // （用户残留、预置分支、上一轮现场），删了等于替别人清场，且会让内置重试从"秒败拒单"
+  // 变成"意外建树成功"——派单语义被静默改写（锁专项③回归的教训）
+  const branchPreexisting = await branchExists(repoDir, branch)
+  const dirPreexisting = fs.existsSync(wtPath)
   const planned = options.addTimeoutMs !== undefined
     ? { timeoutMs: options.addTimeoutMs, fileCount: undefined as number | undefined }
     : await planWorktreeAddTimeout(root, repoDir, options.estimateFileCount)
@@ -870,8 +879,11 @@ export async function createWorktree(
   if (pooled) return pooled
   const out = await runGit(repoDir, ['worktree', 'add', '-b', branch, wtPath, ...(baseBranch ? [baseBranch] : [])], planned.timeoutMs, undefined, true)
   if (out.timedOut) {
-    // 超时绝不当成功：树杀前的 checkout 可能写了一半，孤儿残留的 index.lock 会卡死后续回放
-    const cleaned = await cleanupWorktreeAddResidue(repoDir, wtPath, branch, true)
+    // 超时绝不当成功：树杀前的 checkout 可能写了一半，孤儿残留的 index.lock 会卡死后续
+    // 回放。超时路径无条件全清（含同名既存资产）——agentdeck/<task>_cN 是托管命名空间，
+    // 超时意味着本方已进场施工，同名资产按上一轮残肢对待，这是 hot.7「重派不撞 already
+    // exists」的既定契约（smoke-worktree-timeout 块②固化的语义）
+    const cleaned = await cleanupWorktreeAddResidue(repoDir, wtPath, branch, true, true)
     if (cleaned.residue.length) {
       // 清理部分失败不再静默：残留清单（含分支名）走 noteWorktreeCleanupFailure 记 owner
       // 时间线；拒单文案只报实情，绝不谎称「残肢已清理」——重派 already exists 时查得到现场
@@ -884,9 +896,11 @@ export async function createWorktree(
     return null
   }
   if (!out.ok && !(await worktreeReadyForTolerance(wtPath, branch))) {
-    // 非超时失败同样清残肢：add 中途真实报错（长路径/磁盘/文件占用）时分支/注册/目录一样
-    // 残留，内置重试紧跟着就会撞 branch already exists——与超时路径同一清理通道
-    const cleaned = await cleanupWorktreeAddResidue(repoDir, wtPath, branch, true)
+    // 非超时失败按归属清残肢：本方中途报错（长路径/磁盘/文件占用）时分支/目录是本次尝试
+    // 创建的残肢，与超时路径同一清理通道；"already exists"秒败则什么都没建——既存资产
+    // （用户残留/预置分支）不是本次的残肢，清了会让内置重试意外建树成功，静默改写派单
+    // 语义（锁专项③回归的教训，smoke-worktree-lifecycle 固化该守卫）
+    const cleaned = await cleanupWorktreeAddResidue(repoDir, wtPath, branch, !branchPreexisting, !dirPreexisting)
     if (cleaned.residue.length) {
       try { options.onCleanupResidue?.({ name, reason: `失败残肢清理部分失败：${cleaned.residue.join('、')}`, ownerTaskId }) } catch { /* 时间线出口失败不掩盖主失败 */ }
     }

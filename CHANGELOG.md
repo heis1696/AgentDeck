@@ -16,6 +16,7 @@
 
 ### 修复
 
+- **建树失败清理按归属回收（e3ea8bf 回归修复）**：非超时 "already exists" 秒败路径此前无条件删同名分支/目录——外部预置/残留资产被误清后，内置重试反而"意外建树成功"、子任务被建出、领队卡 running 不落终态（smoke:delegate 锁专项③拦截）。现在建树前盘点分支/目录归属：秒败只清本次尝试自建的资产（既存分支原样存活），超时路径维持 hot.7 全清契约（托管命名空间残肢全清，重派不撞 already exists）；smoke-worktree-lifecycle 固化"既存分支秒败后原样存活"守卫，验证门补 smoke:delegate 全量。
 - **worktree add 非超时失败同样清残肢**：add 中途真实报错（长路径/磁盘/文件占用）此前不清残肢即返回，内置重试紧跟着撞 `branch already exists` 且拒单文案只见余波——现在与超时路径同一清理通道（`cleanupWorktreeAddResidue`），部分失败经 `onCleanupResidue` 记 owner 时间线，重派拿到干净现场。
 - **建树重试保留首次失败原因**：runner 三次建树重试此前 `lastWtError` 逐次覆盖，首因（如 `Filename too long`）被重试余波（`branch already exists`）顶掉、真凶不可观测——现在只记首次错误，余波不再掩盖原因。
 - **队员报告全文双落（摘要回灌之外的持久全文通道）**：队员终态全文镜像进 Issue 评论（单号/状态/runId 标识，不截断）+ 写入领队 workdir `.agentdeck-reports/<单号>.md` 报告副本（头带 runId 防串轮）；摘要尾附全文入口指引（副本相对路径 + Issue 评论锚点）——摘要回灌丢细节时全文永远可查。

@@ -94,6 +94,15 @@ try {
 
   const sweepPooled = await pruneWorktrees(dir, () => false, { maxAgeMs: 0, claimWorktree: testClaim })
   check(sweepPooled.removed.includes('pool_task_a_c1'), 'startup sweep reclaims idle pool entries (session-scoped pool)')
+
+  // 失败清理按归属回收：既存同名分支（用户残留/预置）不是本次尝试的残肢——秒败拒单后
+  // 原样存活，绝不替外部资产清场；清了会让内置重试"意外建树成功"，静默改写派单语义
+  git('branch', 'agentdeck/foreign_task_c1')
+  const foreign = await createWorktree(dir, 'foreign_task_c1', 'main', 'foreign_owner')
+  check(!foreign, 'pre-existing branch: worktree add fails closed')
+  check(await branchExists(dir, 'agentdeck/foreign_task_c1'), 'pre-existing branch survives failed attempts untouched')
+  check(!fs.existsSync(path.join(dir, '.agentdeck-worktrees', 'foreign_task_c1')), 'fast-fail path leaves no directory behind')
+  git('branch', '-D', 'agentdeck/foreign_task_c1')
   console.log('\nWORKTREE LIFECYCLE SMOKE PASSED')
 } finally {
   fs.rmSync(dir, { recursive: true, force: true })
