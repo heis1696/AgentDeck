@@ -10,6 +10,7 @@ import type { TaskCreateInput } from './task-service'
 import { TaskRunner } from './runner'
 import type { AgentBackend } from './backends/types'
 import { prepareManualTaskStart } from './handoff'
+import { relayIssueCommentOrEvent, type IssueRelayChannels } from './issue-relay'
 import { createClaudeBackend } from './backends/claude'
 import { createCodexBackend } from './backends/codex'
 import { createDshBackend } from './backends/dsh'
@@ -116,17 +117,27 @@ export class SidecarRuntime {
       // 与主进程接线（index.ts attachContinue）对齐：停放的后继对用户是隐形的
       // （调度泵与重启对账都跳过 parked），sidecar 又没有 notifyTaskChanged 推送通道——
       // 落一条 Issue 评论把"等你启动"喊到用户看得到的地方，只在新建时追加。
+      // 停放通知走统一中继：评论未送达（Issue 不存在）降级为后继任务事件留痕（落盘即证据）。
       if (task.parked && task.issueId) {
         const firstLine = task.prompt.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? task.title
-        const comment = this.issueStore.addComment(task.issueId, `⏸ 阶段接力已备好：${firstLine.slice(0, 80)}——下一阶段在等你启动（打开该 Issue 的最新执行，点「▶ 启动」）`, { type: 'agent', id: source?.agentId ?? 'relay' })
-        if (!comment) {
-          // null = Issue 已不存在：停放通知降级为后继任务事件留痕（sidecar 无推送通道，落盘即证据）
-          const event = this.store.appendEvent(task.id, { ts: Date.now(), kind: 'status', text: `⚠ 停放通知未送达（Issue 不存在）：阶段接力已备好，等用户启动` })
-          if (event) this.runner.pushEvent(task.id, event)
-        }
+        relayIssueCommentOrEvent(this.issueRelay, {
+          issueId: task.issueId,
+          taskId: task.id,
+          comment: `⏸ 阶段接力已备好：${firstLine.slice(0, 80)}——下一阶段在等你启动（打开该 Issue 的最新执行，点「▶ 启动」）`,
+          fallbackEventText: `⚠ 停放通知未送达（Issue 不存在）：阶段接力已备好，等用户启动`,
+          author: { type: 'agent', id: source?.agentId ?? 'relay' }
+        })
       }
       return task
     })
+  }
+
+  private get issueRelay(): IssueRelayChannels {
+    return {
+      addComment: (issueId, text, author) => this.issueStore.addComment(issueId, text, author ?? { type: 'agent', id: 'relay' }),
+      appendEvent: (taskId, event) => this.store.appendEvent(taskId, event),
+      pushEvent: (taskId, event) => this.runner.pushEvent(taskId, event)
+    }
   }
 
   private onTaskChanged(task: Task) {

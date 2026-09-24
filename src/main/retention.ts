@@ -3,6 +3,7 @@ import type { TaskStore } from './store'
 import type { IssueStore } from './issue-store'
 import type { TaskService } from './task-service'
 import type { EventLog } from './event-log'
+import { deleteReportCopies, resolveRepositoryRoot } from './git'
 
 const DAY = 86_400_000
 const TERMINAL = new Set(['done', 'failed', 'cancelled'])
@@ -94,6 +95,18 @@ export async function sweepExpiredIssues(deps: RetentionDeps, maxAgeDays = 30): 
         return current.safe && current.tasks.length === ids.size && current.tasks.every((task) => ids.has(task.id))
           && current.issues.length === plan.issues.length && current.issues.every((item) => plan.issues.some((prior) => prior.id === item.id))
       }
+      // 报告副本 GC 挂线二（retention 级联）：删除前按计划内任务收齐主仓库根（worktree
+      // 内外一致解析）；删除落定后副本随任务一并清掉，不留孤儿全文
+      const copyRoots = new Set<string>()
+      for (const task of plan.tasks) {
+        if (task.worktree?.repoDir) copyRoots.add(task.worktree.repoDir)
+        else if (task.workdir) {
+          try {
+            const root = await resolveRepositoryRoot(task.workdir)
+            if (root) copyRoots.add(root)
+          } catch { /* 非仓库目录无副本可清 */ }
+        }
+      }
       const deleted = await taskService.deleteTerminalCascade([...ids], deps.forget, valid)
       if (!deleted) continue
       // No await between task removal and projection removal: sync cannot
@@ -103,6 +116,7 @@ export async function sweepExpiredIssues(deps: RetentionDeps, maxAgeDays = 30): 
         report.deletedRuns += issueStore.runs(item.id).length
         if (issueStore.deleteIssue(item.id)) report.deletedIssues++
       }
+      deleteReportCopies([...copyRoots], deleted)
       report.deletedTasks += deleted.length
       for (const id of deleted) deps.onTaskDeleted?.(id)
     }

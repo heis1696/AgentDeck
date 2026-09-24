@@ -359,6 +359,71 @@ try {
     console.log('  PASS deletion tombstone prevents stale task projection resurrection')
   }
 
+  // 块三④：Issue 评论统一降级出口（issue-relay 直连断言两处路径：送达 / Issue 不存在）
+  console.log('[scenario] issue-relay unified degradation exit')
+  {
+    const relayOut = path.join(tempRoot, 'issue-relay.cjs')
+    await build({
+      entryPoints: [path.join(root, 'src/main/issue-relay.ts')],
+      outfile: relayOut,
+      bundle: true,
+      platform: 'node',
+      format: 'cjs',
+      target: 'node18',
+      logLevel: 'silent'
+    })
+    const { relayIssueCommentOrEvent, clampIssueCommentBytes, ISSUE_COMMENT_MAX_BYTES } = await import(pathToFileURL(relayOut).href)
+
+    // 路径一：评论送达 → true，零降级副作用（不发事件、不推送）
+    {
+      const calls = { add: 0, append: 0, push: 0 }
+      const delivered = relayIssueCommentOrEvent({
+        addComment: () => { calls.add++; return { id: 'com_ok' } },
+        appendEvent: () => { calls.append++; return null },
+        pushEvent: () => { calls.push++ }
+      }, { issueId: 'iss_ok', taskId: 'task_ok', comment: '全文', fallbackEventText: '降级文案' })
+      assert.equal(delivered, true, 'issue-relay：评论送达返回 true')
+      assert.deepEqual(calls, { add: 1, append: 0, push: 0 }, 'issue-relay：送达时零降级副作用')
+      console.log('  PASS delivered comment leaves no degradation side effects')
+    }
+
+    // 路径二：Issue 不存在（addComment=null）→ console.warn + 任务事件落盘 + pushEvent
+    {
+      const appended = []
+      const pushed = []
+      const warns = []
+      const origWarn = console.warn
+      console.warn = (...args) => warns.push(args.map(String).join(' '))
+      let delivered
+      try {
+        delivered = relayIssueCommentOrEvent({
+          addComment: () => null,
+          appendEvent: (taskId, event) => { appended.push({ taskId, event }); return { ...event, seq: 1 } },
+          pushEvent: (taskId, event) => pushed.push({ taskId, event })
+        }, { issueId: 'iss_gone', taskId: 'task_gone', comment: '全文', fallbackEventText: '⚠ 评论未送达（Issue 不存在）降级留痕' })
+      } finally {
+        console.warn = origWarn
+      }
+      assert.equal(delivered, false, 'issue-relay：未送达返回 false')
+      assert.equal(appended.length, 1, 'issue-relay：降级=任务事件落盘一次')
+      assert.equal(appended[0].taskId, 'task_gone', 'issue-relay：降级事件落到指定任务')
+      assert.equal(appended[0].event.text, '⚠ 评论未送达（Issue 不存在）降级留痕', 'issue-relay：降级事件携带指定文案')
+      assert.equal(pushed.length, 1, 'issue-relay：降级事件推送一次')
+      assert.equal(pushed[0].taskId, 'task_gone', 'issue-relay：推送同一任务')
+      assert.ok(warns.some((line) => line.includes('[issue-relay]') && line.includes('iss_gone')), 'issue-relay：未送达留 console.warn')
+      console.log('  PASS missing-issue comment degrades to warn + task event + push')
+    }
+
+    // 64KB 通道上限（同源钳制直连）：码点级截断 + 指引字节预算
+    {
+      const clamped = clampIssueCommentBytes('汉'.repeat(30_000) + '😀'.repeat(10_000))
+      assert.equal(clamped.truncated, true, 'issue-relay：超 64KB 触发截断')
+      assert.ok(Buffer.byteLength(clamped.text, 'utf8') + 512 <= ISSUE_COMMENT_MAX_BYTES, `issue-relay：钳制后留出指引预算（${Buffer.byteLength(clamped.text, 'utf8')}B）`)
+      assert.doesNotMatch(clamped.text, /[\uD800-\uDBFF]$/, 'issue-relay：钳制不孤立代理项')
+      console.log('  PASS 64KB comment clamp is codepoint-safe with pointer reserve')
+    }
+  }
+
   console.log('SMOKE ISSUE PERSISTENCE PASSED')
 } finally {
   fs.rmSync(tempRoot, { recursive: true, force: true })

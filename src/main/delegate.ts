@@ -35,12 +35,15 @@ import {
   markWorktreeCleanup,
   mergeBranchInto,
   mergeIntoManagedWorktree,
+  mergeIntoManagedWorktreeDetached,
   reclaimWorktree,
+  reportCopyRelPath,
   snapshotGitAfter,
   worktreeChangeDigest,
   writeReportCopy,
   type WorktreeChangeDigest
 } from './git'
+import { clampIssueCommentBytes } from './issue-relay'
 import { currentGitChanges } from '../shared/git-snapshot'
 
 /** Issue 评论的最小形状：addComment 成功返回；null = Issue 不存在（调用方必须降级，不静默丢） */
@@ -494,14 +497,43 @@ export interface ChildReportBodyInput {
   pointers?: string[]
 }
 
-/** 结构化摘要体：结论段（result 首部有界）+ git 改动小节 + 全文入口指引。
- *  队员可控文本（结论段、指引里的路径）不做伪装结构承诺，指引行统一过字面量破坏转义。 */
+/** 码点级切割：切点落在代理对中间时回退一位，绝不孤立代理项 */
+function sliceCodepoints(text: string, max: number): string {
+  if (max <= 0) return ''
+  if (text.length <= max) return text
+  let cut = max
+  const prev = text.charCodeAt(cut - 1)
+  if (prev >= 0xd800 && prev <= 0xdbff) cut -= 1
+  return text.slice(0, cut)
+}
+
+const FENCE_LINE_RE = /^[ \t]*```/
+
+/** 切点落在未闭合 ``` 围栏内时截至块前（防半截围栏在渲染层吞掉后续小节） */
+function cutBeforeUnclosedFence(text: string): string {
+  let count = 0
+  let lastOpenOffset = -1
+  let offset = 0
+  for (const line of text.split('\n')) {
+    if (FENCE_LINE_RE.test(line)) {
+      count++
+      lastOpenOffset = offset
+    }
+    offset += line.length + 1
+  }
+  if (count % 2 === 1 && lastOpenOffset >= 0) return text.slice(0, lastOpenOffset).replace(/\n$/, '')
+  return text
+}
+
+/** 结构化摘要体：结论段（result 首部有界，码点级切割 + 围栏感知；与 git 小节同源的
+ *  序列内破坏转义——队员可控文本里不再有可解析的活标记）+ git 改动小节 + 全文入口指引。
+ *  4000 字物理截断只是最后防线（触发带截断标记），全文已双落，摘要不承担携带全文的职责。 */
 export function buildChildReportBody(input: ChildReportBodyInput): string {
   const parts: string[] = []
   if (input.status === 'done') {
     const result = input.result ?? ''
-    const head = result.slice(0, REPORT_CONCLUSION_CHARS)
-    parts.push(head)
+    const head = cutBeforeUnclosedFence(sliceCodepoints(result, REPORT_CONCLUSION_CHARS))
+    parts.push(escapeProtocolLiterals(head))
     if (result.length > head.length) {
       parts.push(`…（结论段只摘前 ${REPORT_CONCLUSION_CHARS} 字，后 ${result.length - head.length} 字未进摘要；全文见下方入口）`)
     }
@@ -513,7 +545,7 @@ export function buildChildReportBody(input: ChildReportBodyInput): string {
   const body = parts.filter((part) => part !== '').join('\n\n')
   const overflow = body.length - REPORT_BODY_HARD_CAP
   if (overflow <= 0) return body
-  return body.slice(0, REPORT_BODY_HARD_CAP)
+  return sliceCodepoints(body, REPORT_BODY_HARD_CAP)
     + `\n…（回灌正文超 ${REPORT_BODY_HARD_CAP} 字触发最后防线截断：后 ${overflow} 字未送；全文见 Issue 评论与报告副本）`
 }
 
@@ -681,9 +713,10 @@ export async function runDelegationLoop(
     }
 
     // ---- 全文双落（队员终态即执行，不随摘要回灌的成败）：完整 result 同时落到
-    // ① 领队 Issue 评论（store 无上限，截断只发生在调用点）与 ② 领队 workdir 的
-    // .agentdeck-reports/<单号>.md（info/exclude 忽略，零污染；二层领队落自己的
-    // workdir，机制相同）。评论未送达（返回 null）必须留痕降级，绝不静默丢弃。
+    // ① 领队主仓库根 .agentdeck-reports/<单号>.md（info/exclude 忽略，零污染；worktree
+    // 内写入经 git-common-dir 归位主仓库根）与 ② 领队 Issue 评论（64KB 通道上限：钳制后
+    // 持真实副本路径指引回权威层）。副本先行落盘（权威层），评论只是第二通道；
+    // 评论未送达（返回 null）必须留痕降级，绝不静默丢弃。
     const fullTextEntries = new Map<string, { seq: number; issueOk: boolean; copyPath: string }>()
     for (let idx = 0; idx < childIds.length; idx++) {
       const id = childIds[idx]
@@ -693,22 +726,29 @@ export async function runDelegationLoop(
       const fullBody = c.status === 'done'
         ? (c.result ?? '').trim() || '（无最终输出）'
         : `状态 ${c.status}${c.error ? ': ' + c.error : ''}`
-      let issueOk = false
-      if (task.issueId) {
-        const comment = ctx.addIssueComment?.(task.issueId, workerFullReportComment(c.title, seq, c.status, c.runId ?? '', fullBody)) ?? null
-        issueOk = !!comment
-        if (!issueOk) note(`⚠ 单 #${seq} 的全文评论未送达（Issue 不存在或已删除），全文以报告副本与任务时间线为准`)
-      }
-      let copyPath = ''
+      let copyAbs = ''
       if (task.workdir && hasRepo) {
         const written = await writeReportCopy(task.workdir, id, reportCopyMarkdown({
           childId: id, title: c.title, seq, status: c.status, runId: c.runId ?? '', finishedAt: Date.now(), body: fullBody
         }))
         if (!active()) return abandoned()
-        if (written) copyPath = written
+        if (written) copyAbs = written
         else note(`⚠ 单 #${seq} 的报告副本写入失败（领队工作区不可写），全文仅存 Issue 评论`)
       }
-      fullTextEntries.set(id, { seq, issueOk, copyPath })
+      let issueOk = false
+      if (task.issueId) {
+        let commentText = workerFullReportComment(c.title, seq, c.status, c.runId ?? '', fullBody)
+        const clamped = clampIssueCommentBytes(commentText)
+        if (clamped.truncated) {
+          commentText = copyAbs
+            ? `${clamped.text}\n\n…（评论超出 64KB 通道上限已截断，完整全文以报告副本为准：${reportCopyRelPath(task.workdir!, copyAbs)}）`
+            : `${clamped.text}\n\n…（评论超出 64KB 通道上限已截断，且报告副本写入失败，全文未完整留存）`
+        }
+        const comment = ctx.addIssueComment?.(task.issueId, commentText) ?? null
+        issueOk = !!comment
+        if (!issueOk) note(`⚠ 单 #${seq} 的全文评论未送达（Issue 不存在或已删除），全文以报告副本与任务时间线为准`)
+      }
+      fullTextEntries.set(id, { seq, issueOk, copyPath: copyAbs ? reportCopyRelPath(task.workdir!, copyAbs) : '' })
     }
 
     // 汇报回灌（带单号；审核协议追加）。摘要改为结构化组装：单号+状态在条目标题，
@@ -846,9 +886,25 @@ export async function runDelegationLoop(
         // 临时 worktree 再检出同一分支会被 git 拒绝——此轮 merge 就地做（mergeIntoManagedWorktree
         // 只接受 .agentdeck-worktrees 托管目录，用户工作副本绝不就地改）；证据 diff 改用本轮
         // 集成起点 sha（此时 base 分支即集成分支自身，base...integration 会得到空证据）。
+        // 就地 merge 前置（续链互殴修复）：领队留在托管 worktree 的未提交交付先 commitAll
+        // 落盘——否则干净校验直接拒掉整轮集成、任务带着空 note 静默 done。roundBaseSha 取
+        // commitAll 之后的 HEAD：领队交付已成集成分支的净新增提交（finalizer headSha 观测
+        // 链自洽），本轮 diff 证据以它为基线，不与队员改动混算。
         const leaderOnIntegration = baseBranch === integrationBranch
-        const roundBaseSha = leaderOnIntegration ? await branchHead(task.workdir, integrationBranch) : ''
-        if (!active()) return abandoned()
+        let leaderDeliveryNote = ''
+        let roundBaseSha = ''
+        if (leaderOnIntegration) {
+          const headBeforeDelivery = await branchHead(task.workdir, integrationBranch)
+          if (!active()) return abandoned()
+          const delivered = await commitAll(task.workdir, `agentdeck: 领队续链交付（${task.title}）`)
+          if (!active()) return abandoned()
+          roundBaseSha = await branchHead(task.workdir, integrationBranch)
+          if (!active()) return abandoned()
+          if (delivered && roundBaseSha && roundBaseSha !== headBeforeDelivery) {
+            leaderDeliveryNote = '；领队集成 worktree 的未提交交付已先行落盘（计入本轮净新增）'
+            note('领队集成 worktree 的未提交交付已先行落盘，本轮集成继续')
+          }
+        }
         let allOk = true
         const problems: string[] = []
         let idx = 0
@@ -891,10 +947,19 @@ export async function runDelegationLoop(
             // 只有集成分支 HEAD 真实前进才计入 mergedCount，否则空 diff 会清掉既有证据
             const headBefore = await branchHead(task.workdir, integrationBranch)
             if (!active()) return abandoned()
-            const r = leaderOnIntegration
+            let r = leaderOnIntegration
               ? await mergeIntoManagedWorktree(task.workdir, b!, taskId)
               : await mergeBranchInto(task.workdir, integrationBranch, b!)
             if (!active()) return abandoned()
+            // 续链退路：就地合并被拒且非冲突（commitAll 后仍不干净、状态不可判等）→
+            // 退回临时 worktree 通道——同分支双检出（--detach）合并后 update-ref 回指，
+            // 托管副本按幻影暂存守卫对齐。冲突不走此路（abort 后留待人工/下轮改派）。
+            if (!r.ok && !r.conflict && leaderOnIntegration) {
+              note(`就地合并 ${b} 被拒（${r.message.slice(0, 120)}），退回临时 worktree 通道重试`)
+              const viaDetach = await mergeIntoManagedWorktreeDetached(task.workdir, b!, taskId)
+              if (!active()) return abandoned()
+              r = viaDetach.ok ? viaDetach : { ...viaDetach, message: `${r.message}；临时 worktree 通道仍失败：${viaDetach.message}` }
+            }
             if (!r.ok) {
               childOk = false
               allOk = false
@@ -951,7 +1016,7 @@ export async function runDelegationLoop(
           // 未提交改动（跨线合并是人/后续流程的事）——集成证据与 UI 说明必须亮明这一点
           const replayedFiles = [...reportedChildren.values()]
             .reduce((total, child) => total + (child.worktree?.replay?.files ?? 0), 0)
-          integrationNote = `改动已合入集成分支 ${integrationBranch}（基线 ${baseBranch}，${mergedCount} 个子任务${replayedFiles ? `；含领队回放基线 ${replayedFiles} 文件` : ''}），确认后可自行 merge`
+          integrationNote = `改动已合入集成分支 ${integrationBranch}（基线 ${baseBranch}，${mergedCount} 个子任务${replayedFiles ? `；含领队回放基线 ${replayedFiles} 文件` : ''}${leaderDeliveryNote}），确认后可自行 merge`
           note(`集成完成 → ${integrationBranch}${replayedFiles ? `（含领队回放基线 ${replayedFiles} 文件）` : ''}`)
           // ---- 续链换基线：领队工作目录切到集成分支的托管 worktree ----
           // 只在首次集成成功（本轮基线还不是集成分支）时切换；用户当前分支/仓库根副本绝不改——
@@ -993,8 +1058,9 @@ export async function runDelegationLoop(
           }
           integrationNote = '子任务无独立分支改动；领队若自己改了文件，改动保留在主目录工作区（未提交）'
         } else {
-          // 一次性告知：失败原因只进时间线事件（收件箱/看板等错误面亦可散见），
-          // 不写进常驻的集成横幅——横幅长期挂在任务详情上只会在事后造成噪音
+          // 绝不静默 done：失败原因既进时间线事件，也写进常驻集成说明（note 曾留空，
+          // 任务看着正常完成、集成结果却整个丢失——跨轮重试也无从判断）。
+          integrationNote = `集成失败：${problems.join('; ')}（现场已保留，排查后可追问重试集成）`
           note(`集成停止：${problems.join('; ')}`)
         }
       } finally {

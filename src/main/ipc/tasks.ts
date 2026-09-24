@@ -1,7 +1,7 @@
 import { BrowserWindow, ipcMain } from 'electron'
 import { validateMove } from '../../shared/taskflow'
 import { aggregateUsage } from '../usage'
-import { fileDiff, fileDiffFailure, removeWorktree } from '../git'
+import { deleteReportCopies, fileDiff, fileDiffFailure, removeWorktree, resolveRepositoryRoot } from '../git'
 import { parseContent, parseFollowUpOptions, parseId, parseNonNegativeInteger, parsePermissionDecision, parseRepoRelativePath, parseTaskCreate, parseTaskStatus } from '../ipc-validation'
 import type { IpcContext } from './context'
 import type { Task } from '../../shared/types'
@@ -94,6 +94,19 @@ export function registerTaskIpc(ctx: IpcContext) {
     for (const childId of deleted) await Promise.resolve(ctx.runner.forget?.(childId))
     // 回收该任务（含子任务）的委派 worktree，防累积；失败不阻塞删除，留待启动清扫兜底
     for (const wd of workdirs) void removeWorktree(wd).catch(() => {})
+    // 报告副本 GC 挂线一（tasks:delete 显式回收）：任务与子单在主仓库根的全文副本一并清掉；
+    // 副本经 git-common-dir 归位主仓库根，worktree 目录先删也不影响这一步
+    {
+      const copyRoots = new Set<string>()
+      for (const item of observed) if (item.worktree?.repoDir) copyRoots.add(item.worktree.repoDir)
+      for (const wd of workdirs) {
+        try {
+          const root = await resolveRepositoryRoot(wd)
+          if (root) copyRoots.add(root)
+        } catch { /* 非仓库目录无副本可清 */ }
+      }
+      deleteReportCopies([...copyRoots], deleted)
+    }
     projectTasks()
     for (const childId of deleted) send('task:deleted', childId)
     return { ok: true }
