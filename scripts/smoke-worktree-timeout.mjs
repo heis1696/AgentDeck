@@ -1,10 +1,14 @@
 // worktree 建树超时连环根治的断言面（背景：8.2 万文件 Unity 仓，60s 固定超时只杀 git 父进程，
 // checkout 孤儿继续持有 index.lock → 回放撞活锁拒单 → 回收残肢 → 重派 branch already exists）：
 // ① 超时自适应：worktree add 按 ls-files 计数放大超时（60s 基线 + 每 1 万文件 +60s，封顶 15 分钟），每仓 TTL 缓存
-// ② 超时不吞错：killed/SIGTERM 特征绝不允许走「目录像合法 worktree 就当成功」容错
+// ①b 计数归一：子目录调用与根调用同值同键（repositoryRoot 归一后计数/缓存），消除子目录低估+低值缓存回退面
+// ② 超时不吞错：killed/SIGTERM 特征绝不允许走「目录像合法 worktree 就当成功」容错；全清才说「残肢已清理」
 // ③ 进程树击杀：win32 taskkill /PID <pid> /T /F 参数断言级 + 真实孤儿 hook 对照（旧病可复现、树杀后不复发）
+// ③c 树杀失败不阻塞：taskkill 非零退出且目标不死 → close/exit+二次 deadline 收口，限时返回不 pending
 // ④ 回收原子性与可见：失败步骤重试一次，残留清单（分支名/注册路径）随结果上报并经
 //    noteWorktreeCleanupFailure 落时间线；目录回收不回滚；启动清扫兜底能清「目录已删+注册/分支残留」
+// ④b 超时清理结果不静默：分支删失败 → 残留（含分支名）进拒单文案 + onCleanupResidue →
+//    noteWorktreeCleanupFailure 时间线，文案不谎称「残肢已清理」，重派 already exists 不再静默复发
 import assert from 'node:assert/strict'
 import { build } from 'esbuild'
 import { execFileSync } from 'node:child_process'
@@ -20,6 +24,8 @@ const gitSource = path.join(root, 'src/main/git.ts')
 // child_process 垫片包：只劫持「git worktree add」（伪装慢子进程，永不自行退出）与
 // taskkill（记录参数、并回收对应假子进程）；其余 git 调用直通真实 child_process，
 // 保证超时清理路径（worktree remove/prune/branch -D）在垫片包里仍然真实工作。
+// globalThis.__cpShimTaskkill = 'nonzero' 时 taskkill 打桩为非零退出且不杀 victim
+// （树杀失败形态：child close 永不来，调用方必须限时返回而非 pending）。
 const cpShimPlugin = {
   name: 'cp-shim',
   setup(builder) {
@@ -44,12 +50,15 @@ const cpShimPlugin = {
           const killer = new EventEmitter()
           killer.pid = 999_999
           setImmediate(() => {
-            const victim = fakes.get(Number(args[1]))
-            if (victim) {
-              fakes.delete(Number(args[1]))
-              if (!victim.__closed) { victim.__closed = true; setTimeout(() => victim.emit('close', null, 'SIGTERM'), 10) }
+            if (globalThis.__cpShimTaskkill !== 'nonzero') {
+              const victim = fakes.get(Number(args[1]))
+              if (victim) {
+                fakes.delete(Number(args[1]))
+                if (!victim.__closed) { victim.__closed = true; setTimeout(() => victim.emit('close', null, 'SIGTERM'), 10) }
+              }
             }
-            killer.emit('close', 0)
+            // 非零退出也算通道完成；nonzero 模式 victim 不死（close 永不来）
+            killer.emit('close', globalThis.__cpShimTaskkill === 'nonzero' ? 128 : 0)
           })
           return killer
         }
@@ -126,6 +135,37 @@ try {
   assert.equal(tinyResult.addTimeoutMs, 60_000, '小仓真实计数维持 60s 档')
   console.log('  OK ① 超时自适应：档位/计数/TTL 缓存')
 
+  // ---- ①b 计数归一：子目录调用与根调用同值同键（否则子目录低估 → 60s 基线撞大仓超时，
+  //      低值还以根为键缓存 10 分钟，重派继续撞） ----
+  const nested = makeRepo('nested')
+  for (let i = 0; i < 10; i++) fs.writeFileSync(path.join(nested.dir, `r${i}.txt`), 'x')
+  fs.mkdirSync(path.join(nested.dir, 'deep'), { recursive: true })
+  for (let i = 0; i < 12; i++) { fs.writeFileSync(path.join(nested.dir, 'deep', `d${i}.txt`), 'x') }
+  nested.g('add', '.')
+  nested.g('commit', '-qm', 'nested')
+  for (let i = 0; i < 5; i++) fs.writeFileSync(path.join(nested.dir, 'deep', `u${i}.txt`), 'x')
+  const nestedRoot = nested.dir
+  const nestedDeep = path.join(nested.dir, 'deep')
+  assert.equal(await git.estimateWorktreeFileCount(nestedRoot), 23 + 5, '根调用计数 = 已跟踪 23（含夹具 base.txt）+ 未跟踪 5')
+  assert.equal(await git.estimateWorktreeFileCount(nestedDeep), 28, '子目录调用归一到仓库根，与根调用同值（旧路径只数到 17）')
+  git.clearWorktreeFileCountCache()
+  const injectedKeys = []
+  const subSeeded = await git.createWorktree(nestedDeep, 'task_nz_c1', 'main', 'task_nz', undefined, {
+    estimateFileCount: async (key) => { injectedKeys.push(key); return 80_000 }
+  })
+  assert.equal(subSeeded.addTimeoutMs, 540_000, '子目录调用按整仓规模放大超时')
+  assert.equal(subSeeded.fileCount, 80_000, '子目录调用带回归一后的整仓计数')
+  assert.equal(injectedKeys.length, 1, '子目录调用注入估计器恰好一次')
+  assert.equal(injectedKeys[0], path.resolve(nestedRoot), '缓存键 = 归一后的仓库根（非调用子目录）')
+  let poisoned = false
+  const rootCached = await git.createWorktree(nestedRoot, 'task_nz_c2', 'main', 'task_nz', undefined, {
+    estimateFileCount: async () => { poisoned = true; return 0 }
+  })
+  assert.equal(poisoned, false, '根调用命中子目录调用播种的缓存（同键）')
+  assert.equal(rootCached.addTimeoutMs, 540_000, '根调用复用整仓档位，不被子目录低值覆盖')
+  git.clearWorktreeFileCountCache()
+  console.log('  OK ①b 计数归一：子目录与根同值同键，低值缓存回退面消除')
+
   // ---- ② 超时不吞错：worktree add 超时快返回 + 目录已存在且合法 → 必须判失败而非容错成功 ----
   const swallow = makeRepo('swallow')
   const wtPath = path.join(swallow.dir, '.agentdeck-worktrees', 'task_sw_c1')
@@ -135,6 +175,7 @@ try {
   const refused = await gitShim.createWorktree(swallow.dir, 'task_sw_c1', 'main', 'task_sw', (m) => { swallowError = m }, { addTimeoutMs: 400 })
   assert.equal(refused, null, 'killed/SIGTERM 场景绝不允许走「目录合法即成功」容错')
   assert.ok(/超时/.test(swallowError), `失败原因带超时说明：${swallowError}`)
+  assert.ok(/残肢已清理/.test(swallowError), `全清时才允许说「残肢已清理」：${swallowError}`)
   assert.ok(!fs.existsSync(wtPath), '超时残肢就地清理（目录）')
   assert.throws(() => swallow.g('rev-parse', '--verify', '--quiet', 'agentdeck/task_sw_c1'), '超时残肢就地清理（分支，重派不再 branch already exists）')
   console.log('  OK ② 超时不吞错：快返回超时 + 目录就绪诱惑现场 → 判失败并清理残肢')
@@ -172,6 +213,23 @@ try {
   assert.ok(!fs.existsSync(markerPath), '树杀后钩子孤儿已清（标记未出现）——孤儿 checkout 持锁的根因就此封死')
   console.log('  OK ③b 真实进程树击杀：孤儿 hook 对照组复现旧病，树杀组无孤儿')
 
+  // ③c 树杀失败不阻塞：taskkill 非零退出且 victim 不死（close 永不来）→ 命令限时返回不 pending
+  //（旧路径只依赖 child close，树杀失败 = 整条派单链挂死在永不触发的 close 上）
+  globalThis.__cpShimTaskkill = 'nonzero'
+  gitShim.clearWorktreeFileCountCache?.()
+  const sticky = makeRepo('sticky')
+  const pendStart = Date.now()
+  const pendRace = await Promise.race([
+    gitShim.runGit(sticky.dir, ['worktree', 'add', '-b', 'agentdeck/sticky', path.join(temp, 'never-created-2')], 300, undefined, true),
+    wait(8000).then(() => null)
+  ])
+  const pendElapsed = Date.now() - pendStart
+  assert.ok(pendRace, `taskkill 非零退出且目标不死时命令限时返回（${pendElapsed}ms 内未 pending）`)
+  assert.equal(pendRace.timedOut, true, '树杀失败路径仍带超时判败标记')
+  assert.ok(pendElapsed < 8000, `返回有界（实际 ${pendElapsed}ms，deadline+宽限 ≈ 3.5s 内）`)
+  globalThis.__cpShimTaskkill = ''
+  console.log('  OK ③c 树杀失败不阻塞：taskkill 非零退出 → close/exit+deadline 收口，限时返回')
+
   // ---- ④ 回收原子性与可见：分支删除失败 → 重试一次 → 残留清单上报 → 时间线落盘；目录回收不回滚 ----
   const store = new TaskStore(path.join(temp, 'store-data'))
   const form2 = makeRepo('form2')
@@ -206,6 +264,30 @@ try {
   assert.ok(!fs.existsSync(path.join(form2.dir, '.git', 'worktrees', 'task_f2_c1')), '注册残留已 prune')
   assert.throws(() => form2.g('rev-parse', '--verify', '--quiet', 'agentdeck/task_f2_c1'), '兜底后分支已删（重派不再 branch already exists）')
   console.log('  OK ④ 回收部分失败：重试+残留清单+时间线落盘，清扫兜底收干净')
+
+  // ---- ④b 超时清理结果不静默：分支删失败（refs 锁）→ 残留进拒单文案与 owner 时间线，
+  //      文案绝不谎称「残肢已清理」——消除重派 already exists 的静默复发面 ----
+  const form3 = makeRepo('form3')
+  form3.g('branch', 'agentdeck/task_g3_c1', 'main')
+  const ownerG3 = store.create({ title: 'owner-g3', prompt: 'p', workdir: form3.dir, backend: 'fake', agentId: 'lead' })
+  const refLockG3 = path.join(form3.dir, '.git', 'refs', 'heads', 'agentdeck', 'task_g3_c1.lock')
+  fs.mkdirSync(path.dirname(refLockG3), { recursive: true })
+  fs.writeFileSync(refLockG3, '')
+  let g3Error = ''
+  const g3Refused = await gitShim.createWorktree(form3.dir, 'task_g3_c1', 'main', ownerG3.id, (m) => { g3Error = m }, {
+    addTimeoutMs: 400,
+    onCleanupResidue: (failure) => store.noteWorktreeCleanupFailure(form3.dir, failure)
+  })
+  assert.equal(g3Refused, null, '超时照旧判失败')
+  assert.ok(/残肢未全清/.test(g3Error), `部分失败时文案不得谎称已清理：${g3Error}`)
+  assert.ok(!g3Error.includes('残肢已清理'), `部分失败时文案不含「残肢已清理」：${g3Error}`)
+  assert.ok(g3Error.includes('agentdeck/task_g3_c1'), `拒单文案含残留分支名（重派路径拿得到残留信息）：${g3Error}`)
+  assert.ok(form3.g('rev-parse', '--verify', '--quiet', 'agentdeck/task_g3_c1') !== '', '分支确实残留（refs 锁模拟删除失败）')
+  const eventsG3 = store.readEvents(ownerG3.id).map((e) => e.text ?? '').join('\n')
+  assert.ok(eventsG3.includes('agentdeck/task_g3_c1'), 'onCleanupResidue → noteWorktreeCleanupFailure 时间线事件落盘含残留分支名')
+  fs.rmSync(refLockG3)
+  assert.ok(await git.deleteBranch(form3.dir, 'agentdeck/task_g3_c1'), '解锁后残留分支可正常删除（兜底/重试拿到干净现场，不留死局）')
+  console.log('  OK ④b 超时清理部分失败可见：拒单文案+时间线均含残留分支名，不谎报全清')
 
   console.log('\nWORKTREE TIMEOUT SMOKE PASSED')
 } finally {

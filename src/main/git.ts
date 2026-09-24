@@ -76,29 +76,49 @@ export function isIntegrationBranch(name: string | undefined | null): boolean {
   return !!name && /^agentdeck\/task-[^/]+$/.test(name)
 }
 
+/** 树杀通道自身的二次 deadline：taskkill 挂死/事件不齐时强制收口——超时路径已判败，
+ *  绝不允许因「击杀通道自己 pending」把整条派单链挂住。 */
+const TREE_KILL_DEADLINE_MS = 3000
+/** 树杀完成（或通道收口）后给 child close 事件的宽限：窗口内正常退出按真实退出码收场，
+ *  窗口外（击杀失败存活）强制按超时判败返回。 */
+const TREE_KILL_CLOSE_GRACE_MS = 500
+
 /** 进程树击杀（仅长超时命令的超时路径启用）。根因注释：那台 8.2 万文件 Unity 仓上，
  *  `git worktree add` 完整检出要 5-6 分钟，固定 60s 超时只杀 git 父进程，checkout 子进程
  *  （git reset --hard）成孤儿继续写 index——持有 .git/worktrees/<n>/index.lock 的正是它，
  *  由此引发「回放 cherry-pick 撞活锁→拒单→回收残肢→重派 branch already exists」的锁连环。
  *  win32 用 taskkill /PID <pid> /T /F 按进程树强杀（git.exe 的 reset/checkout 子进程一并带走）；
- *  posix 置独立进程组（spawn detached），超时对整组 SIGTERM，3s 后升级 SIGKILL。 */
-function killProcessTree(child: ChildProcess): void {
-  const pid = child.pid
-  if (!pid) {
-    try { child.kill('SIGKILL') } catch { /* 已退出 */ }
-    return
-  }
-  if (process.platform === 'win32') {
-    const killer = spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
-    // taskkill 缺失/失败时兜底单杀——聊胜于无，树杀失败的下文仍按超时判败
-    killer.on('error', () => { try { child.kill('SIGKILL') } catch { /* 已退出 */ } })
-  } else {
-    try { process.kill(-pid, 'SIGTERM') } catch { try { child.kill('SIGTERM') } catch { /* 已退出 */ } }
-    const escalate = setTimeout(() => {
-      try { process.kill(-pid, 'SIGKILL') } catch { try { child.kill('SIGKILL') } catch { /* 已退出 */ } }
-    }, 3000)
-    escalate.unref?.()
-  }
+ *  posix 置独立进程组（spawn detached），超时对整组 SIGTERM，3s 后升级 SIGKILL。
+ *  Promise 限时必 resolve：taskkill 通道以 close/exit 为完成信号（非零退出也算完成——
+ *  树杀失败下文仍按超时判败，不在此阻塞），error（taskkill 缺失）兜底单杀，3s deadline
+ *  强制收口；posix 在 SIGKILL 升级点 resolve。任何路径都不 pending。 */
+function killProcessTree(child: ChildProcess): Promise<void> {
+  return new Promise((resolve) => {
+    const pid = child.pid
+    if (!pid) {
+      try { child.kill('SIGKILL') } catch { /* 已退出 */ }
+      resolve()
+      return
+    }
+    let done = false
+    const finish = () => { if (!done) { done = true; clearTimeout(deadline); resolve() } }
+    const deadline = setTimeout(finish, TREE_KILL_DEADLINE_MS)
+    deadline.unref?.()
+    if (process.platform === 'win32') {
+      const killer = spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+      // close/exit 任一即完成（非零退出也算）；taskkill 缺失/失败时兜底单杀——聊胜于无
+      killer.on('close', finish)
+      killer.on('exit', finish)
+      killer.on('error', () => { try { child.kill('SIGKILL') } catch { /* 已退出 */ } finish() })
+    } else {
+      try { process.kill(-pid, 'SIGTERM') } catch { try { child.kill('SIGTERM') } catch { /* 已退出 */ } }
+      const escalate = setTimeout(() => {
+        try { process.kill(-pid, 'SIGKILL') } catch { try { child.kill('SIGKILL') } catch { /* 已退出 */ } }
+        finish()
+      }, TREE_KILL_DEADLINE_MS)
+      escalate.unref?.()
+    }
+  })
 }
 
 /** 树杀通道的 spawn 实现：无 maxBuffer 上限（大仓 ls-files 全量输出装得下），超时整树击杀。
@@ -117,14 +137,16 @@ function runGitTreeKilled(workdir: string, args: string[], timeout: number, env?
     let settled = false
     let timedOut = false
     let timer: NodeJS.Timeout | undefined
+    let forced: NodeJS.Timeout | undefined
     const finish = (ok: boolean, code: number | null) => {
       if (settled) return
       settled = true
       if (timer) clearTimeout(timer)
+      if (forced) clearTimeout(forced)
       resolve({
         ok,
         stdout,
-        stderr: stderr || (timedOut ? `git 命令超时（${timeout}ms），进程树已击杀` : ''),
+        stderr: stderr || (timedOut ? `git 命令超时（${timeout}ms），已发起进程树击杀` : ''),
         code,
         timedOut
       })
@@ -132,7 +154,12 @@ function runGitTreeKilled(workdir: string, args: string[], timeout: number, env?
     if (timeout > 0) {
       timer = setTimeout(() => {
         timedOut = true
-        killProcessTree(child)
+        void killProcessTree(child).then(() => {
+          // 二次 deadline：树杀通道限时收口后 child 仍可能因击杀失败而存活（close 永不来）
+          // ——强制 finish，超时路径绝不 pending（否则派单链整条挂死）
+          forced = setTimeout(() => finish(false, null), TREE_KILL_CLOSE_GRACE_MS)
+          forced.unref?.()
+        })
       }, timeout)
     }
     child.stdout?.on('data', (chunk) => { stdout += chunk })
@@ -614,25 +641,31 @@ export function clearWorktreeFileCountCache(): void {
 }
 
 /** 建树体量估计：ls-files 计数（已跟踪 + 可回放未跟踪，即 ignore 掉的依赖目录不计）。
- *  走树杀通道：execFile 默认 1MB maxBuffer 装不下大仓全量 ls-files 输出。
+ *  调用目录先经 repositoryRoot() 归一到仓库根：领队 workdir 可能指在仓库子目录上，
+ *  ls-files 从子目录数只见子目录文件 → 低估 → 60s 基线撞大仓超时（子目录调用与根调用
+ *  必须同值）。走树杀通道：execFile 默认 1MB maxBuffer 装不下大仓全量 ls-files 输出。
  *  计数全失败返回 null（调用方回落 60s 基线，不缓存失败值）；仅未跟踪盘点失败按已跟踪计。 */
 export async function estimateWorktreeFileCount(workdir: string): Promise<number | null> {
+  const root = (await repositoryRoot(workdir)) ?? workdir
   const [tracked, untracked] = await Promise.all([
-    runGitWithLockRetry(workdir, ['ls-files', '-z'], 30_000, undefined, true),
-    runGitWithLockRetry(workdir, ['ls-files', '--others', '--exclude-standard', '-z'], 30_000, undefined, true)
+    runGitWithLockRetry(root, ['ls-files', '-z'], 30_000, undefined, true),
+    runGitWithLockRetry(root, ['ls-files', '--others', '--exclude-standard', '-z'], 30_000, undefined, true)
   ])
   if (!tracked.ok) return null
   const count = (result: GitCommandResult) => result.stdout.split('\0').filter(Boolean).length
   return count(tracked) + (untracked.ok ? count(untracked) : 0)
 }
 
-/** 解析 worktree add 超时：TTL 内吃缓存，否则计数并缓存（注入的估计器同样走缓存，供 smoke 断言）。 */
+/** 解析 worktree add 超时：TTL 内吃缓存，否则计数并缓存（注入的估计器同样走缓存，供 smoke 断言）。
+ *  计数起点与缓存键都先归一到仓库根：否则子目录调用的低值会以根为键缓存 10 分钟，
+ *  重派继续撞超时——归一后子目录调用与根调用同键同值。 */
 async function planWorktreeAddTimeout(repoRoot: string, countFrom: string, injected?: (repoRoot: string) => Promise<number>): Promise<{ timeoutMs: number; fileCount?: number }> {
-  const key = path.resolve(repoRoot)
+  const root = (await repositoryRoot(countFrom || repoRoot)) ?? path.resolve(repoRoot)
+  const key = path.resolve(root)
   const now = Date.now()
   const hit = worktreeFileCountCache.get(key)
   if (hit && now - hit.at < WORKTREE_FILE_COUNT_TTL_MS) return { timeoutMs: worktreeAddTimeoutFor(hit.count), fileCount: hit.count }
-  const count = injected ? await injected(key) : await estimateWorktreeFileCount(countFrom)
+  const count = injected ? await injected(key) : await estimateWorktreeFileCount(root)
   if (count === null) return { timeoutMs: worktreeAddTimeoutFor(0) }
   worktreeFileCountCache.set(key, { count, at: now })
   return { timeoutMs: worktreeAddTimeoutFor(count), fileCount: count }
@@ -643,15 +676,47 @@ export interface WorktreeCreateOptions {
   estimateFileCount?: (repoRoot: string) => Promise<number>
   /** 强制指定 worktree add 超时（ms），跳过规模估计——测试与紧急止损用 */
   addTimeoutMs?: number
+  /** 超时残肢清理部分失败的时间线出口（runner 接 store.noteWorktreeCleanupFailure）：
+   *  残留清单（含分支名）随失败上报，重派撞 already exists 不再静默无据 */
+  onCleanupResidue?: (failure: { name: string; reason: string; ownerTaskId?: string }) => void
+}
+
+/** 超时残肢就地清理的逐步结果：三者全成才算「已清理」，residue 空 == 全清。 */
+interface WorktreeTimeoutCleanupResult {
+  directoryRemoved: boolean
+  registrationPruned: boolean
+  branchDeleted: boolean
+  /** 部分失败残留清单（含残留分支名）：随拒单文案/时间线落盘，不静默 */
+  residue: string[]
 }
 
 /** 超时残肢就地清理：被击杀的 checkout 可能写了一半，注册/目录/分支全清，重派拿到干净现场
- *  （否则同名重派会撞 branch already exists）。全部 best-effort，失败不掩盖主失败原因。 */
-async function cleanupTimedOutWorktree(repoDir: string, wtPath: string, branch: string, deleteBranchRef: boolean): Promise<void> {
-  await runGit(repoDir, ['worktree', 'remove', '--force', wtPath], 30_000)
-  try { fs.rmSync(wtPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 300 }) } catch { /* 留给启动清扫兜底 */ }
-  await runGit(repoDir, ['worktree', 'prune'], 15_000)
-  if (deleteBranchRef) await deleteBranch(repoDir, branch)
+ *  （否则同名重派会撞 branch already exists）。全部 best-effort，失败不掩盖主失败原因，
+ *  但不再静默——目录/注册/分支各自成败随结果返回，失败步骤进 residue 供时间线/拒单文案可见。 */
+async function cleanupTimedOutWorktree(repoDir: string, wtPath: string, branch: string, deleteBranchRef: boolean): Promise<WorktreeTimeoutCleanupResult> {
+  const residue: string[] = []
+  // 目录：worktree remove --force 败（目录已缺/句柄占用）再走 rmSync，两条路都断才记残留
+  const removed = await runGit(repoDir, ['worktree', 'remove', '--force', wtPath], 30_000)
+  let directoryRemoved = removed.ok
+  if (!directoryRemoved) {
+    try {
+      fs.rmSync(wtPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 300 })
+      directoryRemoved = !fs.existsSync(wtPath)
+    } catch { directoryRemoved = false }
+  }
+  if (!directoryRemoved) residue.push(`目录 ${wtPath}（留待启动清扫兜底）`)
+  // 注册：prune 收 .git/worktrees/<name> 注册残留
+  const pruned = await runGit(repoDir, ['worktree', 'prune'], 15_000)
+  if (!pruned.ok) {
+    residue.push(`git 注册 ${path.join(repoDir, '.git', 'worktrees', path.basename(wtPath))}`)
+  }
+  // 分支：本就不存在视为已清（击杀早于 ref 写入时分支根本没建成）；存在而删失败才是残留
+  let branchDeleted = true
+  if (deleteBranchRef && (await branchExists(repoDir, branch))) {
+    branchDeleted = await deleteBranchWithRetry(repoDir, branch)
+    if (!branchDeleted) residue.push(`分支 ${branch}`)
+  }
+  return { directoryRemoved, registrationPruned: pruned.ok, branchDeleted, residue }
 }
 
 /** 「目录确已就绪」核验（吞错封死的容错窄门）：合法仓库 + 检出在预期分支 + 无 index.lock 残留。
@@ -700,8 +765,16 @@ export async function createWorktree(
   const out = await runGit(repoDir, ['worktree', 'add', '-b', branch, wtPath, ...(baseBranch ? [baseBranch] : [])], planned.timeoutMs, undefined, true)
   if (out.timedOut) {
     // 超时绝不当成功：树杀前的 checkout 可能写了一半，孤儿残留的 index.lock 会卡死后续回放
-    await cleanupTimedOutWorktree(repoDir, wtPath, branch, true)
-    fail(`git worktree add 超时（${Math.round(planned.timeoutMs / 1000)}s，已按仓库规模自适应并击杀进程树；残肢已清理），请重派`)
+    const cleaned = await cleanupTimedOutWorktree(repoDir, wtPath, branch, true)
+    if (cleaned.residue.length) {
+      // 清理部分失败不再静默：残留清单（含分支名）走 noteWorktreeCleanupFailure 记 owner
+      // 时间线；拒单文案只报实情，绝不谎称「残肢已清理」——重派 already exists 时查得到现场
+      try { options.onCleanupResidue?.({ name, reason: `超时残肢清理部分失败：${cleaned.residue.join('、')}`, ownerTaskId }) } catch { /* 时间线出口失败不掩盖主失败 */ }
+    }
+    const cleanupNote = cleaned.residue.length
+      ? `残肢未全清（${cleaned.residue.join('、')}），待启动清扫兜底`
+      : '残肢已清理'
+    fail(`git worktree add 超时（${Math.round(planned.timeoutMs / 1000)}s，已按仓库规模自适应并击杀进程树；${cleanupNote}），请重派`)
     return null
   }
   if (!out.ok && !(await worktreeReadyForTolerance(wtPath, branch))) {
@@ -753,8 +826,10 @@ export async function createWorktreeAtBranch(
   fs.mkdirSync(worktreeDir, { recursive: true })
   const added = await runGit(root, ['worktree', 'add', wtPath, branch], 60000, undefined, true)
   if (added.timedOut) {
-    // 与 createWorktree 同一吞错封死：超时绝不当成功；集成分支绝不删（集成结果都在分支上）
-    await cleanupTimedOutWorktree(root, wtPath, branch, false)
+    // 与 createWorktree 同一吞错封死：超时绝不当成功；集成分支绝不删（集成结果都在分支上）。
+    // 清理部分失败留 console 现场（此路径无时间线出口），不静默。
+    const cleaned = await cleanupTimedOutWorktree(root, wtPath, branch, false)
+    if (cleaned.residue.length) console.warn(`[git] 集成 worktree 超时残肢清理部分失败（${wtPath}）：${cleaned.residue.join('、')}`)
     return null
   }
   if (!added.ok && !(await worktreeReadyForTolerance(wtPath, branch))) return null
