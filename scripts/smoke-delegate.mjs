@@ -418,14 +418,36 @@ const digestBase = {
     const childGitDir = execSync('git rev-parse --absolute-git-dir', { cwd: wt2.path, encoding: 'utf8' }).trim()
     fs.writeFileSync(path.join(childGitDir, 'index.lock'), '')
     const tLock = Date.now()
+    assert(Date.now() - fs.statSync(path.join(childGitDir, 'index.lock')).mtimeMs < 5000, '锁专项②：前置——子侧锁 mtime 新鲜（<5s，活锁非陈锁）')
     const refused = await replayLeaderBaseline(lockRepo2, wt2.path, baseSha2)
     assert(refused.status === 'refused', '块五：子侧锁死期间回放被拒（先红：基线无重试也拒，但缺具名文案）')
     assert(refused.reason.includes('领队 git 并发写冲突，请稍后重派'), `块五：拒单文案指明并发写冲突（${refused.reason.slice(0, 90)}）`)
     assert(Date.now() - tLock >= 800, `块五：重试 2 次退避后才拒（耗时 ${Date.now() - tLock}ms）`)
+    assert(fs.existsSync(path.join(childGitDir, 'index.lock')), '锁专项②：新鲜锁（活锁）不被陈锁清除误删——重试耗尽具名拒单收场')
     fs.unlinkSync(path.join(childGitDir, 'index.lock'))
     const appliedAfter = await replayLeaderBaseline(lockRepo2, wt2.path, baseSha2)
     assert(appliedAfter.status === 'applied', `块五：锁释放后回放成功——建单不再被拒（${appliedAfter.status}: ${appliedAfter.reason}）`)
     await reclaimWorktree(wt2.path, { force: true, deleteBranch: true })
+  }
+  {
+    // (d) 锁专项① 子侧陈锁清除：mtime 距今 >5s 的 index.lock 是建树竞态残留（子 worktree
+    //     刚建、子 agent 未启动、无并发写者）→ 删锁追加最后一次尝试，回放 applied
+    const staleRepo = mkRepo('stale')
+    const wt3 = await createWorktree(staleRepo, 'rp_stale', 'main', 'owner')
+    const baseSha3 = readMetaBaseSha(wt3.path)
+    fs.writeFileSync(path.join(staleRepo, 'base.txt'), 'base v2 陈锁轮\n')
+    const childGitDir3 = execSync('git rev-parse --absolute-git-dir', { cwd: wt3.path, encoding: 'utf8' }).trim()
+    const staleLockPath = path.join(childGitDir3, 'index.lock')
+    fs.writeFileSync(staleLockPath, '')
+    const stale = new Date(Date.now() - 10_000)
+    fs.utimesSync(staleLockPath, stale, stale)
+    assert(Date.now() - fs.statSync(staleLockPath).mtimeMs > 5000, '锁专项①：前置——子侧锁 mtime 已拨旧（>5s，陈锁非活锁）')
+    const appliedStale = await replayLeaderBaseline(staleRepo, wt3.path, baseSha3)
+    assert(appliedStale.status === 'applied', `锁专项①：子侧陈锁（mtime>5s）清除后回放 applied（${appliedStale.status}: ${appliedStale.reason}）`)
+    assert(!fs.existsSync(staleLockPath), '锁专项①：陈锁已被删除（rev-parse --git-path 定位真实路径）')
+    assert(fs.readFileSync(path.join(wt3.path, 'base.txt'), 'utf8').includes('base v2 陈锁轮'), '锁专项①：删锁加试后增量真实落进子 worktree')
+    assert((execSync('git status --porcelain', { cwd: wt3.path, encoding: 'utf8' }).trim()) === '', '锁专项①：回放后子 worktree 状态自洽')
+    await reclaimWorktree(wt3.path, { force: true, deleteBranch: true })
   }
 
   // 体量闸：未跟踪文件数超限 → 具名拒单
@@ -1253,6 +1275,73 @@ assert(execSync(`git show ${ibE}:f2.txt`, { cwd: repo5, encoding: 'utf8' }).incl
   const copyG2 = path.join(repo7, REPORTS_DIR_NAME, `${childG3.id}.md`)
   assert(fs.existsSync(copyG2) && fs.readFileSync(copyG2, 'utf8').includes('全文开头标记'), '块三②：续链轮副本统一落主仓库根且可达')
   assert(!fs.existsSync(path.join(integratedWtG, REPORTS_DIR_NAME)), '块三②：托管 worktree 内不再散落副本目录')
+}
+
+// ================= 锁专项③（fail-closed）：worktree 建树失败 → 具名拒单回灌，不降级共享工作区、不建子任务 =================
+// 环境构造（非 mock）：预置同名分支 agentdeck/<taskId>_c1 → worktree add -b 真实报
+// "already exists" → createWorktree 重试 3 次全 null → 拒单回灌而非共享降级
+{
+  const repo8 = fs.mkdtempSync(path.join(os.tmpdir(), 'dele-repo8-'))
+  fs.writeFileSync(path.join(repo8, 'c.txt'), 'c v1\n')
+  execSync('git init -q -b main && git add -A && git -c user.email=t@t -c user.name=t commit -qm init', { cwd: repo8 })
+  const sent8 = []
+  const leader8 = {
+    id: 'lead8z', label: 'Boss8',
+    async probe() { return { ok: true, detail: '' } },
+    async start({ events: rawEvents, turn }) {
+      let activeTurn = turn
+      const events = {
+        onEvent: (e) => rawEvents.onEvent(e, activeTurn),
+        onTurnEnd: (r) => rawEvents.onTurnEnd(r, activeTurn)
+      }
+      setTimeout(() => {
+        const text = '派一单。<delegate to="Alpha">把 c.txt 升级到 v2</delegate>'
+        events.onEvent({ ts: Date.now(), kind: 'final', text })
+        events.onTurnEnd({ response: '已派单。', delegationText: text, ok: true })
+      }, 30)
+      return {
+        sessionId: 'sess_lead8', turnScoped: true,
+        async send(content, nextTurn) {
+          activeTurn = nextTurn
+          sent8.push(content)
+          setTimeout(() => {
+            events.onEvent({ ts: Date.now(), kind: 'final', text: '建树被拒就先收尾。最终总结：本轮不派工。' })
+            events.onTurnEnd({ response: '建树被拒就先收尾。最终总结：本轮不派工。', ok: true })
+          }, 30)
+          await new Promise((r) => setTimeout(r, 20))
+        },
+        async stop() {}, async close() {}
+      }
+    }
+  }
+  const w8 = {
+    id: 'w8a', label: 'w8a',
+    async probe() { return { ok: true, detail: '' } },
+    async start() { return { sessionId: 's_w8', async send() {}, async stop() {}, async close() {} } }
+  }
+  const team8 = [
+    { id: 'L8', name: 'Boss8', backend: 'lead8z', role: '领队', systemPrompt: '', subordinates: ['W8'] },
+    { id: 'W8', name: 'Alpha', backend: 'w8a', role: '工程师', systemPrompt: '' }
+  ]
+  const runner8 = new TaskRunner(store, new Map([['lead8z', leader8], ['w8a', w8]]),
+    () => ({ concurrency: 1, mode: 'yolo', notify: false, workerConcurrency: 2 }))
+  runner8.attachTeam(() => team8)
+  const leaderTask8 = store.create({ title: '建树失败轮', prompt: '升级 c.txt', workdir: repo8, backend: 'lead8z', agentId: 'L8' })
+  execSync(`git branch agentdeck/${leaderTask8.id}_c1`, { cwd: repo8 })
+  runner8.enqueue(leaderTask8)
+  const t8 = Date.now()
+  while (Date.now() - t8 < 30000) {
+    const t = store.get(leaderTask8.id)
+    if (t.status === 'done' || t.status === 'failed') break
+    await new Promise((r) => setTimeout(r, 150))
+  }
+  const fin8 = store.get(leaderTask8.id)
+  assert(fin8.status === 'done', `锁专项③：领队 done（${fin8.status}${fin8.error ? ' ' + fin8.error : ''}）`)
+  assert(store.list().filter((t) => t.parentTaskId === leaderTask8.id).length === 0, '锁专项③：建树失败不建子任务（拒单而非共享降级，子任务未建）')
+  const feedback8 = sent8.find((c) => c.includes('没有被执行') && c.includes('worktree 建立失败，请稍后重派'))
+  assert(!!feedback8, '锁专项③：具名拒单回灌给领队（含「worktree 建立失败，请稍后重派」）')
+  assert(feedback8.includes('already exists'), '锁专项③：回灌含最后一条 git 错误（branch already exists）')
+  assert(store.list().every((t) => t.unavailableReason === undefined || !t.unavailableReason.includes('Git worktree creation failed')), '锁专项③：不再出现「worktree 建失败降级共享工作区」的 unavailableReason')
 }
 
 console.log('\n✅ DELEGATION SMOKE PASSED (v2 + review flow)')

@@ -115,6 +115,39 @@ function lockConflictSuffix(result: GitCommandResult): string {
   return isGitLockError(result) ? '—— 领队 git 并发写冲突，请稍后重派' : ''
 }
 
+/** 子 worktree 陈锁阈值：index.lock mtime 距今超过该值视为陈锁（残留竞态）而非活锁 */
+const CHILD_STALE_LOCK_MS = 5000
+
+/** 子 worktree 陈锁清除：rev-parse --git-path index.lock 定位真实锁路径，仅当 mtime 距今
+ *  超过 5s 才删除（返回是否删除成功）。安全前提：子 worktree 由本流程刚创建、子 agent
+ *  尚未启动、无并发写者，此刻仍在的锁只可能是建树竞态残留（进程被杀/崩溃遗留），删除
+ *  不会伤害任何真实写者；领队 workdir 侧的锁一律不删——可能属于用户真实 git 进程，
+ *  只走既有退避重试。 */
+async function breakStaleChildIndexLock(childWorkdir: string): Promise<boolean> {
+  const rel = (await git(childWorkdir, ['rev-parse', '--git-path', 'index.lock'])).trim()
+  if (!rel) return false
+  const lockPath = path.isAbsolute(rel) ? rel : path.join(childWorkdir, rel)
+  try {
+    if (Date.now() - fs.statSync(lockPath).mtimeMs <= CHILD_STALE_LOCK_MS) return false
+    fs.unlinkSync(lockPath)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** 子侧应用段专用（replayLeaderBaseline 的 cherry-pick/reset/status 三步）：
+ *  既有撞锁退避重试之外，重试耗尽仍是锁错时检查子 worktree 的 index.lock——
+ *  陈锁（mtime>5s）则删除后追加最后一次尝试；锁新鲜（真活锁）或删除失败一律按
+ *  重试耗尽处理，原样返回失败结果（不无限制加时）。 */
+async function runChildApplyGit(childWorkdir: string, args: string[], timeout = 15000, env?: NodeJS.ProcessEnv): Promise<GitCommandResult> {
+  let result = await runGitWithLockRetry(childWorkdir, args, timeout, env)
+  if (!result.ok && isGitLockError(result) && (await breakStaleChildIndexLock(childWorkdir))) {
+    result = await runGit(childWorkdir, args, timeout, env)
+  }
+  return result
+}
+
 export async function isGitRepo(workdir: string): Promise<boolean> {
   if (!workdir) return false
   const out = await git(workdir, ['rev-parse', '--is-inside-work-tree'])
@@ -448,28 +481,33 @@ function updateMetadata(metadata: WorktreeInfo, patch: Partial<WorktreeInfo>) {
   return next
 }
 
-/** 为 worker 创建隔离 worktree（含独立分支）；失败返回 null（回退共享目录）
- *  worktree 一律放在主仓库根的 .agentdeck-worktrees 下——从 worktree 再开（二层委派）也归位主仓库，
- *  避免嵌套进父级工作树污染其 status；exclude 也写进主 gitdir（worktree 间共享）。 */
+/** 为 worker 创建隔离 worktree（含独立分支）；失败返回 null（调用方 fail-closed 拒单，
+ *  不再降级共享工作区——降级会让队员在旧基线上白写、并行队员互相踩）。onError（可选）
+ *  逐次带回失败现场的 git 错误细节，供具名拒单文案使用。 */
 export async function createWorktree(
   repoDir: string,
   name: string,
   baseBranch?: string,
-  ownerTaskId = ''
+  ownerTaskId = '',
+  onError?: (message: string) => void
 ): Promise<WorktreeCreateResult | null> {
-  if (!(await isGitRepo(repoDir)) || !validWorktreeName(name)) return null
+  const fail = (message: string) => { try { onError?.(message) } catch {} }
+  if (!(await isGitRepo(repoDir)) || !validWorktreeName(name)) { fail(`非 git 仓库或 worktree 名非法（${name}）`); return null }
   const branch = `agentdeck/${name}`
   const gcd = (await git(repoDir, ['rev-parse', '--git-common-dir'])).trim()
   const gitDir = commonGitDir(repoDir, gcd)
   const root = path.dirname(gitDir)
   const worktreeDir = managedRoot(root)
   const wtPath = path.join(worktreeDir, name)
-  if (!isWithin(worktreeDir, wtPath)) return null
+  if (!isWithin(worktreeDir, wtPath)) { fail(`worktree 路径越界（${wtPath}）`); return null }
   const baseSha = (await git(repoDir, ['rev-parse', baseBranch || 'HEAD'])).trim()
-  if (!baseSha) return null
+  if (!baseSha) { fail(`无法解析基线 ${baseBranch || 'HEAD'} 的提交`); return null }
   fs.mkdirSync(worktreeDir, { recursive: true })
   const out = await runGit(repoDir, ['worktree', 'add', '-b', branch, wtPath, ...(baseBranch ? [baseBranch] : [])], 60000)
-  if (!out.ok && !(await isGitRepo(wtPath))) return null
+  if (!out.ok && !(await isGitRepo(wtPath))) {
+    fail((out.stderr || out.stdout).trim().slice(0, 300) || `git worktree add exit ${out.code}`)
+    return null
+  }
   // 把 worktree 目录从主仓库状态里排除，避免污染主目录的 status
   appendGitExcludes(gitDir, SYSTEM_SIDECAR_DIRS)
   const metadata: WorktreeInfo = {
@@ -481,10 +519,11 @@ export async function createWorktree(
     createdAt: Date.now(),
     cleanupStatus: 'active'
   }
-  try { writeMetadata(metadata) } catch {
+  try { writeMetadata(metadata) } catch (e) {
     // Do not report a successful isolated worktree whose ownership metadata
     // could not be persisted. Best-effort rollback prevents an untracked
     // managed branch from leaking into the repository.
+    fail(`worktree 元数据写入失败: ${e instanceof Error ? e.message : String(e)}`)
     await runGit(root, ['worktree', 'remove', '--force', wtPath], 30000)
     await deleteBranch(root, branch)
     return null
@@ -754,7 +793,10 @@ function pathspecExcludes(): string[] {
  * 锁加固：全部 git 调用注入 GIT_OPTIONAL_LOCKS=0（只读命令不再 opportunistic 拿
  * index 锁，领队侧持有 index.lock 时盘点照常），且任何步骤撞 index.lock /
  * Another git process 都退避重试（400-900ms 抖动 × 2）而非立即拒单；重试耗尽才拒，
- * 拒单文案指明「领队 git 并发写冲突，请稍后重派」。
+ * 拒单文案指明「领队 git 并发写冲突，请稍后重派」。子侧应用段另有陈锁清除：
+ * 重试耗尽仍是锁错时，子 worktree 的 index.lock（rev-parse --git-path 定位）mtime
+ * 距今超 5s 视为建树竞态残留（子 worktree 刚建、agent 未启动、无并发写者），删锁后
+ * 追加最后一次尝试；锁新鲜或删除失败按重试耗尽处理；领队侧锁一律不删。
  *
  * 回放提交即子分支起始提交（子分支 tip = 回放提交）：此后 digest/集成都以它为基线，
  * 领队的改动不算子产出、不进子 git 小节。失败一律 refused + 具名原因，由调用方拒建单。
@@ -832,19 +874,20 @@ export async function replayLeaderBaseline(leaderWorkdir: string, childWorkdir: 
     if (!replaySha) return replayRefused('commit-tree 未产出提交')
 
     // 子 worktree 应用：parent==子基线 ⇒ cherry-pick 就是精确增量；--quit 清理 sequencer 残留，
-    // reset --soft 把子分支推进到回放提交（index/worktree 已与该树一致，status 归零）
-    const pick = await runGitWithLockRetry(childWorkdir, ['cherry-pick', '--no-commit', replaySha], 60000, lockEnv)
+    // reset --soft 把子分支推进到回放提交（index/worktree 已与该树一致，status 归零）。
+    // 三步走 runChildApplyGit：撞锁退避重试耗尽时子侧陈锁（mtime>5s）先删再加试一次
+    const pick = await runChildApplyGit(childWorkdir, ['cherry-pick', '--no-commit', replaySha], 60000, lockEnv)
     if (!pick.ok) {
       await runGit(childWorkdir, ['cherry-pick', '--abort'], 15000, lockEnv)
       return replayRefused(`子单回放应用失败：${gitError(pick)}${lockConflictSuffix(pick)}`)
     }
     await runGit(childWorkdir, ['cherry-pick', '--quit'], 15000, lockEnv)
-    const soft = await runGitWithLockRetry(childWorkdir, ['reset', '--soft', replaySha], 30000, lockEnv)
+    const soft = await runChildApplyGit(childWorkdir, ['reset', '--soft', replaySha], 30000, lockEnv)
     if (!soft.ok) {
       await runGit(childWorkdir, ['reset', '--hard', childBaseSha], 30000, lockEnv)
       return replayRefused(`子分支推进到回放提交失败：${gitError(soft)}${lockConflictSuffix(soft)}`)
     }
-    const clean = await runGitWithLockRetry(childWorkdir, ['status', '--porcelain'], 15000, lockEnv)
+    const clean = await runChildApplyGit(childWorkdir, ['status', '--porcelain'], 15000, lockEnv)
     if (clean.ok && clean.stdout.trim()) {
       await runGit(childWorkdir, ['reset', '--hard', childBaseSha], 30000, lockEnv)
       return replayRefused('回放后子 worktree 状态不自洽（status 非空），已回滚')

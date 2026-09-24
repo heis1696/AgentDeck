@@ -544,13 +544,19 @@ const scoped = bindTurn(events, turn)
 首回合结束 → 解析 delegate 标记
   ├─ 无标记 → 结束（领队自己干完了）
   ├─ 有标记 → 逐个：解析队员（名字/平台 id，忽略大小写，限 subordinates 内）
-  │           sanitizeChildPrompt → 建 worktree（仓库时）→ 子单基线回放 → 建子任务入队
+  │           sanitizeChildPrompt → 建 worktree（仓库时；建树重试 3 次仍失败即具名拒单
+  │             走既有回灌通道——文案含最后一条 git 错误与「worktree 建立失败，请稍后
+  │             重派」，不降级共享工作区；仅 workdir 非 git 仓库时保留环境性共享降级）
+  │           → 子单基线回放 → 建子任务入队
   │           （回放：领队未提交增量经私有 index 采集为回放提交（parent=子基线 sha），
   │             子 worktree cherry-pick --no-commit 应用后子分支 tip=回放提交，worktree
   │             元数据 baseSha 改写指向它——领队改动不算子产出、不进子 git 小节；
   │             全程不碰领队 index/工作区/refs；全部 git 调用注入 GIT_OPTIONAL_LOCKS=0
   │             且撞 index.lock/Another git process 时 400-900ms 抖动退避重试 2 次，
-  │             耗尽才拒且文案指明「领队 git 并发写冲突，请稍后重派」；无增量零开销
+  │             耗尽才拒且文案指明「领队 git 并发写冲突，请稍后重派」；子侧应用段重试
+  │             耗尽时子 worktree 的 index.lock mtime 距今超 5s 视为建树竞态残留（子
+  │             worktree 刚建、agent 未启动、无并发写者），删锁后追加最后一次尝试，
+  │             领队侧锁一律不删；无增量零开销
   │             跳过；体量闸 2000 文件/200MiB/软链（ls-files --others 配 lstat），
   │             未跟踪盘点（ls-files）超时即拒单；超限或采集/应用失败一律具名拒建单
   │             并把原因回灌给领队改派，不静默）
