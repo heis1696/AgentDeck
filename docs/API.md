@@ -546,7 +546,7 @@ const scoped = bindTurn(events, turn)
   ├─ 无标记 → 结束（领队自己干完了）
   ├─ 有标记 → 逐个：解析队员（名字/平台 id，忽略大小写，限 subordinates 内）
   │           sanitizeChildPrompt → 建 worktree（仓库时；建树重试 3 次仍失败即具名拒单
-  │             走既有回灌通道——文案含最后一条 git 错误与「worktree 建立失败，请稍后
+  │             走既有回灌通道——文案含首次 git 错误与「worktree 建立失败，请稍后
   │             重派」，不降级共享工作区；仅 workdir 非 git 仓库时保留环境性共享降级）
   │           → 子单基线回放 → 建子任务入队
   │           （回放：领队未提交增量经私有 index 采集为回放提交（parent=子基线 sha），

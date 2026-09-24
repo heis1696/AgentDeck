@@ -311,6 +311,7 @@ export class TaskRunner {
   private earlySpawns = new Map<string, { buffer: string; scanOffset: number; closeScanOffset: number; spawned: Map<string, { call: DelegateCall; childId: string }>; seenKeys: Set<string>; pending: Promise<unknown>[] }>()
   /** 被拒派单的原因（按任务累积）：委派循环每轮取走并回灌给领队，让它当场改派而不是干等不存在的回灌 */
   private delegateRejections = new Map<string, string[]>()
+  private workerIndexReservations = new Map<string, number>()
   /** Consecutive tool-call signatures used by the doom-loop approval guard. */
   private toolWindows = new Map<string, { key: string; count: number; requested: boolean }>()
   private doomRequestSeq = 0
@@ -853,6 +854,7 @@ export class TaskRunner {
     this.toolWindows.delete(taskId)
     this.earlySpawns.delete(taskId)
     this.delegateRejections.delete(taskId)
+    this.workerIndexReservations.delete(taskId)
     this.lastTerminalResponses.delete(taskId)
     this.turnLifecycles.get(taskId)?.dispose()
     this.turnLifecycles.delete(taskId)
@@ -1154,6 +1156,7 @@ export class TaskRunner {
       guardedNote(`⚠ 全链委派轮数预算已耗尽，拒绝派给 ${call.to}`)
       return null
     }
+    const workerIndex = this.reserveWorkerIndex(taskId)
     let workdir = task.workdir
     let unavailableReason: string | undefined
     let worktree: WorktreeInfo | undefined
@@ -1175,7 +1178,7 @@ export class TaskRunner {
       for (let attempt = 0; attempt < 3 && !wt; attempt++) {
         if (attempt) await new Promise((r) => setTimeout(r, 500))
         if (!active()) return null
-        wt = await createWorktree(leaderDir, `${taskId}_c${this.workerCount(taskId) + 1}`, base, taskId, (m) => { if (!lastWtError) lastWtError = m }, {
+        wt = await createWorktree(leaderDir, `${taskId}_c${workerIndex}`, base, taskId, (m) => { if (!lastWtError) lastWtError = m }, {
           // 超时残肢清理部分失败（分支/注册残留）→ owner 时间线可见，重派撞
           // already exists 时现场与原因都查得到，不再静默复发
           onCleanupResidue: (failure) => { this.store.noteWorktreeCleanupFailure(leaderDir, failure) }
@@ -1225,11 +1228,14 @@ export class TaskRunner {
       unavailableReason = 'Workspace is not a Git worktree; using the shared workspace'
     }
     if (!active()) return null
-    const childPrompt = buildChildPrompt(sanitizeChildPrompt(call.prompt, task.workdir ?? ''), task.prompt)
+    const childInstruction = sanitizeChildPrompt(call.prompt, task.workdir ?? '')
+    const scopedInstruction = target.sharedWorkspace
+      ? `【只读协作约定】此任务运行在领队共享工作区中。只检查并返回发现，不要修改、创建或删除文件，也不要执行会改变工作区或 Git 状态的操作。\n\n${childInstruction}`
+      : childInstruction
+    const childPrompt = buildChildPrompt(scopedInstruction, task.prompt)
     // 标题取 prompt 前 40 字——多个派单共享同一开场白时（如"每人审查两份报告"）标题会一模一样，
     // 看板上无法区分；与兄弟任务撞标题时追加序号
     const baseTitle = `${target.name}: ${call.prompt.slice(0, 40).replace(/\n/g, ' ')}`
-    const workerIndex = this.workerCount(taskId) + 1
     const siblings = this.store.list().filter((t) => t.parentTaskId === taskId)
     const title = siblings.some((s) => s.title === baseTitle) ? `${baseTitle} #${workerIndex}` : baseTitle
     // 登记 key：循环侧新建的单同样进入会话级去重（否则后续回合复述同一派单会再建）
@@ -1310,6 +1316,13 @@ export class TaskRunner {
   }
   private workerCount(taskId: string) {
     return this.store.list().filter((t) => t.parentTaskId === taskId).length
+  }
+  private reserveWorkerIndex(taskId: string) {
+    const existing = this.store.list().filter((task) => task.parentTaskId === taskId)
+    const previous = this.workerIndexReservations.get(taskId) ?? 0
+    const next = Math.max(previous, existing.length, ...existing.map((task) => task.workerIndex ?? 0)) + 1
+    this.workerIndexReservations.set(taskId, next)
+    return next
   }
   /** git 仓库判定（带缓存：同 workdir 只探测一次） */
   private gitUsableCache = new Map<string, boolean>()

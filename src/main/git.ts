@@ -6,6 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { FileDiffErrorCode, FileDiffResult } from '../shared/contracts'
 import type { Task, TaskGitSnapshot, WorktreeCleanupStatus, WorktreeInfo } from '../shared/types'
+import { currentProcessIdentity, processOwnerState } from './persistence'
 
 export interface GitCommandResult {
   ok: boolean
@@ -749,8 +750,23 @@ export const WORKTREE_POOL_MAX_PER_REPO = 2
 export const WORKTREE_POOL_OWNER = '.agentdeck-pool'
 
 /** 进程内池：repoRoot → 可复用 worktree 路径集合。会话级资产——重启即空，
- *  留在盘上的池条目按无名残肢由启动清扫回收（owner 不在任务册，keepTask 必 false）。 */
+ *  留盘池条目由启动清扫按 WORKTREE_POOL_OWNER 归属回收，不依赖任务册记录。 */
 const worktreePoolByRepo = new Map<string, Set<string>>()
+const worktreePathLocks = new Map<string, Promise<void>>()
+
+async function withWorktreePathLock<T>(wtPath: string, operation: () => Promise<T>): Promise<T> {
+  const key = path.resolve(wtPath)
+  const previous = worktreePathLocks.get(key)
+  let release!: () => void
+  const current = new Promise<void>((resolve) => { release = resolve })
+  worktreePathLocks.set(key, current)
+  if (previous) await previous
+  try { return await operation() }
+  finally {
+    release()
+    if (worktreePathLocks.get(key) === current) worktreePathLocks.delete(key)
+  }
+}
 
 function poolFor(repoRoot: string): Set<string> {
   let pool = worktreePoolByRepo.get(repoRoot)
@@ -780,6 +796,7 @@ async function releaseWorktreeToPool(repoDir: string, wtDir: string, branch: str
   try {
     writeMetadata({
       ownerTaskId: WORKTREE_POOL_OWNER,
+      poolProcess: currentProcessIdentity(),
       repoDir: root,
       path: wtDir,
       branch,
@@ -793,7 +810,7 @@ async function releaseWorktreeToPool(repoDir: string, wtDir: string, branch: str
   return true
 }
 
-/** 从池里取一棵复用：clean -ffd（保留系统目录）→ switch -c <新分支> <基线>（只重写差异文件）
+/** 从池里取一棵复用：clean -ffdx（保留系统目录）→ switch -c <新分支> <基线>（只重写差异文件）
  *  → status 自洽核验（脏则 reset --hard 兜底一次）。任何一步失败都逐出该条目并返回 null，
  *  调用方回落全量 worktree add——池永远是加速捷径而非正确性依赖，复用失败不改变派单语义。
  *  switch/reset 沿用建树的规模自适应超时与进程树击杀通道（病态大差异下同样受控）。 */
@@ -808,34 +825,38 @@ async function acquirePooledWorktree(
   const root = path.resolve(repoDir)
   const pool = worktreePoolByRepo.get(root)
   if (!pool || !pool.size) return null
-  for (const wtPath of pool) {
-    pool.delete(wtPath)
-    const evict = async () => { await reclaimWorktree(wtPath, { force: true, deleteBranch: true }).catch(() => {}) }
-    if (!(await isGitRepo(wtPath))) { await evict(); continue }
-    const cleaned = await runGit(wtPath, ['clean', '-ffd', '--', ...pathspecExcludes()], 60000)
-    if (!cleaned.ok) { await evict(); continue }
-    // switch -C：不存在则建、存在则重置到基线——同名残枝（此前失败流程遗留的同名分支）
-    // 不让复用失败；其可能携带的未集成提交只在集成失败路径存在，而那条路径的 worktree
-    // 不会被归池，重置无丢失风险
-    const switched = await runGit(wtPath, ['switch', '-C', branch, baseSha], timeoutMs, undefined, true)
-    if (!switched.ok) { await evict(); continue }
-    let settled = await runGit(wtPath, ['status', '--porcelain'], 30000)
-    if (!settled.ok || settled.stdout.trim()) {
-      await runGit(wtPath, ['reset', '--hard', baseSha], timeoutMs, undefined, true)
-      settled = await runGit(wtPath, ['status', '--porcelain'], 30000)
-      if (!settled.ok || settled.stdout.trim()) { await evict(); continue }
-    }
-    const metadata: WorktreeInfo = {
-      ownerTaskId,
-      repoDir: root,
-      path: wtPath,
-      branch,
-      baseSha,
-      createdAt: Date.now(),
-      cleanupStatus: 'active'
-    }
-    try { writeMetadata(metadata) } catch { await evict(); continue }
-    return { path: wtPath, branch, metadata, pooled: true }
+  for (const wtPath of [...pool]) {
+    const reused = await withWorktreePathLock(wtPath, async () => {
+      if (!pool.has(wtPath)) return null
+      pool.delete(wtPath)
+      const evict = async (deleteRequestedBranch = false) => {
+        await reclaimWorktreeUnlocked(wtPath, { force: true, deleteBranch: true }).catch(() => {})
+        if (deleteRequestedBranch) await deleteBranchWithRetry(root, branch)
+      }
+      if (!(await isGitRepo(wtPath))) { await evict(); return null }
+      const cleaned = await runGit(wtPath, ['clean', '-ffd', '-x', '--', ...pathspecExcludes()], 60000)
+      if (!cleaned.ok) { await evict(); return null }
+      const switched = await runGit(wtPath, ['switch', '-c', branch, baseSha], timeoutMs, undefined, true)
+      if (!switched.ok) { await evict(); return null }
+      let settled = await runGit(wtPath, ['status', '--porcelain'], 30000)
+      if (!settled.ok || settled.stdout.trim()) {
+        await runGit(wtPath, ['reset', '--hard', baseSha], timeoutMs, undefined, true)
+        settled = await runGit(wtPath, ['status', '--porcelain'], 30000)
+        if (!settled.ok || settled.stdout.trim()) { await evict(true); return null }
+      }
+      const metadata: WorktreeInfo = {
+        ownerTaskId,
+        repoDir: root,
+        path: wtPath,
+        branch,
+        baseSha,
+        createdAt: Date.now(),
+        cleanupStatus: 'active'
+      }
+      try { writeMetadata(metadata) } catch { await evict(true); return null }
+      return { path: wtPath, branch, metadata, pooled: true }
+    })
+    if (reused) return reused
   }
   return null
 }
@@ -846,7 +867,7 @@ async function acquirePooledWorktree(
  *  worktree add 走规模自适应超时 + 进程树击杀（worktreeAddTimeoutFor/killProcessTree）；
  *  超时（killed/SIGTERM）一律判失败并就地清残肢，绝不走「目录像合法 worktree 就当成功」容错
  *  ——该容错仅保留给非超时的快速返回且目录确已就绪（worktreeReadyForTolerance 窄门）。 */
-export async function createWorktree(
+async function createWorktreeUnlocked(
   repoDir: string,
   name: string,
   baseBranch?: string,
@@ -871,18 +892,26 @@ export async function createWorktree(
   // 变成"意外建树成功"——派单语义被静默改写（锁专项③回归的教训）
   const branchPreexisting = await branchExists(repoDir, branch)
   const dirPreexisting = fs.existsSync(wtPath)
+  const rejectOccupiedTarget = (branchExistsNow: boolean, directoryExistsNow: boolean) => {
+    if (!branchExistsNow && !directoryExistsNow) return false
+    fail(branchExistsNow ? `托管分支已存在（${branch}）` : `worktree 目录已存在（${wtPath}）`)
+    return true
+  }
+  if (rejectOccupiedTarget(branchPreexisting, dirPreexisting)) {
+    return null
+  }
   const planned = options.addTimeoutMs !== undefined
     ? { timeoutMs: options.addTimeoutMs, fileCount: undefined as number | undefined }
     : await planWorktreeAddTimeout(root, repoDir, options.estimateFileCount)
+  if (rejectOccupiedTarget(await branchExists(repoDir, branch), fs.existsSync(wtPath))) return null
   // 池化复用先行：同仓池里有空闲 worktree 就换基线复用（只重写差异文件），全量 add 兜底
   const pooled = await acquirePooledWorktree(root, name, branch, baseSha, ownerTaskId, planned.timeoutMs)
   if (pooled) return pooled
+  if (rejectOccupiedTarget(await branchExists(repoDir, branch), fs.existsSync(wtPath))) return null
   const out = await runGit(repoDir, ['worktree', 'add', '-b', branch, wtPath, ...(baseBranch ? [baseBranch] : [])], planned.timeoutMs, undefined, true)
   if (out.timedOut) {
     // 超时绝不当成功：树杀前的 checkout 可能写了一半，孤儿残留的 index.lock 会卡死后续
-    // 回放。超时路径无条件全清（含同名既存资产）——agentdeck/<task>_cN 是托管命名空间，
-    // 超时意味着本方已进场施工，同名资产按上一轮残肢对待，这是 hot.7「重派不撞 already
-    // exists」的既定契约（smoke-worktree-timeout 块②固化的语义）
+    // 回放。超时意味着本方已进入托管路径施工，按残肢清理以避免重派撞 already exists。
     const cleaned = await cleanupWorktreeAddResidue(repoDir, wtPath, branch, true, true)
     if (cleaned.residue.length) {
       // 清理部分失败不再静默：残留清单（含分支名）走 noteWorktreeCleanupFailure 记 owner
@@ -928,6 +957,23 @@ export async function createWorktree(
     return null
   }
   return { path: wtPath, branch, metadata, addTimeoutMs: planned.timeoutMs, ...(planned.fileCount !== undefined ? { fileCount: planned.fileCount } : {}) }
+}
+
+export async function createWorktree(
+  repoDir: string,
+  name: string,
+  baseBranch?: string,
+  ownerTaskId = '',
+  onError?: (message: string) => void,
+  options: WorktreeCreateOptions = {}
+): Promise<WorktreeCreateResult | null> {
+  if (!(await isGitRepo(repoDir)) || !validWorktreeName(name)) {
+    return createWorktreeUnlocked(repoDir, name, baseBranch, ownerTaskId, onError, options)
+  }
+  const gcd = (await git(repoDir, ['rev-parse', '--git-common-dir'])).trim()
+  const root = path.dirname(commonGitDir(repoDir, gcd))
+  const targetPath = path.join(managedRoot(root), name)
+  return withWorktreePathLock(targetPath, () => createWorktreeUnlocked(repoDir, name, baseBranch, ownerTaskId, onError, options))
 }
 
 /** 为领队创建检出**既有分支**（集成分支）的托管 worktree——不建新分支。
@@ -1426,11 +1472,24 @@ async function deleteBranchWithRetry(workdir: string, name: string): Promise<boo
  *  目录与 git 注册保留、子分支删除、元数据挂池标记，下一次派单换基线秒级复用。 */
 export async function reclaimWorktree(
   wtDir: string,
-  options: { force?: boolean; deleteBranch?: boolean; repool?: boolean } = {}
+  options: { force?: boolean; deleteBranch?: boolean; repool?: boolean; expectedOwnerTaskId?: string } = {}
+): Promise<WorktreeCleanupResult> {
+  return withWorktreePathLock(wtDir, () => reclaimWorktreeUnlocked(wtDir, options))
+}
+
+async function reclaimWorktreeUnlocked(
+  wtDir: string,
+  options: { force?: boolean; deleteBranch?: boolean; repool?: boolean; expectedOwnerTaskId?: string } = {}
 ): Promise<WorktreeCleanupResult> {
   const resolved = await resolveManagedWorktree(wtDir)
   if (!resolved) return { ok: false, status: 'failed', path: wtDir, reason: 'path is outside .agentdeck-worktrees' }
   const { repoDir, name, metadata } = resolved
+  if (options.expectedOwnerTaskId !== undefined && metadata?.ownerTaskId !== options.expectedOwnerTaskId) {
+    return { ok: false, status: 'retained', path: wtDir, reason: 'worktree ownership changed' }
+  }
+  if (metadata?.ownerTaskId === WORKTREE_POOL_OWNER && worktreePoolByRepo.get(path.resolve(repoDir))?.has(path.resolve(wtDir))) {
+    return { ok: false, status: 'retained', path: wtDir, reason: 'worktree is active in the reuse pool' }
+  }
   // Legacy worktrees predate the sidecar but use the deterministic managed
   // branch name, so they can still be reclaimed without touching user refs.
   const branch = metadata?.branch || `${MANAGED_BRANCH_PREFIX}${name}`
@@ -1536,8 +1595,8 @@ export async function markWorktreeCleanup(
 }
 
 /** Backward-compatible boolean wrapper. It is fail-closed for dirty/manual-kept trees. */
-export async function removeWorktree(wtDir: string): Promise<boolean> {
-  const result = await reclaimWorktree(wtDir, { deleteBranch: true })
+export async function removeWorktree(wtDir: string, expectedOwnerTaskId?: string): Promise<boolean> {
+  const result = await reclaimWorktree(wtDir, { deleteBranch: true, ...(expectedOwnerTaskId !== undefined ? { expectedOwnerTaskId } : {}) })
   return result.ok
 }
 
@@ -1576,13 +1635,22 @@ export async function pruneWorktrees(
     // isIntegrationBranch 守卫照旧：只删目录与侧车，集成分支仅删任务的显式路径可带走。
     const crashLeftover = name.startsWith('.agentdeck-merge-')
     const owner = metadata?.ownerTaskId || name.replace(/_c\d+$/, '')
-    if (!crashLeftover && owner && keepTask(owner, metadata ?? undefined)) {
+    const pooledEntry = metadata?.ownerTaskId === WORKTREE_POOL_OWNER
+    if (pooledEntry && worktreePoolByRepo.get(path.resolve(root))?.has(path.resolve(wtPath))) {
+      result.retained.push({ name, reason: 'worktree is active in the reuse pool' })
+      continue
+    }
+    if (pooledEntry && processOwnerState(metadata?.poolProcess) !== 'dead') {
+      result.retained.push({ name, reason: 'pool owner process is live or cannot be verified dead' })
+      continue
+    }
+    if (!crashLeftover && owner && owner !== WORKTREE_POOL_OWNER && keepTask(owner, metadata ?? undefined)) {
       result.retained.push({ name, reason: 'owner task or Git operation is still active' })
       continue
     }
     if (metadata?.cleanupStatus === 'removed' && !fs.existsSync(wtPath)) {
-      const lease = options.claimWorktree?.(owner, name.startsWith('.agentdeck-merge-'))
-      if (!lease) {
+      const lease = pooledEntry ? undefined : options.claimWorktree?.(owner, name.startsWith('.agentdeck-merge-'))
+      if (!lease && !pooledEntry) {
         result.retained.push({ name, reason: 'cleanup ownership could not be established' })
         continue
       }
@@ -1615,8 +1683,8 @@ export async function pruneWorktrees(
       result.retained.push({ name, reason: 'within retention window' })
       continue
     }
-    const lease = options.claimWorktree?.(owner, crashLeftover)
-    if (!lease) {
+    const lease = pooledEntry ? undefined : options.claimWorktree?.(owner, crashLeftover)
+    if (!lease && !pooledEntry) {
       result.retained.push({ name, reason: 'cleanup ownership could not be established' })
       continue
     }
@@ -1625,7 +1693,11 @@ export async function pruneWorktrees(
       // 集成结果在分支上，目录只是检出；删任务的显式路径才允许连分支一起删。
       // 施工脚手架对脏判定豁免（force）：租约已确保无在途 Git 操作、仓库任务全部终态，
       // 崩溃残留的冲突/半成品状态不构成保留理由。
-      const reclaimed = await reclaimWorktree(wtPath, { ...(crashLeftover ? { force: true } : {}), deleteBranch: !isIntegrationBranch(metadata?.branch) })
+      const reclaimed = await reclaimWorktree(wtPath, {
+        ...(crashLeftover ? { force: true } : {}),
+        deleteBranch: !isIntegrationBranch(metadata?.branch),
+        ...(metadata ? { expectedOwnerTaskId: metadata.ownerTaskId } : {})
+      })
       if (reclaimed.ok) result.removed.push(name)
       else if (reclaimed.residue?.length) {
         // 部分成功（目录已回收、分支/注册残留）映射进 failed：启动清扫的接线

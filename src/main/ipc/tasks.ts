@@ -77,7 +77,11 @@ export function registerTaskIpc(ctx: IpcContext) {
     if (children.some((item) => item.status === 'running')) return { ok: false, error: '请先取消运行中的子任务' }
     const observed = [task, ...children]
     // 删除前先取 workdir（索引里没了任务对象就取不到了）
-    const workdirs = observed.map((item) => item.workdir).filter((w): w is string => !!w)
+    const worktrees = [...new Map(observed.flatMap((item) => {
+      const worktreePath = item.worktree?.path || item.workdir
+      return worktreePath ? [[worktreePath, item.worktree?.ownerTaskId || item.id] as const] : []
+    })).entries()].map(([worktreePath, ownerTaskId]) => ({ worktreePath, ownerTaskId }))
+    const workdirs = worktrees.map((item) => item.worktreePath)
     // 先按捕获身份校验并提交删除，再清理内存会话：校验失败不留任何副作用，
     // 也不可能让清理先于删除去伤及替换执行（新运行仍持有该任务身份）。
     const deleted = ctx.store.transaction((tx) => {
@@ -93,7 +97,7 @@ export function registerTaskIpc(ctx: IpcContext) {
     if (!deleted) return { ok: false, error: '任务状态已变化，请重试' }
     for (const childId of deleted) await Promise.resolve(ctx.runner.forget?.(childId))
     // 回收该任务（含子任务）的委派 worktree，防累积；失败不阻塞删除，留待启动清扫兜底
-    for (const wd of workdirs) void removeWorktree(wd).catch(() => {})
+    for (const item of worktrees) void removeWorktree(item.worktreePath, item.ownerTaskId).catch(() => {})
     // 报告副本 GC 挂线一（tasks:delete 显式回收）：任务与子单在主仓库根的全文副本一并清掉；
     // 副本经 git-common-dir 归位主仓库根，worktree 目录先删也不影响这一步
     {

@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url'
 import path from 'node:path'
 import fs from 'node:fs'
 import os from 'node:os'
+import { execFileSync } from 'node:child_process'
 
 const root = path.resolve(import.meta.dirname, '..')
 for (const [src, out] of [
@@ -62,11 +63,12 @@ function emitTurn(events, response, delegateTags, { stream = true } = {}) {
   events.onEvent({ ts: Date.now(), kind: 'final', text: response })
   events.onTurnEnd({ response, delegationText: delegateTags ? delegateTags.join('\n') : undefined, ok: true })
 }
-function makeWorkerBackend(id) {
+function makeWorkerBackend(id, onStart) {
   return {
     id, label: id,
     async probe() { return { ok: true, detail: '' } },
-    async start({ events }) {
+    async start({ events, prompt, workdir }) {
+      onStart?.({ id, prompt, workdir })
       setTimeout(() => {
         events.onEvent({ ts: Date.now(), kind: 'final', text: `done ${id}` })
         events.onTurnEnd({ response: `done ${id}`, ok: true })
@@ -75,10 +77,10 @@ function makeWorkerBackend(id) {
     }
   }
 }
-function harness(team, leaderBackend) {
+function harness(team, leaderBackend, onWorkerStart) {
   const tmpStore = fs.mkdtempSync(path.join(os.tmpdir(), 'sdr-store-'))
   const store = new TaskStore(tmpStore)
-  const backends = new Map(team.map((a) => [a.backend, a.backend === 'zcode' ? leaderBackend : makeWorkerBackend(a.backend)]))
+  const backends = new Map(team.map((a) => [a.backend, a.backend === 'zcode' ? leaderBackend : makeWorkerBackend(a.backend, onWorkerStart)]))
   const runner = new TaskRunner(store, backends, () => ({ concurrency: 1, mode: 'yolo', notify: false, workerConcurrency: 3 }))
   runner.attachTeam(() => team)
   return { store, runner }
@@ -220,6 +222,68 @@ function harness(team, leaderBackend) {
   assert(rideAlong.includes('Alpha（alpha）'), '捎带带有效队员名单')
   const rideAlongCount = leader.sent.filter((c) => c.includes('队员执行结果汇报') && c.includes('没有被执行')).length
   assert(rideAlongCount === 1, `捎带恰好一次，不与兜底重复（${rideAlongCount}）`)
+}
+
+{
+  const sharedWorkdir = fs.mkdtempSync(path.join(os.tmpdir(), 'sdr-shared-'))
+  const team = [
+    { id: 'L1', name: 'Boss', backend: 'zcode', role: '领队', systemPrompt: '', subordinates: ['W1'] },
+    { id: 'W1', name: 'Reader', backend: 'alpha', role: '审查员', systemPrompt: '', sharedWorkspace: true }
+  ]
+  let workerStart
+  const leader = makeLeaderBackend({
+    step(n, { events, content }) {
+      if (n === 0) {
+        emitTurn(events, '派只读检查。', [`<delegate to=${String.fromCharCode(34)}Reader${String.fromCharCode(34)}>检查当前文件并汇报问题</delegate>`])
+      } else if (content.includes('队员执行结果汇报')) {
+        emitTurn(events, '已收到检查结果，完成。')
+      } else {
+        emitTurn(events, '继续。')
+      }
+    }
+  })
+  const { store, runner } = harness(team, leader, (start) => { workerStart = start })
+  const task = store.create({ title: '共享工作区只读', prompt: '审查文件', workdir: sharedWorkdir, backend: 'zcode', agentId: 'L1' })
+  runner.enqueue(task)
+  const fin = await settle(store, task.id)
+
+  assert(fin.status === 'done', `场景E 领队 done（${fin.status}${fin.error ? ' ' + fin.error : ''}）`)
+  const child = store.list().find((item) => item.parentTaskId === task.id)
+  assert(!!child && child.workdir === sharedWorkdir && !child.worktree, '共享协作子单复用领队目录且不创建 worktree')
+  assert(child.unavailableReason.includes('只读协作'), '共享协作子单标注只读用途')
+  assert(workerStart?.workdir === sharedWorkdir, '队员后端收到领队共享目录')
+  assert(workerStart?.prompt.includes('只读协作约定') && workerStart.prompt.includes('不要修改、创建或删除文件'), '队员提示明确约束只读操作')
+  assert(leader.sent.some((content) => content.includes('队员 Reader 的结果') && content.includes('done alpha')), '共享工作区队员结果回灌给领队')
+  fs.rmSync(sharedWorkdir, { recursive: true, force: true })
+}
+
+{
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'sdr-parallel-'))
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim()
+  git('init', '-q', '-b', 'main')
+  git('config', 'user.email', 'smoke@example.invalid')
+  git('config', 'user.name', 'Smoke')
+  fs.writeFileSync(path.join(repo, 'base.txt'), 'baseline')
+  git('add', 'base.txt')
+  git('commit', '-qm', 'baseline')
+  const team = [
+    { id: 'L1', name: 'Boss', backend: 'zcode', role: '领队', systemPrompt: '', subordinates: ['W1', 'W2'] },
+    { id: 'W1', name: 'Alpha', backend: 'alpha', role: '工程师', systemPrompt: '' },
+    { id: 'W2', name: 'Beta', backend: 'beta', role: '工程师', systemPrompt: '' }
+  ]
+  const { store, runner } = harness(team, makeLeaderBackend({ step() {} }))
+  const task = store.create({ title: '并行派单', prompt: '检查两个文件', workdir: repo, backend: 'zcode', agentId: 'L1' })
+  store.update(task.id, { status: 'done', endedAt: Date.now() })
+  const children = await Promise.all([
+    runner.spawnDelegateChild(task.id, { to: 'Alpha', prompt: '检查第一个文件' }),
+    runner.spawnDelegateChild(task.id, { to: 'Beta', prompt: '检查第二个文件' })
+  ])
+  assert(children.every((child) => child?.worktree), '并行派单的两位队员都获得独立 worktree')
+  assert(new Set(children.map((child) => child.workerIndex)).size === 2, '并行派单的 workerIndex 在异步建树前已预留')
+  assert(new Set(children.map((child) => child.worktree.branch)).size === 2, '并行派单不共用分支')
+  assert(new Set(children.map((child) => child.workdir)).size === 2, '并行派单不共用工作树目录')
+  await Promise.all(children.map((child) => settle(store, child.id)))
+  fs.rmSync(repo, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
 }
 
 console.log('\n✅ 派单被拒回灌冒烟全绿')

@@ -2,13 +2,12 @@
 // checkout 孤儿继续持有 index.lock → 回放撞活锁拒单 → 回收残肢 → 重派 branch already exists）：
 // ① 超时自适应：worktree add 按 ls-files 计数放大超时（60s 基线 + 每 1 万文件 +60s，封顶 15 分钟），每仓 TTL 缓存
 // ①b 计数归一：子目录调用与根调用同值同键（repositoryRoot 归一后计数/缓存），消除子目录低估+低值缓存回退面
-// ② 超时不吞错：killed/SIGTERM 特征绝不允许走「目录像合法 worktree 就当成功」容错；全清才说「残肢已清理」
+// ② 既存 worktree/branch 拒绝接管；本次 checkout 超时绝不误报成功且清除自建残肢
 // ③ 进程树击杀：win32 taskkill /PID <pid> /T /F 参数断言级 + 真实孤儿 hook 对照（旧病可复现、树杀后不复发）
 // ③c 树杀失败不阻塞：taskkill 非零退出且目标不死 → close/exit+二次 deadline 收口，限时返回不 pending
 // ④ 回收原子性与可见：失败步骤重试一次，残留清单（分支名/注册路径）随结果上报并经
 //    noteWorktreeCleanupFailure 落时间线；目录回收不回滚；启动清扫兜底能清「目录已删+注册/分支残留」
-// ④b 超时清理结果不静默：分支删失败 → 残留（含分支名）进拒单文案 + onCleanupResidue →
-//    noteWorktreeCleanupFailure 时间线，文案不谎称「残肢已清理」，重派 already exists 不再静默复发
+// ④b 已存在分支保持原样；本次超时清理分支失败则残留进入拒单和时间线
 import assert from 'node:assert/strict'
 import { build } from 'esbuild'
 import { execFileSync } from 'node:child_process'
@@ -63,6 +62,10 @@ const cpShimPlugin = {
           return killer
         }
         if (isWorktreeAdd(file, args)) {
+          if (globalThis.__cpShimCheckoutOnAdd) {
+            real.execFileSync(file, args, { stdio: 'ignore' })
+            globalThis.__cpShimAfterAdd?.()
+          }
           const slow = new EventEmitter()
           slow.pid = 4242
           slow.stdout = new EventEmitter()
@@ -166,19 +169,33 @@ try {
   git.clearWorktreeFileCountCache()
   console.log('  OK ①b 计数归一：子目录与根同值同键，低值缓存回退面消除')
 
-  // ---- ② 超时不吞错：worktree add 超时快返回 + 目录已存在且合法 → 必须判失败而非容错成功 ----
+  // ---- ② 既存树不接管：同名 worktree 与分支已存在时必须快拒绝且保持原样 ----
   const swallow = makeRepo('swallow')
   const wtPath = path.join(swallow.dir, '.agentdeck-worktrees', 'task_sw_c1')
   fs.mkdirSync(path.dirname(wtPath), { recursive: true })
   swallow.g('worktree', 'add', '-b', 'agentdeck/task_sw_c1', wtPath, 'main')
   let swallowError = ''
   const refused = await gitShim.createWorktree(swallow.dir, 'task_sw_c1', 'main', 'task_sw', (m) => { swallowError = m }, { addTimeoutMs: 400 })
-  assert.equal(refused, null, 'killed/SIGTERM 场景绝不允许走「目录合法即成功」容错')
-  assert.ok(/超时/.test(swallowError), `失败原因带超时说明：${swallowError}`)
-  assert.ok(/残肢已清理/.test(swallowError), `全清时才允许说「残肢已清理」：${swallowError}`)
-  assert.ok(!fs.existsSync(wtPath), '超时残肢就地清理（目录）')
-  assert.throws(() => swallow.g('rev-parse', '--verify', '--quiet', 'agentdeck/task_sw_c1'), '超时残肢就地清理（分支，重派不再 branch already exists）')
-  console.log('  OK ② 超时不吞错：快返回超时 + 目录就绪诱惑现场 → 判失败并清理残肢')
+  assert.equal(refused, null, '既存 worktree 不得被误认为本次超时残肢')
+  assert.ok(/已存在/.test(swallowError), `失败原因说明既存资产冲突：${swallowError}`)
+  assert.ok(fs.existsSync(wtPath), '拒绝接管后既存 worktree 目录保持不变')
+  assert.equal(swallow.g('rev-parse', '--verify', 'agentdeck/task_sw_c1'), swallow.g('rev-parse', 'main'), '拒绝接管后既存分支保持原 tip')
+  console.log('  OK ② 既存 worktree 与分支不被超时清理路径接管或删除')
+
+  const newCheckout = makeRepo('new-checkout')
+  const newCheckoutPath = path.join(newCheckout.dir, '.agentdeck-worktrees', 'task_new_c1')
+  let timedOutError = ''
+  globalThis.__cpShimCheckoutOnAdd = true
+  try {
+    const timedOut = await gitShim.createWorktree(newCheckout.dir, 'task_new_c1', 'main', 'task_new', (message) => { timedOutError = message }, { addTimeoutMs: 400 })
+    assert.equal(timedOut, null, '本次 checkout 虽已就绪但 add 超时仍不得误报成功')
+  } finally {
+    globalThis.__cpShimCheckoutOnAdd = false
+  }
+  assert.match(timedOutError, /超时/, '本次 checkout 超时应明确报告失败')
+  assert.match(timedOutError, /残肢已清理/, '全清时才报告残肢已清理')
+  assert.ok(!fs.existsSync(newCheckoutPath), '本次失败的 worktree 目录被回收')
+  assert.throws(() => newCheckout.g('rev-parse', '--verify', '--quiet', 'agentdeck/task_new_c1'), '本次失败创建的分支被回收')
 
   // ---- ③ 进程树击杀 ----
   // ③a win32 taskkill 命令构造（参数断言级）
@@ -265,29 +282,52 @@ try {
   assert.throws(() => form2.g('rev-parse', '--verify', '--quiet', 'agentdeck/task_f2_c1'), '兜底后分支已删（重派不再 branch already exists）')
   console.log('  OK ④ 回收部分失败：重试+残留清单+时间线落盘，清扫兜底收干净')
 
-  // ---- ④b 超时清理结果不静默：分支删失败（refs 锁）→ 残留进拒单文案与 owner 时间线，
-  //      文案绝不谎称「残肢已清理」——消除重派 already exists 的静默复发面 ----
+  // ---- ④b 既存分支受 refs 锁时拒绝接管；不得删分支或将其误报为本次残留 ----
   const form3 = makeRepo('form3')
   form3.g('branch', 'agentdeck/task_g3_c1', 'main')
-  const ownerG3 = store.create({ title: 'owner-g3', prompt: 'p', workdir: form3.dir, backend: 'fake', agentId: 'lead' })
+  const originalG3Sha = form3.g('rev-parse', 'agentdeck/task_g3_c1')
   const refLockG3 = path.join(form3.dir, '.git', 'refs', 'heads', 'agentdeck', 'task_g3_c1.lock')
   fs.mkdirSync(path.dirname(refLockG3), { recursive: true })
   fs.writeFileSync(refLockG3, '')
   let g3Error = ''
-  const g3Refused = await gitShim.createWorktree(form3.dir, 'task_g3_c1', 'main', ownerG3.id, (m) => { g3Error = m }, {
+  let cleanupReported = false
+  const g3Refused = await gitShim.createWorktree(form3.dir, 'task_g3_c1', 'main', 'owner-g3', (m) => { g3Error = m }, {
     addTimeoutMs: 400,
-    onCleanupResidue: (failure) => store.noteWorktreeCleanupFailure(form3.dir, failure)
+    onCleanupResidue: () => { cleanupReported = true }
   })
-  assert.equal(g3Refused, null, '超时照旧判失败')
-  assert.ok(/残肢未全清/.test(g3Error), `部分失败时文案不得谎称已清理：${g3Error}`)
-  assert.ok(!g3Error.includes('残肢已清理'), `部分失败时文案不含「残肢已清理」：${g3Error}`)
-  assert.ok(g3Error.includes('agentdeck/task_g3_c1'), `拒单文案含残留分支名（重派路径拿得到残留信息）：${g3Error}`)
-  assert.ok(form3.g('rev-parse', '--verify', '--quiet', 'agentdeck/task_g3_c1') !== '', '分支确实残留（refs 锁模拟删除失败）')
-  const eventsG3 = store.readEvents(ownerG3.id).map((e) => e.text ?? '').join('\n')
-  assert.ok(eventsG3.includes('agentdeck/task_g3_c1'), 'onCleanupResidue → noteWorktreeCleanupFailure 时间线事件落盘含残留分支名')
+  assert.equal(g3Refused, null, '既存分支冲突必须拒绝')
+  assert.ok(/已存在/.test(g3Error), `拒绝原因说明既存资产冲突：${g3Error}`)
+  assert.equal(cleanupReported, false, '既存分支不作为本次残留上报')
+  assert.equal(form3.g('rev-parse', 'agentdeck/task_g3_c1'), originalG3Sha, 'refs 锁下既存分支 tip 仍保持原样')
   fs.rmSync(refLockG3)
-  assert.ok(await git.deleteBranch(form3.dir, 'agentdeck/task_g3_c1'), '解锁后残留分支可正常删除（兜底/重试拿到干净现场，不留死局）')
-  console.log('  OK ④b 超时清理部分失败可见：拒单文案+时间线均含残留分支名，不谎报全清')
+  assert.ok(await git.deleteBranch(form3.dir, 'agentdeck/task_g3_c1'), '解锁后夹具分支可正常删除')
+  console.log('  OK ④b refs 锁下的既存分支不被拒单清理路径删除或重置')
+
+  const timedOutPartialRepo = makeRepo('partial-timeout')
+  const partialOwner = store.create({ title: 'partial-timeout', prompt: 'p', workdir: timedOutPartialRepo.dir, backend: 'fake', agentId: 'lead' })
+  const partialBranch = 'agentdeck/task_partial_c1'
+  const partialLock = path.join(timedOutPartialRepo.dir, '.git', 'refs', 'heads', 'agentdeck', 'task_partial_c1.lock')
+  let partialError = ''
+  globalThis.__cpShimCheckoutOnAdd = true
+  globalThis.__cpShimAfterAdd = () => {
+    fs.mkdirSync(path.dirname(partialLock), { recursive: true })
+    fs.writeFileSync(partialLock, '')
+  }
+  try {
+    const partialResult = await gitShim.createWorktree(timedOutPartialRepo.dir, 'task_partial_c1', 'main', partialOwner.id, (message) => { partialError = message }, {
+      addTimeoutMs: 400,
+      onCleanupResidue: (failure) => store.noteWorktreeCleanupFailure(timedOutPartialRepo.dir, failure)
+    })
+    assert.equal(partialResult, null, '部分清理仍须按超时拒单')
+  } finally {
+    globalThis.__cpShimCheckoutOnAdd = false
+    globalThis.__cpShimAfterAdd = undefined
+  }
+  assert.match(partialError, /残肢未全清/, '清理有残留时不得谎报全清')
+  assert.ok(partialError.includes(partialBranch), '拒单说明包括残留分支')
+  assert.ok(store.readEvents(partialOwner.id).some((event) => event.text?.includes(partialBranch)), '清理残留记录进 owner 时间线')
+  fs.rmSync(partialLock)
+  assert.ok(await git.deleteBranch(timedOutPartialRepo.dir, partialBranch), '解锁后残留分支可清理')
 
   console.log('\nWORKTREE TIMEOUT SMOKE PASSED')
 } finally {
