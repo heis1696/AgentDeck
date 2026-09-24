@@ -1165,10 +1165,15 @@ export class TaskRunner {
       // worktree 创建与领队/其他子任务的 git 操作可能撞 index.lock：重试两次再放弃
       let wt: { path: string; metadata: WorktreeInfo } | null = null
       let lastWtError = ''
+      const leaderDir = task.workdir
       for (let attempt = 0; attempt < 3 && !wt; attempt++) {
         if (attempt) await new Promise((r) => setTimeout(r, 500))
         if (!active()) return null
-        wt = await createWorktree(task.workdir, `${taskId}_c${this.workerCount(taskId) + 1}`, base, taskId, (m) => { lastWtError = m })
+        wt = await createWorktree(leaderDir, `${taskId}_c${this.workerCount(taskId) + 1}`, base, taskId, (m) => { lastWtError = m }, {
+          // 超时残肢清理部分失败（分支/注册残留）→ owner 时间线可见，重派撞
+          // already exists 时现场与原因都查得到，不再静默复发
+          onCleanupResidue: (failure) => { this.store.noteWorktreeCleanupFailure(leaderDir, failure) }
+        })
         if (!active()) {
           if (wt) await reclaimWorktree(wt.path)
           return null
