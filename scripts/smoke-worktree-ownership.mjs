@@ -15,8 +15,13 @@ const electronStub = {
     builder.onResolve({ filter: /^electron$/ }, () => ({ path: 'electron', namespace: 'electron-stub' }))
     builder.onLoad({ filter: /.*/, namespace: 'electron-stub' }, () => ({ loader: 'js', contents: `
       globalThis.__worktreeHandlers = new Map()
-      export const ipcMain = { handle: (name, handler) => globalThis.__worktreeHandlers.set(name, handler) }
+      export const ipcMain = {
+        handle: (name, handler) => globalThis.__worktreeHandlers.set(name, handler),
+        on: () => {}
+      }
       export const BrowserWindow = { getAllWindows: () => [] }
+      export const dialog = { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) }
+      export const Notification = { isSupported: () => false }
     ` }))
   }
 }
@@ -39,10 +44,11 @@ const load = async (file, name, plugins = []) => {
   await build({ entryPoints: [path.join(root, file)], outfile, bundle: true, platform: 'node', format: 'cjs', plugins, external: plugins.includes(electronStub) ? [] : ['electron'], logLevel: 'silent' })
   return import(pathToFileURL(outfile).href)
 }
-const [{ TaskStore }, { createExecutionOwner, currentProcessIdentity }, git, { runDelegationLoop }, { registerTaskIpc }] = await Promise.all([
+const [{ TaskStore }, { createExecutionOwner, currentProcessIdentity }, git, { runDelegationLoop }, { registerTaskIpc }, { registerSystemIpc }] = await Promise.all([
   load('src/main/store.ts', 'store'), load('src/main/persistence.ts', 'persistence'),
   load('src/main/git.ts', 'git'), load('src/main/delegate.ts', 'delegate', [gatePlugin]),
-  load('src/main/ipc/tasks.ts', 'ipc-tasks', [electronStub])
+  load('src/main/ipc/tasks.ts', 'ipc-tasks', [electronStub]),
+  load('src/main/ipc/system.ts', 'ipc-system', [electronStub])
 ])
 const identity = (task) => ({ status: task.status, runId: task.runId, executionOwner: task.executionOwner, attempt: task.attempt })
 const runGit = (dir, ...args) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8', windowsHide: true }).trim()
@@ -375,6 +381,93 @@ try {
   chain.store.flush()
   chain.peer.flush()
   console.log('PASS chain continuation worktree: kept by integration.branch alone, sweep keeps the branch, explicit delete reclaims it')
+
+  // ── merge 尸体清扫：crashLeftover 优先于 owner keep + 失败可见 ──
+  // 现场实证：merge 临时目录（.agentdeck-merge-*）检出集成分支且带 owner 侧车时，
+  // keepTask 判定先于 crashLeftover 判定——owner 在册（哪怕早已终态）就把施工脚手架
+  // 当成果载体 retain 永不回收。修后：尸体直接进回收流程（租约照拿），集成分支守卫照旧。
+  {
+    const corpse = await fixture('merge-corpse-sweep')
+    const leaderId = corpse.parent.id
+    const ib = 'agentdeck/task-' + leaderId
+    const markDone = () => {
+      const current = corpse.peer.get(leaderId)
+      corpse.peer.updateIf(leaderId, identity(current), { status: 'done', endedAt: Date.now() })
+    }
+    markDone()
+    const latest = () => corpse.peer.get(leaderId)
+    corpse.peer.updateIf(leaderId, identity(latest()), { integration: { branch: ib } })
+    runGit(corpse.repo, 'branch', ib, 'main')
+    fs.mkdirSync(path.join(corpse.repo, '.agentdeck-worktrees'), { recursive: true })
+    const writeCorpseMetadata = (name, wtPath, branch) => {
+      const metaDir = path.join(corpse.repo, '.agentdeck-worktrees', '.metadata')
+      fs.mkdirSync(metaDir, { recursive: true })
+      fs.writeFileSync(path.join(metaDir, `${name}.json`), JSON.stringify({
+        ownerTaskId: leaderId, repoDir: corpse.repo, path: wtPath, branch,
+        baseSha: runGit(corpse.repo, 'rev-parse', 'main'), createdAt: Date.now() - 86400000, cleanupStatus: 'active'
+      }))
+    }
+    const pruneWithLease = () => git.pruneWorktrees(corpse.repo, (owner, worktree) => git.shouldKeepTaskWorktree(corpse.peer.list(), corpse.repo, owner, worktree), {
+      maxAgeMs: 0,
+      claimWorktree: (owner, merge) => {
+        const claim = corpse.peer.claimWorktreeCleanup(corpse.repo, owner, merge)
+        return claim ? { release: () => corpse.peer.releaseGitOperation(claim) } : undefined
+      }
+    })
+    // ① owner 任务在册 + 尸体检出集成分支 → 清扫回收目录，集成分支保留
+    const corpse1Name = `.agentdeck-merge-corpse1-${Date.now().toString(36)}`
+    const corpse1Path = path.join(corpse.repo, '.agentdeck-worktrees', corpse1Name)
+    runGit(corpse.repo, 'worktree', 'add', corpse1Path, ib)
+    writeCorpseMetadata(corpse1Name, corpse1Path, ib)
+    const sweep1 = await pruneWithLease()
+    assert.ok(!fs.existsSync(corpse1Path) && sweep1.removed.includes(corpse1Name), '① merge 尸体（owner 在册+检出集成分支）被清扫回收目录')
+    assert.equal(await git.branchExists(corpse.repo, ib), true, '① 集成分支保留（清扫只减目录与侧车）')
+    // ① 尸体检出普通 agentdeck/ 子分支 → 按既有守卫连分支删
+    const sideBranch = `agentdeck/corpse-side-${Date.now().toString(36)}`
+    runGit(corpse.repo, 'branch', sideBranch, 'main')
+    const corpse2Name = `.agentdeck-merge-corpse2-${Date.now().toString(36)}`
+    const corpse2Path = path.join(corpse.repo, '.agentdeck-worktrees', corpse2Name)
+    runGit(corpse.repo, 'worktree', 'add', corpse2Path, sideBranch)
+    writeCorpseMetadata(corpse2Name, corpse2Path, sideBranch)
+    const sweep2 = await pruneWithLease()
+    assert.ok(!fs.existsSync(corpse2Path) && sweep2.removed.includes(corpse2Name), '① 检出普通 agentdeck/ 子分支的尸体连目录回收')
+    assert.equal(await git.branchExists(corpse.repo, sideBranch), false, '① 普通托管分支按既有守卫随尸体一并删除')
+    // ② 租约不可用 → retain 且 reason 含 ownership（留待下轮）
+    const corpse3Name = `.agentdeck-merge-corpse3-${Date.now().toString(36)}`
+    const corpse3Path = path.join(corpse.repo, '.agentdeck-worktrees', corpse3Name)
+    runGit(corpse.repo, 'worktree', 'add', corpse3Path, ib)
+    writeCorpseMetadata(corpse3Name, corpse3Path, ib)
+    const sweep3 = await git.pruneWorktrees(corpse.repo, (owner, worktree) => git.shouldKeepTaskWorktree(corpse.peer.list(), corpse.repo, owner, worktree), {
+      maxAgeMs: 0,
+      claimWorktree: () => undefined
+    })
+    const retainedEntry = sweep3.retained.find((item) => item.name === corpse3Name)
+    assert.ok(retainedEntry && fs.existsSync(corpse3Path), '② 租约不可用 → 尸体 retain 待下轮')
+    assert.match(retainedEntry.reason, /ownership/, '② retain 原因含 ownership')
+    // ③ reclaim 失败（Windows 句柄占用/断开 gitdir 链接）→ failed 项 + 时间线事件可见
+    const corpse4Name = `.agentdeck-merge-corpse4-${Date.now().toString(36)}`
+    const corpse4Path = path.join(corpse.repo, '.agentdeck-worktrees', corpse4Name)
+    runGit(corpse.repo, 'worktree', 'add', '--detach', corpse4Path, 'main')
+    writeCorpseMetadata(corpse4Name, corpse4Path, ib)
+    const occupied = fs.openSync(path.join(corpse4Path, 'occupied.txt'), 'w')
+    fs.writeFileSync(path.join(corpse4Path, 'occupied.txt'), '外部程序占用的文件\n')
+    fs.rmSync(path.join(corpse4Path, '.git'))
+    registerSystemIpc({ store: corpse.peer, settings: { worktreeMaxAgeDays: 30 }, getWindow: () => null })
+    const report = await globalThis.__worktreeHandlers.get('worktrees:prune')()
+    assert.ok(report.failed.some((item) => item.name === corpse4Name), '③ reclaim 失败计入 failed（不再静默）')
+    const eventsFile = path.join(corpse.data, 'tasks', leaderId, 'events.jsonl')
+    assert.ok(fs.existsSync(eventsFile), '③ 失败事件落 owner 任务时间线')
+    const noteLine = fs.readFileSync(eventsFile, 'utf8').split('\n').find((line) => line.includes(corpse4Name))
+    assert.ok(noteLine, '③ 事件含目录名')
+    const noteEvent = JSON.parse(noteLine)
+    assert.equal(noteEvent.data.worktreeCleanupFailed.name, corpse4Name, '③ 事件记录目录名')
+    assert.ok(noteEvent.data.worktreeCleanupFailed.reason, '③ 事件记录失败原因')
+    assert.match(noteEvent.text, /外部程序/, '③ 文案带占用排查提示')
+    fs.closeSync(occupied)
+    corpse.store.flush()
+    corpse.peer.flush()
+    console.log('PASS merge corpse sweep: crashLeftover beats owner keep, ownership retain names the lease, failed cleanup lands on the timeline')
+  }
 
   // 显式删除路径（tasks:delete → removeWorktree）才允许带走集成分支
   const chain2 = await fixture('chain-explicit-delete')

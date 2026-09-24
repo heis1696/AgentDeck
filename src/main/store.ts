@@ -531,6 +531,25 @@ export class TaskStore {
     })
   }
 
+  /** 清扫回收失败不再静默：owner 任务在册 → 其时间线记一条 status 事件（目录名+原因+
+   *  占用排查提示），每轮清扫各记一条——连续多轮失败在时间线上可见；无主（裸 merge 尸体）
+   *  退化为 console.warn 留现场。 */
+  noteWorktreeCleanupFailure(repoDir: string, failure: { name: string; reason: string; ownerTaskId?: string }): void {
+    const derived = failure.name.replace(/_c\d+$/, '')
+    const owner = (failure.ownerTaskId ? this.get(failure.ownerTaskId) : undefined)
+      ?? (derived !== failure.name ? this.get(derived) : undefined)
+    if (!owner) {
+      console.warn(`[worktree] 清理失败（保留现场，待下轮清扫重试）：${failure.name} — ${failure.reason}`)
+      return
+    }
+    this.appendEvent(owner.id, {
+      eventId: `worktree-cleanup-failed:${failure.name}:${Date.now()}`,
+      ts: Date.now(), kind: 'status',
+      text: `worktree 清理失败：${failure.name}（${failure.reason}）。若连续多轮失败，请检查是否有外部程序（IDE/git GUI）占用该目录。`,
+      data: { worktreeCleanupFailed: { repoDir, name: failure.name, reason: failure.reason } }
+    })
+  }
+
   claimRun(id: string, expected: TaskExpectation, runId: string, owner: ExecutionOwner, patch: Partial<Task> = {}): Task | undefined {
     if (!owner.token || owner.pid !== process.pid || processOwnerState(owner) !== 'live') throw new Error('Invalid execution owner')
     return this.transaction((tx) => {

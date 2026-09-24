@@ -962,6 +962,8 @@ export async function runDelegationLoop(
               if (!active()) return abandoned()
               r = viaDetach.ok ? viaDetach : { ...viaDetach, message: `${r.message}；临时 worktree 通道仍失败：${viaDetach.message}` }
             }
+            // 临时 merge worktree 的 finally 清理失败不再静默：目录名+原因记上时间线
+            if (r.cleanupWarning) note(`合并临时 worktree 清理失败（保留现场，待下轮清扫兜底）：${r.cleanupWarning}`)
             if (!r.ok) {
               childOk = false
               allOk = false

@@ -31,13 +31,16 @@ export function registerSystemIpc(ctx: IpcContext) {
     const maxAgeMs = ctx.settings.worktreeMaxAgeDays * 24 * 60 * 60 * 1000
     const results = []
     for (const repoDir of dirs) {
-      results.push(await pruneWorktrees(repoDir, (owner, worktree) => shouldKeepTaskWorktree(ctx.store.list(), repoDir, owner, worktree), {
+      const report = await pruneWorktrees(repoDir, (owner, worktree) => shouldKeepTaskWorktree(ctx.store.list(), repoDir, owner, worktree), {
         maxAgeMs,
         claimWorktree: (owner, merge) => {
           const claim = ctx.store.claimWorktreeCleanup(repoDir, owner, merge)
           return claim ? { release: () => { try { ctx.store.releaseGitOperation(claim) } catch {} } } : undefined
         }
-      }))
+      })
+      results.push(report)
+      // 清扫失败不再静默：owner 任务在册 → 时间线事件（目录名+原因），连续多轮失败可见
+      for (const failure of report.failed) ctx.store.noteWorktreeCleanupFailure(repoDir, failure)
       for (const metadata of listWorktreeMetadata(repoDir)) {
         const task = ctx.store.list().find((item) => item.worktree?.path === metadata.path)
         if (task && task.worktree && task.worktree.cleanupStatus !== metadata.cleanupStatus) {
