@@ -6,6 +6,10 @@ export type TaskStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
 export type BackendId = 'zcode' | 'claude' | 'codex' | 'opencode' | 'dsh'
 export const BACKEND_IDS: readonly BackendId[] = ['zcode', 'claude', 'codex', 'opencode', 'dsh']
 
+/** Agent 思考强度档位（zcode/claude/codex/dsh 支持；opencode 不支持，走其配置文件 variants） */
+export type ThinkingLevel = 'off' | 'low' | 'medium' | 'high' | 'max'
+export const THINKING_LEVELS: readonly ThinkingLevel[] = ['off', 'low', 'medium', 'high', 'max']
+
 export function isTaskStatus(value: unknown): value is TaskStatus {
   return value === 'queued' || value === 'running' || value === 'done' || value === 'failed' || value === 'cancelled'
 }

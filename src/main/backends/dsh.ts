@@ -143,14 +143,14 @@ export function createDshBackend(getPaths: () => { dshPath: string }): AgentBack
       })
     },
     async start(args) {
-      const { prompt, workdir, events: rawEvents, mode, model, turn } = args
+      const { prompt, workdir, events: rawEvents, mode, model, thinking, turn } = args
       // ACP 组件在才尝试：缺失时直接 headless，不产生额外延迟
       const acp = findDshAcpBin(getPaths().dshPath || undefined)
       if (acp) {
         try {
           // ACP owns its per-turn binding. Passing an already-bound channel
           // would force every later turn back onto the first turn's stamp.
-          return await startDshAcpSession({ prompt, workdir, mode, model, events: rawEvents, acp, turn })
+          return await startDshAcpSession({ prompt, workdir, mode, model, thinking, events: rawEvents, acp, turn })
         } catch (e) {
           if (!(e instanceof AcpBootError)) throw e
           const events = bindTurn(rawEvents, turn)

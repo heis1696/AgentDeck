@@ -12,6 +12,17 @@ import { isForgeAgent } from '../../../shared/forge'
 /** v1 支持预设注入执行的后端面（Agent 表单的预设提示文案据此区分，非预设归属）：zcode（runtimeModel）/ claude（spawn env） */
 const CONNECTION_BACKENDS = ['zcode', 'claude']
 
+/** 思考强度档位（空 = 跟随平台默认）；badge 用同一文案映射 */
+const THINKING_OPTIONS: Array<{ value: '' | 'off' | 'low' | 'medium' | 'high' | 'max'; label: string }> = [
+  { value: '', label: '跟随默认' },
+  { value: 'off', label: '关' },
+  { value: 'low', label: '低' },
+  { value: 'medium', label: '中' },
+  { value: 'high', label: '高' },
+  { value: 'max', label: '极致' }
+]
+const THINKING_LABELS: Record<string, string> = { off: '关', low: '低', medium: '中', high: '高', max: '极致' }
+
 export type ListLoadState = 'loading' | 'ready' | 'error'
 
 export function canPersistList<T>(state: ListLoadState, list: T[] | null, refreshing = false): list is T[] {
@@ -548,6 +559,7 @@ export function AgentsView() {
                 <div className="tm-badges">
                   <span className="tm-badge"><Network size={10} />{a.backend}</span>
                   {a.model ? <span className="tm-badge tm-badge-mono">{a.model}</span> : null}
+                  {a.thinking ? <span className="tm-badge" title="思考强度">思考·{THINKING_LABELS[a.thinking] ?? a.thinking}</span> : null}
                   {isForgeAgent(a) ? <span className="tm-badge tm-badge-forge">✦ 锻造师</span> : null}
                   {a.subordinates?.length ? <span className="tm-badge tm-badge-lead">⚡ 领队 · 可驱使 {a.subordinates.length}</span> : null}
                   {preset ? <span className="tm-badge tm-badge-preset" title={`连接：${preset.name} · ${preset.baseURL}`}>预设：{preset.name}</span> : null}
@@ -817,6 +829,21 @@ export function AgentsView() {
                   ))}
                 </div>
               )}
+            </label>
+            <label className="field">
+              <span>思考强度</span>
+              <select
+                value={editing.thinking ?? ''}
+                disabled={editing.backend === 'opencode'}
+                onChange={(e) => update(editing, { thinking: (e.target.value || undefined) as Agent['thinking'] })}
+              >
+                {THINKING_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+              {editing.backend === 'opencode'
+                ? <span className="hint">OpenCode 暂不支持，请用其配置文件 variants</span>
+                : editing.backend === 'zcode'
+                  ? <span className="hint">非推理模型自动忽略，协议无中间档时自动就近上调</span>
+                  : null}
             </label>
             <label className="field">
               <span>定位（头衔：领队 / 工程师 / 审查员…）</span>

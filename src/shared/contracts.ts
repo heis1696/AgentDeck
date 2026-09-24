@@ -1,4 +1,4 @@
-import type { AcceptanceCriterion, Automation, AppSettings, AnalyticsSummary, Comment, Goal, GoalApprovalSnapshot, GoalCheckpoint, GoalEvolutionPatch, GoalSpecDecision, GoalSpecSnapshot, GoalRun, Issue, IssuePriority, IssueStatus, Run, RunTrigger, RuntimeSnapshot, Task, TaskEvent } from './types'
+import type { AcceptanceCriterion, Automation, AppSettings, AnalyticsSummary, Comment, Goal, GoalApprovalSnapshot, GoalCheckpoint, GoalEvolutionPatch, GoalSpecDecision, GoalSpecSnapshot, GoalRun, Issue, IssuePriority, IssueStatus, Run, RunTrigger, RuntimeSnapshot, Task, TaskEvent, ThinkingLevel } from './types'
 import type { SkillDetail, SkillMeta, SkillTarget, SyncState } from './skills'
 import type { AgentDraft, DraftResult, ExportResult, ImproveResult, ImportResult, EvaluateResult } from './forge'
 import type { Meeting, MeetingCreateInput } from './meeting'
@@ -58,6 +58,7 @@ export interface AgentInfo {
   backend: string
   model?: string
   presetId?: string
+  thinking?: ThinkingLevel
   note?: string
   color: string
   role?: string

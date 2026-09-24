@@ -12,7 +12,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import type { TaskEvent } from '../../shared/types'
+import type { TaskEvent, ThinkingLevel } from '../../shared/types'
 import type { PermissionRequest } from '../../shared/contracts'
 import type { BackendSession, BackendSessionEvents, BackendTurnStamp } from './types'
 import { bindTurn } from './types'
@@ -26,8 +26,8 @@ const ACP_COMPOSITION = `# AgentDeck 的 dsh ACP 组合：基于 deepseek-harnes
 - id: llm-deepseek
   name: '@deepseek-ai/dsh-llm-deepseek'
   config:
-    thinking: enabled
-    reasoningEffort: max
+    thinking: !!js "process.env.AGENTDECK_DSH_THINKING ?? 'enabled'"
+    reasoningEffort: !!js "process.env.AGENTDECK_DSH_EFFORT ?? 'max'"
     models:
       - id: deepseek-v4-flash
       - id: deepseek-v4-pro
@@ -302,6 +302,8 @@ export interface DshAcpSessionOptions {
   workdir: string
   mode: string
   model?: string
+  /** 思考强度（空 = 模板默认 enabled/max）：off→thinking disabled，其余→enabled+effort=<档> */
+  thinking?: ThinkingLevel
   events: BackendSessionEvents
   acp: DshAcpBin
   /** 首回合身份：本连接会把消息归属到它，并原样回传 */
@@ -314,7 +316,7 @@ export interface DshAcpSessionOptions {
  * 调用方（dsh.ts）据此回退 headless 一次性模式。
  */
 export async function startDshAcpSession(opts: DshAcpSessionOptions): Promise<BackendSession> {
-  const { prompt, workdir, mode, model, events, acp, turn: firstTurn } = opts
+  const { prompt, workdir, mode, model, thinking, events, acp, turn: firstTurn } = opts
   /**
    * 本连接"在飞回合"的发射通道：**每个回合一个不可变通道**（bindTurn 固定住身份），
    * 换回合只换指针、绝不改写既有通道。没有回合身份时退回会话级通道（老调用方零变化），
@@ -358,6 +360,13 @@ export async function startDshAcpSession(opts: DshAcpSessionOptions): Promise<Ba
     } else {
       env.AGENTDECK_DSH_MODEL = model
     }
+  }
+  // 思考强度：模板经 !!js 读这两个 env（未设 = enabled/max 现状）
+  if (thinking === 'off') {
+    env.AGENTDECK_DSH_THINKING = 'disabled'
+  } else if (thinking) {
+    env.AGENTDECK_DSH_THINKING = 'enabled'
+    env.AGENTDECK_DSH_EFFORT = thinking
   }
 
   const conn = new AcpConnection(acp.node, [acp.bin, '--config', configPath], workdir || process.cwd(), env)

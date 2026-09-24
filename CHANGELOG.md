@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **Agent 思考强度配置（端到端）**：`Agent` 增 `thinking` 档位（关/低/中/高/极致，空 = 平台默认），runner 按后端原生协议分发——zcode 选目录 variant（缺档就近上调，非推理模型忽略）或预设 optionSpecs 单值档（关=不发参数，其余交给 zcode 内置映射发 thinking/reasoning_effort）；claude 注入 `MAX_THINKING_TOKENS`（off=0 … max=31999）；codex 拼 `-c model_reasoning_effort`（off=minimal、max=xhigh，新会话与 resume 都带）；dsh 经 `AGENTDECK_DSH_THINKING/EFFORT` 环境变量参数化 ACP 组合模板（headless 回退不受影响）。opencode 显式不支持（表单禁用，提示走其配置文件 variants）。AgentsView 表单与卡片 badge 同步；IPC 白名单收窄非法档位。
+
 ### 变更
 
 - **API 预设去平台绑定（全局连接档案）**：`ApiPreset` 删除 `backend` 字段——预设只存连接（baseURL/apiKey/协议），不再锁定所属平台，任何 agent 按平台能力引用（同一中转站可同时服务 zcode 与 claude，不必建两份）。IPC 校验、normalize 同步收窄；旧 presets.json 兼容（`backend` 字段加载即忽略、下次保存自然消失）；AgentsView 预设表单与引用芯片简化（-55 行）。

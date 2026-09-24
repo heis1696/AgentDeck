@@ -5,10 +5,13 @@
 // 注意：Windows 下 workspace-write 沙箱会废掉命令执行，必须 bypass（实测 exit -1）
 import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnResult, BackendTurnStamp } from './types'
 import { bindTurn } from './types'
-import type { TaskEvent, ToolEditMeta } from '../../shared/types'
+import type { TaskEvent, ThinkingLevel, ToolEditMeta } from '../../shared/types'
 import { isJsonObject, jsonObject, jsonString, runCliJsonl, toolEvent } from './cli-common'
 import { parseEditMeta } from './edit-meta'
 import { resolveCli, probeCli } from './cli-locator'
+
+/** 思考档位 → Codex 的 model_reasoning_effort 原生档（off 关到最小档；max 用协议专属 xhigh） */
+const MODEL_REASONING_EFFORT: Record<ThinkingLevel, string> = { off: 'minimal', low: 'low', medium: 'medium', high: 'high', max: 'xhigh' }
 
 export function createCodexBackend(): AgentBackend {
   const runOnce = (
@@ -17,6 +20,7 @@ export function createCodexBackend(): AgentBackend {
     resumeSessionId: string | undefined,
     events: BackendSessionEvents,
     model?: string,
+    thinking?: ThinkingLevel,
     /** 本会话当前进程句柄落点：stop/close 只杀自己会话的进程，多任务并发不再串杀/漏杀 */
     onSpawn?: (runner: { kill: () => void | Promise<unknown> }) => void
   ): Promise<{ sessionId: string } & BackendTurnResult> => {
@@ -25,9 +29,10 @@ export function createCodexBackend(): AgentBackend {
     if (!resolved) return Promise.reject(new Error('PATH 上找不到 codex'))
     const common = ['--json', '--dangerously-bypass-approvals-and-sandbox', '--skip-git-repo-check']
     const modelArgs = model ? ['-m', model] : []
+    const effortArgs = thinking ? ['-c', `model_reasoning_effort=${MODEL_REASONING_EFFORT[thinking]}`] : []
     const args = resumeSessionId
-      ? ['exec', 'resume', resumeSessionId, ...modelArgs, ...common, prompt]
-      : ['exec', ...modelArgs, ...common, prompt]
+      ? ['exec', 'resume', resumeSessionId, ...modelArgs, ...effortArgs, ...common, prompt]
+      : ['exec', ...modelArgs, ...effortArgs, ...common, prompt]
     let sessionId = resumeSessionId ?? ''
     let finalText = ''
     // Codex can emit multiple agent_message items in one turn. Keep all of
@@ -125,12 +130,12 @@ export function createCodexBackend(): AgentBackend {
       const p = await probeCli('codex')
       return p.ok ? { ok: true, detail: `codex ${p.version}` } : { ok: false, detail: p.error ?? '未安装' }
     },
-    async start({ prompt, workdir, events: rawEvents, resumeSessionId, model, turn }) {
+    async start({ prompt, workdir, events: rawEvents, resumeSessionId, model, thinking, turn }) {
       const dir = workdir || process.cwd()
       let own: { kill: () => void } | null = null
       // 一次性 CLI：每个回合一个进程。回合身份随进程绑定，被杀旧进程的迟到回调带旧身份。
       const runTurn = (turnPrompt: string, resumeId?: string, turnStamp?: BackendTurnStamp) =>
-        runOnce(turnPrompt, dir, resumeId, bindTurn(rawEvents, turnStamp), model, (r) => { own = r })
+        runOnce(turnPrompt, dir, resumeId, bindTurn(rawEvents, turnStamp), model, thinking, (r) => { own = r })
       const r = await runTurn(prompt, resumeSessionId, turn)
       if (!r.ok && r.error) throw new Error(r.error)
       const sid = r.sessionId

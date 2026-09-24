@@ -56,6 +56,9 @@ const agents = validation.parseAgents([{ id: 'ag_1', name: 'One', backend: 'code
 if (agents.length !== 1 || agents[0].backend !== 'codex') throw new Error('valid agents were rejected')
 expectReject(() => validation.parseAgents([{ id: 'ag_1', name: 'One', backend: 'unknown', color: '#fff' }]), 'invalid agent backend')
 expectReject(() => validation.parseAgents([{ id: 'same', name: 'One', backend: 'codex', color: '#fff' }, { id: 'same', name: 'Two', backend: 'claude', color: '#000' }]), 'duplicate agent id')
+// 思考强度档位：白名单内原样回传，非法档拒收
+if (validation.parseAgents([{ id: 'ag_2', name: 'Two', backend: 'zcode', color: '#fff', thinking: 'max' }])[0].thinking !== 'max') throw new Error('agent thinking was dropped')
+expectReject(() => validation.parseAgents([{ id: 'ag_2', name: 'Two', backend: 'zcode', color: '#fff', thinking: 'ultra' }]), 'invalid agent thinking')
 const presets = validation.parsePresets([{ id: 'pst_1', name: 'Gateway', baseURL: 'https://example.invalid', apiKey: 'secret', createdAt: 1 }])
 if (presets.length !== 1 || presets[0].name !== 'Gateway') throw new Error('valid presets were rejected')
 expectReject(() => validation.parsePresets([{ id: 'pst_1', name: 'Gateway', baseURL: '', apiKey: 'secret', createdAt: 1 }]), 'empty preset URL')

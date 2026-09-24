@@ -1,7 +1,7 @@
 // dsh ACP 适配器冒烟：fake ACP server（NDJSON JSON-RPC）驱动，不依赖真实 dsh/API key。
 // 覆盖：握手/建会话、agent_message_chunk→text 事件流、多回合续聊、
 // request_permission→onPermission 桥接、session/cancel 取消、close 杀进程、
-// 启动期失败抛 AcpBootError（供 headless 回退）。
+// 启动期失败抛 AcpBootError（供 headless 回退）、思考强度→AGENTDECK_DSH_* env 参数化。
 import { build } from 'esbuild'
 import path from 'node:path'
 import fs from 'node:fs'
@@ -45,7 +45,11 @@ process.stdin.on('data', (c) => {
     const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1)
     if (!line) continue
     const msg = JSON.parse(line)
-    if (msg.method === 'initialize') send({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: 1, agentInfo: { name: 'fake-acp' }, agentCapabilities: {} } })
+    if (msg.method === 'initialize') {
+      // 思考强度 env 探针：落盘 initialize 时所见（agentdeck 传入的组合 env）
+      try { fs.writeFileSync(process.argv[3] + '.envlog', JSON.stringify({ thinking: process.env.AGENTDECK_DSH_THINKING ?? null, effort: process.env.AGENTDECK_DSH_EFFORT ?? null })) } catch {}
+      send({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: 1, agentInfo: { name: 'fake-acp' }, agentCapabilities: {} } })
+    }
     else if (msg.method === 'session/new') { sessionCount++; send({ jsonrpc: '2.0', id: msg.id, result: { sessionId: 'fake-sess-' + sessionCount } }) }
     else if (msg.method === 'session/prompt') {
       const text = (msg.params.prompt ?? []).map((b) => b.text).join('')
@@ -67,6 +71,8 @@ process.stdin.on('data', (c) => {
 // 权限选择日志：收到即写（taskkill /F 强杀不跑 exit 钩子）
 `)
 const permissionLogPath = path.join(tmp, 'examples', 'acp-agent', 'agentdeck.cordis.yml.permlog')
+const compositionPath = path.join(tmp, 'examples', 'acp-agent', 'agentdeck.cordis.yml')
+const envLogPath = path.join(tmp, 'examples', 'acp-agent', 'agentdeck.cordis.yml.envlog')
 
 const events = []
 const heartbeats = { n: 0 }
@@ -153,6 +159,26 @@ assert(bootError instanceof AcpBootError && /code=3/.test(bootError.message), `�
 // ---- 7) 服务端收到的权限选择 ----
 const permLog = JSON.parse(fs.readFileSync(permissionLogPath, 'utf8'))
 assert(JSON.stringify(permLog) === JSON.stringify([{ outcome: { outcome: 'selected', optionId: 'allow-once' } }]), '权限选择按 ACP outcome 格式回传服务端')
+
+// ---- 7.5) 组合模板参数化：llm-deepseek 思考档位经 !!js 读 AGENTDECK_DSH_* env ----
+const composition = fs.readFileSync(compositionPath, 'utf8')
+assert(composition.includes(`thinking: !!js "process.env.AGENTDECK_DSH_THINKING ?? 'enabled'"`), '组合模板 thinking 行参数化（默认 enabled）')
+assert(composition.includes(`reasoningEffort: !!js "process.env.AGENTDECK_DSH_EFFORT ?? 'max'"`), '组合模板 reasoningEffort 行参数化（默认 max）')
+
+// ---- 7.6) 思考强度 → AGENTDECK_DSH_* env 注入（fake server 在 initialize 落盘所见 env） ----
+const bootWithThinking = async (thinking) => {
+  const s = await startDshAcpSession({
+    prompt: 'thinking probe', workdir: tmp, mode: 'yolo', ...(thinking ? { thinking } : {}),
+    events: { onEvent: () => {}, onHeartbeat: () => {}, onTurnEnd: () => {} },
+    acp: { node: process.execPath, bin: fakeServer, repoRoot: tmp }
+  })
+  const seen = JSON.parse(fs.readFileSync(envLogPath, 'utf8'))
+  await s.close()
+  return seen
+}
+assert(JSON.stringify(await bootWithThinking(undefined)) === JSON.stringify({ thinking: null, effort: null }), 'thinking 未设：不注入 env（模板默认 enabled/max）')
+assert(JSON.stringify(await bootWithThinking('off')) === JSON.stringify({ thinking: 'disabled', effort: null }), 'thinking=off：AGENTDECK_DSH_THINKING=disabled（不注 effort）')
+assert(JSON.stringify(await bootWithThinking('low')) === JSON.stringify({ thinking: 'enabled', effort: 'low' }), 'thinking=low：enabled + AGENTDECK_DSH_EFFORT=low')
 
 // ---- 8) Production composition: dsh.ts must not bind ACP twice to turn #1 ----
 const fakeRepo = path.join(tmp, 'deepseek-harness')

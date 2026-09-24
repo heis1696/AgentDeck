@@ -4,10 +4,13 @@
 // 续聊：--resume <sessionId>
 import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnStamp } from './types'
 import { bindTurn } from './types'
-import type { TaskEvent, ToolEditMeta } from '../../shared/types'
+import type { TaskEvent, ThinkingLevel, ToolEditMeta } from '../../shared/types'
 import { isJsonObject, jsonNumber, jsonObject, jsonString, runCliJsonl, toolEvent } from './cli-common'
 import { parseEditMeta, stringifyToolArgs } from './edit-meta'
 import { resolveCli, probeCli } from './cli-locator'
+
+/** 思考档位 → Claude Code 的思考预算 env（off 显式 0 关闭思考；max=31999 是协议上限） */
+const MAX_THINKING_TOKENS: Record<ThinkingLevel, number> = { off: 0, low: 4000, medium: 10000, high: 20000, max: 31999 }
 
 export function createClaudeBackend(): AgentBackend {
   /** 跑一次（新会话或 resume）；resolve 于回合终态（result 事件或进程退出） */
@@ -18,6 +21,7 @@ export function createClaudeBackend(): AgentBackend {
     events: BackendSessionEvents,
     model?: string,
     connection?: { name: string; baseURL: string; apiKey: string },
+    thinking?: ThinkingLevel,
     /** 本会话当前进程句柄落点：stop/close 只杀自己会话的进程，多任务并发不再串杀/漏杀 */
     onSpawn?: (runner: { kill: () => void | Promise<unknown> }) => void
   ): Promise<{ sessionId: string; response: string; ok: boolean; error?: string }> => {
@@ -53,8 +57,16 @@ export function createClaudeBackend(): AgentBackend {
       prefixArgs: resolved.prefixArgs,
       args,
       cwd: workdir,
-      // API 预设连接覆盖：与 cc-switch 同机制（env 快照），但不写全局 settings.json
-      ...(connection ? { env: { ANTHROPIC_BASE_URL: connection.baseURL, ANTHROPIC_AUTH_TOKEN: connection.apiKey } } : {}),
+      // API 预设连接覆盖：与 cc-switch 同机制（env 快照），但不写全局 settings.json；
+      // 思考强度走同一 env 对象注入，互不覆盖
+      ...(connection || thinking
+        ? {
+            env: {
+              ...(connection ? { ANTHROPIC_BASE_URL: connection.baseURL, ANTHROPIC_AUTH_TOKEN: connection.apiKey } : {}),
+              ...(thinking ? { MAX_THINKING_TOKENS: String(MAX_THINKING_TOKENS[thinking]) } : {})
+            }
+          }
+        : {}),
       onLine: (obj) => {
         if (!isJsonObject(obj)) return
         const j = obj
@@ -133,13 +145,13 @@ export function createClaudeBackend(): AgentBackend {
       const p = await probeCli('claude')
       return p.ok ? { ok: true, detail: `claude ${p.version}` } : { ok: false, detail: p.error ?? '未安装' }
     },
-    async start({ prompt, workdir, events: rawEvents, resumeSessionId, model, connection, turn }) {
+    async start({ prompt, workdir, events: rawEvents, resumeSessionId, model, connection, thinking, turn }) {
       const dir = workdir || process.cwd()
       let own: { kill: () => void } | null = null
       // 每个回合都是独立进程：把它自己的回合身份绑到该进程的所有回调上，
       // 被杀掉的旧进程再吐终态也只会带着旧身份，被运行器丢弃。
       const runTurn = (turnPrompt: string, resumeId?: string, turnStamp?: BackendTurnStamp) =>
-        runOnce(turnPrompt, dir, resumeId, bindTurn(rawEvents, turnStamp), model, connection, (r) => { own = r })
+        runOnce(turnPrompt, dir, resumeId, bindTurn(rawEvents, turnStamp), model, connection, thinking, (r) => { own = r })
       const first = runTurn(prompt, resumeSessionId, turn)
       const sidPromise = first.then((r) => r.sessionId).catch(() => '')
       // start() 在回合结束后才 resolve 与 zcode 语义不同——但接口允许：
