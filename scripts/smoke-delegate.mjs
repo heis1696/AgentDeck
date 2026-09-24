@@ -449,6 +449,33 @@ const digestBase = {
     assert((execSync('git status --porcelain', { cwd: wt3.path, encoding: 'utf8' }).trim()) === '', '锁专项①：回放后子 worktree 状态自洽')
     await reclaimWorktree(wt3.path, { force: true, deleteBranch: true })
   }
+  {
+    // (e) 锁专项③ env 污染容器校验：GIT_DIR 指向主仓时子侧锁路径会被解析到主仓
+    //     .git/index.lock——容器校验必须拒绝删除，主仓陈锁原样存活，子单按重试耗尽的
+    //     具名拒单收场（先红：基线无容器校验会把主仓锁当陈锁删掉）
+    const mainRepo = mkRepo('pollute')
+    const wt4 = await createWorktree(mainRepo, 'rp_pollute', 'main', 'owner')
+    const baseSha4 = readMetaBaseSha(wt4.path)
+    fs.writeFileSync(path.join(mainRepo, 'base.txt'), 'base v2 污染轮\n')
+    const mainLock = path.join(mainRepo, '.git', 'index.lock')
+    fs.writeFileSync(mainLock, '')
+    const backdated = new Date(Date.now() - 10_000)
+    fs.utimesSync(mainLock, backdated, backdated)
+    assert(Date.now() - fs.statSync(mainLock).mtimeMs > 5000, '锁专项③：前置——主仓锁 mtime 已拨旧（>5s，陈锁）')
+    process.env.GIT_DIR = path.join(mainRepo, '.git')
+    let polluted
+    try {
+      polluted = await replayLeaderBaseline(mainRepo, wt4.path, baseSha4)
+    } finally {
+      delete process.env.GIT_DIR
+    }
+    assert(polluted.status === 'refused', `锁专项③：env 污染（GIT_DIR 指主仓）时子单按拒单收场（${polluted.status}: ${polluted.reason}）`)
+    assert(polluted.reason.includes('领队 git 并发写冲突，请稍后重派'), `锁专项③：拒单走锁冲突具名文案（${polluted.reason.slice(0, 90)}）`)
+    assert(fs.existsSync(mainLock), '锁专项③：主仓陈锁原样存活——容器校验拦下误删')
+    assert(fs.readFileSync(path.join(wt4.path, 'base.txt'), 'utf8').includes('base v1'), '锁专项③：子 worktree 未被污染写入（cherry-pick 未落盘）')
+    fs.unlinkSync(mainLock)
+    await reclaimWorktree(wt4.path, { force: true, deleteBranch: true })
+  }
 
   // 体量闸：未跟踪文件数超限 → 具名拒单
   {

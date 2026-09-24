@@ -118,15 +118,35 @@ function lockConflictSuffix(result: GitCommandResult): string {
 /** 子 worktree 陈锁阈值：index.lock mtime 距今超过该值视为陈锁（残留竞态）而非活锁 */
 const CHILD_STALE_LOCK_MS = 5000
 
-/** 子 worktree 陈锁清除：rev-parse --git-path index.lock 定位真实锁路径，仅当 mtime 距今
- *  超过 5s 才删除（返回是否删除成功）。安全前提：子 worktree 由本流程刚创建、子 agent
- *  尚未启动、无并发写者，此刻仍在的锁只可能是建树竞态残留（进程被杀/崩溃遗留），删除
- *  不会伤害任何真实写者；领队 workdir 侧的锁一律不删——可能属于用户真实 git 进程，
- *  只走既有退避重试。 */
-async function breakStaleChildIndexLock(childWorkdir: string): Promise<boolean> {
-  const rel = (await git(childWorkdir, ['rev-parse', '--git-path', 'index.lock'])).trim()
+/** 会劫持 git 仓库解析的定向环境变量：GIT_DIR 指向主仓等污染会让子 worktree 里的
+ *  rev-parse 解析到别的仓库（如主仓的 .git）。推导子 worktree 自身 gitdir 容器前先剥离。 */
+const GIT_REPO_REDIRECT_ENV_KEYS = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_CEILING_DIRECTORIES', 'GIT_NAMESPACE'] as const
+
+function repoProbeEnv(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const probe: NodeJS.ProcessEnv = { ...(env ?? process.env) }
+  for (const key of GIT_REPO_REDIRECT_ENV_KEYS) delete probe[key]
+  return probe
+}
+
+/** 子 worktree 陈锁清除：rev-parse --git-path index.lock 定位锁路径（沿用调用方 env，
+ *  与触发锁错的解析一致），仅当 mtime 距今超过 5s 才删除（返回是否删除成功）。安全前提：
+ *  子 worktree 由本流程刚创建、子 agent 尚未启动、无并发写者，此刻仍在的锁只可能是建树
+ *  竞态残留（进程被杀/崩溃遗留），删除不会伤害任何真实写者；领队 workdir 侧的锁一律不删
+ *  ——可能属于用户真实 git 进程，只走既有退避重试。
+ *  容器校验（防误删领队/主仓锁）：解析出的锁路径必须落在该子 worktree 自己的 gitdir 容器
+ *  内——用剥离定向变量的干净 env 重新发现子 worktree 的真实 gitdir（即
+ *  <主仓>/.git/worktrees/<子名>/）作容器前缀，路径归属判定走 isWithin（含 .. 逃逸与
+ *  路径段边界，裸 startsWith 会放行 <子名>-eviltwin 这类前缀同名目录）。不在容器内
+ *  （如 env 污染 GIT_DIR 指向主仓导致解析到主仓 .git/index.lock）一律拒绝删除、按重试
+ *  耗尽收场——那把锁可能属于用户真实 git 进程，删了会砸掉领队侧并发写。 */
+async function breakStaleChildIndexLock(childWorkdir: string, env?: NodeJS.ProcessEnv): Promise<boolean> {
+  const resolved = await runGit(childWorkdir, ['rev-parse', '--git-path', 'index.lock'], 15000, env)
+  const rel = resolved.ok ? resolved.stdout.trim() : ''
   if (!rel) return false
   const lockPath = path.isAbsolute(rel) ? rel : path.join(childWorkdir, rel)
+  const probe = await runGit(childWorkdir, ['rev-parse', '--absolute-git-dir'], 15000, repoProbeEnv(env))
+  const container = probe.ok ? path.resolve(probe.stdout.trim()) : ''
+  if (!container || !isWithin(container, lockPath)) return false
   try {
     if (Date.now() - fs.statSync(lockPath).mtimeMs <= CHILD_STALE_LOCK_MS) return false
     fs.unlinkSync(lockPath)
@@ -138,11 +158,12 @@ async function breakStaleChildIndexLock(childWorkdir: string): Promise<boolean> 
 
 /** 子侧应用段专用（replayLeaderBaseline 的 cherry-pick/reset/status 三步）：
  *  既有撞锁退避重试之外，重试耗尽仍是锁错时检查子 worktree 的 index.lock——
- *  陈锁（mtime>5s）则删除后追加最后一次尝试；锁新鲜（真活锁）或删除失败一律按
- *  重试耗尽处理，原样返回失败结果（不无限制加时）。 */
+ *  陈锁（mtime>5s 且锁路径落在子 worktree 自己的 gitdir 容器内）则删除后追加最后一次
+ *  尝试；锁新鲜（真活锁）、锁路径越出容器（env 污染兜底，防误删领队/主仓锁）或删除失败
+ *  一律按重试耗尽处理，原样返回失败结果（不无限制加时）。 */
 async function runChildApplyGit(childWorkdir: string, args: string[], timeout = 15000, env?: NodeJS.ProcessEnv): Promise<GitCommandResult> {
   let result = await runGitWithLockRetry(childWorkdir, args, timeout, env)
-  if (!result.ok && isGitLockError(result) && (await breakStaleChildIndexLock(childWorkdir))) {
+  if (!result.ok && isGitLockError(result) && (await breakStaleChildIndexLock(childWorkdir, env))) {
     result = await runGit(childWorkdir, args, timeout, env)
   }
   return result
@@ -796,7 +817,9 @@ function pathspecExcludes(): string[] {
  * 拒单文案指明「领队 git 并发写冲突，请稍后重派」。子侧应用段另有陈锁清除：
  * 重试耗尽仍是锁错时，子 worktree 的 index.lock（rev-parse --git-path 定位）mtime
  * 距今超 5s 视为建树竞态残留（子 worktree 刚建、agent 未启动、无并发写者），删锁后
- * 追加最后一次尝试；锁新鲜或删除失败按重试耗尽处理；领队侧锁一律不删。
+ * 追加最后一次尝试；锁新鲜、锁路径越出子 worktree 自己的 gitdir 容器（env 污染
+ * GIT_DIR 指向主仓时会解析到主仓锁——容器校验防误删领队/主仓锁）或删除失败按重试
+ * 耗尽处理；领队侧锁一律不删。
  *
  * 回放提交即子分支起始提交（子分支 tip = 回放提交）：此后 digest/集成都以它为基线，
  * 领队的改动不算子产出、不进子 git 小节。失败一律 refused + 具名原因，由调用方拒建单。
