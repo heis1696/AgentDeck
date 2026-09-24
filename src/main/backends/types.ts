@@ -1,6 +1,6 @@
 // AgentBackend：执行后端适配器接口。
 // 新增后端（claude / codex …）时实现此接口并在 registry 注册即可。
-import type { TaskEvent } from '../../shared/types'
+import type { TaskEvent, ThinkingLevel } from '../../shared/types'
 import type { PermissionRequest } from '../../shared/contracts'
 export type { PermissionRequest } from '../../shared/contracts'
 
@@ -79,6 +79,8 @@ export interface AgentBackend {
     mode: string
     /** agent 钉死的模型覆盖（形如 glm-5.2 或 providerId/modelId）；空 = 平台默认 */
     model?: string
+    /** 思考强度档位（空 = 平台默认）：zcode 选 variant/预设档，claude 注入 MAX_THINKING_TOKENS，codex 拼 model_reasoning_effort，dsh 走 ACP env；opencode 不支持 */
+    thinking?: ThinkingLevel
     /** API 预设连接覆盖（与 model 同时提供时生效）：baseURL/apiKey 注册进会话配置，不写死全局 */
     connection?: { name: string; baseURL: string; apiKey: string; protocol?: 'anthropic' | 'openai' }
     resumeSessionId?: string

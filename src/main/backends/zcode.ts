@@ -14,7 +14,7 @@
 //             state.updated（会话状态机）、v4/telemetry/event（turn.terminal 等）
 import fs from 'node:fs'
 import os from 'node:os'
-import type { TaskEvent } from '../../shared/types'
+import type { TaskEvent, ThinkingLevel } from '../../shared/types'
 import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnStamp } from './types'
 import { bindTurn } from './types'
 import { isJsonObject, type JsonObject } from './cli-common'
@@ -77,15 +77,16 @@ function compactArgs(args?: string): string {
 /**
  * 解析模型引用（{providerId, modelId, options?}，注册表引用）。
  * providerId 取自 v2 provider_config.json 的 providerRules；模型 id 按桌面端目录
- * 归一大小写；reasoning 模型自动带 defaultVariant 的 reasoningLevel。
+ * 归一大小写；reasoning 模型自动带 reasoningLevel（defaultVariant 或 thinking 就近档）。
  * 连接（API 预设）替代旧 runtimeModel 内联凭据：upsert 成 v2 注册表的个人
  * provider 规则后按派生 id 引用（写入发生在 app-server 拉起前，回合内即生效）。
  */
 export function buildModelSelectionFromCliConfig(
   modelRef?: string,
-  connection?: { name: string; baseURL: string; apiKey: string }
+  connection?: { name: string; baseURL: string; apiKey: string },
+  thinking?: ThinkingLevel
 ): { providerId: string; modelId: string; options?: { reasoningLevel: string } } | null {
-  return buildModelSelection(modelRef, connection)
+  return buildModelSelection(modelRef, connection, thinking)
 }
 
 /**
@@ -123,7 +124,7 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
       if (!cfg.ok) return { ok: false, detail: `${cfg.detail} · ${nodeNote}` }
       return { ok: node.source !== 'fallback-electron', detail: `${bundle} · ${provider.detail} · ${cfg.detail} · ${nodeNote}` }
     },
-    async start({ prompt, workdir, mode, model, connection, events: rawEvents, resumeSessionId, turn }) {
+    async start({ prompt, workdir, mode, model, thinking, connection, events: rawEvents, resumeSessionId, turn }) {
       const { nodePath, zcodePath } = getPaths()
       const bundle = findBundle(zcodePath || undefined)
       if (!bundle) throw new Error('找不到 zcode.cjs')
@@ -136,7 +137,7 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
       const node = resolveNode(nodePath || undefined)
       // 模型解析（预设连接此时 upsert 进 v2 注册表）必须先于 spawn：app-server 启动时
       // 加载注册表快照，拉起后再写文件它看不到（setModel 报 provider-not-found）
-      const modelSelection = model?.trim() ? buildModelSelection(model, connection) : null
+      const modelSelection = model?.trim() ? buildModelSelection(model, connection, thinking) : null
       const conn = new ZcodeConnection(node.path, bundle, cwd)
       // 启动即注册硬停句柄：session/create 等握手请求挂死时（进程半死/连接无响应），
       // 调用方在 start 返回前也有手段杀掉进程，不会永久占住任务与并发槽

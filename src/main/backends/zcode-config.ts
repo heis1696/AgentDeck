@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import type { ThinkingLevel } from '../../shared/types'
 import { isJsonObject } from './cli-common'
 
 export function zcodeDefaultPaths(): string[] {
@@ -68,14 +69,16 @@ export function ensureZcodeCliConfig(): { ok: boolean; detail: string } {
  * 解析模型引用为协议 model 字段（{providerId, modelId, options?} 引用）。
  * 新协议（CLI 3.12.3+）只收注册表引用：providerId 必须是 ~/.zcode/v2/provider_config.json
  * providerRules 里的 id（如 bigmodel-api），模型 id 大小写敏感（目录里是 GLM-5.3），
- * reasoning 模型必须带 options.reasoningLevel（取桌面端目录里的 defaultVariant）。
+ * reasoning 模型必须带 options.reasoningLevel（取桌面端目录里的 defaultVariant；
+ * thinking 档位提供时按目录 variants 就近选档，非 reasoning 模型忽略）。
  * 连接（API 预设）替代旧 runtimeModel 内联凭据：作为个人 provider 规则 upsert 进
  * v2 provider_config.json（id 由 baseURL 派生，不同预设互不冲突），app-server 由
  * agentdeck 每回合重新拉起、启动前写入即生效。
  */
 export function buildModelSelectionFromCliConfig(
   modelRef?: string,
-  connection?: { name: string; baseURL: string; apiKey: string; protocol?: 'anthropic' | 'openai' }
+  connection?: { name: string; baseURL: string; apiKey: string; protocol?: 'anthropic' | 'openai' },
+  thinking?: ThinkingLevel
 ): { providerId: string; modelId: string; options?: { reasoningLevel: string } } | null {
   const ref = modelRef?.trim()
   if (connection && ref) {
@@ -85,12 +88,13 @@ export function buildModelSelectionFromCliConfig(
     const entry = catalog?.models.find((m) => m.modelId === requested) ?? catalog?.models.find((m) => m.modelId.toLowerCase() === requested.toLowerCase())
     // 注册与引用必须同 id：优先目录归一后的，目录外按原引用
     const modelId = entry?.modelId ?? requested
-    if (!upsertPresetProvider(connection, modelId)) {
+    // 注册表里该模型的 optionSpecs 由本函数显式声明（档位见 presetReasoningSpec），
+    // 引用必须带同款 level，否则选择校验报 "Reasoning level is required"
+    const reasoning = presetReasoningSpec(connection, thinking)
+    if (!upsertPresetProvider(connection, modelId, reasoning)) {
       throw new Error(`预设连接「${connection.name}」注册失败：无法写入 ~/.zcode/v2/provider_config.json（ZCode 桌面端可能正占用该文件，稍后重试）`)
     }
-    // 注册表里该模型的 optionSpecs 由本函数显式声明（reasoningLevel values=['high']），
-    // 引用必须带同款 level，否则选择校验报 "Reasoning level is required"
-    return { providerId: presetProviderId(connection), modelId, options: { reasoningLevel: 'high' } }
+    return { providerId: presetProviderId(connection), modelId, options: { reasoningLevel: reasoning.level } }
   }
   const catalog = readV2ModelCatalog()
   if (!catalog) return null
@@ -101,16 +105,44 @@ export function buildModelSelectionFromCliConfig(
     if (!catalog.providerIds.includes(prefix)) return null
     const bare = ref.slice(slash + 1)
     const entry = bare ? (catalog.models.find((m) => m.modelId === bare) ?? catalog.models.find((m) => m.modelId.toLowerCase() === bare.toLowerCase())) : undefined
-    return entry ? withReasoning(prefix, entry) : { providerId: prefix, modelId: bare }
+    return entry ? withReasoning(prefix, entry, thinking) : { providerId: prefix, modelId: bare }
   }
   const providerId = catalog.providerIds[0]
   if (!providerId) return null
   if (ref) {
     const entry = catalog.models.find((m) => m.modelId === ref) ?? catalog.models.find((m) => m.modelId.toLowerCase() === ref.toLowerCase())
-    return entry ? withReasoning(providerId, entry) : { providerId, modelId: ref }
+    return entry ? withReasoning(providerId, entry, thinking) : { providerId, modelId: ref }
   }
   const first = catalog.models[0]
-  return first ? withReasoning(providerId, first) : null
+  return first ? withReasoning(providerId, first, thinking) : null
+}
+
+/** 档位 → 目录 variants 的就近选档链：精确命中优先，缺档按链取第一个存在者，全不在回落 defaultVariant */
+const THINKING_VARIANT_CHAINS: Record<ThinkingLevel, string[]> = {
+  off: ['disabled'],
+  low: ['low', 'enabled'],
+  medium: ['medium', 'high'],
+  high: ['high', 'enabled'],
+  max: ['max', 'high', 'enabled']
+}
+
+function pickThinkingVariant(thinking: ThinkingLevel, reasoning: { defaultVariant?: string; variants?: string[] }): string {
+  const chain = THINKING_VARIANT_CHAINS[thinking]
+  const hit = chain.find((variant) => reasoning.variants?.includes(variant))
+  return hit ?? reasoning.defaultVariant ?? reasoning.variants?.[0] ?? 'high'
+}
+
+/**
+ * 预设线的 reasoningLevel 声明与引用档位。未设保持 'high'（历史行为，回归兼容）；
+ * off 用 'disabled' 且不发任何 thinking 参数；low/medium/high/max 声明单值档、
+ * 不写 map——与 builtin 目录一致，交给 zcode 内置默认映射翻译成 thinking /
+ * reasoning_effort 参数（anthropic 协议无 medium 档，上调 'high'）。
+ */
+function presetReasoningSpec(connection: { baseURL: string; protocol?: 'anthropic' | 'openai' }, thinking?: ThinkingLevel): { level: string; silent: boolean } {
+  if (!thinking) return { level: 'high', silent: true }
+  if (thinking === 'off') return { level: 'disabled', silent: true }
+  if (thinking === 'medium' && resolvePresetProtocol(connection) === 'anthropic-messages') return { level: 'high', silent: false }
+  return { level: thinking, silent: false }
 }
 
 /** 预设注册到 v2 注册表的 providerId：baseURL 派生（fnv1a-32），同预设幂等、异预设不冲突 */
@@ -134,13 +166,16 @@ function resolvePresetProtocol(connection: { baseURL: string; protocol?: 'anthro
  * 把预设连接 upsert 成 v2 注册表的个人 provider：providerRule 声明凭据/端点/模型目录
  * （group 必填 standard-personal，缺了整条规则被静默过滤），providerModelRule 用
  * 完整模型定义（注册表完整性校验必查 properties/optionSpecs；只写 enabled 会被内置
- * 通用规则补成"reasoning 必选"，外部模型没法定义 level 就卡死）。optionSpecs 显式
- * 声明 reasoningLevel values=['high']、map '{}'（不发 thinking 参数），引用端始终带
- * options.reasoningLevel='high' 同款。api.type 按预设协议（openai 网关注册
- * anthropic-messages 会 404：OpenRouter 等没有 /messages 路由）。只动自己 id 的
- * 条目，桌面端规则不受影响。
+ * 通用规则补成"reasoning 必选"，外部模型没法定义 level 就卡死）。optionSpecs 按
+ * presetReasoningSpec 声明 reasoningLevel（silent 档写 map '{}' 即不发 thinking 参数），
+ * 引用端始终带同款 level。api.type 按预设协议（openai 网关注册 anthropic-messages
+ * 会 404：OpenRouter 等没有 /messages 路由）。只动自己 id 的条目，桌面端规则不受影响。
  */
-function upsertPresetProvider(connection: { name: string; baseURL: string; apiKey: string; protocol?: 'anthropic' | 'openai' }, modelId: string): boolean {
+function upsertPresetProvider(
+  connection: { name: string; baseURL: string; apiKey: string; protocol?: 'anthropic' | 'openai' },
+  modelId: string,
+  reasoning: { level: string; silent: boolean }
+): boolean {
   const id = presetProviderId(connection)
   try {
     const configPath = path.join(os.homedir(), '.zcode', 'v2', 'provider_config.json')
@@ -184,7 +219,9 @@ function upsertPresetProvider(connection: { name: string; baseURL: string; apiKe
           supportsMidConversationSystem: false
         },
         optionSpecs: {
-          reasoningLevel: { values: ['high'], map: '{}' },
+          // silent 档（未设/关）写空 map：不生成任何 thinking 请求参数；
+          // 其余档不写 map，由 zcode 内置默认映射发 thinking/reasoning_effort
+          reasoningLevel: { values: [reasoning.level], ...(reasoning.silent ? { map: '{}' } : {}) },
           maxOutputTokens: { max: 32000, map: "{'max_tokens': maxOutputTokens}" }
         }
       }
@@ -196,11 +233,12 @@ function upsertPresetProvider(connection: { name: string; baseURL: string; apiKe
   } catch { return false }
 }
 
-function withReasoning(providerId: string, entry: { modelId: string; reasoning?: { enabled?: boolean; defaultVariant?: string; variants?: string[] } }): { providerId: string; modelId: string; options?: { reasoningLevel: string } } {
+function withReasoning(providerId: string, entry: { modelId: string; reasoning?: { enabled?: boolean; defaultVariant?: string; variants?: string[] } }, thinking?: ThinkingLevel): { providerId: string; modelId: string; options?: { reasoningLevel: string } } {
   const reasoning = entry.reasoning
-  const options = reasoning?.enabled
-    ? { reasoningLevel: reasoning.defaultVariant ?? reasoning.variants?.[0] ?? 'high' }
-    : undefined
+  // 非 reasoning 模型忽略思考档位；reasoning 模型按档位就近选 variant（未设保持 defaultVariant）
+  const options = !reasoning?.enabled
+    ? undefined
+    : { reasoningLevel: thinking ? pickThinkingVariant(thinking, reasoning) : (reasoning.defaultVariant ?? reasoning.variants?.[0] ?? 'high') }
   return { providerId, modelId: entry.modelId, ...(options ? { options } : {}) }
 }
 

@@ -3,7 +3,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { app } from 'electron'
-import { BACKEND_IDS, type BackendId } from '../shared/types'
+import { BACKEND_IDS, THINKING_LEVELS, type BackendId, type ThinkingLevel } from '../shared/types'
 import { FORGE_AGENT_ID, isForgeAgent } from '../shared/forge'
 import { LEAD_PERSONA, CLAUDE_PERSONA, CODEX_PERSONA, OPENCODE_PERSONA, DSH_PERSONA } from './prompts/personas'
 
@@ -22,12 +22,15 @@ export interface Agent {
   model?: string
   /** API 预设 id（连接覆盖：baseURL/apiKey 按会话内存注入；可空 = 平台默认连接） */
   presetId?: string
+  /** 思考强度档位（可空 = 平台默认）；opencode 不支持，走其配置文件 variants */
+  thinking?: ThinkingLevel
   note?: string
   /** 主题色（UI 头像） */
   color: string
 }
 
 const BACKEND_SET = new Set<string>(BACKEND_IDS)
+const THINKING_SET = new Set<string>(THINKING_LEVELS)
 
 /** Normalize persisted/user supplied agents before they cross the IPC boundary. */
 export function normalizeAgent(value: unknown, fallback?: Agent): Agent | null {
@@ -49,6 +52,7 @@ export function normalizeAgent(value: unknown, fallback?: Agent): Agent | null {
     ...(subordinates?.length ? { subordinates } : {}),
     ...(typeof raw.model === 'string' && raw.model.trim() ? { model: raw.model.trim() } : {}),
     ...(typeof raw.presetId === 'string' && raw.presetId.trim() ? { presetId: raw.presetId.trim() } : {}),
+    ...(typeof raw.thinking === 'string' && THINKING_SET.has(raw.thinking) ? { thinking: raw.thinking as ThinkingLevel } : {}),
     ...(typeof raw.note === 'string' && raw.note.trim() ? { note: raw.note.trim() } : {}),
     color: typeof raw.color === 'string' && raw.color.trim() ? raw.color.trim() : (fallback?.color ?? '#64748b')
   }

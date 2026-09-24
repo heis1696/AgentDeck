@@ -1,4 +1,4 @@
-import { BACKEND_IDS, type AppSettings, type Automation, type GoalAcceptancePatch, type GoalEvolutionPatch, type GoalPatchProvenance, type IssuePriority, type IssueStatus, type RunTrigger, type TaskStatus } from '../shared/types'
+import { BACKEND_IDS, THINKING_LEVELS, type AppSettings, type Automation, type GoalAcceptancePatch, type GoalEvolutionPatch, type GoalPatchProvenance, type IssuePriority, type IssueStatus, type RunTrigger, type TaskStatus } from '../shared/types'
 import type { GoalCheckpointInput, GoalCreateInput, GoalEvolveInput, IssueCreateInput, IssueUpdatePatch, TaskCreateInput } from '../shared/contracts'
 import type { Agent } from './agents'
 import type { ApiPreset } from './presets'
@@ -8,6 +8,7 @@ const issuePriorities = new Set<IssuePriority>(['urgent', 'high', 'medium', 'low
 const taskStatuses = new Set<TaskStatus>(['queued', 'running', 'done', 'failed', 'cancelled'])
 const triggers = new Set<RunTrigger>(['assignment', 'mention', 'autopilot', 'manual', 'handoff', 'meeting'])
 const backendIds = new Set<string>(BACKEND_IDS)
+const thinkingLevels = new Set<string>(THINKING_LEVELS)
 const settingsKeys = new Set<keyof AppSettings>(['theme', 'zcodePath', 'dshPath', 'nodePath', 'concurrency', 'notifyOnDone', 'mode', 'workerConcurrency', 'sharedDir', 'turnIdleTimeoutMs', 'permissionTimeoutMs', 'maxRetryAttempts', 'retryBackoffMs', 'maxHandoffChain', 'delegateMaxRounds', 'delegateMaxTotalRounds', 'delegateMaxDepth', 'doomLoopThreshold', 'worktreeMaxAgeDays', 'updateFeedUrl'])
 
 /** 调优参数的合法区间：越界直接拒绝，防止手滑值把看门狗/预算打穿 */
@@ -32,6 +33,13 @@ function record(value: unknown, label: string): Record<string, unknown> {
 function assertKeys(input: Record<string, unknown>, allowed: readonly string[], label: string) {
   const keys = new Set(allowed)
   for (const key of Object.keys(input)) if (!keys.has(key)) throw new Error(`${label}包含未知字段: ${key}`)
+}
+
+/** 思考强度档位白名单（空 = 平台默认，故 undefined 合法） */
+function optionalThinking(value: unknown, label: string): Agent['thinking'] | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' || !thinkingLevels.has(value)) throw new Error(`${label} 无效: ${String(value)}`)
+  return value as Agent['thinking']
 }
 
 function stringValue(value: unknown, label: string, required = true): string | undefined {
@@ -349,7 +357,7 @@ export function parseAgents(value: unknown): Agent[] {
   const ids = new Set<string>()
   return value.map((item, index) => {
     const input = record(item, `agent[${index}]`)
-    assertKeys(input, ['id', 'name', 'backend', 'role', 'systemPrompt', 'subordinates', 'model', 'presetId', 'note', 'color'], `agent[${index}]`)
+    assertKeys(input, ['id', 'name', 'backend', 'role', 'systemPrompt', 'subordinates', 'model', 'presetId', 'thinking', 'note', 'color'], `agent[${index}]`)
     const id = stringValue(input.id, `agent[${index}].id`)!
     const backend = stringValue(input.backend, `agent[${index}].backend`)!
     if (ids.has(id)) throw new Error(`agent id 重复: ${id}`)
@@ -366,6 +374,7 @@ export function parseAgents(value: unknown): Agent[] {
       ...(subordinates ? { subordinates } : {}),
       ...(optionalString(input.model, `agent[${index}].model`) ? { model: optionalString(input.model, `agent[${index}].model`) } : {}),
       ...(optionalString(input.presetId, `agent[${index}].presetId`) ? { presetId: optionalString(input.presetId, `agent[${index}].presetId`) } : {}),
+      ...(optionalThinking(input.thinking, `agent[${index}].thinking`) ? { thinking: optionalThinking(input.thinking, `agent[${index}].thinking`) } : {}),
       ...(optionalString(input.note, `agent[${index}].note`) ? { note: optionalString(input.note, `agent[${index}].note`) } : {})
     }
   })

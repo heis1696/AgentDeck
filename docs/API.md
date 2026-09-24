@@ -77,10 +77,11 @@ preload 以 `contextBridge` 暴露，全部经 `ipcRenderer.invoke/on` 与主进
 | `presets.newId` | `() => Promise<string>` | 生成预设 id |
 | `presets.models` | `(presetId) => Promise<AgentModelCatalog>` | 经预设连通探测拉模型目录 |
 
-`AgentInfo`：`{ id, name, backend, model?, presetId?, note?, color, role?, systemPrompt?, subordinates?: string[] }`
+`AgentInfo`：`{ id, name, backend, model?, presetId?, thinking?, note?, color, role?, systemPrompt?, subordinates?: string[] }`
 
 - `backend ∈ { zcode, claude, codex, opencode, dsh }`
 - `subordinates` 非空 → 领队（获得委派能力）；`model` 钉死模型覆盖；`presetId` 绑定 API 预设连接
+- `thinking` 思考强度档位（`off | low | medium | high | max`，空 = 平台默认）；opencode 不支持（走其配置文件 variants）
 
 ### 1.3 Issue / Run `bridge.issues`
 

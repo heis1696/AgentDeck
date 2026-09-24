@@ -2,7 +2,7 @@
 // 领队系统提示告知队员名单与 <delegate> 标记语法；运行时截获标记 → 并行执行子任务 →
 // 结果回灌 → 领队继续。循环直到领队不再派发。任何支持续聊的后端都适用。
 // 提示词文案集中在 src/main/prompts/delegation.ts（本文件只保留解析器与循环逻辑）。
-import type { Task, TaskEvent } from '../shared/types'
+import type { Task, TaskEvent, ThinkingLevel } from '../shared/types'
 import type { TaskExpectation, TaskStore } from './store'
 import type { TaskRunner } from './runner'
 import type { BackendSession, BackendTurnResult } from './backends/types'
@@ -262,6 +262,8 @@ export interface AgentLike {
   model?: string
   /** API 预设 id（连接覆盖，runner 解析为 connection 传入 backend.start） */
   presetId?: string
+  /** 思考强度档位（Agent.thinking 透传给 backend.start） */
+  thinking?: ThinkingLevel
   note?: string
 }
 

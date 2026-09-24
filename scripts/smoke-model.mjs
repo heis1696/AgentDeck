@@ -62,6 +62,8 @@ fs.writeFileSync(path.join(fakeHome, '.zcode', 'v2', 'config.json'), JSON.string
       name: 'Bigmodel',
       models: {
         'GLM-5.3': { reasoning: { enabled: true, variants: ['low', 'max', 'high'], defaultVariant: 'max' }, limit: { context: 200000, output: 32000 } },
+        // 无 low/high 档、只有 disabled/enabled 的模型：覆盖 off 命中 disabled 与各档回落 enabled 链
+        'GLM-5.1': { reasoning: { enabled: true, variants: ['disabled', 'enabled'], defaultVariant: 'enabled' } },
         'GLM-5.3-Flash': {}
       }
     }
@@ -90,6 +92,18 @@ const rmCustom = buildModelSelectionFromCliConfig('glm-9.9')
 assert(rmCustom?.modelId === 'glm-9.9' && rmCustom.providerId === 'bigmodel-api' && rmCustom.options === undefined, '目录外模型按原引用透传（服务端给出明确 ModelNotFound）')
 assert(buildModelSelectionFromCliConfig('nope/m1') === null, 'provider 不在注册表返回 null')
 
+// 思考强度 → 目录 variant 就近选档（精确命中 / 缺档上调回落 / off→disabled / 全不在→defaultVariant）
+const pickVariant = (model, thinking) => buildModelSelectionFromCliConfig(model, undefined, thinking)?.options?.reasoningLevel
+assert(pickVariant('GLM-5.3', 'low') === 'low', 'thinking=low：精确命中 low 档')
+assert(pickVariant('GLM-5.3', 'high') === 'high' && pickVariant('GLM-5.3', 'max') === 'max', 'thinking=high/max：精确命中')
+assert(pickVariant('GLM-5.3', 'medium') === 'high', 'thinking=medium：无 medium 档上调 high')
+assert(pickVariant('GLM-5.3', 'off') === 'max', 'thinking=off：无 disabled 档回落 defaultVariant')
+assert(pickVariant('GLM-5.1', 'off') === 'disabled', 'thinking=off：有 disabled 档精确命中')
+assert(pickVariant('GLM-5.1', 'low') === 'enabled' && pickVariant('GLM-5.1', 'high') === 'enabled' && pickVariant('GLM-5.1', 'max') === 'enabled', 'thinking=low/high/max：无同名档回落 enabled')
+assert(pickVariant('GLM-5.1', 'medium') === 'enabled', 'thinking=medium：medium/high 都无档回落 defaultVariant')
+assert(buildModelSelectionFromCliConfig('GLM-5.3-Flash', undefined, 'max')?.options === undefined, '非 reasoning 模型忽略思考档位')
+assert(pickVariant('GLM-5.3', undefined) === 'max', 'thinking 未设：保持 defaultVariant（现状回归）')
+
 // API 预设连接：upsert 进 v2 注册表（个人 provider 规则）后按派生 id 引用
 const conn = { name: '某中转站', baseURL: 'https://relay.example/v1', apiKey: 'sk-relay' }
 const readPresetConfig = () => JSON.parse(fs.readFileSync(path.join(fakeHome, '.zcode', 'v2', 'provider_config.json'), 'utf8'))
@@ -101,6 +115,7 @@ assert(presetRule?.providerName === '某中转站' && presetRule?.config?.group 
 assert(presetRule?.config?.personalModelIds?.[0] === 'GLM-5.3', 'personalModelIds 用归一 id')
 const presetModelRule = readPresetConfig().config.modelConfigRules.providerModelRules.find((r) => r.providerId === rmPreset.providerId)
 assert(presetModelRule?.config?.enabled === true && presetModelRule?.config?.optionSpecs?.reasoningLevel?.values?.[0] === 'high' && !!presetModelRule?.config?.properties?.contextWindow, 'providerModelRule 完整定义（properties+optionSpecs 自控）')
+assert(presetModelRule?.config?.optionSpecs?.reasoningLevel?.map === '{}', 'thinking 未设：map 空（不发参数，现状回归）')
 buildModelSelectionFromCliConfig('glm-5.3', conn)
 const rulesAfter = readPresetConfig().config.providerConfigRules.providerRules.filter((r) => r.providerId === rmPreset.providerId)
 assert(rulesAfter.length === 1, '重复 upsert 幂等（不翻倍）')
@@ -126,8 +141,27 @@ buildModelSelectionFromCliConfig('glm-5.3', explicitConn)
 const explicitRule = readPresetConfig().config.providerConfigRules.providerRules.find((r) => r.providerName === '显式覆盖')
 assert(explicitRule?.config?.api?.type === 'openai-chat-completions', '显式 protocol 声明优先于推断')
 
+// 思考强度 → 预设线 optionSpecs 与引用档位（同 provider+model 幂等替换，逐档读最新规则）
+const presetLevel = (connArg, thinking) => {
+  const sel = buildModelSelectionFromCliConfig('glm-5.3', connArg, thinking)
+  const spec = readPresetConfig().config.modelConfigRules.providerModelRules.find((r) => r.providerId === sel?.providerId && r.modelId === sel?.modelId)?.config?.optionSpecs?.reasoningLevel
+  return { ref: sel?.options?.reasoningLevel, values: spec?.values, map: spec?.map }
+}
+let lv = presetLevel(conn, 'off')
+assert(lv.ref === 'disabled' && lv.values?.[0] === 'disabled' && lv.map === '{}', 'thinking=off：引用与 values 均 disabled，map 空（不发参数即关）')
+lv = presetLevel(conn, 'low')
+assert(lv.ref === 'low' && lv.values?.[0] === 'low' && lv.map === undefined, 'thinking=low：单值档且不写 map（交给 zcode 默认映射发参数）')
+lv = presetLevel(conn, 'high')
+assert(lv.ref === 'high' && lv.values?.[0] === 'high' && lv.map === undefined, 'thinking=high：单值档且不写 map')
+lv = presetLevel(conn, 'max')
+assert(lv.ref === 'max' && lv.values?.[0] === 'max' && lv.map === undefined, 'thinking=max：单值档且不写 map')
+lv = presetLevel(conn, 'medium')
+assert(lv.ref === 'medium' && lv.values?.[0] === 'medium' && lv.map === undefined, 'thinking=medium：openai 协议（/v1 推断）保留 medium')
+lv = presetLevel(anthropicConn, 'medium')
+assert(lv.ref === 'high' && lv.values?.[0] === 'high' && lv.map === undefined, 'thinking=medium：anthropic 协议上调 high')
+
 const catalog = listZcodeModels()
-assert(catalog.models.length === 2 && catalog.models.includes('GLM-5.3') && catalog.defaultModel === undefined, `模型目录来自 v2 桌面端目录（${catalog.models.join(',')}）`)
+assert(catalog.models.length === 3 && catalog.models.includes('GLM-5.3') && catalog.defaultModel === undefined, `模型目录来自 v2 桌面端目录（${catalog.models.join(',')}）`)
 
 process.env.USERPROFILE = ORIG_HOME // 还原，避免影响后续 claude 实测读真实配置
 

@@ -1609,6 +1609,7 @@ export class TaskRunner {
           workdir: task.workdir,
           mode: this.opts().mode,
           model: me?.model,
+          thinking: me?.thinking,
           connection: this.resolveConnection(task.agentId),
           resumeSessionId,
           turn: turn.stamp,
@@ -1773,6 +1774,7 @@ export class TaskRunner {
           workdir: task.workdir,
           mode: this.opts().mode,
           model: me?.model,
+          thinking: me?.thinking,
           connection: this.resolveConnection(task.agentId),
           // 自动重试第 1 次带会话续跑（maybeAutoRetry 故意保留 sessionId）：从失败处接着干，
           // 不再整任务从头重来；手动"重新运行"会清 sessionId，恒新会话不受影响
@@ -2084,6 +2086,7 @@ export class TaskRunner {
             workdir: task.workdir,
             mode: this.opts().mode,
             model: me?.model,
+            thinking: me?.thinking,
             connection: this.resolveConnection(task.agentId),
             resumeSessionId: task.sessionId,
             turn: turnRecord.stamp,
