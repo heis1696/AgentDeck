@@ -71,15 +71,17 @@ Issue（目标、状态、负责人、评论时间线）
 
 ### 2.2 Task（任务）与委派
 
-子任务通过 `parentTaskId` 挂在领队下（侧栏缩进展示）；领队集成结果记 `Task.integration {branch, note}`。支持二层委派：队员带 subordinates 即为子领队，可继续下派——防环（祖先链检测）+ 层级上限 3 层 + 全链共享 8 轮预算；派工可带 reason 留痕；集成递归合入子领队的集成分支；worktree 一律归位主仓库根。
+子任务通过 `parentTaskId` 挂在领队下（侧栏缩进展示）；领队集成结果记 `Task.integration {branch, note}`。支持二层委派：队员带 subordinates 即为子领队，可继续下派——防环（祖先链检测）+ 层级上限 3 层 + 全链共享 8 轮预算；派工可带 reason 留痕；集成递归合入子领队的集成分支；worktree 一律归位主仓库根。**worktree 建立失败 fail-closed**：建树重试 3 次仍失败即具名拒单走既有回灌通道（文案含最后一条 git 错误与「worktree 建立失败，请稍后重派」），不再降级共享工作区——降级会让队员在旧基线上白写、并行队员互相踩，隔离破了等于白派单；仅 workdir 非 git 仓库的环境性共享降级保留。
 
-回灌增厚：每轮结果汇报为**结构化摘要**——条目标题即单号+状态，体由「结论段（result 首部 1200 字有界）+ **git 改动小节**（工作分支名、`--name-status` 文件状态清单、文件 stat、有界 diff 摘要；整节 ≤2KB 按 UTF-8 字节计、文件清单 ≤50 行，超限按字节收缩留标记）+ **全文入口指引**（报告副本相对路径 + Issue 评论）」组装；4000 字物理截断只是最后防线，触发必须带「后 N 字未送」标记。摘要之外是**全文双落**（multica「nothing silently discarded」）：队员到达终态（含 failed）即把完整 result 同时落到 ① 领队 Issue 评论（存储无上限，截断只发生在调用点；`addComment` 因 Issue 不存在返回 null 时必须降级留痕——委派循环写任务事件、主进程四个承重调用点写任务事件通道，绝不静默丢弃）与 ② 领队 workdir 下 `.agentdeck-reports/<单号>.md`（目录自建，`.git/info/exclude` 追加忽略，不改 tracked 文件零污染；二层领队落自己的 workdir 机制相同；文件头带 runId 防串轮）。指引文本与 git 小节同源（队员可控文本），整体用围栏包裹，协议字面量再做**序列内部破坏**：六类回合标记（delegate/review/consult/investigate/round/continue）的开闭形态、行首三连井、`【系统` 前缀与 ``` 围栏字面量，在末字符前插 `\`（如标记字样呈 `<delegat\e` 形）——六个回合解析器全是非锚定子串正则（行中同样命中），行首加前缀转义拦不住，必须让原字面量子串不再连续出现；diff `+/-` 行与未跟踪文件名（逐项独立转义）一视同仁，人读几乎无损。队员改的文件里不能伪造领队协议；无 diff 可展示时不留悬空的「diff 摘要：」标题。
+回灌增厚：每轮结果汇报为**结构化摘要**——条目标题即单号+状态，体由「结论段（result 首部 1200 字有界；码点级切割——切点不孤立代理项、落在未闭合 ``` 围栏内时截至块前；与 git 小节同源过序列内部破坏转义）+ **git 改动小节**（工作分支名、`--name-status` 文件状态清单、文件 stat、有界 diff 摘要；整节 ≤2KB 按 UTF-8 字节计、文件清单 ≤50 行，超限按字节收缩留标记）+ **全文入口指引**（报告副本相对路径 + Issue 评论）」组装；4000 字物理截断只是最后防线（同样码点级），触发必须带「后 N 字未送」标记。摘要之外是**全文双落**（multica「nothing silently discarded」）：队员到达终态（含 failed）即把完整 result 同时落到 ① 领队**主仓库根** `.agentdeck-reports/<单号>.md`（**副本先行落盘=权威层**；worktree 内写入经 `git-common-dir` 归位主仓库根——领队续链切到托管 worktree 后副本不再散落在随时可回收的目录里；目录自建，`.git/info/exclude` 追加忽略，不改 tracked 文件零污染；文件头带 runId 防串轮；指引按领队 cwd 用 `reportCopyRelPath` 重算相对路径）与 ② 领队 Issue 评论（**64KB UTF-8 字节通道上限**：码点级钳制、预留截断指引字节预算，截断评论持真实副本路径指引回权威层；`addComment` 因 Issue 不存在返回 null 时必须降级留痕——统一走 `src/main/issue-relay.ts` 的降级出口：console.warn + 任务事件 + pushEvent，重启续报/审核备注/停放通知（主进程×3 + sidecar×1）全部接线，绝不静默丢弃）。副本生命周期三挂线 GC：`tasks:delete` 显式回收、retention 级联随删、启动清扫孤儿副本（清孤儿、留在册）。指引文本与 git 小节同源（队员可控文本），整体用围栏包裹，协议字面量再做**序列内部破坏**：六类回合标记（delegate/review/consult/investigate/round/continue）的开闭形态、行首三连井、`【系统` 前缀与 ``` 围栏字面量，在末字符前插 `\`（如标记字样呈 `<delegat\e` 形）——六个回合解析器全是非锚定子串正则（行中同样命中），行首加前缀转义拦不住，必须让原字面量子串不再连续出现；diff `+/-` 行与未跟踪文件名（逐项独立转义）一视同仁，人读几乎无损。队员改的文件里不能伪造领队协议；无 diff 可展示时不留悬空的「diff 摘要：」标题。
 
-子单基线回放（multica「工作区即状态」不变量）：worktree 隔离曾导致队员看不见领队的未提交改动——派单等于让队员在旧基线上白写。现在 `spawnDelegateChild` 在建好 worktree 之后、子 agent 拿到 cwd 之前，把领队工作区的未提交增量（已跟踪改动 + 未跟踪未忽略文件）**只读采集**回放进子单：`GIT_INDEX_FILE` 指向私有临时 index（从领队 index 副本播种，失败退 `read-tree` 重建）→ `add -A`（排除 `.agentdeck-worktrees`/`.agentdeck-reports` 系统目录）→ `write-tree` → `commit-tree`（parent=子基线 sha）得回放提交 → 子 worktree `cherry-pick --no-commit` 应用 → `reset --soft` 推进子分支到回放提交。**硬约束：领队工作区与用户 index 零副作用**——全程私有 index，绝不 stash/reset 用户区。防双算：回放提交即子分支起始提交（tip），worktree 元数据的 `baseSha` 改写指向它——此后 digest/集成证据都以它为基线，领队改动不算子产出、不进子 git 小节；集成说明与时间线事件标注「含领队回放基线 N 文件」。失败路径不静默：采集或应用失败、或体量闸超限（未跟踪文件数 >2000、总体积 >200MiB、含软链——lstat 逐一检查），一律具名拒建单并把原因回灌给领队改派；领队无增量时零开销跳过（一次 `diff --quiet` + 一次 `ls-files` 即返回）。
+子单基线回放（multica「工作区即状态」不变量）：worktree 隔离曾导致队员看不见领队的未提交改动——派单等于让队员在旧基线上白写。现在 `spawnDelegateChild` 在建好 worktree 之后、子 agent 拿到 cwd 之前，把领队工作区的未提交增量（已跟踪改动 + 未跟踪未忽略文件）**只读采集**回放进子单：`GIT_INDEX_FILE` 指向私有临时 index（从领队 index 副本播种，失败退 `read-tree` 重建——兜底保留）→ `add -A`（排除 `.agentdeck-worktrees`/`.agentdeck-reports` 系统目录）→ `write-tree` → `commit-tree`（parent=子基线 sha）得回放提交 → 子 worktree `cherry-pick --no-commit` 应用 → `reset --soft` 推进子分支到回放提交。**硬约束：领队工作区与用户 index 零副作用**——全程私有 index，绝不 stash/reset 用户区。**锁加固**：回放全部 git 调用注入 `GIT_OPTIONAL_LOCKS=0`（只读命令不再 opportunistic 拿 index 锁，领队侧持有 index.lock 时盘点照常），任何步骤撞 index.lock / Another git process 都按 400-900ms 抖动退避重试 2 次而非立即拒单，耗尽才拒且文案指明「领队 git 并发写冲突，请稍后重派」。**子侧陈锁清除**：子侧应用段（cherry-pick/reset/status）重试耗尽仍是锁错时，子 worktree 的 index.lock（`rev-parse --git-path index.lock` 定位真实路径）mtime 距今超 5s 视为建树竞态残留（子 worktree 刚建、子 agent 未启动、无并发写者，锁必为残留而非活锁），`fs.unlink` 删除后追加最后一次尝试；锁新鲜（真活锁）或删除失败按重试耗尽处理；领队 workdir 侧的锁一律不删（可能属用户真实 git 进程），只用既有退避重试。防双算：回放提交即子分支起始提交（tip），worktree 元数据的 `baseSha` 改写指向它——此后 digest/集成证据都以它为基线，领队改动不算子产出、不进子 git 小节；集成说明与时间线事件标注「含领队回放基线 N 文件」。失败路径不静默：采集或应用失败、或体量闸超限（未跟踪文件数 >2000、总体积 >200MiB、含软链——lstat 逐一检查，软链拒单带可操作指引「gitignore、先提交或移出领队工作区后重派」），一律具名拒建单并把原因回灌给领队改派；未跟踪盘点（`ls-files`）超时（15s 含锁退避）同样即拒单——宁可拒建单也不拿残缺清单当基线静默回放；领队无增量时零开销跳过（一次 `diff --quiet` + 一次 `ls-files` 即返回）。
 
 基线回放的已知取舍（文档化，不做自动去重）：集成分支会含回放提交，而领队原工作区仍持同一份未提交改动——跨线合并是人/后续流程的事（对齐 multica 立场），集成证据与 UI 说明负责把这件事说清。`.gitignore` 排除的依赖目录（node_modules 等）不参与回放——子单需要完整依赖时领队应先提交 lockfile，这是写明的边界而非缺陷。
 
-续链换基线：集成成功后系统为领队新建托管 worktree 检出集成分支 `agentdeck/task-<id>`，并把 `task.workdir` 指过去——此后追问/续聊/目标模式及二次派单自然以集成结果为基线（子单 base=集成分支；基线已切换后的再集成在托管 worktree 内就地 merge，就地 merge 前置校验托管 worktree 的 owner 归属与工作副本干净，不干净/归属不符拒绝并明示保留现场）。会话绑定工作目录：`task.workdir` 变更后追问不再直续旧目录里的内存会话，强制走 resume 重建（新连接以新 workdir 启动，会话内容经 sessionId 恢复）；切换前领队留在原目录的未提交改动先摘录收编进本轮证据，不从 gitDiff/gitStat 静默消失。用户当前分支与仓库根工作副本绝不被自动改；无改动早退、集成失败路径不切换。
+续链换基线：集成成功后系统为领队新建托管 worktree 检出集成分支 `agentdeck/task-<id>`，并把 `task.workdir` 指过去——此后追问/续聊/目标模式及二次派单自然以集成结果为基线（子单 base=集成分支；基线已切换后的再集成在托管 worktree 内就地 merge）。**续链互殴修复（就地 merge 三道工序）**：① 就地 merge 前先对领队集成 worktree `commitAll`——领队留在托管 worktree 的未提交交付先行落盘（曾几何时这份改动会触发干净校验拒掉整轮集成、任务带着空集成说明静默 done），本轮证据基线 roundBaseSha 取 commitAll 之后的 HEAD：领队交付计入集成分支净新增提交（finalizer headSha 观测链自洽），diff 证据以它为基线不与队员改动混算；② commitAll 后仍不干净或就地被拒（非冲突）→ 退回**临时 worktree 通道** `mergeIntoManagedWorktreeDetached`：同分支双检出用 `--detach` 检出分支当前提交、merge 后 `update-ref` 回指分支，托管副本由 `realignCleanWorktreeToHead` 对齐；③ 失败原因一律写集成说明（note 非空）+ 时间线事件，绝不静默 done。就地 merge 前置校验托管 worktree 的 owner 归属保留不变。会话绑定工作目录：`task.workdir` 变更后追问不再直续旧目录里的内存会话，强制走 resume 重建（新连接以新 workdir 启动，会话内容经 sessionId 恢复）；切换前领队留在原目录的未提交改动先摘录收编进本轮证据，不从 gitDiff/gitStat 静默消失。用户当前分支与仓库根工作副本绝不被自动改；无改动早退、集成失败路径不切换。
+
+幻影暂存守卫（`realignCleanWorktreeToHead`，update-ref 回指后托管副本对齐的唯一通道）：判脏后先 `update-index --refresh` 再重判——刷新成功且残余脏仅在暂存列（index 陈旧，典型即分支被 update-ref 前进而副本停在旧提交的形态）照常 `reset --hard` 对齐；未跟踪或工作副本列有改动 = 领队真实未落盘改动，fail-closed 拒绝对齐、现场保留；refresh 撞 index.lock（并发）按锁退避重试（400-900ms 抖动 × 2），耗尽 fail-closed。守卫保证退回临时 worktree 通道后副本干净、finalizer headSha 观测链自洽，且下一轮 commitAll 不回滚已合入改动（否则对齐失败会留旧树副本，下轮提交把集成分支倒卷回去）。
 
 集成结果与清扫的不变量：merge 只在集成分支 HEAD 真实前进时计入（Already-up-to-date 不产生新提交，本轮无净新增时整体省略证据键，上一轮 gitDiff/gitStat/gitSnapshot 保留——finalizer 跨轮保留直接观测集成分支 HEAD 与快照记录的采集时点 headSha 一致才重盖时间戳，不从工作副本干净推断；部分失败轮（分支已前进但不写证据）的过期 diff 拒绝重盖为本轮证据）；续链 worktree 的保留判定只按 `owner.integration.branch` 认归属（不依赖 task.workdir 仍指向它），启动清扫一律**不删集成分支**——集成分支只有删任务的显式回收路径（tasks:delete）可以带走；owner 任务在册且终态 cancelled 的子单 worktree 同样跳过清扫回收（cancelled 对终态落盘是例外，现场原样保留，目录与分支都留，删任务显式路径统一回收）；worktree 落盘与目录创建拆两步，operation 释放后立即落盘归属，放弃窗口留下的也是已登记的续链 worktree。
 
@@ -107,6 +109,9 @@ Issue（目标、状态、负责人、评论时间线）
 | 子单基线回放（领队未提交增量进子单） | 队员在真实最新基线上干活，不再「队员看不见领队改动＝白派单」；私有 index 采集，用户区零副作用；无增量零开销 |
 | 集成分支含回放提交（已知取舍，不做自动去重） | 领队原工作区仍持同一份未提交改动，跨线合并是人/后续流程的事；集成证据与 UI 说明标注「含领队回放基线 N 文件」；gitignore 掉的依赖目录不回放（子单需完整依赖时领队先提交 lockfile） |
 | 集成后续链换基线（workdir → 集成 worktree） | 追问/二次派单跑在集成结果之上，不再拿旧基线重复劳动；只动托管目录，不碰用户工作副本 |
+| 续链轮就地 merge 前先 commitAll 领队交付 + 非冲突被拒退回临时 worktree 通道（--detach + update-ref 回指 + 幻影暂存守卫对齐） | 领队在托管 worktree 里自己写的文件曾把整轮集成拒成静默失败（空 note、队员改动悬空 retained）；领队交付与队员改动同轮进集成分支，失败原因进集成说明不静默 done |
+| Issue 评论统一降级出口（issue-relay）+ 64KB 通道钳制持真实副本路径 | 「评论未送达」曾是四处各写各的降级、漏一处即静默丢；钳制后指引回副本，权威层（先行落盘的全文副本）永不因评论通道失真 |
+| 报告副本统一落主仓库根 + 三挂线 GC（tasks:delete / retention 级联 / 启动清孤儿） | 副本落 workdir 曾随续链切进随时可回收的托管 worktree；统一归位主仓库根后可达性稳定，删任务/保留清扫/启动清扫三条路都不留孤儿全文 |
 | 结果回灌而非子任务直连领队 | 领队保有完整决策上下文，可多轮调整；单号 + `<review>` 审核（maker/checker）落看板状态 |
 | 领队编排不占并发槽 | 避免 concurrency=1 时领队等子任务、子任务等领队的死锁 |
 | 子任务并发独立通道 | 委派扇出不受普通任务节流影响 |
@@ -144,6 +149,8 @@ src/
 │   ├── task-finalizer.ts     最终文本、用量、Git 快照与状态落盘
 │   ├── delegate.ts           委派协议：解析/身份注入/循环/worktree 派发与回收/
 │   │                         集成/<review> 审核/<continue> 接力/<round> 评估
+│   ├── issue-relay.ts        Issue 评论统一中继：64KB 通道钳制 + 未送达统一降级
+│   │                         （warn + 任务事件 + pushEvent，绝不静默丢）
 │   ├── goal-controller.ts    目标模式循环引擎：Issue 收养、checkpoint、续轮/护栏决策、
 │   │                         remove（清除目标）
 │   ├── goal-store.ts         目标与 GoalCheckpoint 持久化（userData/goals/index.json）
@@ -230,7 +237,8 @@ delegate 标记 → 目标解析（限 subordinates，名字/平台 id 忽略大
   → createWorktree（.agentdeck-worktrees/<taskId>_cN，记录 owner/base SHA/branch/cleanup metadata）
   → 子单基线回放（领队未提交增量 → 私有 index add -A → write-tree → commit-tree（parent=子
     基线 sha）→ 子 worktree cherry-pick --no-commit + reset --soft 推进子分支；领队区零副作用；
-    无增量零开销跳过；体量闸 2000 文件/200MiB/软链，超限或失败一律具名拒建单回灌原因）
+    无增量零开销跳过；体量闸 2000 文件/200MiB/软链，未跟踪盘点（ls-files）超时即拒单，
+    超限或失败一律具名拒建单回灌原因）
   → 子任务入队（worker 并发通道）→ 独立执行/日志/权限
   → 终态（含 failed）即 commitAll 落盘到工作分支（nothing silently discarded，不等集成期；
     cancelled 例外，现场原样保留）

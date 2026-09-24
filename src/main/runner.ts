@@ -1164,10 +1164,11 @@ export class TaskRunner {
       if (!active()) return null
       // worktree 创建与领队/其他子任务的 git 操作可能撞 index.lock：重试两次再放弃
       let wt: { path: string; metadata: WorktreeInfo } | null = null
+      let lastWtError = ''
       for (let attempt = 0; attempt < 3 && !wt; attempt++) {
         if (attempt) await new Promise((r) => setTimeout(r, 500))
         if (!active()) return null
-        wt = await createWorktree(task.workdir, `${taskId}_c${this.workerCount(taskId) + 1}`, base, taskId)
+        wt = await createWorktree(task.workdir, `${taskId}_c${this.workerCount(taskId) + 1}`, base, taskId, (m) => { lastWtError = m })
         if (!active()) {
           if (wt) await reclaimWorktree(wt.path)
           return null
@@ -1201,7 +1202,13 @@ export class TaskRunner {
           guardedNote(`↧ 领队未提交基线已回放进子单（${replay.files} 个文件），子单以回放提交为基线`)
         }
       } else {
-        unavailableReason = 'Git worktree creation failed; using the shared workspace'
+        // fail-closed：建树重试 3 次仍失败不再降级共享工作区——队员会在旧基线上白写、
+        // 并行队员互相踩，隔离破了等于白派单。具名拒单走既有回灌通道（含最后一条 git
+        // 错误）；仅 workdir 非 git 仓库的环境性共享降级（上方 else if 分支）保留。
+        const why = `worktree 建立失败，请稍后重派${lastWtError ? `——${lastWtError}` : ''}`
+        guardedNote(`⚠ 拒绝派给 ${call.to}：${why}（不降级共享工作区）`)
+        this.recordDelegateRejection(taskId, `to="${call.to}"：${why}`)
+        return null
       }
     } else if (task.workdir) {
       unavailableReason = 'Workspace is not a Git worktree; using the shared workspace'

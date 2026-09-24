@@ -286,6 +286,81 @@ try {
   const cleanMerged = await git.mergeIntoManagedWorktree(chainWtPath, 'main', chain.parent.id)
   assert.equal(cleanMerged.ok, true, 'm3: a clean owned managed worktree accepts the in-place merge')
 
+  // 块四：临时 worktree 通道（--detach 双检出 + update-ref 回指）+ 幻影暂存守卫（先红：通道与守卫均为新函数）
+  {
+    const fbRepo = path.join(temp, 'detach-fb', 'repo')
+    fs.mkdirSync(fbRepo, { recursive: true })
+    runGit(fbRepo, 'init', '-q', '-b', 'main')
+    runGit(fbRepo, 'config', 'user.email', 'smoke@example.com')
+    runGit(fbRepo, 'config', 'user.name', 'AgentDeck Smoke')
+    fs.writeFileSync(path.join(fbRepo, 'f.txt'), 'f v1\n')
+    runGit(fbRepo, 'add', '.')
+    runGit(fbRepo, 'commit', '-qm', 'base')
+    const ibFb = 'agentdeck/task-detachfb'
+    runGit(fbRepo, 'branch', ibFb)
+    const wtFb = await git.createWorktreeAtBranch(fbRepo, 'task-detachfb-integrated', ibFb, 'task-detachfb')
+    assert.ok(wtFb, '块四：集成托管 worktree 创建')
+    // 源分支：f.txt v2（主检出上切出、提交、切回，不动托管 worktree）
+    runGit(fbRepo, 'checkout', '-b', 'agentdeck/src2')
+    fs.writeFileSync(path.join(fbRepo, 'f.txt'), 'f v2\n')
+    runGit(fbRepo, 'add', '.')
+    runGit(fbRepo, 'commit', '-qm', 'f v2')
+    runGit(fbRepo, 'checkout', 'main')
+    // 就地通道因托管副本脏被拒（commitAll 后仍不干净的退路场景）→ 临时 worktree 通道接棒
+    fs.writeFileSync(path.join(wtFb.path, 'leader-local.txt'), '领队未提交交付\n')
+    const inPlace = await git.mergeIntoManagedWorktree(wtFb.path, 'agentdeck/src2', 'task-detachfb')
+    assert.equal(inPlace.ok, false, '块四：就地合并被拒（托管副本脏）')
+    const fb = await git.mergeIntoManagedWorktreeDetached(wtFb.path, 'agentdeck/src2', 'task-detachfb')
+    assert.equal(fb.ok, false, '块四：真脏在场时退回通道 fail-closed（合并已回指但副本拒绝对齐）')
+    assert.match(fb.message, /realignment failed/, '块四：fail-closed 文案说明对齐失败')
+    // 清掉真脏（对齐 delegate 真实时序：commitAll 之后才退回），临时通道完整走通
+    fs.unlinkSync(path.join(wtFb.path, 'leader-local.txt'))
+    const fb2 = await git.mergeIntoManagedWorktreeDetached(wtFb.path, 'agentdeck/src2', 'task-detachfb')
+    assert.equal(fb2.ok, true, `块四：临时 worktree 通道合入成功（${fb2.message}）`)
+    assert.equal(runGit(fbRepo, 'show', ibFb + ':f.txt'), 'f v2', '块四：update-ref 回指后分支内容=f v2')
+    const leftoverTmp = fs.readdirSync(path.join(fbRepo, '.agentdeck-worktrees')).filter((name) => name.startsWith('.agentdeck-merge-detach-'))
+    assert.deepEqual(leftoverTmp, [], '块四：临时 detach worktree 用后即清')
+    const statusFb = runGit(wtFb.path, 'status', '--porcelain', '--untracked-files=all')
+    assert.equal(statusFb, '', `块四：退回路后 worktree 干净（${JSON.stringify(statusFb)}）`)
+    assert.equal(fs.readFileSync(path.join(wtFb.path, 'f.txt'), 'utf8').trim(), 'f v2', '块四：对齐后托管副本内容更新到 v2')
+    // 下一轮 commitAll 不回滚已合入改动：干净副本零改动、分支 HEAD 不动、f.txt 保持 v2
+    const headBeforeCommit = runGit(fbRepo, 'rev-parse', ibFb)
+    assert.equal(await git.commitAll(wtFb.path, 'agentdeck: 下一轮领队提交'), false, '块四：对齐后的干净副本 commitAll 零改动')
+    assert.equal(runGit(fbRepo, 'rev-parse', ibFb), headBeforeCommit, '块四：下一轮 commitAll 不回滚已合入改动（分支 HEAD 不动）')
+    assert.equal(runGit(fbRepo, 'show', ibFb + ':f.txt'), 'f v2', '块四：f.txt 保持 v2（不回滚到 v1）')
+    // headSha 观测链自洽
+    const sumFb = await git.branchDiffSummary(fbRepo, 'main', ibFb)
+    assert.equal(sumFb.snapshot.headSha, runGit(fbRepo, 'rev-parse', ibFb), '块四：branchDiffSummary headSha 观测=分支实际 HEAD')
+    // 幻影暂存守卫 fail-closed 面：未跟踪 / 工作副本列 = 真脏拒绝对齐
+    fs.writeFileSync(path.join(wtFb.path, 'real-dirty.txt'), 'x\n')
+    const refuseUntracked = await git.realignCleanWorktreeToHead(wtFb.path)
+    assert.equal(refuseUntracked.ok, false, '块四：未跟踪文件=真脏 fail-closed')
+    assert.match(refuseUntracked.reason, /fail-closed/, '块四：fail-closed 具名原因')
+    fs.unlinkSync(path.join(wtFb.path, 'real-dirty.txt'))
+    fs.writeFileSync(path.join(wtFb.path, 'f.txt'), 'f v3 本地未落盘\n')
+    const refuseWt = await git.realignCleanWorktreeToHead(wtFb.path)
+    assert.equal(refuseWt.ok, false, '块四：工作副本列改动=真脏 fail-closed')
+    // 用 git 还原（autocrlf 下 checkout 产物与手写 LF 字节不同，手写会被 git 判真脏）
+    execFileSync('git', ['-C', wtFb.path, 'checkout', '--', 'f.txt'], { stdio: 'ignore' })
+    assert.equal((await git.realignCleanWorktreeToHead(wtFb.path)).ok, true, '块四：真脏清除后对齐恢复')
+    // index 陈旧形态（仅暂存列，update-ref 回指后的自然产物）→ 照常 reset --hard 对齐
+    runGit(fbRepo, 'checkout', '-b', 'agentdeck/src3')
+    fs.writeFileSync(path.join(fbRepo, 'f2.txt'), 'f2 v1\n')
+    runGit(fbRepo, 'add', '.')
+    runGit(fbRepo, 'commit', '-qm', 'f2 v1')
+    runGit(fbRepo, 'checkout', 'main')
+    const src3Head = runGit(fbRepo, 'rev-parse', 'agentdeck/src3')
+    runGit(fbRepo, 'update-ref', `refs/heads/${ibFb}`, src3Head)
+    const staleStatus = runGit(wtFb.path, 'status', '--porcelain', '--untracked-files=all')
+    assert.ok(staleStatus.trim() !== '', '块四：update-ref 回指后副本呈现暂存列形态')
+    assert.ok(staleStatus.split('\n').filter(Boolean).every((line) => line[0] !== '?' && line[1] === ' '), `块四：残余脏仅在暂存列（${JSON.stringify(staleStatus)}）`)
+    const realignStale = await git.realignCleanWorktreeToHead(wtFb.path)
+    assert.equal(realignStale.ok, true, `块四：index 陈旧（仅暂存列）照常对齐（${realignStale.reason ?? ''}）`)
+    assert.equal(runGit(wtFb.path, 'rev-parse', 'HEAD'), src3Head, '块四：对齐后副本 HEAD=回指目标')
+    assert.equal(fs.readFileSync(path.join(wtFb.path, 'f2.txt'), 'utf8').trim(), 'f2 v1', '块四：对齐带回回指内容')
+    console.log('PASS detached fallback channel + phantom-staging realign guard')
+  }
+
   // M1：清扫路径绝不删集成分支——即使 owner 记录已删除（借 repo 内其他任务的 claim 回收目录）
   chain.peer.delete(chain.parent.id)
   const orphanSweep = await git.pruneWorktrees(chain.repo, (owner, worktree) => git.shouldKeepTaskWorktree(chain.peer.list(), chain.repo, owner, worktree), {
@@ -307,6 +382,12 @@ try {
   const chain2WtPath = chain2.peer.get(chain2.parent.id).workdir
   assert.ok(chain2WtPath && chain2WtPath.includes('.agentdeck-worktrees'), 'the second fixture switched its leader workdir too')
   chain2.peer.updateIf(chain2.parent.id, identity(chain2.peer.get(chain2.parent.id)), { status: 'done', endedAt: Date.now() })
+  // 块三 GC 挂线一（先红：基线删任务不清副本）：tasks:delete 连带清理主仓库根报告副本；在册任务副本保留
+  const keeperChain2 = chain2.store.create({ title: 'keeper', prompt: 'x', workdir: chain2.repo, backend: 'fake' })
+  const reportsDirChain2 = path.join(chain2.repo, '.agentdeck-reports')
+  fs.mkdirSync(reportsDirChain2, { recursive: true })
+  fs.writeFileSync(path.join(reportsDirChain2, `${chain2.parent.id}.md`), 'parent 全文\n')
+  fs.writeFileSync(path.join(reportsDirChain2, `${keeperChain2.id}.md`), 'keeper 全文\n')
   registerTaskIpc({ store: chain2.peer, runner: { pushTask() {} }, issueStore: { sync() {}, syncEventually() {} }, getWindow: () => null })
   const deleteResult = await globalThis.__worktreeHandlers.get('tasks:delete')(null, chain2.parent.id)
   assert.ok(deleteResult.ok, 'explicit task deletion succeeds')
@@ -317,6 +398,10 @@ try {
   }
   assert.ok(!fs.existsSync(chain2WtPath), 'explicit deletion reclaims the integration worktree')
   assert.equal(await git.branchExists(chain2.repo, 'agentdeck/task-' + chain2.parent.id), false, 'explicit deletion takes the integration branch with it')
+  assert.equal(fs.existsSync(path.join(reportsDirChain2, `${chain2.parent.id}.md`)), false, '块三挂线一：删任务连带清理其报告副本')
+  assert.equal(fs.existsSync(path.join(reportsDirChain2, `${chain2.child.id}.md`)), false, '块三挂线一：子单报告副本一并清理（fixture 循环写入的副本）')
+  assert.equal(fs.existsSync(path.join(reportsDirChain2, `${keeperChain2.id}.md`)), true, '块三挂线一：在册任务的副本保留')
+  fs.unlinkSync(path.join(reportsDirChain2, `${keeperChain2.id}.md`))
   chain2.store.flush()
   chain2.peer.flush()
   console.log('PASS explicit task deletion takes the integration branch with it')

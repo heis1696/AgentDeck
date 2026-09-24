@@ -26,7 +26,8 @@ import { createDshBackend } from './backends/dsh'
 import type { AgentBackend } from './backends/types'
 import type { AppSettings, Task, RunTrigger } from '../shared/types'
 import { ensureSharedDir } from './skills'
-import { shouldKeepTaskWorktree, sweepWorktrees } from './git'
+import { shouldKeepTaskWorktree, sweepReportCopies, sweepWorktrees } from './git'
+import { relayIssueCommentOrEvent, type IssueRelayChannels } from './issue-relay'
 import { registerIpcHandlers, type CreateTaskInput } from './ipc/register'
 import { SidecarManager } from './sidecar'
 import { PetController } from './pet'
@@ -322,6 +323,8 @@ const initMain = async (): Promise<void> => {
         return claim ? { release: () => { try { store.releaseGitOperation(claim) } catch {} } } : undefined
       }
     }).catch(() => {})
+    // 报告副本 GC 挂线三（启动清扫）：孤儿副本（任务已不在册）删除，在册副本保留
+    void sweepReportCopies(dir, (id) => !!store.get(id)).catch(() => {})
   }
   goalStore = new GoalStore(app.getPath('userData'))
   automationStore = new AutomationStore(app.getPath('userData'))
@@ -415,6 +418,13 @@ const initMain = async (): Promise<void> => {
   })
   meetingController.recover()
   meetingController.subscribe((meeting) => mainWindow?.webContents.send('meetings:updated', meeting))
+  // Issue 评论统一中继（全文层统一降级出口）：评论未送达（Issue 不存在）= warn + 任务事件 + 推送，
+  // 重启续报/审核备注/停放通知三处共用，绝不静默丢
+  const issueRelay: IssueRelayChannels = {
+    addComment: (issueId, text, author) => issueStore.addComment(issueId, text, author ?? { type: 'agent', id: 'relay' }),
+    appendEvent: (taskId, event) => store.appendEvent(taskId, event),
+    pushEvent: (taskId, event) => runner.pushEvent(taskId, event)
+  }
   // 启动对账：执行只活在主进程内存里，快照里遗留的 running 只有在**执行身份被证实
   // 已死**时才是僵尸——活跃或身份不可读的运行一律保留（租约过期不是死亡证据）。
   // 接管统一走 store.recoverDeadRuns：锁外探活、锁内按捕获身份条件提交，每个死运行
@@ -427,12 +437,12 @@ const initMain = async (): Promise<void> => {
     relayInterruptedLeader: (stale, kids) => {
       if (!stale.issueId) return
       const excerpts = kids.slice(0, 5).map((kid) => `- **${kid.title}**（${kid.status}）：${(kid.result ?? '').slice(0, 400) || '（无最终输出）'}`).join('\n')
-      const comment = issueStore.addComment(stale.issueId, `⚠ 委派报告未送达：领队执行被应用重启打断。以下为队员报告摘要：\n${excerpts}`, { type: 'agent', id: 'relay' })
-      if (!comment) {
-        // null = Issue 已不存在：降级到任务证据/事件通道，报告摘要绝不静默丢弃
-        const event = store.appendEvent(stale.id, { ts: Date.now(), kind: 'status', text: `⚠ Issue 评论未送达（Issue 不存在），队员报告摘要转投任务时间线：\n${excerpts}` })
-        if (event) runner.pushEvent(stale.id, event)
-      }
+      relayIssueCommentOrEvent(issueRelay, {
+        issueId: stale.issueId,
+        taskId: stale.id,
+        comment: `⚠ 委派报告未送达：领队执行被应用重启打断。以下为队员报告摘要：\n${excerpts}`,
+        fallbackEventText: `⚠ Issue 评论未送达（Issue 不存在），队员报告摘要转投任务时间线：\n${excerpts}`
+      })
     }
   })
   presets = loadPresets()
@@ -443,12 +453,14 @@ const initMain = async (): Promise<void> => {
       if (!child?.issueId) return
       issueStore.updateWorkflow(child.issueId, verdict === 'pass' ? 'done' : 'blocked')
       if (note) {
-        const comment = issueStore.addComment(child.issueId, `审核${verdict === 'pass' ? '通过' : '退回'}：${note}`, { type: 'agent', id: 'reviewer' })
-        if (!comment) {
-          // null = Issue 已不存在：审核结论降级为子任务事件留痕
-          const event = store.appendEvent(childId, { ts: Date.now(), kind: 'status', text: `⚠ 审核评论未送达（Issue 不存在）；审核${verdict === 'pass' ? '通过' : '退回'}：${note}` })
-          if (event) runner.pushEvent(childId, event)
-        }
+        // 审核备注走统一中继：评论未送达（Issue 不存在）降级为子任务事件留痕
+        relayIssueCommentOrEvent(issueRelay, {
+          issueId: child.issueId,
+          taskId: childId,
+          comment: `审核${verdict === 'pass' ? '通过' : '退回'}：${note}`,
+          fallbackEventText: `⚠ 审核评论未送达（Issue 不存在）；审核${verdict === 'pass' ? '通过' : '退回'}：${note}`,
+          author: { type: 'agent', id: 'reviewer' }
+        })
       }
       publishIssueUpdate(child)
     },
@@ -528,12 +540,14 @@ const initMain = async (): Promise<void> => {
       // Only a newly created successor gets a visible handoff notice.
       if (task.parked && task.issueId) {
         const firstLine = task.prompt.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? task.title
-        const comment = issueStore.addComment(task.issueId, `⏸ 阶段接力已备好：${firstLine.slice(0, 80)}——下一阶段在等你启动（打开该 Issue 的最新执行，点「▶ 启动」）`, { type: 'agent', id: source.agentId ?? 'relay' })
-        if (!comment) {
-          // null = Issue 已不存在：停放通知降级为后继任务事件留痕
-          const event = store.appendEvent(task.id, { ts: Date.now(), kind: 'status', text: `⚠ 停放通知未送达（Issue 不存在）：阶段接力已备好，等用户启动` })
-          if (event) runner.pushEvent(task.id, event)
-        }
+        // 停放通知走统一中继：评论未送达（Issue 不存在）降级为后继任务事件留痕
+        relayIssueCommentOrEvent(issueRelay, {
+          issueId: task.issueId,
+          taskId: task.id,
+          comment: `⏸ 阶段接力已备好：${firstLine.slice(0, 80)}——下一阶段在等你启动（打开该 Issue 的最新执行，点「▶ 启动」）`,
+          fallbackEventText: `⚠ 停放通知未送达（Issue 不存在）：阶段接力已备好，等用户启动`,
+          author: { type: 'agent', id: source.agentId ?? 'relay' }
+        })
       }
     }
     return task

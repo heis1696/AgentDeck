@@ -45,7 +45,7 @@ preload 以 `contextBridge` 暴露，全部经 `ipcRenderer.invoke/on` 与主进
 | `start` | `(id) => Promise<IpcResult>` | 启动 queued 任务（含 parked 和排队解卡）；接力任务记录本阶段人工启动确认并传入首回合，不代表工具权限或其他审批已获批准 |
 | `cancel` | `(id) => Promise<IpcResult>` | 取消排队/运行中任务；**级联取消其运行中子任务** |
 | `followUp` | `(id, content, opts?: { relay?: boolean }) => Promise<IpcResult>` | 在已完成任务会话上追问（done/failed/cancelled 均可）；无活跃会话走 resume（dsh ACP 无跨进程 resume，重启后追问会新建会话）。`relay: true` 仅由「接力下一阶段」按钮传入；若已有非取消后继则复用，queued 后继按人工确认启动，不重复建单 |
-| `delete` | `(id) => Promise<IpcResult>` | 删除任务及日志（连带子任务），并回收名下委派 worktree；运行中拒绝 |
+| `delete` | `(id) => Promise<IpcResult>` | 删除任务及日志（连带子任务），回收名下委派 worktree，并连带清理任务与子单在主仓库根 `.agentdeck-reports/` 的报告副本；运行中拒绝 |
 | `retry` | `(id) => Promise<IpcResult>` | 清空结果/会话/attempt 重置为 queued 重跑 |
 | `move` | `(id, status) => Promise<IpcResult>` | 看板拖动的状态流转；`validateMove`（shared/taskflow）校验合法性，→ running 仅限 queued 且解除 parked |
 | `rewind` | `(id, toSeq) => Promise<IpcResult>` | 截断 toSeq 之后的事件（truncateEvents），重算 result/usage，重新入队执行；广播 `task:events-invalidated` |
@@ -544,29 +544,41 @@ const scoped = bindTurn(events, turn)
 首回合结束 → 解析 delegate 标记
   ├─ 无标记 → 结束（领队自己干完了）
   ├─ 有标记 → 逐个：解析队员（名字/平台 id，忽略大小写，限 subordinates 内）
-  │           sanitizeChildPrompt → 建 worktree（仓库时）→ 子单基线回放 → 建子任务入队
+  │           sanitizeChildPrompt → 建 worktree（仓库时；建树重试 3 次仍失败即具名拒单
+  │             走既有回灌通道——文案含最后一条 git 错误与「worktree 建立失败，请稍后
+  │             重派」，不降级共享工作区；仅 workdir 非 git 仓库时保留环境性共享降级）
+  │           → 子单基线回放 → 建子任务入队
   │           （回放：领队未提交增量经私有 index 采集为回放提交（parent=子基线 sha），
   │             子 worktree cherry-pick --no-commit 应用后子分支 tip=回放提交，worktree
   │             元数据 baseSha 改写指向它——领队改动不算子产出、不进子 git 小节；
-  │             全程不碰领队 index/工作区/refs；无增量零开销跳过；体量闸 2000 文件/
-  │             200MiB/软链（ls-files --others 配 lstat），超限或采集/应用失败一律
-  │             具名拒建单并把原因回灌给领队改派，不静默）
+  │             全程不碰领队 index/工作区/refs；全部 git 调用注入 GIT_OPTIONAL_LOCKS=0
+  │             且撞 index.lock/Another git process 时 400-900ms 抖动退避重试 2 次，
+  │             耗尽才拒且文案指明「领队 git 并发写冲突，请稍后重派」；子侧应用段重试
+  │             耗尽时子 worktree 的 index.lock mtime 距今超 5s 视为建树竞态残留（子
+  │             worktree 刚建、agent 未启动、无并发写者），删锁后追加最后一次尝试，
+  │             领队侧锁一律不删；无增量零开销
+  │             跳过；体量闸 2000 文件/200MiB/软链（ls-files --others 配 lstat），
+  │             未跟踪盘点（ls-files）超时即拒单；超限或采集/应用失败一律具名拒建单
+  │             并把原因回灌给领队改派，不静默）
   ├─ 等本轮子任务全部终态 → 终态（含 failed）即对队员 worktree commitAll 落盘
   │     （nothing silently discarded，不等集成期；cancelled 例外）
-  │     → 终态全文双落：完整 result → ① 领队 Issue 评论（addComment 返回 null =
-  │       Issue 不存在，必须降级任务事件通道留痕，不静默丢弃）+ ② 领队 workdir 下
-  │       .agentdeck-reports/<单号>.md（info/exclude 追加忽略零污染，文件头带 runId
-  │       防串轮；二层领队落自己的 workdir 机制相同）
+  │     → 终态全文双落：完整 result → ① 领队主仓库根 .agentdeck-reports/<单号>.md
+  │       （副本先行落盘=权威层；worktree 内写入经 git-common-dir 归位主仓库根，
+  │       info/exclude 追加忽略零污染，文件头带 runId 防串轮）+ ② 领队 Issue 评论
+  │       （64KB UTF-8 字节通道上限：码点级钳制、预留截断指引预算，截断评论持真实
+  │       副本路径指引回权威层；addComment 返回 null = Issue 不存在，统一走
+  │       issue-relay 降级出口：warn + 任务事件 + pushEvent，不静默丢弃）
   │     → 结果格式化回灌（结构化摘要：条目标题=单号+状态；结论段=result 首部 1200 字
-  │       有界；done 单附 ≤2KB 的 git 改动小节：工作分支/--name-status 文件状态清单
-  │       （二进制可见）/文件 stat/diff 摘要，对子分支基线（回放后=回放提交）的全部
-  │       改动；摘要尾带全文入口指引（报告副本相对路径 + Issue 评论，指引文本与
-  │       小节同过转义防护）；整节按 UTF-8 字节计、围栏包裹且协议字面量做序列内部
-  │       破坏：六类回合标记（delegate/review/consult/investigate/round/continue）
-  │       开闭形态、行首三连井、【系统 前缀与 ``` 在末字符前插 \（原字面量子串不再
-  │       连续出现——六个解析器是非锚定子串正则，行首前缀转义无效）；diff +/- 行与
-  │       未跟踪文件名（逐项）一视同仁，超限留截断标记；4000 字物理截断只是最后
-  │       防线，触发必须带「后 N 字未送」）
+  │       有界，码点级切割（不孤立代理项；切点落在未闭合 ``` 围栏内时截至块前）且与
+  │       git 小节同源过转义；done 单附 ≤2KB 的 git 改动小节：工作分支/--name-status
+  │       文件状态清单（二进制可见）/文件 stat/diff 摘要，对子分支基线（回放后=回放
+  │       提交）的全部改动；摘要尾带全文入口指引（报告副本相对路径（按领队 cwd 经
+  │       reportCopyRelPath 重算）+ Issue 评论，指引文本与小节同过转义防护）；整节按
+  │       UTF-8 字节计、围栏包裹且协议字面量做序列内部破坏：六类回合标记
+  │       （delegate/review/consult/investigate/round/continue）开闭形态、行首三连井、
+  │       【系统 前缀与 ``` 在末字符前插 \（原字面量子串不再连续出现——六个解析器是
+  │       非锚定子串正则，行首前缀转义无效）；diff +/- 行与未跟踪文件名（逐项）一视
+  │       同仁，超限留截断标记；4000 字物理截断只是最后防线，触发必须带「后 N 字未送」）
   ├─ 领队对报告里每个 done 单输出 <review> 审核结论
   │      pass → 看板归档 done / fail → blocked / 无结论 → 不动状态留人工审核
   └─ 领队继续输出 → 再解析（单领队最多 6 轮，全链共享 8 轮预算）
@@ -575,8 +587,14 @@ const scoped = bindTurn(events, turn)
          证据键，上一轮 gitDiff/gitStat/gitSnapshot 保留——finalizer 跨轮保留同样直接
          观测集成分支 HEAD 与快照记录的采集时点 headSha 一致才重盖时间戳，部分失败
          轮（分支已前进但不写证据）的过期 diff 拒绝重盖为本轮证据）
-       （领队 workdir 已是集成 worktree 的续链轮：在托管 worktree 内就地 merge——
-         前置校验 owner 归属 + 工作副本干净，不干净/归属不符拒绝并保留现场）
+       （领队 workdir 已是集成 worktree 的续链轮：就地 merge 三道工序——① merge 前先
+         对托管 worktree commitAll，领队未提交交付先行落盘计入本轮净新增，roundBaseSha
+         取 commitAll 后 HEAD（diff 证据不与领队交付混算）；② commitAll 后仍不干净或
+         就地被拒（非冲突）退回临时 worktree 通道：--detach 检出分支当前提交 → merge →
+         update-ref 回指，托管副本由 realignCleanWorktreeToHead 对齐（幻影暂存守卫：
+         判脏先 update-index --refresh 重判，残余脏仅暂存列=index 陈旧照常 reset --hard，
+         未跟踪/工作副本列=真脏 fail-closed，撞锁按退避重试）；③ 失败原因一律写集成
+         说明（note 非空）+ 时间线事件，绝不静默 done。owner 归属前置校验保留）
        → 集成成功即回收 worktree + 删工作分支；branchDiffSummary 生成总 diff；
          子单带回放元数据时集成说明与时间线标注「含领队回放基线 N 文件」
        无实际合并时如实标注
@@ -588,7 +606,7 @@ const scoped = bindTurn(events, turn)
 
 基线回放的已知取舍（文档化，不做自动去重）：集成分支会含回放提交，领队原工作区仍持同一份未提交改动——跨线合并是人/后续流程的事，集成证据与 UI 说明标注「含领队回放基线 N 文件」。`.gitignore` 排除的依赖目录（node_modules 等）不参与回放：回放只采集 `--exclude-standard` 视角内的增量，子单需要完整依赖时领队应先提交 lockfile——这是写明的边界而非缺陷。
 
-约束：取消领队级联取消子任务；领队自己的改动留在主工作区不自动提交；dsh 不能当领队（runner 侧守卫保留——ACP 虽已支持 send，但委派链路未对 dsh 开放）；子任务未绑定 Issue 时审核结论只留痕、不写看板状态；二层委派时子领队的集成分支递归合入领队集成分支；续链集成 worktree 走既有回收渠道（owner metadata 登记 + 删任务连带回收）；保留判定只按 owner.integration.branch 认归属（不依赖 task.workdir 仍指向它），启动清扫一律不删集成分支——集成分支只有 tasks:delete 的显式回收路径可以带走；owner 任务在册且终态 cancelled 的子单 worktree 同样跳过清扫回收（终态即落盘对 cancelled 例外，现场原样保留，目录与分支都留，删任务的显式路径统一回收）。
+约束：取消领队级联取消子任务；首轮集成前领队自己的改动留在主工作区不自动提交（仅摘录收编进证据），续链轮领队留在托管 worktree 的未提交交付由就地 merge 前置的 commitAll 落盘；dsh 不能当领队（runner 侧守卫保留——ACP 虽已支持 send，但委派链路未对 dsh 开放）；子任务未绑定 Issue 时审核结论只留痕、不写看板状态；二层委派时子领队的集成分支递归合入领队集成分支；续链集成 worktree 走既有回收渠道（owner metadata 登记 + 删任务连带回收）；保留判定只按 owner.integration.branch 认归属（不依赖 task.workdir 仍指向它），启动清扫一律不删集成分支——集成分支只有 tasks:delete 的显式回收路径可以带走；owner 任务在册且终态 cancelled 的子单 worktree 同样跳过清扫回收（终态即落盘对 cancelled 例外，现场原样保留，目录与分支都留，删任务的显式路径统一回收）。报告副本生命周期三挂线 GC：tasks:delete 显式回收（任务与子单的副本连带清理）、retention 级联随删、启动清扫孤儿副本（任务已不在册的副本删除，在册副本保留）——副本统一落主仓库根 `.agentdeck-reports/`，worktree 内外一致可达。
 
 ---
 
