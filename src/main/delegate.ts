@@ -991,10 +991,12 @@ export async function runDelegationLoop(
                 ...(reclaimed.ok ? { cleanedAt: Date.now() } : {})
               }
             })
-            if (!reclaimed.ok && reclaimed.status === 'failed') {
+            // 部分成功（目录已回收、分支/注册残留）同样浮出：residue 清单进问题汇总
+            //（回合末记上时间线），不再静默 retained——残留分支会在重派时撞 already exists
+            if (!reclaimed.ok && (reclaimed.status === 'failed' || reclaimed.residue?.length)) {
               childOk = false
               allOk = false
-              problems.push(`worktree cleanup: ${reclaimed.reason ?? 'failed'}`)
+              problems.push(`worktree cleanup: ${reclaimed.reason ?? 'failed'}${reclaimed.residue?.length ? `（残留：${reclaimed.residue.join('、')}）` : ''}`)
             }
             if (childOk && ownBranch && !(await deleteBranch(task.workdir, ownBranch))) {
               if (!active()) return abandoned()
