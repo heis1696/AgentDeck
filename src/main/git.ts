@@ -1281,9 +1281,25 @@ export async function replayLeaderBaseline(leaderWorkdir: string, childWorkdir: 
   let files = 0
   let bytes = 0
   const symlinks: string[] = []
+  const symlinkParentCache = new Map<string, boolean>()
   for (const rel of untracked) {
+    let parent = leaderWorkdir
+    let hasSymlinkParent = false
+    const components = rel.split('/')
+    for (const component of components.slice(0, -1)) {
+      parent = path.join(parent, component)
+      let isSymlink = symlinkParentCache.get(parent)
+      if (isSymlink === undefined) {
+        try { isSymlink = fs.lstatSync(parent).isSymbolicLink() }
+        catch { return replayRefused(`无法核验未跟踪路径的父目录（${rel}），拒绝回放`) }
+        symlinkParentCache.set(parent, isSymlink)
+      }
+      if (isSymlink) { hasSymlinkParent = true; break }
+    }
+    if (hasSymlinkParent) { symlinks.push(rel); continue }
     let info: fs.Stats
-    try { info = fs.lstatSync(path.join(leaderWorkdir, rel)) } catch { continue }
+    try { info = fs.lstatSync(path.join(leaderWorkdir, rel)) }
+    catch { return replayRefused(`无法核验未跟踪文件（${rel}），拒绝回放`) }
     if (info.isSymbolicLink()) { symlinks.push(rel); continue }
     if (!info.isFile()) continue
     files++

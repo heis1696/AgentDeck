@@ -508,6 +508,35 @@ const digestBase = {
     await reclaimWorktree(wt.path, { force: true, deleteBranch: true })
   }
 
+  {
+    const linkParentRepo = mkRepo('link-parent')
+    const wt = await createWorktree(linkParentRepo, 'rp_link_parent', 'main', 'owner')
+    const baseSha = readMetaBaseSha(wt.path)
+    const targetDir = fs.mkdtempSync(path.join(os.tmpdir(), 'replay-link-target-'))
+    fs.writeFileSync(path.join(targetDir, 'nested.txt'), '外部未跟踪文件\n')
+    const linkPath = path.join(linkParentRepo, 'evil-dir')
+    let made = false
+    try { fs.symlinkSync(targetDir, linkPath, 'junction'); made = true } catch {}
+    if (!made) {
+      try { fs.symlinkSync(targetDir, linkPath, 'dir'); made = true } catch {}
+    }
+    if (made) {
+      const untracked = execSync('git ls-files --others --exclude-standard -z', { cwd: linkParentRepo }).toString().split('\0').filter(Boolean)
+      const nestedPath = untracked.find((rel) => rel.startsWith('evil-dir/'))
+      if (nestedPath) {
+        assert(!fs.lstatSync(path.join(linkParentRepo, nestedPath)).isSymbolicLink(), 'B3：联接父级下的文件本身不是软链')
+        const refused = await replayLeaderBaseline(linkParentRepo, wt.path, baseSha)
+        assert(refused.status === 'refused' && refused.reason.includes('软链'), `B3：联接父级含未跟踪文件时拒单（${refused.reason.slice(0, 50)}…）`)
+      } else {
+        console.log('  ⚠ Git 未枚举联接目录下的文件，跳过父级软链专项断言')
+      }
+    } else {
+      console.log('  ⚠ 本机无法创建目录符号链接/联接，跳过父级软链闸断言')
+    }
+    await reclaimWorktree(wt.path, { force: true, deleteBranch: true })
+    fs.rmSync(targetDir, { recursive: true, force: true })
+  }
+
   // B5：digest 的 name-status 清单——二进制文件改动可见
   {
     const binRepo = mkRepo('bin')
@@ -1367,7 +1396,7 @@ assert(execSync(`git show ${ibE}:f2.txt`, { cwd: repo5, encoding: 'utf8' }).incl
   assert(store.list().filter((t) => t.parentTaskId === leaderTask8.id).length === 0, '锁专项③：建树失败不建子任务（拒单而非共享降级，子任务未建）')
   const feedback8 = sent8.find((c) => c.includes('没有被执行') && c.includes('worktree 建立失败，请稍后重派'))
   assert(!!feedback8, '锁专项③：具名拒单回灌给领队（含「worktree 建立失败，请稍后重派」）')
-  assert(feedback8.includes('already exists'), '锁专项③：回灌含最后一条 git 错误（branch already exists）')
+  assert(feedback8.includes(`托管分支已存在（agentdeck/${leaderTask8.id}_c1）`), '锁专项③：回灌含首次失败原因与冲突分支')
   assert(store.list().every((t) => t.unavailableReason === undefined || !t.unavailableReason.includes('Git worktree creation failed')), '锁专项③：不再出现「worktree 建失败降级共享工作区」的 unavailableReason')
 }
 
