@@ -2,6 +2,7 @@
 // 领队系统提示告知队员名单与 <delegate> 标记语法；运行时截获标记 → 并行执行子任务 →
 // 结果回灌 → 领队继续。循环直到领队不再派发。任何支持续聊的后端都适用。
 // 提示词文案集中在 src/main/prompts/delegation.ts（本文件只保留解析器与循环逻辑）。
+import path from 'node:path'
 import type { Task, TaskEvent, ThinkingLevel } from '../shared/types'
 import type { TaskExpectation, TaskStore } from './store'
 import type { TaskRunner } from './runner'
@@ -587,6 +588,15 @@ export async function runDelegationLoop(
   const task = store.get(taskId)
   if (!task) return abandoned()
   const team = ctx.getTeam()
+  const sharesLeaderWorkspace = (child: Task) => {
+    const agent = team.find((candidate) => candidate.id === child.agentId)
+    return agent?.sharedWorkspace === true && !!task.workdir && !!child.workdir
+      && path.resolve(child.workdir) === path.resolve(task.workdir)
+  }
+  const childOwnsWorktree = (child: Task) => !!child.worktree && !!child.workdir
+    && !sharesLeaderWorkspace(child)
+    && child.worktree.ownerTaskId === child.id
+    && path.resolve(child.worktree.path) === path.resolve(child.workdir)
   const me = team.find((a) => a.id === task.agentId)
   const subs = (me?.subordinates ?? []).map((id) => team.find((a) => a.id === id)).filter(Boolean) as AgentLike[]
   if (!subs.length) return { rounds: 0, children: [], finalText: first.response, scanTexts: [first.delegationText ?? '', first.response] }
@@ -926,7 +936,12 @@ export async function runDelegationLoop(
           if (!active()) return abandoned()
           if (!ownBranch && !subIntegration) {
             // 没有任何可集成改动，worktree 里没有值得保留的东西：直接回收（优先归池复用）
-            const reclaimed = await reclaimWorktree(c.workdir, { repool: true })
+            if (!childOwnsWorktree(c)) continue
+            const reclaimed = await reclaimWorktree(c.workdir, {
+              repool: true,
+              expectedOwnerTaskId: c.id,
+              ...(c.worktree?.generationId ? { expectedGenerationId: c.worktree.generationId } : {})
+            })
             if (!active()) return abandoned()
             if (c.worktree) store.updateIf(cid, capturedChild, {
               worktree: {
@@ -983,8 +998,12 @@ export async function runDelegationLoop(
           // 收尾回收：全部合入集成分支后 worktree 即无保留价值（改动都在集成分支上），
           // 顺带删掉已合并的工作分支（优先归池，供下一次派单换基线秒级复用）；
           // 有失败/冲突则保留现场便于排查，留待任务删除时回收
-          if (childOk) {
-            const reclaimed = await reclaimWorktree(c.workdir, { repool: true })
+          if (childOk && childOwnsWorktree(c)) {
+            const reclaimed = await reclaimWorktree(c.workdir, {
+              repool: true,
+              expectedOwnerTaskId: c.id,
+              ...(c.worktree?.generationId ? { expectedGenerationId: c.worktree.generationId } : {})
+            })
             if (!active()) return abandoned()
             if (c.worktree) store.updateIf(cid, capturedChild, {
               worktree: {
@@ -1089,7 +1108,10 @@ export async function runDelegationLoop(
           pushTask(taskId)
           note(`续链基线已切换：领队工作区 → 集成 worktree（检出 ${integrationBranch}），后续追问/续聊/派单以集成结果为基线`)
         } else {
-          await reclaimWorktree(pendingFollow.path)
+          await reclaimWorktree(pendingFollow.path, {
+            expectedOwnerTaskId: taskId,
+            expectedGenerationId: pendingFollow.metadata.generationId
+          })
           note('⚠ 续链基线切换未落盘（任务归属已变化），集成结果保留在集成分支上')
         }
         pendingFollow = null

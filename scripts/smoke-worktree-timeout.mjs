@@ -2,7 +2,7 @@
 // checkout 孤儿继续持有 index.lock → 回放撞活锁拒单 → 回收残肢 → 重派 branch already exists）：
 // ① 超时自适应：worktree add 按 ls-files 计数放大超时（60s 基线 + 每 1 万文件 +60s，封顶 15 分钟），每仓 TTL 缓存
 // ①b 计数归一：子目录调用与根调用同值同键（repositoryRoot 归一后计数/缓存），消除子目录低估+低值缓存回退面
-// ② 既存 worktree/branch 拒绝接管；本次 checkout 超时绝不误报成功且清除自建残肢
+// ② 既存 worktree/branch 拒绝接管；超时现场无法归属时保留并具名报告
 // ③ 进程树击杀：win32 taskkill /PID <pid> /T /F 参数断言级 + 真实孤儿 hook 对照（旧病可复现、树杀后不复发）
 // ③c 树杀失败不阻塞：taskkill 非零退出且目标不死 → close/exit+二次 deadline 收口，限时返回不 pending
 // ④ 回收原子性与可见：失败步骤重试一次，残留清单（分支名/注册路径）随结果上报并经
@@ -193,9 +193,10 @@ try {
     globalThis.__cpShimCheckoutOnAdd = false
   }
   assert.match(timedOutError, /超时/, '本次 checkout 超时应明确报告失败')
-  assert.match(timedOutError, /残肢已清理/, '全清时才报告残肢已清理')
-  assert.ok(!fs.existsSync(newCheckoutPath), '本次失败的 worktree 目录被回收')
-  assert.throws(() => newCheckout.g('rev-parse', '--verify', '--quiet', 'agentdeck/task_new_c1'), '本次失败创建的分支被回收')
+  assert.match(timedOutError, /归属无法核验，现场保留/, '归属无法核验时明确报告保留现场')
+  assert.ok(fs.existsSync(newCheckoutPath), '超时后不擅自回收可能被外部持有的目录')
+  assert.equal(newCheckout.g('rev-parse', '--verify', 'agentdeck/task_new_c1'), newCheckout.g('rev-parse', 'main'), '超时后不删除可能由并发方创建的分支')
+  assert.ok(!fs.existsSync(path.join(newCheckout.dir, '.agentdeck-worktrees', '.metadata', 'task_new_c1.json')), '失败 add 不为残留 worktree 伪造归属元数据')
 
   // ---- ③ 进程树击杀 ----
   // ③a win32 taskkill 命令构造（参数断言级）
@@ -252,8 +253,6 @@ try {
   const form2 = makeRepo('form2')
   const created2 = await git.createWorktree(form2.dir, 'task_f2_c1', 'main', 'task_f2')
   assert.ok(created2, '兜底形态夹具 worktree 建成')
-  // 构造「目录已删 + .git/worktrees 注册 + 分支残留」形态：目录被外力（崩溃竞态）清掉
-  fs.rmSync(created2.path, { recursive: true, force: true })
   const refLock = path.join(form2.dir, '.git', 'refs', 'heads', 'agentdeck', 'task_f2_c1.lock')
   fs.mkdirSync(path.dirname(refLock), { recursive: true })
   fs.writeFileSync(refLock, '')
@@ -274,13 +273,14 @@ try {
   const events = store.readEvents(owner.id).map((e) => e.text ?? '').join('\n')
   assert.ok(events.includes('task_f2_c1') && events.includes('agentdeck/task_f2_c1'), '时间线事件落盘含残留目录名与分支名')
 
-  // 解锁后启动清扫兜底：目录已删 + 注册 prune + 分支删除一并收干净
+  // 注册已被此前 prune 移除，代际无法核验时保留分支并持续报告
   fs.rmSync(refLock)
   const sweep = await git.pruneWorktrees(form2.dir, () => false, { maxAgeMs: 0, claimWorktree: () => ({ release() {} }) })
-  assert.ok(sweep.removed.includes('task_f2_c1'), '启动清扫兜底回收「目录已删+注册+分支残留」形态')
+  assert.equal(sweep.removed.length, 0, '注册不可验证时不按旧记录清理残留分支')
+  assert.ok(sweep.failed.some((item) => item.name === 'task_f2_c1'), '注册不可验证时继续报告旧记录')
   assert.ok(!fs.existsSync(path.join(form2.dir, '.git', 'worktrees', 'task_f2_c1')), '注册残留已 prune')
-  assert.throws(() => form2.g('rev-parse', '--verify', '--quiet', 'agentdeck/task_f2_c1'), '兜底后分支已删（重派不再 branch already exists）')
-  console.log('  OK ④ 回收部分失败：重试+残留清单+时间线落盘，清扫兜底收干净')
+  assert.ok(form2.g('rev-parse', '--verify', '--quiet', 'agentdeck/task_f2_c1') !== '', '代际无法核验时保留分支')
+  console.log('  OK ④ 回收部分失败：注册丢失后持续报告并保留未核验分支')
 
   // ---- ④b 既存分支受 refs 锁时拒绝接管；不得删分支或将其误报为本次残留 ----
   const form3 = makeRepo('form3')
@@ -323,11 +323,55 @@ try {
     globalThis.__cpShimCheckoutOnAdd = false
     globalThis.__cpShimAfterAdd = undefined
   }
-  assert.match(partialError, /残肢未全清/, '清理有残留时不得谎报全清')
+  assert.match(partialError, /归属无法核验，现场保留/, '归属不明时不得声称已清理')
   assert.ok(partialError.includes(partialBranch), '拒单说明包括残留分支')
   assert.ok(store.readEvents(partialOwner.id).some((event) => event.text?.includes(partialBranch)), '清理残留记录进 owner 时间线')
   fs.rmSync(partialLock)
+  execFileSync('git', ['-C', timedOutPartialRepo.dir, 'worktree', 'remove', '--force', path.join(timedOutPartialRepo.dir, '.agentdeck-worktrees', 'task_partial_c1')])
   assert.ok(await git.deleteBranch(timedOutPartialRepo.dir, partialBranch), '解锁后残留分支可清理')
+
+  const nestedResidueRepo = makeRepo('nested-residue')
+  const nestedResidueOwner = store.create({ title: 'nested-residue', prompt: 'p', workdir: nestedResidueRepo.dir, backend: 'fake', agentId: 'lead' })
+  const nestedParent = await git.createWorktree(nestedResidueRepo.dir, 'task_nested_parent_c1', 'main', nestedResidueOwner.id)
+  assert.ok(nestedParent, '嵌套委派的父 worktree 创建成功')
+  const nestedName = 'task_nested_registration_c1'
+  const nestedBranch = `agentdeck/${nestedName}`
+  const nestedPath = path.join(nestedResidueRepo.dir, '.agentdeck-worktrees', nestedName)
+  const nestedRegistration = path.join(nestedResidueRepo.dir, '.git', 'worktrees', nestedName)
+  let nestedAddError = ''
+  let nestedResidueReason = ''
+  const nestedFailedAdd = await git.createWorktree(nestedParent.path, nestedName, 'main', nestedResidueOwner.id, (message) => { nestedAddError = message }, {
+    addTimeoutMs: 10_000,
+    runAddForTest: async (run) => {
+      const added = await run()
+      assert.equal(added.ok, true, '嵌套 add 先成功建立用于残留盘点的 worktree')
+      fs.rmSync(nestedPath, { recursive: true, force: true })
+      execFileSync('git', ['-C', nestedParent.path, 'update-ref', '-d', `refs/heads/${nestedBranch}`])
+      return { ...added, ok: false, stdout: '', stderr: 'injected nested post-add failure', code: 1, timedOut: false }
+    },
+    onCleanupResidue: (failure) => {
+      nestedResidueReason = failure.reason
+      store.noteWorktreeCleanupFailure(nestedResidueRepo.dir, failure)
+    }
+  })
+  assert.equal(nestedFailedAdd, null, '嵌套 post-add 故障按失败拒单')
+  assert.ok(nestedAddError.includes(nestedRegistration), `失败 add 盘点真实 common Git dir 注册：${nestedAddError}`)
+  assert.ok(nestedResidueReason.includes(nestedRegistration), `失败现场报告仅注册残留：${nestedResidueReason}`)
+  assert.ok(!nestedResidueReason.includes(nestedBranch), '不存在的分支不冒报为残留')
+  assert.ok(!fs.existsSync(nestedPath) && !await git.branchExists(nestedResidueRepo.dir, nestedBranch), '嵌套残留确实没有目录与分支')
+  assert.ok(fs.existsSync(nestedRegistration), '嵌套 Git common dir 注册仍在')
+  assert.ok(store.readEvents(nestedResidueOwner.id).some((event) => event.text?.includes(nestedRegistration)), '嵌套失败 add 注册路径进入 owner 时间线')
+
+  const nestedRestartSweep = await git.pruneWorktrees(nestedResidueRepo.dir, (ownerTaskId) => ownerTaskId === nestedResidueOwner.id, {
+    maxAgeMs: 0,
+    claimWorktree: () => ({ release() {} })
+  })
+  const nestedRestartFailure = nestedRestartSweep.failed.find((item) => item.name === nestedName)
+  assert.ok(nestedRestartFailure?.reason.includes(nestedRegistration), `重启清扫盘点并提示无目录注册：${JSON.stringify(nestedRestartSweep)}`)
+  assert.ok(!nestedRestartFailure.reason.includes(`分支 ${nestedBranch}`), '重启清扫不把注册 HEAD 中已删除的分支误报为残留')
+  assert.ok(fs.existsSync(nestedRegistration) && !fs.existsSync(nestedPath), '重启清扫保留无 owner 元数据的注册现场')
+  assert.ok(!await git.branchExists(nestedResidueRepo.dir, nestedBranch), '重启清扫不伪造或误删外部 branch')
+  console.log('  OK ⑤ 嵌套失败 add 解析 common Git dir；注册-only 残留可见且不清外部资源')
 
   console.log('\nWORKTREE TIMEOUT SMOKE PASSED')
 } finally {

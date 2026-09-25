@@ -129,6 +129,9 @@ try {
       const mergeName = `.agentdeck-merge-protected-${stage}`
       const mergePath = path.join(f.repo, '.agentdeck-worktrees', mergeName)
       runGit(f.repo, 'worktree', 'add', '--detach', mergePath, 'main')
+      const mergePointer = fs.readFileSync(path.join(mergePath, '.git'), 'utf8')
+      const mergeGitdir = path.resolve(mergePath, /^gitdir:\s*(.+?)\s*$/im.exec(mergePointer)[1])
+      fs.writeFileSync(path.join(mergeGitdir, 'agentdeck-generation'), `smoke-${mergeName}\n`)
       const pruned = await git.pruneWorktrees(f.repo, (owner) => git.shouldKeepTaskWorktree(f.peer.list(), f.repo, owner), { maxAgeMs: 0 })
       assert.ok(fs.existsSync(mergePath) && pruned.retained.some((item) => item.name === mergeName), 'cleanup preserves merge worktrees while an operation is reserved')
       f.mergePath = mergePath
@@ -141,7 +144,13 @@ try {
     assert.equal(f.store.get(f.parent.id).gitOperation, undefined)
     assert.equal(f.store.get(f.child.id).gitOperation, undefined)
     assert.equal(runGit(f.repo, 'show', 'agentdeck/task-' + f.parent.id + ':result.txt'), 'delivered', 'the integration contains the reported child work')
-    assert.ok((await git.reclaimWorktree(f.mergePath)).ok, 'the protected merge worktree is reclaimable after release')
+    const directMergeCleanup = await git.reclaimWorktree(f.mergePath)
+    assert.ok(!directMergeCleanup.ok && fs.existsSync(f.mergePath), 'direct reclaim cannot bypass merge-scaffold startup verification')
+    const mergeSweep = await git.pruneWorktrees(f.repo, (owner) => git.shouldKeepTaskWorktree(f.peer.list(), f.repo, owner), {
+      maxAgeMs: 0,
+      claimWorktree: () => ({ release() {} })
+    })
+    assert.ok(mergeSweep.removed.includes(path.basename(f.mergePath)) && !fs.existsSync(f.mergePath), 'verified merge scaffold is reclaimable through startup sweep after release')
     assert.ok(f.peer.updateIf(f.child.id, identity(f.peer.get(f.child.id)), { status: 'queued', attempt: 2 }), 'retry is accepted after Git work settles')
     f.store.flush()
     f.peer.flush()
@@ -402,8 +411,12 @@ try {
     const writeCorpseMetadata = (name, wtPath, branch) => {
       const metaDir = path.join(corpse.repo, '.agentdeck-worktrees', '.metadata')
       fs.mkdirSync(metaDir, { recursive: true })
+      const pointer = fs.readFileSync(path.join(wtPath, '.git'), 'utf8')
+      const gitdir = path.resolve(wtPath, /^gitdir:\s*(.+?)\s*$/im.exec(pointer)[1])
+      const generationId = `smoke-${name}`
+      fs.writeFileSync(path.join(gitdir, 'agentdeck-generation'), `${generationId}\n`)
       fs.writeFileSync(path.join(metaDir, `${name}.json`), JSON.stringify({
-        ownerTaskId: leaderId, repoDir: corpse.repo, path: wtPath, branch,
+        ownerTaskId: leaderId, generationId, repoDir: corpse.repo, path: wtPath, branch,
         baseSha: runGit(corpse.repo, 'rev-parse', 'main'), createdAt: Date.now() - 86400000, cleanupStatus: 'active'
       }))
     }

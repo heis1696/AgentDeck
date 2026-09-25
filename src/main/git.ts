@@ -1,6 +1,7 @@
 // git 快照与委派 worktree 支持
 import { execFile, spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -182,9 +183,10 @@ function runGitTreeKilled(workdir: string, args: string[], timeout: number, env?
  *  killTree（默认 false，仅 worktree add 等长超时命令启用）：超时路径走 spawn+进程树击杀——
  *  只杀 git 父进程会让 checkout 孤儿继续持锁，是那台机锁连环的根因（见 killProcessTree）。 */
 export function runGit(workdir: string, args: string[], timeout = 15000, env?: NodeJS.ProcessEnv, killTree = false): Promise<GitCommandResult> {
-  if (killTree) return runGitTreeKilled(workdir, args, timeout, env)
+  const gitEnv = env ?? repoProbeEnv()
+  if (killTree) return runGitTreeKilled(workdir, args, timeout, gitEnv)
   return new Promise((resolve) => {
-    execFile('git', ['-C', workdir, ...args], { timeout, windowsHide: true, env }, (err, stdout, stderr) => {
+    execFile('git', ['-C', workdir, ...args], { timeout, windowsHide: true, env: gitEnv }, (err, stdout, stderr) => {
       const error = err as (NodeJS.ErrnoException & { killed?: boolean; signal?: string }) | null
       const timedOut = !!error && (error.killed === true || error.signal === 'SIGTERM')
       resolve({
@@ -235,9 +237,9 @@ function lockConflictSuffix(result: GitCommandResult): string {
 /** 子 worktree 陈锁阈值：index.lock mtime 距今超过该值视为陈锁（残留竞态）而非活锁 */
 const CHILD_STALE_LOCK_MS = 5000
 
-/** 会劫持 git 仓库解析的定向环境变量：GIT_DIR 指向主仓等污染会让子 worktree 里的
- *  rev-parse 解析到别的仓库（如主仓的 .git）。推导子 worktree 自身 gitdir 容器前先剥离。 */
-const GIT_REPO_REDIRECT_ENV_KEYS = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_CEILING_DIRECTORIES', 'GIT_NAMESPACE'] as const
+/** 会劫持 git 仓库解析的定向环境变量：GIT_DIR 指向其他仓库会让 -C 解析到错误目标。
+ *  默认 Git 命令与探测先剥离继承值；显式 env 仍支持回放流程的私有 GIT_INDEX_FILE。 */
+const GIT_REPO_REDIRECT_ENV_KEYS = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CEILING_DIRECTORIES', 'GIT_NAMESPACE'] as const
 
 function repoProbeEnv(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const probe: NodeJS.ProcessEnv = { ...(env ?? process.env) }
@@ -286,10 +288,101 @@ async function runChildApplyGit(childWorkdir: string, args: string[], timeout = 
   return result
 }
 
+async function rollbackChildReplay(childWorkdir: string, childBaseSha: string, env: NodeJS.ProcessEnv): Promise<{ ok: boolean; reason: string }> {
+  await runChildApplyGit(childWorkdir, ['reset', '--hard', childBaseSha], 30000, env)
+  const [head, indexTree, baseTree, status] = await Promise.all([
+    runGitWithLockRetry(childWorkdir, ['rev-parse', 'HEAD'], 15000, env),
+    runGitWithLockRetry(childWorkdir, ['write-tree'], 30000, env),
+    runGitWithLockRetry(childWorkdir, ['rev-parse', `${childBaseSha}^{tree}`], 15000, env),
+    runChildApplyGit(childWorkdir, ['status', '--porcelain', '--untracked-files=all'], 15000, env)
+  ])
+  const problems: string[] = []
+  if (!head.ok || head.stdout.trim() !== childBaseSha) problems.push(`HEAD 未回到子基线：${head.ok ? head.stdout.trim() : gitError(head)}`)
+  if (!indexTree.ok || !baseTree.ok || indexTree.stdout.trim() !== baseTree.stdout.trim()) {
+    problems.push(`index 未恢复到子基线：${!indexTree.ok ? gitError(indexTree) : !baseTree.ok ? gitError(baseTree) : 'tree 不匹配'}`)
+  }
+  if (!status.ok || status.stdout.trim()) problems.push(`worktree 状态未恢复干净：${status.ok ? status.stdout.trim() : gitError(status)}`)
+  return problems.length
+    ? { ok: false, reason: `子 worktree 回滚失败或无法核验：${problems.join('；')}` }
+    : { ok: true, reason: '子 worktree HEAD、index 与工作区均已核验回到子基线' }
+}
+
+export type GitRepositoryProbeResult =
+  | { status: 'repo' }
+  | { status: 'not-repo'; reason?: string }
+  | { status: 'error'; reason: string }
+
+export async function probeGitRepository(workdir: string): Promise<GitRepositoryProbeResult> {
+  if (!workdir) return { status: 'not-repo', reason: 'workspace not configured' }
+  let result: GitCommandResult
+  try {
+    result = await runGit(workdir, ['rev-parse', '--is-inside-work-tree'], 15000, repoProbeEnv())
+  } catch (error) {
+    return { status: 'error', reason: error instanceof Error ? error.message : String(error) }
+  }
+  if (!result.ok) {
+    const detail = `${result.stderr}\n${result.stdout}`
+    if (result.code === 128 && /not a git repository/i.test(detail)) {
+      const marker = gitMarkerForPath(workdir)
+      if (marker) {
+        return { status: 'error', reason: marker.reason ?? `Git metadata exists at ${marker.path}, but Git rejected the workspace` }
+      }
+      return { status: 'not-repo', reason: 'workspace is not a Git worktree' }
+    }
+    return { status: 'error', reason: gitError(result) }
+  }
+  const inside = result.stdout.trim()
+  if (inside === 'true') return { status: 'repo' }
+  if (inside === 'false') return { status: 'not-repo', reason: 'workspace is not a Git worktree' }
+  return { status: 'error', reason: `unexpected Git repository probe response: ${inside || '(empty)'}` }
+}
+
+function gitMarkerForPath(workdir: string): { path: string; reason?: string } | undefined {
+  let directory: string
+  try { directory = path.resolve(workdir) }
+  catch (error) { return { path: workdir, reason: error instanceof Error ? error.message : String(error) } }
+  while (true) {
+    const markerPath = path.join(directory, '.git')
+    let marker: fs.Stats
+    try { marker = fs.lstatSync(markerPath) }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        return { path: markerPath, reason: `could not inspect Git metadata at ${markerPath}: ${String(error)}` }
+      }
+      const parent = path.dirname(directory)
+      if (parent === directory) return undefined
+      directory = parent
+      continue
+    }
+    if (marker.isFile()) {
+      let pointer: string
+      try { pointer = fs.readFileSync(markerPath, 'utf8') }
+      catch (error) { return { path: markerPath, reason: `could not read Git pointer ${markerPath}: ${String(error)}` } }
+      const match = /^gitdir:\s*(.+?)\s*$/im.exec(pointer)
+      if (!match) return { path: markerPath, reason: `invalid Git pointer at ${markerPath}` }
+      const target = path.resolve(directory, match[1])
+      try {
+        if (!fs.statSync(target).isDirectory()) return { path: markerPath, reason: `Git pointer at ${markerPath} does not target a directory` }
+      } catch { return { path: markerPath, reason: `Git pointer at ${markerPath} targets a missing directory` } }
+    }
+    return { path: markerPath }
+  }
+}
+
 export async function isGitRepo(workdir: string): Promise<boolean> {
-  if (!workdir) return false
-  const out = await git(workdir, ['rev-parse', '--is-inside-work-tree'])
-  return out.trim() === 'true'
+  return (await probeGitRepository(workdir)).status === 'repo'
+}
+
+export async function probeCurrentBranch(workdir: string): Promise<{ ok: true; branch: string } | { ok: false; reason: string }> {
+  if (!workdir) return { ok: false, reason: 'workspace not configured' }
+  let result: GitCommandResult
+  try {
+    result = await runGit(workdir, ['rev-parse', '--abbrev-ref', 'HEAD'], 15000, repoProbeEnv())
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+  }
+  if (!result.ok) return { ok: false, reason: gitError(result) }
+  return { ok: true, branch: result.stdout.trim() }
 }
 
 /** 分支是否存在（二层委派集成时探测子任务的集成分支） */
@@ -537,8 +630,8 @@ function gitFail(workdir: string, args: string[]): Promise<{ ok: false; stderr: 
 
 /** 当前分支名；detached 时返回空 */
 export async function currentBranch(workdir: string): Promise<string> {
-  const out = await git(workdir, ['rev-parse', '--abbrev-ref', 'HEAD'])
-  return out.trim()
+  const result = await probeCurrentBranch(workdir)
+  return result.ok ? result.branch : ''
 }
 
 function commonGitDir(repoDir: string, gcd?: string) {
@@ -554,10 +647,16 @@ async function repositoryRoot(repoDir: string): Promise<string | null> {
 /** Capability probe used by callers that need an explicit non-Git downgrade. */
 export async function worktreeAvailability(workdir: string): Promise<{ available: boolean; repoDir?: string; reason?: string }> {
   if (!workdir) return { available: false, reason: 'No workspace configured; using the shared process workspace' }
-  const repoDir = await repositoryRoot(workdir)
-  return repoDir
-    ? { available: true, repoDir }
-    : { available: false, reason: 'Workspace is not a Git worktree; using the shared workspace' }
+  const probe = await probeGitRepository(workdir)
+  if (probe.status === 'error') {
+    return { available: false, reason: `Could not verify Git workspace isolation; refusing shared-workspace dispatch: ${probe.reason}` }
+  }
+  if (probe.status === 'not-repo') return { available: false, reason: 'Workspace is not a Git worktree; using the shared workspace' }
+  const common = await runGit(workdir, ['rev-parse', '--git-common-dir'])
+  if (!common.ok || !common.stdout.trim()) {
+    return { available: false, reason: `Could not resolve Git workspace root; refusing shared-workspace dispatch: ${gitError(common)}` }
+  }
+  return { available: true, repoDir: path.dirname(commonGitDir(workdir, common.stdout.trim())) }
 }
 
 function managedRoot(repoDir: string) {
@@ -581,12 +680,45 @@ function validWorktreeName(name: string) {
   return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name) && name !== WORKTREE_METADATA_DIR
 }
 
+interface RegisteredWorktree {
+  path: string
+  registrationPath: string
+  head?: string
+  branch?: string
+}
+
+function listManagedWorktreeRegistrations(repoDir: string, gitDir: string): Map<string, RegisteredWorktree> {
+  const result = new Map<string, RegisteredWorktree>()
+  const registrationsDir = path.join(gitDir, 'worktrees')
+  let entries: fs.Dirent[] = []
+  try { entries = fs.readdirSync(registrationsDir, { withFileTypes: true }) } catch { return result }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    const registrationPath = path.join(registrationsDir, entry.name)
+    try {
+      const gitFile = path.resolve(registrationPath, fs.readFileSync(path.join(registrationPath, 'gitdir'), 'utf8').trim())
+      if (path.basename(gitFile).toLowerCase() !== '.git') continue
+      const worktreePath = path.dirname(gitFile)
+      if (!isWithin(managedRoot(repoDir), worktreePath)) continue
+      let head: string | undefined
+      try { head = fs.readFileSync(path.join(registrationPath, 'HEAD'), 'utf8').trim() } catch {}
+      const branch = head ? /^ref: refs\/heads\/(.+)$/.exec(head)?.[1] : undefined
+      result.set(path.basename(worktreePath), { path: worktreePath, registrationPath, ...(head !== undefined ? { head } : {}), ...(branch ? { branch } : {}) })
+    } catch {}
+  }
+  return result
+}
+
 function writeMetadata(metadata: WorktreeInfo) {
   const file = metadataFile(metadata.repoDir, path.basename(metadata.path))
   fs.mkdirSync(path.dirname(file), { recursive: true })
   const tmp = `${file}.tmp`
   fs.writeFileSync(tmp, JSON.stringify(metadata, null, 2))
   fs.renameSync(tmp, file)
+}
+
+function removeMetadata(repoDir: string, name: string) {
+  try { fs.rmSync(metadataFile(repoDir, name), { force: true }) } catch {}
 }
 
 function readMetadataFile(file: string): WorktreeInfo | null {
@@ -617,6 +749,111 @@ function updateMetadata(metadata: WorktreeInfo, patch: Partial<WorktreeInfo>) {
   const next = { ...metadata, ...patch }
   writeMetadata(next)
   return next
+}
+
+const WORKTREE_GENERATION_FILE = 'agentdeck-generation'
+
+function sameWorktreePath(left: string, right: string): boolean {
+  const resolvedLeft = path.resolve(left)
+  const resolvedRight = path.resolve(right)
+  return process.platform === 'win32'
+    ? resolvedLeft.toLowerCase() === resolvedRight.toLowerCase()
+    : resolvedLeft === resolvedRight
+}
+
+function worktreeAdminDir(wtPath: string, commonDir: string): string | null {
+  const worktreesDir = path.join(commonDir, 'worktrees')
+  try {
+    const pointer = fs.readFileSync(path.join(wtPath, '.git'), 'utf8')
+    const match = /^gitdir:\s*(.+?)\s*$/im.exec(pointer)
+    if (match) {
+      const adminDir = path.resolve(wtPath, match[1])
+      if (isWithin(worktreesDir, adminDir)) return adminDir
+    }
+  } catch {}
+  try {
+    for (const entry of fs.readdirSync(worktreesDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      const adminDir = path.join(worktreesDir, entry.name)
+      const registeredGitFile = path.resolve(adminDir, fs.readFileSync(path.join(adminDir, 'gitdir'), 'utf8').trim())
+      if (sameWorktreePath(registeredGitFile, path.join(wtPath, '.git'))) return adminDir
+    }
+  } catch {}
+  return null
+}
+
+function readWorktreeGeneration(wtPath: string, commonDir: string): string | null {
+  const adminDir = worktreeAdminDir(wtPath, commonDir)
+  if (!adminDir) return null
+  try { return fs.readFileSync(path.join(adminDir, WORKTREE_GENERATION_FILE), 'utf8').trim() || null }
+  catch { return null }
+}
+
+function writeWorktreeGeneration(wtPath: string, commonDir: string): string | null {
+  const adminDir = worktreeAdminDir(wtPath, commonDir)
+  if (!adminDir) return null
+  const generationId = randomUUID()
+  try {
+    fs.writeFileSync(path.join(adminDir, WORKTREE_GENERATION_FILE), `${generationId}\n`, { flag: 'wx' })
+    return generationId
+  } catch {
+    return null
+  }
+}
+
+async function verifyWorktreeGeneration(
+  repoDir: string,
+  wtPath: string,
+  generationId: string,
+  expectedBranch?: string
+): Promise<string | null> {
+  const common = await runGit(repoDir, ['rev-parse', '--git-common-dir'])
+  if (!common.ok || !common.stdout.trim()) return 'Git worktree registration could not be verified'
+  const commonDir = commonGitDir(repoDir, common.stdout.trim())
+  const registrations = listManagedWorktreeRegistrations(repoDir, commonDir)
+  const registration = registrations.get(path.basename(wtPath))
+  if (!registration || !sameWorktreePath(registration.path, wtPath)) return 'current Git worktree registration could not be found'
+  let pointer: string
+  try {
+    const gitFile = path.join(wtPath, '.git')
+    if (!fs.lstatSync(gitFile).isFile()) return 'current worktree .git pointer is missing or invalid'
+    pointer = fs.readFileSync(gitFile, 'utf8')
+  } catch {
+    return 'current worktree .git pointer is missing or invalid'
+  }
+  const match = /^gitdir:\s*(.+?)\s*$/im.exec(pointer)
+  if (!match) return 'current worktree .git pointer is missing or invalid'
+  const adminDir = path.resolve(wtPath, match[1])
+  if (!isWithin(path.join(commonDir, 'worktrees'), adminDir)) return 'current worktree .git pointer is outside its common-dir'
+  if (!fs.existsSync(adminDir)) return 'current Git worktree registration metadata could not be verified'
+  if (!sameWorktreePath(adminDir, registration.registrationPath)) return 'current Git worktree registration metadata does not match its common-dir entry'
+  const detachedHead = !!registration.head && /^[0-9a-f]{40,64}$/i.test(registration.head)
+  const attachedHead = !!registration.head && /^ref: refs\/heads\/.+/.test(registration.head) && !!registration.branch
+  if (!detachedHead && !attachedHead) return 'current Git worktree registration is incomplete (missing HEAD)'
+  if (attachedHead && !(await branchExists(repoDir, registration.branch!))) return 'current Git worktree registration is incomplete (missing HEAD target)'
+  if (path.basename(wtPath).startsWith('.agentdeck-merge-detach-')) {
+    if (!detachedHead) return 'detached merge worktree is no longer detached'
+  } else if (expectedBranch && registration.branch !== expectedBranch) {
+    return 'current Git worktree branch does not match its metadata'
+  }
+  let actualGenerationId: string
+  try { actualGenerationId = fs.readFileSync(path.join(adminDir, WORKTREE_GENERATION_FILE), 'utf8').trim() }
+  catch { return 'current Git worktree generation marker is missing' }
+  if (!actualGenerationId) return 'current Git worktree generation marker is missing'
+  if (actualGenerationId !== generationId) return 'current Git worktree belongs to a different generation'
+  return null
+}
+
+async function registerWorktreeGeneration(repoDir: string, wtPath: string): Promise<string | null> {
+  const common = await runGit(repoDir, ['rev-parse', '--git-common-dir'])
+  if (!common.ok || !common.stdout.trim()) return null
+  return writeWorktreeGeneration(wtPath, commonGitDir(repoDir, common.stdout.trim()))
+}
+
+async function currentWorktreeGeneration(repoDir: string, wtPath: string): Promise<string | null> {
+  const common = await runGit(repoDir, ['rev-parse', '--git-common-dir'])
+  if (!common.ok || !common.stdout.trim()) return null
+  return readWorktreeGeneration(wtPath, commonGitDir(repoDir, common.stdout.trim()))
 }
 
 // ---- worktree add 超时自适应（规模档位） ----
@@ -679,13 +916,13 @@ export interface WorktreeCreateOptions {
   estimateFileCount?: (repoRoot: string) => Promise<number>
   /** 强制指定 worktree add 超时（ms），跳过规模估计——测试与紧急止损用 */
   addTimeoutMs?: number
-  /** 超时残肢清理部分失败的时间线出口（runner 接 store.noteWorktreeCleanupFailure）：
-   *  残留清单（含分支名）随失败上报，重派撞 already exists 不再静默无据 */
+  /** 无法核验归属的失败现场时间线出口（runner 接 store.noteWorktreeCleanupFailure） */
   onCleanupResidue?: (failure: { name: string; reason: string; ownerTaskId?: string }) => void
+  runAddForTest?: (run: () => Promise<GitCommandResult>) => Promise<GitCommandResult>
 }
 
-/** 超时残肢就地清理的逐步结果：三者全成才算「已清理」，residue 空 == 全清。 */
-interface WorktreeTimeoutCleanupResult {
+/** Residue inventory observed after a failed worktree add. */
+interface WorktreeAddResidueResult {
   directoryRemoved: boolean
   registrationPruned: boolean
   branchDeleted: boolean
@@ -693,54 +930,38 @@ interface WorktreeTimeoutCleanupResult {
   residue: string[]
 }
 
-/** 失败残肢就地清理：被击杀/中途报错的 checkout 可能写了一半，注册/目录/分支按归属
- *  受控回收（deleteBranchRef / removeDirectory 只对本次尝试自己创建的资产为 true——
+/** Failed-add residue inventory: failure alone does not prove ownership.
+ *  Potential directory, registration, and branch residues are inspected only.
  *  "branch already exists"这类秒败里既存分支/目录是外部资产，删了会夷平别人现场、
  *  还会让内置重试意外成功改变派单语义）。全部 best-effort，失败不掩盖主失败原因，
  *  但不再静默——失败步骤进 residue 供时间线/拒单文案可见。 */
-async function cleanupWorktreeAddResidue(repoDir: string, wtPath: string, branch: string, deleteBranchRef: boolean, removeDirectory = true): Promise<WorktreeTimeoutCleanupResult> {
+function pathEntryExists(candidate: string): boolean {
+  try { fs.lstatSync(candidate); return true }
+  catch (error) { return (error as NodeJS.ErrnoException).code !== 'ENOENT' }
+}
+
+async function inspectWorktreeAddResidue(repoDir: string, gitDir: string, wtPath: string, branch: string, includeBranch: boolean, includeDirectory = true): Promise<WorktreeAddResidueResult> {
   const residue: string[] = []
-  // 目录：worktree remove --force 败（目录已缺/句柄占用）再走 rmSync，两条路都断才记残留
+  // Failed add has no durable ownership proof; retain every possible residue.
   let directoryRemoved = true
-  if (removeDirectory) {
-    const removed = await runGit(repoDir, ['worktree', 'remove', '--force', wtPath], 30_000)
-    directoryRemoved = removed.ok
-    if (!directoryRemoved) {
-      try {
-        fs.rmSync(wtPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 300 })
-        directoryRemoved = !fs.existsSync(wtPath)
-      } catch { directoryRemoved = false }
-    }
+  if (includeDirectory) {
+    directoryRemoved = !pathEntryExists(wtPath)
     if (!directoryRemoved) residue.push(`目录 ${wtPath}（留待启动清扫兜底）`)
   }
-  // 注册：prune 收 .git/worktrees/<name> 注册残留
-  const pruned = await runGit(repoDir, ['worktree', 'prune'], 15_000)
-  if (!pruned.ok) {
-    residue.push(`git 注册 ${path.join(repoDir, '.git', 'worktrees', path.basename(wtPath))}`)
-  }
-  // 分支：本就不存在视为已清（击杀早于 ref 写入时分支根本没建成）；存在而删失败才是残留
+  const registrationPath = path.join(gitDir, 'worktrees', path.basename(wtPath))
+  const registrationPruned = !pathEntryExists(registrationPath)
+  if (!registrationPruned) residue.push(`git 注册 ${registrationPath}`)
   let branchDeleted = true
-  if (deleteBranchRef && (await branchExists(repoDir, branch))) {
-    branchDeleted = await deleteBranchWithRetry(repoDir, branch)
-    if (!branchDeleted) residue.push(`分支 ${branch}`)
+  if (includeBranch && (await branchExists(repoDir, branch))) {
+    branchDeleted = false
+    residue.push(`分支 ${branch}`)
   }
-  return { directoryRemoved, registrationPruned: pruned.ok, branchDeleted, residue }
+  return { directoryRemoved, registrationPruned, branchDeleted, residue }
 }
 
 /** 「目录确已就绪」核验（吞错封死的容错窄门）：合法仓库 + 检出在预期分支 + 无 index.lock 残留。
  *  目录看着像 worktree 但锁还在（孤儿/竞态写手）时绝不放行——放行了，子 agent 的基线回放
  *  就会撞上仍在刷新的 index.lock 活锁（那台机锁连环的第二环）。 */
-async function worktreeReadyForTolerance(wtDir: string, branch: string): Promise<boolean> {
-  if (!(await isGitRepo(wtDir))) return false
-  if ((await currentBranch(wtDir)) !== branch) return false
-  const lock = await runGit(wtDir, ['rev-parse', '--git-path', 'index.lock'], 15_000)
-  if (!lock.ok) return false
-  const rel = lock.stdout.trim()
-  if (!rel) return false
-  const lockPath = path.isAbsolute(rel) ? rel : path.join(wtDir, rel)
-  return !fs.existsSync(lockPath)
-}
-
 // ---- worktree 池化复用（大仓派单提速） ----
 
 /** 每仓库池容量。8 万文件级 Unity 仓全量 checkout 要 4-6 分钟；池化后派单只重写基线间
@@ -790,13 +1011,14 @@ export function clearWorktreePool(): void {
 async function releaseWorktreeToPool(repoDir: string, wtDir: string, branch: string, metadata?: WorktreeInfo | null): Promise<boolean> {
   const root = path.resolve(repoDir)
   const pool = poolFor(root)
-  if (pool.size >= WORKTREE_POOL_MAX_PER_REPO || pool.has(wtDir)) return false
+  if (pool.size >= WORKTREE_POOL_MAX_PER_REPO || pool.has(wtDir) || !metadata?.generationId) return false
   const detached = await runGit(wtDir, ['switch', '--detach'], 30000)
   if (!detached.ok) return false
   try {
     writeMetadata({
       ownerTaskId: WORKTREE_POOL_OWNER,
       poolProcess: currentProcessIdentity(),
+      generationId: metadata.generationId,
       repoDir: root,
       path: wtDir,
       branch,
@@ -829,8 +1051,11 @@ async function acquirePooledWorktree(
     const reused = await withWorktreePathLock(wtPath, async () => {
       if (!pool.has(wtPath)) return null
       pool.delete(wtPath)
+      const poolMetadata = readMetadataFile(metadataFile(root, path.basename(wtPath)))
+      const generationId = poolMetadata?.generationId
+      if (!generationId || await verifyWorktreeGeneration(root, wtPath, generationId)) return null
       const evict = async (deleteRequestedBranch = false) => {
-        await reclaimWorktreeUnlocked(wtPath, { force: true, deleteBranch: true }).catch(() => {})
+        await reclaimWorktreeUnlocked(wtPath, { force: true, deleteBranch: true, expectedGenerationId: generationId }).catch(() => {})
         if (deleteRequestedBranch) await deleteBranchWithRetry(root, branch)
       }
       if (!(await isGitRepo(wtPath))) { await evict(); return null }
@@ -846,6 +1071,7 @@ async function acquirePooledWorktree(
       }
       const metadata: WorktreeInfo = {
         ownerTaskId,
+        generationId,
         repoDir: root,
         path: wtPath,
         branch,
@@ -866,7 +1092,7 @@ async function acquirePooledWorktree(
  *  逐次带回失败现场的 git 错误细节，供具名拒单文案使用。
  *  worktree add 走规模自适应超时 + 进程树击杀（worktreeAddTimeoutFor/killProcessTree）；
  *  超时（killed/SIGTERM）一律判失败并就地清残肢，绝不走「目录像合法 worktree 就当成功」容错
- *  ——该容错仅保留给非超时的快速返回且目录确已就绪（worktreeReadyForTolerance 窄门）。 */
+ *  任一失败时，归属无法核验的目录/注册/分支均保留并具名报告。 */
 async function createWorktreeUnlocked(
   repoDir: string,
   name: string,
@@ -891,7 +1117,7 @@ async function createWorktreeUnlocked(
   // （用户残留、预置分支、上一轮现场），删了等于替别人清场，且会让内置重试从"秒败拒单"
   // 变成"意外建树成功"——派单语义被静默改写（锁专项③回归的教训）
   const branchPreexisting = await branchExists(repoDir, branch)
-  const dirPreexisting = fs.existsSync(wtPath)
+  const dirPreexisting = pathEntryExists(wtPath)
   const rejectOccupiedTarget = (branchExistsNow: boolean, directoryExistsNow: boolean) => {
     if (!branchExistsNow && !directoryExistsNow) return false
     fail(branchExistsNow ? `托管分支已存在（${branch}）` : `worktree 目录已存在（${wtPath}）`)
@@ -903,43 +1129,53 @@ async function createWorktreeUnlocked(
   const planned = options.addTimeoutMs !== undefined
     ? { timeoutMs: options.addTimeoutMs, fileCount: undefined as number | undefined }
     : await planWorktreeAddTimeout(root, repoDir, options.estimateFileCount)
-  if (rejectOccupiedTarget(await branchExists(repoDir, branch), fs.existsSync(wtPath))) return null
+  if (rejectOccupiedTarget(await branchExists(repoDir, branch), pathEntryExists(wtPath))) return null
   // 池化复用先行：同仓池里有空闲 worktree 就换基线复用（只重写差异文件），全量 add 兜底
   const pooled = await acquirePooledWorktree(root, name, branch, baseSha, ownerTaskId, planned.timeoutMs)
   if (pooled) return pooled
-  if (rejectOccupiedTarget(await branchExists(repoDir, branch), fs.existsSync(wtPath))) return null
-  const out = await runGit(repoDir, ['worktree', 'add', '-b', branch, wtPath, ...(baseBranch ? [baseBranch] : [])], planned.timeoutMs, undefined, true)
+  if (rejectOccupiedTarget(await branchExists(repoDir, branch), pathEntryExists(wtPath))) return null
+  const runAdd = () => runGit(repoDir, ['worktree', 'add', '-b', branch, wtPath, ...(baseBranch ? [baseBranch] : [])], planned.timeoutMs, undefined, true)
+  const out = options.runAddForTest ? await options.runAddForTest(runAdd) : await runAdd()
   if (out.timedOut) {
     // 超时绝不当成功：树杀前的 checkout 可能写了一半，孤儿残留的 index.lock 会卡死后续
     // 回放。超时意味着本方已进入托管路径施工，按残肢清理以避免重派撞 already exists。
-    const cleaned = await cleanupWorktreeAddResidue(repoDir, wtPath, branch, true, true)
+    const cleaned = await inspectWorktreeAddResidue(repoDir, gitDir, wtPath, branch, !branchPreexisting, !dirPreexisting)
     if (cleaned.residue.length) {
       // 清理部分失败不再静默：残留清单（含分支名）走 noteWorktreeCleanupFailure 记 owner
       // 时间线；拒单文案只报实情，绝不谎称「残肢已清理」——重派 already exists 时查得到现场
-      try { options.onCleanupResidue?.({ name, reason: `超时残肢清理部分失败：${cleaned.residue.join('、')}`, ownerTaskId }) } catch { /* 时间线出口失败不掩盖主失败 */ }
+      try { options.onCleanupResidue?.({ name, reason: `建树超时后归属无法核验，保留现场：${cleaned.residue.join('、')}`, ownerTaskId }) } catch { /* 时间线出口失败不掩盖主失败 */ }
     }
     const cleanupNote = cleaned.residue.length
-      ? `残肢未全清（${cleaned.residue.join('、')}），待启动清扫兜底`
-      : '残肢已清理'
-    fail(`git worktree add 超时（${Math.round(planned.timeoutMs / 1000)}s，已按仓库规模自适应并击杀进程树；${cleanupNote}），请重派`)
+      ? `；归属无法核验，现场保留：${cleaned.residue.join('、')}`
+      : '；未发现可确认归属的残留，未执行清理'
+    fail(`git worktree add 超时（${Math.round(planned.timeoutMs / 1000)}s）${cleanupNote}；请重派`)
     return null
   }
-  if (!out.ok && !(await worktreeReadyForTolerance(wtPath, branch))) {
+  if (!out.ok) {
     // 非超时失败按归属清残肢：本方中途报错（长路径/磁盘/文件占用）时分支/目录是本次尝试
     // 创建的残肢，与超时路径同一清理通道；"already exists"秒败则什么都没建——既存资产
     // （用户残留/预置分支）不是本次的残肢，清了会让内置重试意外建树成功，静默改写派单
     // 语义（锁专项③回归的教训，smoke-worktree-lifecycle 固化该守卫）
-    const cleaned = await cleanupWorktreeAddResidue(repoDir, wtPath, branch, !branchPreexisting, !dirPreexisting)
+    const cleaned = await inspectWorktreeAddResidue(repoDir, gitDir, wtPath, branch, !branchPreexisting, !dirPreexisting)
     if (cleaned.residue.length) {
-      try { options.onCleanupResidue?.({ name, reason: `失败残肢清理部分失败：${cleaned.residue.join('、')}`, ownerTaskId }) } catch { /* 时间线出口失败不掩盖主失败 */ }
+      try { options.onCleanupResidue?.({ name, reason: `建树失败后归属无法核验，保留现场：${cleaned.residue.join('、')}`, ownerTaskId }) } catch { /* 时间线出口失败不掩盖主失败 */ }
     }
-    fail((out.stderr || out.stdout).trim().slice(0, 300) || `git worktree add exit ${out.code}`)
+    const detail = (out.stderr || out.stdout).trim().slice(0, 300) || `git worktree add exit ${out.code}`
+    fail(`${detail}${cleaned.residue.length ? `；归属无法核验，现场保留：${cleaned.residue.join('、')}` : ''}`)
     return null
   }
   // 把 worktree 目录从主仓库状态里排除，避免污染主目录的 status
   appendGitExcludes(gitDir, SYSTEM_SIDECAR_DIRS)
+  const generationId = writeWorktreeGeneration(wtPath, gitDir)
+  if (!generationId) {
+    fail('worktree Git 注册代际标记写入失败')
+    await runGit(root, ['worktree', 'remove', '--force', wtPath], 30000)
+    await deleteBranch(root, branch)
+    return null
+  }
   const metadata: WorktreeInfo = {
     ownerTaskId,
+    generationId,
     repoDir: root,
     path: wtPath,
     branch,
@@ -1000,15 +1236,25 @@ export async function createWorktreeAtBranch(
   if (added.timedOut) {
     // 与 createWorktree 同一吞错封死：超时绝不当成功；集成分支绝不删（集成结果都在分支上）。
     // 清理部分失败留 console 现场（此路径无时间线出口），不静默。
-    const cleaned = await cleanupWorktreeAddResidue(root, wtPath, branch, false)
-    if (cleaned.residue.length) console.warn(`[git] 集成 worktree 超时残肢清理部分失败（${wtPath}）：${cleaned.residue.join('、')}`)
+    const cleaned = await inspectWorktreeAddResidue(root, gitDir, wtPath, branch, false)
+    if (cleaned.residue.length) console.warn(`[git] 集成 worktree 超时后归属无法核验，保留现场（${wtPath}）：${cleaned.residue.join('、')}`)
     return null
   }
-  if (!added.ok && !(await worktreeReadyForTolerance(wtPath, branch))) return null
+  if (!added.ok) {
+    const retained = await inspectWorktreeAddResidue(root, gitDir, wtPath, branch, false)
+    if (retained.residue.length) console.warn(`[git] 集成 worktree 建立失败，归属无法核验，保留现场（${wtPath}）：${retained.residue.join('、')}`)
+    return null
+  }
   // 把 worktree 目录从主仓库状态里排除，避免污染主目录的 status（与 createWorktree 同一约定）
   appendGitExcludes(gitDir, SYSTEM_SIDECAR_DIRS)
+  const generationId = writeWorktreeGeneration(wtPath, gitDir)
+  if (!generationId) {
+    await runGit(root, ['worktree', 'remove', '--force', wtPath], 30000)
+    return null
+  }
   const metadata: WorktreeInfo = {
     ownerTaskId,
+    generationId,
     repoDir: root,
     path: wtPath,
     branch,
@@ -1218,9 +1464,13 @@ export interface BaselineReplayResult {
   commitSha: string
   /** 回放增量文件数（已跟踪改动 + 未跟踪；UI 说明「含领队回放基线 N 文件」用） */
   files: number
-  /** 未跟踪部分总字节（体量说明用） */
+  /** 计入体量闸的新增 blob 总字节（未跟踪文件及发生变化的原暂存新增文件） */
   bytes: number
   reason: string
+}
+
+export interface BaselineReplayTestHooks {
+  postSoftResetStatusResult?: (result: GitCommandResult) => GitCommandResult
 }
 
 const replayRefused = (reason: string): BaselineReplayResult => ({ status: 'refused', commitSha: '', files: 0, bytes: 0, reason })
@@ -1230,10 +1480,39 @@ function splitUntracked(stdout: string): string[] {
   return stdout.split('\0').filter(Boolean).filter((rel) => !SYSTEM_SIDECAR_DIRS.some((dir) => rel === dir || rel.startsWith(`${dir}/`) || rel.startsWith(`${dir}\\`)))
 }
 
+function replayParentIssue(workdir: string, rel: string, allowMissing: boolean): string | undefined {
+  const components = rel.split('/')
+  if (components.some((component) => !component || component === '.' || component === '..')) return `回放路径格式异常（${rel}），拒绝回放`
+  let parent = workdir
+  for (const component of components.slice(0, -1)) {
+    parent = path.join(parent, component)
+    let info: fs.Stats
+    try { info = fs.lstatSync(parent) }
+    catch (error) {
+      if (allowMissing && (error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      return `无法核验回放路径父目录（${rel}），拒绝回放`
+    }
+    if (info.isSymbolicLink()) return `回放增量含软链父目录（${rel}），拒绝回放`
+    if (!info.isDirectory()) return `回放路径父级不是目录（${rel}），拒绝回放`
+  }
+  return undefined
+}
+
 function pathspecExcludes(): string[] {
   // glob 形态：直接点名被忽略目录本身会触发 git 的 ignored-paths 报错（exit 1），
   // glob 深度形态不会——与 multica 的 snapshot excludes 同一写法
   return SYSTEM_SIDECAR_DIRS.flatMap((dir) => [`:(exclude,glob)**/${dir}/**`])
+}
+
+function gitBlobSizes(workdir: string, objectIds: string[], env: NodeJS.ProcessEnv): Promise<GitCommandResult> {
+  return new Promise((resolve) => {
+    const child = execFile('git', ['-C', workdir, 'cat-file', '--batch-check=%(objectname) %(objecttype) %(objectsize)'],
+      { timeout: 30000, windowsHide: true, env }, (error, stdout, stderr) => {
+        resolve({ ok: !error, stdout: String(stdout ?? ''), stderr: String(stderr ?? error?.message ?? ''), code: !error ? 0 : typeof error.code === 'number' ? error.code : -1 })
+      })
+    child.stdin?.on('error', () => {})
+    child.stdin?.end(`${objectIds.join('\n')}\n`)
+  })
 }
 
 /**
@@ -1259,23 +1538,53 @@ function pathspecExcludes(): string[] {
  * 未跟踪盘点（ls-files）超时即拒单：大仓盘点限时 15s（含锁退避重试），宁可拒建单
  * 回灌原因让领队改派，也不拿残缺增量当基线静默回放。
  */
-export async function replayLeaderBaseline(leaderWorkdir: string, childWorkdir: string, childBaseSha: string): Promise<BaselineReplayResult> {
+export async function replayLeaderBaseline(leaderWorkdir: string, childWorkdir: string, childBaseSha: string, testHooks?: BaselineReplayTestHooks): Promise<BaselineReplayResult> {
   if (!leaderWorkdir || !childWorkdir || !childBaseSha) return replayRefused('回放前置缺失：workdir 或子基线为空')
   // 全程禁 opportunistic index 锁：只读盘点在领队侧 index.lock 存在时也照常执行
-  const lockEnv: NodeJS.ProcessEnv = { ...process.env, GIT_OPTIONAL_LOCKS: '0' }
+  const lockEnv: NodeJS.ProcessEnv = { ...repoProbeEnv(), GIT_OPTIONAL_LOCKS: '0' }
   // 体量闸先行（只读）：未跟踪清单 + 已跟踪改动一次盘明，零增量直接走零开销路径；
   // 未跟踪盘点（ls-files）超时即拒单——不拿残缺清单当基线回放
-  const [list, quiet, trackedNames] = await Promise.all([
+  const [list, quiet, trackedNames, originalDiff] = await Promise.all([
     runGitWithLockRetry(leaderWorkdir, ['ls-files', '--others', '--exclude-standard', '-z'], 15000, lockEnv),
     runGitWithLockRetry(leaderWorkdir, ['diff', '--quiet', 'HEAD'], 15000, lockEnv),
-    runGitWithLockRetry(leaderWorkdir, ['diff', '--name-only', 'HEAD'], 15000, lockEnv)
+    runGitWithLockRetry(leaderWorkdir, ['diff', '--name-only', '-z', 'HEAD'], 15000, lockEnv),
+    runGitWithLockRetry(leaderWorkdir, ['diff', '--cached', '--raw', '--no-renames', '--no-abbrev', '-z', 'HEAD'], 15000, lockEnv)
   ])
   if (!list.ok) return replayRefused(`无法盘点领队未跟踪文件：${gitError(list)}${lockConflictSuffix(list)}`)
   if (!quiet.ok && quiet.code !== 1) return replayRefused(`无法对比领队工作区与 HEAD：${gitError(quiet)}${lockConflictSuffix(quiet)}`)
   if (!trackedNames.ok) return replayRefused(`无法列出领队已跟踪改动：${gitError(trackedNames)}${lockConflictSuffix(trackedNames)}`)
+  if (!originalDiff.ok) return replayRefused(`无法核验领队原有暂存文件：${gitError(originalDiff)}${lockConflictSuffix(originalDiff)}`)
   const untracked = splitUntracked(list.stdout)
-  const trackedCount = trackedNames.stdout.split('\n').filter((line) => line.trim() !== '').length
-  if (!trackedCount && !untracked.length) return replaySkipped('领队无未提交增量，子单零开销跳过回放')
+  const trackedPaths = trackedNames.stdout.split('\0').filter(Boolean)
+  const trackedCount = trackedPaths.length
+  const originalEntries = originalDiff.stdout.split('\0')
+  if (originalEntries.pop() !== '') return replayRefused('领队原有暂存清单不完整，拒绝回放')
+  const originalStaged = new Map<string, string>()
+  const originalTracked = new Map<string, { mode: string; oid: string; status: string }>()
+  for (let index = 0; index < originalEntries.length; index += 2) {
+    const match = /^:([0-7]{6}) ([0-7]{6}) [0-9a-f]+ ([0-9a-f]+) ([A-Z])$/.exec(originalEntries[index] ?? '')
+    const rel = originalEntries[index + 1]
+    if (!match || !rel || originalStaged.has(rel) || originalTracked.has(rel)) return replayRefused('领队原有暂存清单格式异常，拒绝回放')
+    if (match[4] === 'A' && match[1] === '000000') originalStaged.set(rel, match[3])
+    else if (match[1] !== '000000' && ['M', 'D', 'T'].includes(match[4])) originalTracked.set(rel, { mode: match[2], oid: match[3], status: match[4] })
+    else return replayRefused(`领队原有暂存状态不支持安全回放（${rel}），拒绝回放`)
+  }
+  for (const rel of new Set([...trackedPaths, ...originalTracked.keys()])) {
+    const issue = replayParentIssue(leaderWorkdir, rel, true)
+    if (issue) return replayRefused(issue)
+  }
+  for (const rel of originalStaged.keys()) {
+    const issue = replayParentIssue(leaderWorkdir, rel, false)
+    if (issue) return replayRefused(issue)
+    try { fs.lstatSync(path.join(leaderWorkdir, rel)) }
+    catch { return replayRefused(`原有暂存新增文件在采集前消失（${rel}），拒绝回放，请重派`) }
+  }
+  if (!trackedCount && !untracked.length && !originalStaged.size && !originalTracked.size) {
+    const cachedQuiet = await runGitWithLockRetry(leaderWorkdir, ['diff', '--cached', '--quiet', 'HEAD'], 15000, lockEnv)
+    if (!cachedQuiet.ok && cachedQuiet.code !== 1) return replayRefused(`无法核验领队暂存状态：${gitError(cachedQuiet)}${lockConflictSuffix(cachedQuiet)}`)
+    if (!cachedQuiet.ok) return replayRefused('领队暂存增量与工作区不一致，拒绝跳过回放，请检查暂存文件后重派')
+    return replaySkipped('领队无未提交增量，子单零开销跳过回放')
+  }
 
   // lstat 体量闸：只针对未跟踪部分（已跟踪改动体量天然受仓库约束）
   let files = 0
@@ -1322,19 +1631,105 @@ export async function replayLeaderBaseline(leaderWorkdir: string, childWorkdir: 
   try {
     let seeded = false
     try {
-      const rel = (await git(leaderWorkdir, ['rev-parse', '--git-path', 'index'])).trim()
+      const indexPath = await runGit(leaderWorkdir, ['rev-parse', '--git-path', 'index'], 15000, lockEnv)
+      const rel = indexPath.ok ? indexPath.stdout.trim() : ''
       if (rel) {
         const src = path.isAbsolute(rel) ? rel : path.join(leaderWorkdir, rel)
         fs.copyFileSync(src, tmpIndex)
         seeded = true
       }
     } catch {}
+    for (const rel of new Set([...trackedPaths, ...originalTracked.keys()])) {
+      const issue = replayParentIssue(leaderWorkdir, rel, true)
+      if (issue) return replayRefused(issue)
+    }
+    for (const rel of originalStaged.keys()) {
+      const issue = replayParentIssue(leaderWorkdir, rel, false)
+      if (issue) return replayRefused(issue)
+      try { fs.lstatSync(path.join(leaderWorkdir, rel)) }
+      catch { return replayRefused(`原有暂存新增文件在采集期间消失（${rel}），拒绝回放，请重派`) }
+    }
     let added = await runGitWithLockRetry(leaderWorkdir, addArgs, 60000, env)
     if (!added.ok && seeded) {
       const rebuilt = await runGitWithLockRetry(leaderWorkdir, ['read-tree', head], 30000, env)
       if (rebuilt.ok) added = await runGitWithLockRetry(leaderWorkdir, addArgs, 60000, env)
     }
     if (!added.ok) return replayRefused(`私有 index 采集失败：${gitError(added)}${lockConflictSuffix(added)}`)
+    const changed = await runGitWithLockRetry(leaderWorkdir, ['diff', '--cached', '--raw', '--no-renames', '--no-abbrev', '-z', 'HEAD'], 30000, env)
+    if (!changed.ok) return replayRefused(`无法核验实际回放路径：${gitError(changed)}${lockConflictSuffix(changed)}`)
+    const changedEntries = changed.stdout.split('\0')
+    if (changedEntries.pop() !== '') return replayRefused('实际回放路径清单不完整，拒绝回放')
+    const changedPaths = new Map<string, { mode: string; oid: string; status: string }>()
+    for (let index = 0; index < changedEntries.length; index += 2) {
+      const match = /^:[0-7]{6} ([0-7]{6}) [0-9a-f]+ ([0-9a-f]+) ([A-Z])$/.exec(changedEntries[index] ?? '')
+      const rel = changedEntries[index + 1]
+      if (!match || !rel || changedPaths.has(rel)) return replayRefused('实际回放路径清单格式异常，拒绝回放')
+      changedPaths.set(rel, { mode: match[1], oid: match[2], status: match[3] })
+      const issue = replayParentIssue(leaderWorkdir, rel, match[3] === 'D')
+      if (issue) return replayRefused(issue)
+    }
+    for (const [rel, original] of originalTracked) {
+      const actual = changedPaths.get(rel)
+      if (!actual || actual.mode !== original.mode || actual.oid !== original.oid || actual.status !== original.status) {
+        return replayRefused(`领队原有暂存已跟踪改动与工作区不一致（${rel}），拒绝回放——请检查暂存文件后重派`)
+      }
+    }
+    const staged = await runGitWithLockRetry(leaderWorkdir, ['diff', '--cached', '--raw', '--diff-filter=A', '--no-renames', '--no-abbrev', '-z', 'HEAD'], 30000, env)
+    if (!staged.ok) return replayRefused(`无法核验实际暂存文件：${gitError(staged)}${lockConflictSuffix(staged)}`)
+    const entries = staged.stdout.split('\0')
+    if (entries.pop() !== '') return replayRefused('实际暂存清单不完整，拒绝回放')
+    const untrackedPaths = new Set(untracked)
+    const stagedUntrackedPaths = new Set<string>()
+    const stagedForLimit: string[] = []
+    const stagedPaths = new Set<string>()
+    for (let index = 0; index < entries.length; index += 2) {
+      const match = /^:000000 ([0-7]{6}) [0-9a-f]+ ([0-9a-f]+) A$/.exec(entries[index] ?? '')
+      const rel = entries[index + 1]
+      if (!match || !rel) return replayRefused('实际暂存清单格式异常，拒绝回放')
+      if (stagedPaths.has(rel)) return replayRefused('实际暂存清单含重复路径，拒绝回放')
+      stagedPaths.add(rel)
+      if (match[1] !== '100644' && match[1] !== '100755') return replayRefused(`实际暂存增量含软链或非普通文件（${rel}），拒绝回放`)
+      let parent = leaderWorkdir
+      try {
+        for (const component of rel.split('/').slice(0, -1)) {
+          parent = path.join(parent, component)
+          if (fs.lstatSync(parent).isSymbolicLink()) return replayRefused(`回放增量含软链父目录（${rel}），拒绝回放`)
+        }
+        if (!fs.lstatSync(path.join(leaderWorkdir, rel)).isFile()) return replayRefused(`暂存后文件类型变化（${rel}），拒绝回放`)
+      } catch { return replayRefused(`暂存后无法核验未跟踪文件（${rel}），拒绝回放`) }
+      const originalOid = originalStaged.get(rel)
+      if (originalOid !== undefined) {
+        if (originalOid !== match[2]) stagedForLimit.push(match[2])
+        continue
+      }
+      if (!untrackedPaths.has(rel)) return replayRefused(`盘点后新增未跟踪文件（${rel}），拒绝回放，请重派`)
+      stagedUntrackedPaths.add(rel)
+      stagedForLimit.push(match[2])
+    }
+    for (const rel of originalStaged.keys()) {
+      if (!stagedPaths.has(rel)) return replayRefused(`原有暂存新增文件在采集期间消失（${rel}），拒绝回放，请重派`)
+    }
+    if (stagedUntrackedPaths.size !== untracked.length || untracked.some((rel) => !stagedUntrackedPaths.has(rel))) {
+      return replayRefused('盘点后未跟踪文件发生变化，拒绝回放，请重派')
+    }
+    files = stagedUntrackedPaths.size
+    bytes = 0
+    if (stagedForLimit.length) {
+      const sizes = await gitBlobSizes(leaderWorkdir, stagedForLimit, env)
+      if (!sizes.ok) return replayRefused(`无法核验实际暂存体积：${gitError(sizes)}`)
+      const lines = sizes.stdout.trimEnd().split('\n')
+      if (lines.length !== stagedForLimit.length) return replayRefused('实际暂存体积清单不完整，拒绝回放')
+      for (let index = 0; index < lines.length; index++) {
+        const match = /^([0-9a-f]+) blob (\d+)$/.exec(lines[index].trim())
+        if (!match || match[1] !== stagedForLimit[index]) return replayRefused('实际暂存对象类型或体积异常，拒绝回放')
+        const blobBytes = Number(match[2])
+        if (!Number.isSafeInteger(blobBytes)) return replayRefused('实际暂存对象体积超出可核验范围，拒绝回放')
+        bytes += blobBytes
+        if (stagedForLimit.length > REPLAY_MAX_FILES || bytes > REPLAY_MAX_BYTES) {
+          return replayRefused(`回放增量超限：实际暂存新增 ${stagedForLimit.length} 个文件 / ${Math.ceil(bytes / 1024 / 1024)}MiB（上限 ${REPLAY_MAX_FILES} 个 / ${REPLAY_MAX_BYTES / 1024 / 1024}MiB）——请 gitignore 或先提交`)
+        }
+      }
+    }
     const treeResult = await runGitWithLockRetry(leaderWorkdir, ['write-tree'], 60000, env)
     const tree = treeResult.stdout.trim()
     if (!treeResult.ok || !tree) return replayRefused(`write-tree 未产出树对象：${gitError(treeResult)}${lockConflictSuffix(treeResult)}`)
@@ -1354,15 +1749,18 @@ export async function replayLeaderBaseline(leaderWorkdir: string, childWorkdir: 
     await runGit(childWorkdir, ['cherry-pick', '--quit'], 15000, lockEnv)
     const soft = await runChildApplyGit(childWorkdir, ['reset', '--soft', replaySha], 30000, lockEnv)
     if (!soft.ok) {
-      await runGit(childWorkdir, ['reset', '--hard', childBaseSha], 30000, lockEnv)
-      return replayRefused(`子分支推进到回放提交失败：${gitError(soft)}${lockConflictSuffix(soft)}`)
+      const rollback = await rollbackChildReplay(childWorkdir, childBaseSha, lockEnv)
+      return replayRefused(`子分支推进到回放提交失败：${gitError(soft)}${lockConflictSuffix(soft)}；${rollback.reason}`)
     }
-    const clean = await runChildApplyGit(childWorkdir, ['status', '--porcelain'], 15000, lockEnv)
-    if (clean.ok && clean.stdout.trim()) {
-      await runGit(childWorkdir, ['reset', '--hard', childBaseSha], 30000, lockEnv)
-      return replayRefused('回放后子 worktree 状态不自洽（status 非空），已回滚')
+    const status = await runChildApplyGit(childWorkdir, ['status', '--porcelain'], 15000, lockEnv)
+    const clean = testHooks?.postSoftResetStatusResult?.(status) ?? status
+    if (!clean.ok || clean.stdout.trim()) {
+      const cause = clean.ok
+        ? '回放后子 worktree 状态不自洽（status 非空）'
+        : `回放后无法核验子 worktree 状态：${gitError(clean)}${lockConflictSuffix(clean)}`
+      const rollback = await rollbackChildReplay(childWorkdir, childBaseSha, lockEnv)
+      return replayRefused(`${cause}；${rollback.reason}`)
     }
-    if (!clean.ok) return replayRefused(`回放后无法核验子 worktree 状态：${gitError(clean)}${lockConflictSuffix(clean)}`)
     // 子 worktree 元数据的 baseSha 同步改写：digest/集成的基线指向回放提交（防双算）
     const resolved = await resolveManagedWorktree(childWorkdir)
     if (resolved?.metadata) {
@@ -1488,20 +1886,47 @@ async function deleteBranchWithRetry(workdir: string, name: string): Promise<boo
  *  目录与 git 注册保留、子分支删除、元数据挂池标记，下一次派单换基线秒级复用。 */
 export async function reclaimWorktree(
   wtDir: string,
-  options: { force?: boolean; deleteBranch?: boolean; repool?: boolean; expectedOwnerTaskId?: string } = {}
+  options: { force?: boolean; deleteBranch?: boolean; repool?: boolean; expectedOwnerTaskId?: string; expectedGenerationId?: string } = {}
 ): Promise<WorktreeCleanupResult> {
   return withWorktreePathLock(wtDir, () => reclaimWorktreeUnlocked(wtDir, options))
 }
 
 async function reclaimWorktreeUnlocked(
   wtDir: string,
-  options: { force?: boolean; deleteBranch?: boolean; repool?: boolean; expectedOwnerTaskId?: string } = {}
+  options: { force?: boolean; deleteBranch?: boolean; repool?: boolean; expectedOwnerTaskId?: string; expectedGenerationId?: string } = {},
+  allowVerifiedMergeScaffold = false
 ): Promise<WorktreeCleanupResult> {
   const resolved = await resolveManagedWorktree(wtDir)
   if (!resolved) return { ok: false, status: 'failed', path: wtDir, reason: 'path is outside .agentdeck-worktrees' }
   const { repoDir, name, metadata } = resolved
+  if (!metadata) {
+    const missingSidecar = !fs.existsSync(metadataFile(repoDir, name))
+    if (!allowVerifiedMergeScaffold || !missingSidecar || !name.startsWith('.agentdeck-merge-') || !options.expectedGenerationId) {
+      return { ok: false, status: 'retained', path: wtDir, reason: 'worktree owner metadata is missing or invalid' }
+    }
+  } else if (!metadata.ownerTaskId.trim() || !metadata.branch.trim()
+    || !sameWorktreePath(metadata.repoDir, repoDir)
+    || !sameWorktreePath(metadata.path, wtDir)) {
+    return { ok: false, status: 'retained', path: wtDir, reason: 'worktree owner metadata is missing or invalid' }
+  }
   if (options.expectedOwnerTaskId !== undefined && metadata?.ownerTaskId !== options.expectedOwnerTaskId) {
     return { ok: false, status: 'retained', path: wtDir, reason: 'worktree ownership changed' }
+  }
+  if (metadata && !metadata.generationId) {
+    return { ok: false, status: 'retained', path: wtDir, reason: 'legacy worktree metadata has no generation identity' }
+  }
+  if (options.expectedGenerationId && metadata?.generationId && options.expectedGenerationId !== metadata.generationId) {
+    return { ok: false, status: 'retained', path: wtDir, reason: 'worktree generation metadata changed' }
+  }
+  const expectedGenerationId = options.expectedGenerationId ?? metadata?.generationId
+  if (expectedGenerationId) {
+    const generationMismatch = await verifyWorktreeGeneration(
+      repoDir,
+      wtDir,
+      expectedGenerationId,
+      metadata?.cleanupStatus === 'pooled' ? undefined : metadata?.branch || undefined
+    )
+    if (generationMismatch) return { ok: false, status: 'retained', path: wtDir, reason: generationMismatch }
   }
   if (metadata?.ownerTaskId === WORKTREE_POOL_OWNER && worktreePoolByRepo.get(path.resolve(repoDir))?.has(path.resolve(wtDir))) {
     return { ok: false, status: 'retained', path: wtDir, reason: 'worktree is active in the reuse pool' }
@@ -1622,10 +2047,8 @@ export async function deleteBranch(workdir: string, name: string): Promise<boole
   return (await runGit(workdir, ['branch', '-D', name], 15000)).ok
 }
 
-/** 启动清扫：回收上次会话遗留的 worktree——合并临时目录（.agentdeck-merge-*，其 finally 兜不住进程被杀）
- *  和已不存在任务的委派目录（<taskId>_c<N>）。任务仍在的目录不动：可能存有未提交改动，
- *  交给任务删除钩子或人工处理。返回回收的目录名列表。
- *  keepTask 第二参传入该目录的 owner metadata（若有）：续链集成 worktree 的保留判定需要它。 */
+/** 清扫带可靠 owner metadata 的遗留 worktree。缺失归属的目录或 Git 注册仅报告并保留；
+ *  keepTask 第二参传入该目录的 owner metadata：续链集成 worktree 的保留判定需要它。 */
 export async function pruneWorktrees(
   repoDir: string,
   keepTask: (taskId: string, worktree?: WorktreeInfo) => boolean = () => false,
@@ -1639,18 +2062,60 @@ export async function pruneWorktrees(
   try { entries = fs.readdirSync(worktreeDir, { withFileTypes: true }) } catch {}
   const names = new Set(entries.filter((entry) => entry.isDirectory() && entry.name !== WORKTREE_METADATA_DIR).map((entry) => entry.name))
   for (const metadata of listWorktreeMetadata(root)) names.add(path.basename(metadata.path))
+  const common = await runGit(root, ['rev-parse', '--git-common-dir'])
+  const gitDir = common.ok && common.stdout.trim() ? commonGitDir(root, common.stdout.trim()) : ''
+  const registrations = gitDir ? listManagedWorktreeRegistrations(root, gitDir) : new Map<string, RegisteredWorktree>()
+  for (const name of registrations.keys()) names.add(name)
   const now = options.now ?? Date.now()
   const maxAgeMs = Math.max(0, options.maxAgeMs ?? DEFAULT_WORKTREE_MAX_AGE_MS)
   for (const name of names) {
     const wtPath = path.join(worktreeDir, name)
-    const metadata = readMetadataFile(metadataFile(root, name))
+    const sidecarPath = metadataFile(root, name)
+    let metadata = readMetadataFile(sidecarPath)
+    const hasOwnerMetadata = !!metadata
+    let verifiedMergeScaffold = false
     result.scanned++
+    const registration = registrations.get(name)
+    if (!metadata && !fs.existsSync(sidecarPath) && name.startsWith('.agentdeck-merge-')) {
+      const generationId = await currentWorktreeGeneration(root, wtPath)
+      if (generationId && !await verifyWorktreeGeneration(root, wtPath, generationId, registration?.branch)) {
+        const stat = (() => { try { return fs.statSync(wtPath) } catch { return null } })()
+        metadata = {
+          ownerTaskId: name,
+          generationId,
+          repoDir: root,
+          path: wtPath,
+          branch: registration?.branch ?? '',
+          baseSha: '',
+          createdAt: stat?.birthtimeMs ?? stat?.mtimeMs ?? now,
+          cleanupStatus: 'active'
+        }
+        verifiedMergeScaffold = true
+      }
+    }
+    const reliableMetadata = metadata
+      && path.resolve(metadata.repoDir) === path.resolve(root)
+      && path.resolve(metadata.path) === path.resolve(wtPath)
+      && !!metadata.ownerTaskId.trim()
+    if (!metadata || !reliableMetadata) {
+      const registeredBranchExists = registration?.branch ? await branchExists(root, registration.branch) : false
+      const evidence = [
+        fs.existsSync(wtPath) ? `目录 ${wtPath}` : '',
+        registration ? `git 注册 ${registration.registrationPath}${registration.head ? '' : ' (missing HEAD)'}` : '',
+        registeredBranchExists ? `分支 ${registration?.branch}` : ''
+      ].filter(Boolean).join('；')
+      result.failed.push({
+        name,
+        reason: `owner 元数据缺失或不匹配，现场保留且未尝试清理${evidence ? `：${evidence}` : ''}`
+      })
+      continue
+    }
     // merge 临时目录（.agentdeck-merge-* / .agentdeck-merge-detach-*）是施工脚手架非成果载体：
     // 集成结果都落在分支上，owner 存续（哪怕在册且检出同一集成分支）不构成保留理由——
     // crashLeftover 判定先于 keepTask，直接进回收流程（租约照拿，拿不到 retain 待下轮）；
     // isIntegrationBranch 守卫照旧：只删目录与侧车，集成分支仅删任务的显式路径可带走。
     const crashLeftover = name.startsWith('.agentdeck-merge-')
-    const owner = metadata?.ownerTaskId || name.replace(/_c\d+$/, '')
+    const owner = metadata.ownerTaskId
     const pooledEntry = metadata?.ownerTaskId === WORKTREE_POOL_OWNER
     if (pooledEntry && worktreePoolByRepo.get(path.resolve(root))?.has(path.resolve(wtPath))) {
       result.retained.push({ name, reason: 'worktree is active in the reuse pool' })
@@ -1662,6 +2127,28 @@ export async function pruneWorktrees(
     }
     if (!crashLeftover && owner && owner !== WORKTREE_POOL_OWNER && keepTask(owner, metadata ?? undefined)) {
       result.retained.push({ name, reason: 'owner task or Git operation is still active' })
+      continue
+    }
+    if (metadata?.cleanupStatus === 'removed' && !fs.existsSync(wtPath)
+      && metadata.branch.startsWith(MANAGED_BRANCH_PREFIX) && !(await branchExists(root, metadata.branch))) {
+      if (registration) {
+        result.failed.push({ name, reason: `worktree directory and branch are gone but Git registration remains: ${registration.registrationPath}`, ...(owner && owner !== name ? { ownerTaskId: owner } : {}) })
+      }
+      continue
+    }
+    if (!metadata.generationId) {
+      result.failed.push({ name, reason: 'legacy worktree metadata has no generation identity', ...(owner && owner !== name ? { ownerTaskId: owner } : {}) })
+      continue
+    }
+    const generationMismatch = await verifyWorktreeGeneration(
+      root,
+      wtPath,
+      metadata.generationId,
+      metadata.cleanupStatus === 'pooled' ? undefined : metadata.branch || undefined
+    )
+    if (generationMismatch) {
+      const reason = `${generationMismatch}${metadata.branch ? `; branch ${metadata.branch} retained` : ''}`
+      result.failed.push({ name, reason, ...(owner && owner !== name ? { ownerTaskId: owner } : {}) })
       continue
     }
     if (metadata?.cleanupStatus === 'removed' && !fs.existsSync(wtPath)) {
@@ -1709,11 +2196,15 @@ export async function pruneWorktrees(
       // 集成结果在分支上，目录只是检出；删任务的显式路径才允许连分支一起删。
       // 施工脚手架对脏判定豁免（force）：租约已确保无在途 Git 操作、仓库任务全部终态，
       // 崩溃残留的冲突/半成品状态不构成保留理由。
-      const reclaimed = await reclaimWorktree(wtPath, {
+      const reclaimOptions = {
         ...(crashLeftover ? { force: true } : {}),
-        deleteBranch: !isIntegrationBranch(metadata?.branch),
-        ...(metadata ? { expectedOwnerTaskId: metadata.ownerTaskId } : {})
-      })
+        deleteBranch: !verifiedMergeScaffold && !isIntegrationBranch(metadata?.branch),
+        ...(hasOwnerMetadata ? { expectedOwnerTaskId: metadata.ownerTaskId } : {}),
+        expectedGenerationId: metadata.generationId
+      }
+      const reclaimed = verifiedMergeScaffold
+        ? await withWorktreePathLock(wtPath, () => reclaimWorktreeUnlocked(wtPath, reclaimOptions, true))
+        : await reclaimWorktree(wtPath, reclaimOptions)
       if (reclaimed.ok) result.removed.push(name)
       else if (reclaimed.residue?.length) {
         // 部分成功（目录已回收、分支/注册残留）映射进 failed：启动清扫的接线
@@ -1737,8 +2228,7 @@ export async function sweepWorktrees(
   keepTask: (taskId: string, worktree?: WorktreeInfo) => boolean,
   options: { maxAgeMs?: number; now?: number; claimWorktree?: (taskId: string, mergeWorktree: boolean) => WorktreePruneLease | undefined } = {}
 ): Promise<WorktreePruneResult> {
-  // Preserve the legacy startup behavior: ownerless clean worktrees are
-  // removed immediately, while dirty/manual-kept trees remain fail-closed.
+  // Ownerless worktrees remain fail-closed even when clean; callers receive them in failed.
   return pruneWorktrees(repoDir, keepTask, {
     ...options,
     maxAgeMs: options.maxAgeMs ?? 0
@@ -1751,15 +2241,39 @@ export async function mergeBranchInto(
   targetBranch: string,
   sourceBranch: string
 ): Promise<{ ok: boolean; conflict: boolean; message: string; cleanupWarning?: string }> {
-  const exists = await runGit(repoDir, ['rev-parse', '--verify', targetBranch])
+  const root = await repositoryRoot(repoDir)
+  if (!root) return { ok: false, conflict: false, message: 'cannot resolve merge repository root' }
+  const exists = await runGit(root, ['rev-parse', '--verify', targetBranch])
   if (!exists.ok || !exists.stdout.trim()) {
-    const created = await runGit(repoDir, ['branch', targetBranch], 30000)
+    const created = await runGit(root, ['branch', targetBranch], 30000)
     if (!created.ok) return { ok: false, conflict: false, message: `cannot create integration branch ${targetBranch}: ${gitError(created)}` }
   }
   const tmpName = `.agentdeck-merge-${Date.now().toString(36)}`
-  const wtPath = path.join(repoDir, '.agentdeck-worktrees', tmpName)
-  const added = await runGit(repoDir, ['worktree', 'add', wtPath, targetBranch], 60000, undefined, true)
+  const wtPath = path.join(managedRoot(root), tmpName)
+  fs.mkdirSync(managedRoot(root), { recursive: true })
+  const added = await runGit(root, ['worktree', 'add', wtPath, targetBranch], 60000, undefined, true)
   if (!added.ok) return { ok: false, conflict: false, message: `cannot create merge worktree: ${gitError(added)}` }
+  const generationId = await registerWorktreeGeneration(root, wtPath)
+  if (!generationId) {
+    await runGit(root, ['worktree', 'remove', '--force', wtPath], 30000)
+    return { ok: false, conflict: false, message: 'cannot mark merge worktree generation' }
+  }
+  try {
+    writeMetadata({
+      ownerTaskId: tmpName,
+      generationId,
+      repoDir: root,
+      path: wtPath,
+      branch: targetBranch,
+      baseSha: (await branchHead(root, targetBranch)) ?? '',
+      createdAt: Date.now(),
+      cleanupStatus: 'active'
+    })
+  } catch (error) {
+    const removed = await runGit(root, ['worktree', 'remove', '--force', wtPath], 30000)
+    const message = `cannot persist merge worktree ownership metadata: ${error instanceof Error ? error.message : String(error)}`
+    return { ok: false, conflict: false, message, ...(!removed.ok ? { cleanupWarning: `${tmpName}: ${gitError(removed)}` } : {}) }
+  }
   // finally 兜不住（目录被占用等）→ 留痕不静默：目录名+原因进返回值（调用方记时间线），
   // 同时 console.warn 留现场；尸体由下轮启动清扫的 crashLeftover 通道兜底回收。
   let cleanupWarning: string | undefined
@@ -1779,7 +2293,8 @@ export async function mergeBranchInto(
       outcome = { ok: true, conflict: false, message: '' }
     }
   } finally {
-    const removed = await runGit(repoDir, ['worktree', 'remove', '--force', wtPath], 30000)
+    const removed = await runGit(root, ['worktree', 'remove', '--force', wtPath], 30000)
+    if (removed.ok) removeMetadata(root, tmpName)
     if (!removed.ok && fs.existsSync(wtPath)) {
       cleanupWarning = `${tmpName}: ${gitError(removed)}`
       console.warn(`[git] merge 临时 worktree 清理失败（保留现场，待下轮清扫兜底）：${tmpName} — ${gitError(removed)}`)
@@ -1905,6 +2420,27 @@ export async function mergeIntoManagedWorktreeDetached(
   const wtPath = path.join(managedRoot(repoDir), tmpName)
   const added = await runGit(repoDir, ['worktree', 'add', '--detach', wtPath, head], 60000, undefined, true)
   if (!added.ok) return refuse(`cannot create detached merge worktree: ${gitError(added)}`)
+  const generationId = await registerWorktreeGeneration(repoDir, wtPath)
+  if (!generationId) {
+    const removed = await runGit(repoDir, ['worktree', 'remove', '--force', wtPath], 30000)
+    return { ...refuse('cannot mark detached merge worktree generation'), ...(!removed.ok ? { cleanupWarning: `${tmpName}: ${gitError(removed)}` } : {}) }
+  }
+  try {
+    writeMetadata({
+      ownerTaskId: tmpName,
+      generationId,
+      repoDir,
+      path: wtPath,
+      branch,
+      baseSha: head,
+      createdAt: Date.now(),
+      cleanupStatus: 'active'
+    })
+  } catch (error) {
+    const removed = await runGit(repoDir, ['worktree', 'remove', '--force', wtPath], 30000)
+    const message = `cannot persist detached merge worktree ownership metadata: ${error instanceof Error ? error.message : String(error)}`
+    return { ...refuse(message), ...(!removed.ok ? { cleanupWarning: `${tmpName}: ${gitError(removed)}` } : {}) }
+  }
   // finally 兜不住（目录被占用等）→ 留痕不静默：目录名+原因进返回值（调用方记时间线），
   // 同时 console.warn 留现场；尸体由下轮启动清扫的 crashLeftover 通道兜底回收。
   let cleanupWarning: string | undefined
@@ -1933,6 +2469,7 @@ export async function mergeIntoManagedWorktreeDetached(
     }
   } finally {
     const removed = await runGit(repoDir, ['worktree', 'remove', '--force', wtPath], 30000)
+    if (removed.ok) removeMetadata(repoDir, tmpName)
     if (!removed.ok && fs.existsSync(wtPath)) {
       cleanupWarning = `${tmpName}: ${gitError(removed)}`
       console.warn(`[git] merge 临时 worktree 清理失败（保留现场，待下轮清扫兜底）：${tmpName} — ${gitError(removed)}`)

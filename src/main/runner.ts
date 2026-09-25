@@ -9,7 +9,7 @@ import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnSta
 import { runDelegationLoop, parseContinueMerged, stripContinue, parseDelegates, parseConsultsMerged, stripConsults, parseInvestigatesMerged, stripInvestigates, ancestorBudget, sanitizeChildPrompt, MAX_DEPTH, MAX_TOTAL_ROUNDS, type AgentLike, type DelegateCall, type ConsultCall, type InvestigateCall, type IssueCommentLike } from './delegate'
 import { buildAgentPrompt, buildDelegationBlock, buildChildPrompt, CONTINUE_BLOCK, HANDOFF_CUE, HANDOFF_RECEIVE_CUE, HANDOFF_START_CONFIRMED_CUE, RETITLE_PROMPT } from './prompts'
 import { findHandoffSuccessor, prepareManualTaskStart, repeatsHandoffPhase } from './handoff'
-import { isGitRepo, createWorktree, currentBranch, setWorktreeOwner, reclaimWorktree, replayLeaderBaseline } from './git'
+import { probeGitRepository, probeCurrentBranch, createWorktree, setWorktreeOwner, reclaimWorktree, replayLeaderBaseline, type GitRepositoryProbeResult } from './git'
 
 /** API 预设（主进程 presets.ts 的 ApiPreset 的运行时子集，避免环依赖） */
 interface PresetLike {
@@ -1160,14 +1160,30 @@ export class TaskRunner {
     let workdir = task.workdir
     let unavailableReason: string | undefined
     let worktree: WorktreeInfo | undefined
+    const gitProbe = !target.sharedWorkspace && task.workdir ? await this.gitRepositoryProbe(task.workdir) : undefined
+    if (gitProbe && !active()) return null
+    if (gitProbe?.status === 'error') {
+      const why = `无法确认工作区是否可安全隔离，拒绝共享工作区派单——${gitProbe.reason}`
+      guardedNote(`⚠ 拒绝派给 ${call.to}：${why}`)
+      this.recordDelegateRejection(taskId, `to="${call.to}"：${why}`)
+      return null
+    }
     if (target.sharedWorkspace) {
       // 只读协作队员（审码/咨询类）显式声明共享工作区：零建树开销，直接用领队现场——
       // 与 meeting 调查模式同一约定；写代码的队员仍一律走隔离 worktree
       unavailableReason = 'Agent 标记共享工作区（只读协作）：直接使用领队工作区，不建 worktree'
-    } else if (task.workdir && (await this.gitUsable(task.workdir))) {
+    } else if (task.workdir && gitProbe?.status === 'repo') {
       if (!active()) return null
       // 基线分支显式传（缺省会从当前 HEAD 建——领队若中途动过分支，子任务基线会漂移）
-      const base = (await currentBranch(task.workdir)) || undefined
+      const branchProbe = await probeCurrentBranch(task.workdir)
+      if (!active()) return null
+      if (!branchProbe.ok) {
+        const why = `无法确认隔离 worktree 基线，拒绝派单——${branchProbe.reason}`
+        guardedNote(`⚠ 拒绝派给 ${call.to}：${why}`)
+        this.recordDelegateRejection(taskId, `to="${call.to}"：${why}`)
+        return null
+      }
+      const base = branchProbe.branch || undefined
       if (!active()) return null
       // worktree 创建与领队/其他子任务的 git 操作可能撞 index.lock：重试两次再放弃。
       // lastWtError 只记首次失败——后续重试撞上的是首次失败留下的残肢（branch already
@@ -1175,6 +1191,20 @@ export class TaskRunner {
       let wt: { path: string; metadata: WorktreeInfo } | null = null
       let lastWtError = ''
       const leaderDir = task.workdir
+      const reclaimCancelledWorktree = async (candidate: { path: string }, phase: string) => {
+        let reason = ''
+        try {
+          const cleanup = await reclaimWorktree(candidate.path, { force: true, deleteBranch: true, expectedOwnerTaskId: taskId })
+          if (!cleanup.ok) reason = `回收结果 ${cleanup.status}：${cleanup.reason ?? '未知原因'}`
+        } catch (error) {
+          reason = `回收异常：${error instanceof Error ? error.message : String(error)}`
+        }
+        if (!reason) return
+        const name = path.basename(candidate.path)
+        const detail = `取消后${phase} worktree 回收失败（${reason}）；现场保留并已记录`
+        this.store.noteWorktreeCleanupFailure(leaderDir, { name, reason: detail, ownerTaskId: taskId })
+        this.note(taskId, `⚠ ${detail}`)
+      }
       for (let attempt = 0; attempt < 3 && !wt; attempt++) {
         if (attempt) await new Promise((r) => setTimeout(r, 500))
         if (!active()) return null
@@ -1184,7 +1214,7 @@ export class TaskRunner {
           onCleanupResidue: (failure) => { this.store.noteWorktreeCleanupFailure(leaderDir, failure) }
         })
         if (!active()) {
-          if (wt) await reclaimWorktree(wt.path)
+          if (wt) await reclaimCancelledWorktree(wt, '建树后')
           return null
         }
       }
@@ -1193,18 +1223,32 @@ export class TaskRunner {
         worktree = wt.metadata
         // 子单基线回放（multica「工作区即状态」不变量）：领队的未提交增量此刻只存在于
         // 领队工作区，子单的隔离 worktree 看不见就等于白派单。在子 agent 拿到 cwd 之前，
-        // 用私有 index 把增量采集成一个提交回放进子 worktree（零副作用：不 stash/不 reset
-        // 用户区）。回放提交随即成为子分支起始提交（B2 防双算：digest/集成以它为基线，
+        // 用私有 index 把增量采集成一个提交回放进子 worktree（不修改领队工作区与用户 index；
+        // 失败后的子侧回滚需核验，拒单回收失败需留痕）。回放提交随即成为子分支起始提交（B2 防双算：digest/集成以它为基线，
         // 领队改动不算子产出）；无增量零开销跳过；采集/应用失败具名拒建单回灌原因。
         const replay = await replayLeaderBaseline(task.workdir, wt.path, wt.metadata.baseSha)
         if (!active()) {
-          await reclaimWorktree(wt.path, { force: true, deleteBranch: true })
+          await reclaimCancelledWorktree(wt, '基线回放后')
           return null
         }
         if (replay.status === 'refused') {
-          await reclaimWorktree(wt.path, { force: true, deleteBranch: true })
-          guardedNote(`⚠ 拒绝派给 ${call.to}：领队基线回放失败，拒建单——${replay.reason}`)
-          this.recordDelegateRejection(taskId, `to="${call.to}"：领队基线回放失败，拒建单——${replay.reason}`)
+          let cleanupFailure: string | undefined
+          try {
+            const reclaimed = await reclaimWorktree(wt.path, { force: true, deleteBranch: true, expectedOwnerTaskId: taskId })
+            if (!reclaimed.ok) cleanupFailure = `拒单后的 worktree 回收失败（${reclaimed.status}）：${reclaimed.reason ?? '未知原因'}`
+          } catch (error) {
+            cleanupFailure = `拒单后的 worktree 回收异常：${String(error)}`
+          }
+          if (cleanupFailure) {
+            this.store.noteWorktreeCleanupFailure(leaderDir, {
+              name: path.basename(wt.path),
+              reason: cleanupFailure,
+              ownerTaskId: taskId
+            })
+          }
+          const refusal = `领队基线回放失败，拒建单——${replay.reason}${cleanupFailure ? `；${cleanupFailure}，现场保留并已记录` : ''}`
+          guardedNote(`⚠ 拒绝派给 ${call.to}：${refusal}`)
+          this.recordDelegateRejection(taskId, `to="${call.to}"：${refusal}`)
           return null
         }
         if (replay.status === 'applied') {
@@ -1324,15 +1368,14 @@ export class TaskRunner {
     this.workerIndexReservations.set(taskId, next)
     return next
   }
-  /** git 仓库判定（带缓存：同 workdir 只探测一次） */
-  private gitUsableCache = new Map<string, boolean>()
-  private async gitUsable(dir: string): Promise<boolean> {
-    let usable = this.gitUsableCache.get(dir)
-    if (usable === undefined) {
-      usable = await isGitRepo(dir)
-      this.gitUsableCache.set(dir, usable)
-    }
-    return usable
+  /** Git 工作区探测（成功/非仓库带缓存；临时探测错误不缓存）。 */
+  private gitUsableCache = new Map<string, GitRepositoryProbeResult>()
+  private async gitRepositoryProbe(dir: string): Promise<GitRepositoryProbeResult> {
+    const cached = this.gitUsableCache.get(dir)
+    if (cached) return cached
+    const probe = await probeGitRepository(dir)
+    if (probe.status !== 'error') this.gitUsableCache.set(dir, probe)
+    return probe
   }
 
   /** agent 引用的 API 预设 → 会话连接覆盖（预设 + 模型须同时具备） */

@@ -329,6 +329,7 @@ export type WorktreeCleanupStatus = 'active' | 'removed' | 'retained' | 'failed'
 export interface WorktreeInfo {
   ownerTaskId: string
   poolProcess?: { pid: number; instance: string }
+  generationId?: string
   repoDir: string
   path: string
   branch: string
