@@ -8,6 +8,21 @@ import type { ExecutionOwner, TaskStatus } from '../shared/types'
 /** Versioned protocol shared by the Electron shell and the business sidecar. */
 export const SIDECAR_PROTOCOL_VERSION = 1 as const
 export const SIDECAR_STATE_FILE = 'sidecar-state.json'
+export const SIDECAR_DIAGNOSTIC_FILE = 'sidecar-diagnostics.json'
+
+export const SIDECAR_DIAGNOSTIC_LIMIT = 20
+export const SIDECAR_DIAGNOSTIC_LINE_LIMIT = 200
+export const SIDECAR_STDERR_TAIL_LINES = 4
+const SIDECAR_STDERR_PARTIAL_LIMIT = 800
+
+export type SidecarDiagnosticSource = 'spawn' | 'exit' | 'stderr'
+
+export interface SidecarDiagnostic {
+  at: number
+  source: SidecarDiagnosticSource
+  code?: string
+  message?: string
+}
 
 export type SidecarStatus = 'stopped' | 'starting' | 'ready' | 'degraded' | 'reconnecting' | 'stopping'
 
@@ -24,6 +39,7 @@ export interface SidecarState {
 export interface SidecarSnapshot extends SidecarState {
   url: string
   orphanRuns: string[]
+  diagnostics?: SidecarDiagnostic[]
 }
 
 export interface SidecarSyncState {
@@ -121,10 +137,12 @@ export class SidecarProtocolError extends Error {
 export class SidecarManager {
   private readonly options: Required<Pick<SidecarManagerOptions, 'userDataDir' | 'requestTimeoutMs'>> & SidecarManagerOptions
   private readonly stateFile: string
+  private readonly diagnosticFile: string
   private child: ChildProcess | null = null
   private ownsSidecar = false
   private state: SidecarState | null = null
   private orphanRuns: string[] = []
+  private readonly diagnostics: SidecarDiagnostic[] = []
   private startPromise: Promise<SidecarSnapshot> | null = null
   private status: SidecarStatus = 'stopped'
   private readonly listeners = new Set<StatusListener>()
@@ -136,6 +154,15 @@ export class SidecarManager {
     // sidecar, and the renderer retry immediately re-blocks the fresh instance.
     this.options = { requestTimeoutMs: 30_000, ...options }
     this.stateFile = path.join(options.userDataDir, SIDECAR_STATE_FILE)
+    this.diagnosticFile = path.join(options.userDataDir, SIDECAR_DIAGNOSTIC_FILE)
+    try {
+      const saved: unknown = JSON.parse(fs.readFileSync(this.diagnosticFile, 'utf8'))
+      if (Array.isArray(saved)) for (const entry of saved.slice(-SIDECAR_DIAGNOSTIC_LIMIT)) {
+        if (entry && Number.isFinite(entry.at) && (entry.source === 'spawn' || entry.source === 'exit')) {
+          this.diagnostics.push({ at: entry.at, source: entry.source, ...(typeof entry.code === 'string' && /^[a-zA-Z0-9:_-]{1,32}$/.test(entry.code) ? { code: entry.code } : {}) })
+        }
+      }
+    } catch {}
   }
 
   onStatus(listener: StatusListener) {
@@ -145,14 +172,14 @@ export class SidecarManager {
 
   get snapshot(): SidecarSnapshot | null {
     if (!this.state) return null
-    return { ...this.state, status: this.status, url: this.url(), orphanRuns: [...this.orphanRuns] }
+    return { ...this.state, status: this.status, url: this.url(), orphanRuns: [...this.orphanRuns], diagnostics: [...this.diagnostics] }
   }
 
   get currentStatus(): SidecarStatus { return this.status }
 
   private emit(orphanRuns: string[] = []) {
     if (!this.state) return
-    const snapshot: SidecarSnapshot = { ...this.state, status: this.status, url: this.url(), orphanRuns }
+    const snapshot: SidecarSnapshot = { ...this.state, status: this.status, url: this.url(), orphanRuns, diagnostics: [...this.diagnostics] }
     for (const listener of this.listeners) {
       try { listener(snapshot) } catch { /* status observers are isolated from lifecycle */ }
     }
@@ -211,7 +238,7 @@ export class SidecarManager {
       this.status = 'ready'
       const orphans = (handshake.orphanRuns ?? []).map((run) => String(run.runId ?? run.id ?? '')).filter(Boolean)
       this.orphanRuns = orphans
-      return { ...this.state, url: this.url(), orphanRuns: orphans }
+      return { ...this.state, url: this.url(), orphanRuns: orphans, diagnostics: [...this.diagnostics] }
     } catch (error) {
       // A reachable process speaking another protocol is an invariant
       // violation, not a stale port. Fail loudly so we do not silently attach
@@ -232,6 +259,61 @@ export class SidecarManager {
     if (!value || (value.schemaVersion !== undefined && value.schemaVersion !== 1) || version !== SIDECAR_PROTOCOL_VERSION || !Number.isInteger(value.port) || value.port! <= 0 || typeof token !== 'string' || !token) return null
     value.token = token
     return value
+  }
+
+  private recordDiagnostic(entry: SidecarDiagnostic) {
+    this.diagnostics.push(entry)
+    if (this.diagnostics.length > SIDECAR_DIAGNOSTIC_LIMIT) this.diagnostics.splice(0, this.diagnostics.length - SIDECAR_DIAGNOSTIC_LIMIT)
+    if (entry.source === 'stderr') return
+    const safe = this.diagnostics.filter((item) => item.source !== 'stderr').map((item) => ({
+      at: item.at,
+      source: item.source,
+      ...(item.code && /^[a-zA-Z0-9:_-]{1,32}$/.test(item.code) ? { code: item.code } : {})
+    }))
+    try { writeJson(this.diagnosticFile, safe) } catch {}
+  }
+
+  private attachDiagnostics(child: ChildProcess, token: string, onGone: (evidence: string) => void) {
+    const clamp = (line: string) => {
+      const redacted = token ? line.split(token).join('[redacted]') : line
+      return redacted.length > SIDECAR_DIAGNOSTIC_LINE_LIMIT ? `${redacted.slice(0, SIDECAR_DIAGNOSTIC_LINE_LIMIT - 1)}…` : redacted
+    }
+    const note = (source: SidecarDiagnosticSource, code?: string, message?: string) =>
+      this.recordDiagnostic({ at: Date.now(), source, ...(code ? { code } : {}), ...(message ? { message } : {}) })
+    child.stdout?.on('data', () => {})
+    let tail: string[] = []
+    let partial = ''
+    const stderr = child.stderr
+    if (stderr) {
+      stderr.setEncoding('utf8')
+      stderr.on('data', (chunk: string) => {
+        const lines = (partial + chunk).split(/\r?\n/)
+        partial = lines.pop() ?? ''
+        if (partial.length > SIDECAR_STDERR_PARTIAL_LIMIT) partial = partial.slice(-SIDECAR_STDERR_PARTIAL_LIMIT)
+        for (const line of lines) {
+          if (!line.trim()) continue
+          tail.push(clamp(line))
+          if (tail.length > SIDECAR_STDERR_TAIL_LINES) tail.splice(0, tail.length - SIDECAR_STDERR_TAIL_LINES)
+        }
+      })
+    }
+    let crash = false
+    child.once('error', (error) => {
+      const evidence = `spawn failed: ${clamp(error instanceof Error ? error.message : String(error))}`
+      onGone(evidence)
+      if (this.status !== 'stopping') note('spawn', (error as NodeJS.ErrnoException).code ?? 'spawn_error', evidence)
+    })
+    child.once('exit', (code, signal) => {
+      const evidence = signal ? `killed by signal ${signal}` : `exited with code ${code ?? 'unknown'}`
+      onGone(evidence)
+      crash = this.status !== 'stopping'
+      if (crash) note('exit', signal ? `signal:${signal}` : `code:${code ?? 'unknown'}`)
+    })
+    child.once('close', () => {
+      if (crash) for (const line of tail) note('stderr', undefined, line)
+      tail = []
+      partial = ''
+    })
   }
 
   async start(): Promise<SidecarSnapshot> {
@@ -269,10 +351,8 @@ export class SidecarManager {
     const child = launcher(node, [entrypoint], { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
     this.child = child
     this.ownsSidecar = true
-    // Drain child output so a verbose provider cannot block its own IPC loop
-    // on a full inherited pipe. Diagnostics stay in the sidecar log stream.
-    child.stdout?.on('data', () => {})
-    child.stderr?.on('data', () => {})
+    let bootFailure: string | null = null
+    this.attachDiagnostics(child, token, (evidence) => { bootFailure = evidence })
     child.once('exit', () => {
       if (this.child === child) {
         this.child = null
@@ -289,6 +369,7 @@ export class SidecarManager {
     writeJson(this.stateFile, this.persistedState())
     let lastError = ''
     for (let attempt = 0; attempt < 50; attempt++) {
+      if (bootFailure) break
       try {
         const ready = await this.probe(port, token)
         if (ready) {
@@ -305,7 +386,8 @@ export class SidecarManager {
     if (failedChild && failedChild.exitCode === null) {
       try { failedChild.kill() } catch {}
     }
-    throw new SidecarProtocolError(`Sidecar failed to start${lastError ? `: ${lastError}` : ''}`, 503)
+    const detail = [bootFailure, lastError].filter(Boolean).join('; ')
+    throw new SidecarProtocolError(`Sidecar failed to start${detail ? `: ${detail}` : ''}`, 503)
   }
 
   private persistedState() {
@@ -325,6 +407,16 @@ export class SidecarManager {
   }
 
   async rpc<T = unknown>(method: string, params?: unknown): Promise<T> {
+    if ((method === 'tasks.create' || method === 'issues.create') && params && typeof params === 'object' && !Array.isArray(params)) {
+      const request = params as Record<string, unknown>
+      const input = request.input
+      if (input && typeof input === 'object' && !Array.isArray(input)) {
+        const creation = input as Record<string, unknown>
+        if (![creation.dedupeKey, creation.requestId, creation.idempotencyKey].some((value) => typeof value === 'string' && value.trim())) {
+          params = { ...request, input: { ...creation, requestId: `sidecar:${crypto.randomUUID()}` } }
+        }
+      }
+    }
     if (!this.state || this.status !== 'ready') {
       return this.enqueueRpc<T>(method, params)
     }
@@ -403,7 +495,7 @@ export class SidecarManager {
     await this.flushRpcQueue()
     this.setStatus('ready')
     this.emit(this.orphanRuns)
-    return { ...snapshot, status: 'ready', orphanRuns: [...this.orphanRuns] }
+    return { ...snapshot, status: 'ready', orphanRuns: [...this.orphanRuns], diagnostics: [...this.diagnostics] }
   }
 
   async recoverOrphans() {
@@ -439,7 +531,7 @@ export class SidecarManager {
     this.rejectRpcQueue(new SidecarProtocolError('Sidecar stopped', 503))
     this.setStatus('stopped')
     for (const listener of this.listeners) {
-      try { listener({ ...previous, status: 'stopped', url: '', orphanRuns: [] }) } catch {}
+      try { listener({ ...previous, status: 'stopped', url: '', orphanRuns: [], diagnostics: [...this.diagnostics] }) } catch {}
     }
   }
 }

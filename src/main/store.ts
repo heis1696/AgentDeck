@@ -1,7 +1,7 @@
 // 文件存储：userData/tasks.json（索引）+ userData/tasks/<id>/events.jsonl（日志流）
 import fs from 'node:fs'
 import path from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { isTaskEventDurable, isTaskStatus, type Task, type TaskEvent, type IntegrationInfo, type ExecutionOwner, type TaskStatus, type TaskGitOperation } from '../shared/types'
 import { executionRecordFromTask } from '../shared/taskflow'
 import { EventLog } from './event-log'
@@ -31,7 +31,8 @@ const TASK_INDEX_FIELDS = [
   'suppressIssue', 'runId', 'executionOwner', 'gitOperation', 'goalId', 'phaseIndex', 'parentTaskId', 'workerIndex', 'integration', 'status',
   'createdAt', 'startedAt', 'endedAt', 'result', 'error', 'failure', 'attempt',
   'roundsUsed', 'handoff', 'continuesFrom', 'parked', 'manualStartConfirmedAt', 'backgroundRunning', 'titleAuto', 'sessionId',
-  'gitDiff', 'gitStat', 'gitSnapshot', 'usage', 'eventCount', 'unavailableReason', 'worktree', 'workVersion', 'dedupeKey'
+  'gitDiff', 'gitStat', 'gitSnapshot', 'usage', 'eventCount', 'unavailableReason', 'worktree', 'workVersion', 'dedupeKey',
+  'delegateSourceRunId', 'delegateDeliveredAt', 'delegateRejections'
 ] as const
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -79,6 +80,15 @@ export function migrateTaskRecord(raw: unknown, sourceVersion = 0, now = Date.no
   if (typeof out.backend !== 'string' || !out.backend) out.backend = 'zcode'
   if (!isTaskStatus(out.status)) out.status = 'queued'
   if (typeof out.manualStartConfirmedAt !== 'number' || !Number.isFinite(out.manualStartConfirmedAt) || out.manualStartConfirmedAt <= 0) delete out.manualStartConfirmedAt
+  if (typeof out.delegateSourceRunId !== 'string' || !out.delegateSourceRunId) delete out.delegateSourceRunId
+  if (typeof out.delegateDeliveredAt !== 'number' || !Number.isFinite(out.delegateDeliveredAt) || out.delegateDeliveredAt <= 0) delete out.delegateDeliveredAt
+  if (Array.isArray(out.delegateRejections)) {
+    out.delegateRejections = out.delegateRejections.filter((entry): entry is { runId: string; reason: string; key?: string; deliveredAt?: number } =>
+      isRecord(entry) && typeof entry.runId === 'string' && !!entry.runId && typeof entry.reason === 'string' && !!entry.reason)
+      .map((entry) => ({ runId: entry.runId, reason: entry.reason,
+        ...(typeof entry.key === 'string' && entry.key ? { key: entry.key } : {}),
+        ...(typeof entry.deliveredAt === 'number' && Number.isFinite(entry.deliveredAt) && entry.deliveredAt > 0 ? { deliveredAt: entry.deliveredAt } : {}) }))
+  } else delete out.delegateRejections
 
   // A running task cannot survive an application restart. This recovery is
   // deliberately idempotent: the persisted result is terminal on next load.
@@ -142,7 +152,7 @@ export function migrateTaskIndex(raw: unknown, now = Date.now(), options: { reco
 export type TaskCreateRecord = Pick<Task, 'title' | 'prompt' | 'workdir' | 'backend'> & Partial<Pick<Task,
   'parentTaskId' | 'workerIndex' | 'integration' | 'agentId' | 'handoff' | 'continuesFrom' | 'parked' |
   'backgroundRunning' | 'suppressIssue' | 'trigger' | 'issueId' | 'goalId' | 'phaseIndex' | 'titleAuto' |
-  'unavailableReason' | 'worktree' | 'workVersion' | 'dedupeKey'>>
+  'unavailableReason' | 'worktree' | 'workVersion' | 'dedupeKey' | 'delegateSourceRunId'>>
 
 export interface TaskExpectation {
   status?: TaskStatus | readonly TaskStatus[]
@@ -205,6 +215,7 @@ export class TaskStore {
     this.userDataDir = userDataDir
     this.dir = path.join(userDataDir, 'tasks')
     const document = this.readDocument()
+    this.recoverPendingEventBatches(document.tasks)
     if (document.pendingTaskSnapshots?.length || document.pendingTaskDeletes?.length) this.scheduleFlush()
     if (options.recoverRunning === true) this.restartInterrupted = this.recoverDeadRuns('failed')
   }
@@ -223,6 +234,71 @@ export class TaskStore {
       this.logs.set(id, log)
     }
     return log
+  }
+
+  private pendingEventFile(id: string, turnId: string) {
+    const name = createHash('sha256').update(turnId).digest('hex')
+    return path.join(this.taskDir(id), 'pending-events', `${name}.json`)
+  }
+
+  stagePendingEvents(id: string, turnId: string, runId: string, events: readonly Omit<TaskEvent, 'seq'>[], expected: TaskExpectation, openedAt = Date.now()): boolean {
+    const durable = events.filter(isTaskEventDurable)
+    if (!durable.length) return true
+    return this.transaction((tx) => {
+      const task = tx.get(id)
+      if (!task || !matchesTask(task, expected)) return false
+      atomicWriteJson(this.pendingEventFile(id, turnId), { version: 1, taskId: id, runId, turnId, openedAt, events: durable })
+      return true
+    })
+  }
+
+  clearPendingEvents(id: string, turnId: string): void {
+    try { fs.unlinkSync(this.pendingEventFile(id, turnId)) }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+  }
+
+  private recoverPendingEventBatches(tasks: readonly Task[]): void {
+    for (const task of tasks) {
+      const directory = path.join(this.taskDir(task.id), 'pending-events')
+      let files: string[]
+      try { files = fs.readdirSync(directory).filter((name) => /^[a-f0-9]{64}\.json$/.test(name)) }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') console.error('[TaskStore] Pending event directory unreadable', task.id, error)
+        continue
+      }
+      const batches: Array<{ file: string; turnId: string; openedAt: number; events: Array<Omit<TaskEvent, 'seq'>> }> = []
+      let invalid = false
+      for (const file of files) {
+        try {
+          const pending: unknown = readJsonFile(path.join(directory, file), undefined)
+          if (!isRecord(pending) || pending.version !== 1 || pending.taskId !== task.id || typeof pending.runId !== 'string'
+            || !pending.runId || typeof pending.turnId !== 'string' || !pending.turnId
+            || createHash('sha256').update(pending.turnId).digest('hex') + '.json' !== file
+            || (pending.openedAt !== undefined && (!Number.isFinite(pending.openedAt) || Number(pending.openedAt) < 0))
+            || !Array.isArray(pending.events) || !pending.events.length || !pending.events.every((event) => isRecord(event)
+              && !('seq' in event) && ((typeof event.id === 'string' && !!event.id) || (typeof event.eventId === 'string' && !!event.eventId))
+              && Number.isFinite(event.ts) && typeof event.kind === 'string' && !!event.kind
+              && isTaskEventDurable(event as Omit<TaskEvent, 'seq'>))) throw new Error('Invalid pending event batch')
+          const events = pending.events as Array<Omit<TaskEvent, 'seq'>>
+          batches.push({ file, turnId: pending.turnId, openedAt: typeof pending.openedAt === 'number' ? pending.openedAt : events[0].ts, events })
+        } catch (error) {
+          console.error('[TaskStore] Pending event replay failed', task.id, file, error)
+          invalid = true
+        }
+      }
+      if (invalid) continue
+      batches.sort((left, right) => left.openedAt - right.openedAt || left.file.localeCompare(right.file))
+      for (const batch of batches) {
+        try {
+          const committed = this.appendEvents(task.id, batch.events)
+          if (committed.length !== batch.events.length) throw new Error('Pending event replay incomplete')
+          this.clearPendingEvents(task.id, batch.turnId)
+        } catch (error) {
+          console.error('[TaskStore] Pending event replay failed', task.id, batch.file, error)
+          break
+        }
+      }
+    }
   }
 
   private readDocument(deriveCounts = true): TaskIndexDocument {
@@ -320,7 +396,7 @@ export class TaskStore {
           }
           const fields = ['parentTaskId', 'workerIndex', 'integration', 'agentId', 'handoff', 'continuesFrom', 'parked',
             'backgroundRunning', 'suppressIssue', 'trigger', 'issueId', 'goalId', 'phaseIndex', 'titleAuto',
-            'unavailableReason', 'worktree', 'workVersion', 'dedupeKey'] as const
+            'unavailableReason', 'worktree', 'workVersion', 'dedupeKey', 'delegateSourceRunId'] as const
           for (const field of fields) {
             const value = input[field]
             if (value || typeof value === 'number') Object.assign(task, { [field]: value })

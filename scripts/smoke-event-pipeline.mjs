@@ -100,6 +100,29 @@ const mergeAnonymousText = (previous, next) => previous.kind === 'text' && next.
   assert.equal(await batcher.close(), true)
 }
 
+{
+  const committed = []
+  let failed = true
+  const batcher = new BoundedEventBatcher({
+    maxDelayMs: 50,
+    maxItems: 1,
+    maxBytes: 1024,
+    sizeOf: eventBytes,
+    onPending: () => false,
+    onFlush: (events) => {
+      if (failed) return false
+      committed.push(...events)
+      return true
+    }
+  })
+  assert.equal(batcher.add({ ts: 1, kind: 'text', text: 'retained' }), true)
+  assert.equal(batcher.add({ ts: 2, kind: 'text', text: 'rejected' }), false)
+  assert.equal(batcher.hasPending, true)
+  failed = false
+  assert.equal(await batcher.close(), true)
+  assert.deepEqual(committed.map((event) => event.text), ['retained'])
+}
+
 // A write that reached disk before an uncertain fsync error is idempotent on
 // retry because the batch retains stable event identities.
 {
@@ -245,6 +268,17 @@ const runner = new TaskRunner(
   { send: (channel, payload) => { if (channel === 'task:event') ipcEvents.push(payload) } }
 )
 
+const launchFault = store.create({ title: 'launch fault', prompt: 'launch fault', workdir: '', backend: 'stream' })
+const realAppendEvent = store.appendEvent.bind(store)
+store.appendEvent = (taskId, event, expected) => {
+  if (taskId === launchFault.id && event.kind === 'user') throw new Error('injected event write failure')
+  return realAppendEvent(taskId, event, expected)
+}
+runner.enqueue(launchFault)
+await waitFor(() => store.get(launchFault.id)?.status === 'failed', 'claimed launch with a failed user-event append')
+assert.match(store.get(launchFault.id).error, /injected event write failure/)
+store.appendEvent = realAppendEvent
+
 const streamTask = store.create({ title: 'stream', prompt: 'stream', workdir: '', backend: 'stream' })
 const stableTask = store.create({ title: 'stable', prompt: 'stable', workdir: '', backend: 'stable' })
 runner.enqueue(streamTask)
@@ -265,6 +299,15 @@ assert.deepEqual(stableHistory.filter((event) => event.kind === 'text').map((eve
 const stableCount = stableHistory.length
 assert.equal(store.appendEvent(stableTask.id, { eventId: 'stable-b', ts: Date.now(), kind: 'text', text: 'B' })?.eventId, 'stable-b')
 assert.equal(store.readEvents(stableTask.id).length, stableCount, 'producer event identity remains idempotent')
+store.appendEvent = (taskId, event, expected) => {
+  if (taskId === stableTask.id && event.kind === 'user') throw new Error('injected follow-up event failure')
+  return realAppendEvent(taskId, event, expected)
+}
+const failedFollowUp = await runner.followUp(stableTask.id, 'follow up')
+assert.equal(failedFollowUp.ok, false)
+assert.equal(store.get(stableTask.id)?.status, 'failed')
+assert.equal(runner.sessions.has(stableTask.id), false)
+store.appendEvent = realAppendEvent
 
 let merged = []
 const recoveredStream = store.readEvents(streamTask.id)
@@ -284,6 +327,17 @@ assert.equal(store.readEvents(blockedTask.id).some((event) => event.kind === 'fi
 blockWrites = false
 await waitFor(() => store.get(blockedTask.id)?.status === 'done', 'terminal drain recovery')
 assert.equal(store.readEvents(blockedTask.id).some((event) => event.kind === 'final'), true)
+
+const cancellingTerminal = store.create({ title: 'cancel terminal', prompt: 'cancel terminal', workdir: '', backend: 'blocked' })
+blockedTaskId = cancellingTerminal.id
+blockWrites = true
+runner.enqueue(cancellingTerminal)
+await waitFor(() => (appendCalls.get(cancellingTerminal.id) ?? 0) >= 1, 'terminal drain before cancellation')
+const cancellation = await runner.cancel(cancellingTerminal.id)
+assert.equal(cancellation.ok, true)
+assert.match(cancellation.warning, /恢复副本/)
+assert.equal(store.get(cancellingTerminal.id)?.status, 'cancelled')
+blockWrites = false
 
 await waitFor(() => runner.eventBatchers.size === 0, 'completed batcher disposal')
 const cancelledTask = store.create({ title: 'cancel', prompt: 'cancel', workdir: '', backend: 'hang' })
@@ -307,6 +361,85 @@ store.flush()
 const recovered = new TaskStore(path.join(tmp, 'runner'))
 assert.equal(recovered.get(streamTask.id)?.status, 'done')
 assert.equal(recovered.readEvents(streamTask.id).filter((event) => event.kind === 'text').map((event) => event.text).join(''), streamText)
+
+const backupDir = path.join(tmp, 'failed-backup')
+const backupStore = new TaskStore(backupDir)
+let failingTaskId = ''
+const appendToBackupStore = backupStore.appendEvents.bind(backupStore)
+backupStore.appendEvents = (id, events, expected) => id === failingTaskId ? [] : appendToBackupStore(id, events, expected)
+const backupBackend = terminalBackend('backup', (events, turn) => {
+  events.onEvent({ ts: Date.now(), kind: 'text', text: 'recover me' }, turn)
+  events.onEvent({ ts: Date.now(), kind: 'final', text: 'recover me' }, turn)
+  events.onTurnEnd({ ok: true, response: 'recover me' }, turn)
+})
+const backupRunner = new TaskRunner(backupStore, new Map([['backup', backupBackend]]), () => ({ concurrency: 1, mode: 'yolo', notify: false }))
+const failedBackup = backupStore.create({ title: 'failed backup', prompt: 'run', workdir: '', backend: 'backup' })
+failingTaskId = failedBackup.id
+backupRunner.enqueue(failedBackup)
+await waitFor(() => backupStore.get(failedBackup.id)?.status === 'failed', 'failed event flush terminates instead of hanging', 10_000)
+assert.ok((backupStore.get(failedBackup.id)?.error ?? '').length > 0)
+const recoveryPath = path.join(backupDir, 'tasks', failedBackup.id, 'pending-events')
+assert.equal(fs.readdirSync(recoveryPath).filter((entry) => entry.endsWith('.json')).length, 1)
+await backupRunner.shutdown()
+const replayed = new TaskStore(backupDir)
+assert.equal(replayed.readEvents(failedBackup.id).filter((event) => event.kind === 'text').map((event) => event.text).join(''), 'recover me')
+assert.equal(replayed.readEvents(failedBackup.id).filter((event) => event.kind === 'final').length, 1)
+assert.equal(new TaskStore(backupDir).readEvents(failedBackup.id).filter((event) => event.kind === 'text').length, 1)
+assert.equal(fs.readdirSync(recoveryPath).filter((entry) => entry.endsWith('.json')).length, 0)
+
+const orderedTask = replayed.create({ title: 'ordered backup', prompt: 'run', workdir: '', backend: 'backup' })
+const orderedEvents = [
+  { ts: 1000, kind: 'text', text: 'first', eventId: 'ordered-first' },
+  { ts: 2000, kind: 'text', text: 'second', eventId: 'ordered-second' }
+]
+assert.equal(replayed.stagePendingEvents(orderedTask.id, 'ordered-later', 'ordered-run', [orderedEvents[1]], { status: 'queued' }, 2000), true)
+assert.equal(replayed.stagePendingEvents(orderedTask.id, 'ordered-earlier', 'ordered-run', [orderedEvents[0]], { status: 'queued' }, 1000), true)
+const restoredOrder = new TaskStore(backupDir)
+assert.deepEqual(restoredOrder.readEvents(orderedTask.id).filter((event) => event.kind === 'text').map((event) => event.text), ['first', 'second'])
+
+const noBackupDir = path.join(tmp, 'unwritable-backup')
+const noBackupStore = new TaskStore(noBackupDir)
+const noBackupTask = noBackupStore.create({ title: 'both writes fail', prompt: 'run', workdir: '', backend: 'backup' })
+noBackupStore.stagePendingEvents = () => false
+noBackupStore.appendEvents = () => []
+const noBackupRunner = new TaskRunner(noBackupStore, new Map([['backup', backupBackend]]), () => ({ concurrency: 1, mode: 'yolo', notify: false }))
+noBackupRunner.enqueue(noBackupTask)
+await waitFor(() => noBackupStore.get(noBackupTask.id)?.status === 'failed', 'unrecoverable event writes fail explicitly', 10_000)
+assert.match(noBackupStore.get(noBackupTask.id)?.error, /恢复副本均写入失败/)
+await noBackupRunner.shutdown()
+
+const deletedBackup = replayed.create({ title: 'delete backup', prompt: 'run', workdir: '', backend: 'backup' })
+const deletedEvent = { ts: Date.now(), kind: 'text', text: 'delete me', eventId: 'pending-delete' }
+assert.equal(replayed.stagePendingEvents(deletedBackup.id, 'deleted-turn', 'deleted-run', [deletedEvent], { status: 'queued' }), true)
+assert.equal(fs.readdirSync(path.join(backupDir, 'tasks', deletedBackup.id, 'pending-events')).length, 1)
+replayed.delete(deletedBackup.id)
+assert.equal(fs.existsSync(path.join(backupDir, 'tasks', deletedBackup.id)), false)
+assert.equal(new TaskStore(backupDir).get(deletedBackup.id), undefined)
+
+for (const action of ['cancel', 'shutdown']) {
+  const directory = path.join(tmp, `recovery-${action}`)
+  const faultStore = new TaskStore(directory)
+  const faultTask = faultStore.create({ title: action, prompt: 'run', workdir: '', backend: 'hang' })
+  const normalAppend = faultStore.appendEvents.bind(faultStore)
+  faultStore.appendEvents = (id, events, expected) => id === faultTask.id ? [] : normalAppend(id, events, expected)
+  const faultRunner = new TaskRunner(faultStore, new Map([['hang', backends.get('hang')]]), () => ({ concurrency: 1, mode: 'yolo', notify: false }))
+  faultRunner.enqueue(faultTask)
+  const pendingDirectory = path.join(directory, 'tasks', faultTask.id, 'pending-events')
+  await waitFor(() => fs.existsSync(pendingDirectory) && fs.readdirSync(pendingDirectory).some((entry) => entry.endsWith('.json')), `${action} backup staged`)
+  const start = Date.now()
+  if (action === 'cancel') {
+    const stopped = await faultRunner.cancel(faultTask.id)
+    assert.equal(stopped.ok, true)
+    assert.match(stopped.warning, /恢复副本/)
+    assert.equal(faultStore.get(faultTask.id)?.status, 'cancelled')
+    assert.ok(faultStore.get(faultTask.id)?.error)
+    await faultRunner.shutdown()
+  } else await faultRunner.shutdown()
+  assert.ok(Date.now() - start < 8_000, `${action} does not wait forever for the event log`)
+  const replay = new TaskStore(directory, { recoverRunning: true })
+  assert.equal(replay.readEvents(faultTask.id).filter((event) => event.kind === 'text').map((event) => event.text).join(''), 'hanging')
+  assert.equal(replay.get(faultTask.id)?.status, action === 'cancel' ? 'cancelled' : 'running')
+}
 
 console.log('EVENT PIPELINE SMOKE PASSED')
 process.exit(0)

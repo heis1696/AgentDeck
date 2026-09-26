@@ -307,6 +307,7 @@ export interface AnalyticsSummary {
 export interface FailureInfo {
   code:
     | 'cli_missing' | 'protocol_config' | 'provider_auth' | 'provider_quota' | 'rate_limit'
+    | 'provider_model_missing' | 'provider_channel_unavailable' | 'provider_server_error'
     | 'output_limit' | 'context_overflow' | 'timeout' | 'sandbox' | 'process_crash' | 'unknown'
   title: string
   hint: string
@@ -450,6 +451,10 @@ export interface Task {
   workVersion?: string
   /** Durable idempotency key for replayed creation requests. */
   dedupeKey?: string
+  delegateSourceRunId?: string
+  delegateDeliveredAt?: number
+  /** Dispatch identity `${to}\n${prompt}`; legacy records without a key dedupe by reason. */
+  delegateRejections?: Array<{ runId: string; reason: string; key?: string; deliveredAt?: number }>
   /** 完成时抓取的 git 改动 */
   gitDiff?: string
   gitStat?: string

@@ -6,7 +6,7 @@ import path from 'node:path'
 import { sameExecutionOwner, type TaskExpectation, type TaskStore } from './store'
 import { createExecutionOwner } from './persistence'
 import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnStamp, PermissionRequest, BackendTurnResult } from './backends/types'
-import { runDelegationLoop, parseContinueMerged, stripContinue, parseDelegates, parseConsultsMerged, stripConsults, parseInvestigatesMerged, stripInvestigates, ancestorBudget, sanitizeChildPrompt, MAX_DEPTH, MAX_TOTAL_ROUNDS, type AgentLike, type DelegateCall, type ConsultCall, type InvestigateCall, type IssueCommentLike } from './delegate'
+import { runDelegationLoop, parseContinueMerged, stripContinue, parseDelegates, parseConsultsMerged, stripConsults, parseInvestigatesMerged, stripInvestigates, ancestorBudget, sanitizeChildPrompt, escapeProtocolLiterals, MAX_DEPTH, MAX_TOTAL_ROUNDS, DELEGATE_REJECT_EXCERPT_MARK, type AgentLike, type DelegateCall, type ConsultCall, type InvestigateCall, type IssueCommentLike } from './delegate'
 import { buildAgentPrompt, buildDelegationBlock, buildChildPrompt, CONTINUE_BLOCK, HANDOFF_CUE, HANDOFF_RECEIVE_CUE, HANDOFF_START_CONFIRMED_CUE, RETITLE_PROMPT } from './prompts'
 import { findHandoffSuccessor, prepareManualTaskStart, repeatsHandoffPhase } from './handoff'
 import { probeGitRepository, probeCurrentBranch, createWorktree, setWorktreeOwner, reclaimWorktree, replayLeaderBaseline, type GitRepositoryProbeResult } from './git'
@@ -56,6 +56,8 @@ export interface ChildTaskCreator {
     backend: string
     agentId?: string
     parentTaskId: string
+    dedupeKey?: string
+    delegateSourceRunId?: string
     workerIndex: number
     unavailableReason?: string
     worktree?: WorktreeInfo
@@ -305,12 +307,14 @@ export class TaskRunner {
   private turnLifecycles = new Map<string, TurnLifecycle>()
   /** Pending provider batches are flushed at turn and process lifecycle boundaries. */
   private eventBatchers = new Map<BoundedEventBatcher<RunnerEvent>, string>()
+  private shuttingDown = false
+  private cancellationDrains = new Map<string, number>()
   private readonly onTaskChanged?: (task: Task) => void
   /** 流式派单嗅探：领队会话期间逐条 text 事件累计扫描，闭合一个 <delegate> 即提前建单入队。
    *  回灌仍只在回合末（委派循环）发生，不会打断领队正在进行的主运行。 */
   private earlySpawns = new Map<string, { buffer: string; scanOffset: number; closeScanOffset: number; spawned: Map<string, { call: DelegateCall; childId: string }>; seenKeys: Set<string>; pending: Promise<unknown>[] }>()
   /** 被拒派单的原因（按任务累积）：委派循环每轮取走并回灌给领队，让它当场改派而不是干等不存在的回灌 */
-  private delegateRejections = new Map<string, string[]>()
+  private delegateRejections = new Map<string, Array<{ runId?: string; reason: string; key?: string }>>()
   private workerIndexReservations = new Map<string, number>()
   /** Consecutive tool-call signatures used by the doom-loop approval guard. */
   private toolWindows = new Map<string, { key: string; count: number; requested: boolean }>()
@@ -385,11 +389,12 @@ export class TaskRunner {
     this.ports.send('task:event', { taskId, event: e })
   }
 
-  private async closeEventBatches(taskId?: string): Promise<boolean> {
+  private async closeEventBatches(taskId?: string, timeoutMs = 5_000): Promise<boolean> {
     const selected = [...this.eventBatchers].filter(([, owner]) => taskId === undefined || owner === taskId)
     const committed = await Promise.all(selected.map(async ([batcher]) => {
-      const ok = await batcher.close()
-      if (ok) this.eventBatchers.delete(batcher)
+      const ok = await batcher.close(timeoutMs)
+      if (!ok) batcher.dispose()
+      this.eventBatchers.delete(batcher)
       return ok
     }))
     return committed.every(Boolean)
@@ -444,6 +449,20 @@ export class TaskRunner {
     }
     let eventSequence = 0
     let terminalStarted = false
+    let persistenceProblem = ''
+    const turnOpenedAt = Date.now()
+    const stagePending = (events: readonly RunnerEvent[]) => {
+      for (const event of events) {
+        if (!hasStableEventIdentity(event)) event.eventId = `agentdeck:batch:${stamp.id}:${++eventSequence}`
+      }
+      try {
+        if (this.store.stagePendingEvents(taskId, stamp.id, claim.runId, events, runCondition(claim), turnOpenedAt)) return true
+      } catch (error) {
+        console.error('[TaskRunner] Pending event backup failed', taskId, error)
+      }
+      if (!persistenceProblem.includes('日志与恢复副本均写入失败')) persistenceProblem = '事件恢复副本无法写入；本轮记录可能不完整'
+      return false
+    }
     let batcher!: BoundedEventBatcher<RunnerEvent>
     batcher = new BoundedEventBatcher<RunnerEvent>({
       // Ten UI updates per second remain visually responsive while keeping
@@ -452,6 +471,8 @@ export class TaskRunner {
       maxRetryDelayMs: 5_000,
       maxItems: 64,
       maxBytes: 128 * 1024,
+      maxPendingBytes: 1024 * 1024,
+      onPending: stagePending,
       sizeOf: eventSize,
       canMerge: (previous, next) => isStreamDeltaEvent(previous)
         && isStreamDeltaEvent(next)
@@ -465,25 +486,25 @@ export class TaskRunner {
         // The conditional batch append below is the durable ownership gate.
         if (!events.length) return true
         if (!active(events[0].kind)) return true
-        this.touchWatchdog(taskId)
-        // These objects stay queued after a failed commit. Assigning identity
-        // once makes partial-write and uncertain-fsync retries idempotent.
-        for (const event of events) {
-          if (!hasStableEventIdentity(event)) {
-            event.eventId = `agentdeck:batch:${stamp.id}:${++eventSequence}`
-          }
-        }
+        const protectedEvents = stagePending(events)
         let full: TaskEvent[]
         try {
           full = this.store.appendEvents(taskId, events, runCondition(claim))
-        } catch {
+        } catch (error) {
+          persistenceProblem = protectedEvents ? '事件日志写入失败，事件已保存在本地恢复副本' : '事件日志与恢复副本均写入失败，本轮记录可能丢失'
+          console.error('[TaskRunner] Event log write failed', taskId, error)
           return false
         }
         if (full.length !== events.length) {
           // A replaced Run must discard its stale batch. A still-current Run
           // retains the same identified events and retries with backoff.
-          return !durableActive(events[0].kind)
+          if (!durableActive(events[0].kind)) return true
+          persistenceProblem = protectedEvents ? '事件日志未完整写入，事件已保存在本地恢复副本' : '事件日志与恢复副本均写入失败，本轮记录可能丢失'
+          return false
         }
+        persistenceProblem = ''
+        try { this.store.clearPendingEvents(taskId, stamp.id) }
+        catch (error) { console.error('[TaskRunner] Pending event cleanup failed', taskId, error) }
         ownershipCheckedAt = Date.now()
         ownershipValid = true
         for (let index = 0; index < events.length; index++) {
@@ -526,7 +547,15 @@ export class TaskRunner {
         // The append, side effects, and renderer broadcast happen once per
         // bounded batch. A final event remains in the same ordered queue and
         // is flushed synchronously by onTurnEnd below.
-        batcher.add(e)
+        if (!batcher.add(e) && !this.shuttingDown && !terminalStarted && durableActive(e.kind)) {
+          terminalStarted = true
+          batcher.dispose()
+          this.eventBatchers.delete(batcher)
+          const failure: BackendTurnResult = { ok: false, response: '', error: persistenceProblem || '事件恢复副本写入失败或待写事件超过上限' }
+          router.closeTurn(stamp.id)
+          onTurnEnd?.(failure)
+          life.resolveResume(token, failure)
+        }
       },
       onHeartbeat: () => { if (durableActive(undefined, false, 1_000)) this.touchWatchdog(taskId) },
       onTurnEnd: (r: BackendTurnResult) => {
@@ -541,9 +570,19 @@ export class TaskRunner {
           router.abandonTurn(stamp.id)
           return
         }
-        void batcher.close().then((committed) => {
+        void batcher.close(5_000).then((committed) => {
           this.eventBatchers.delete(batcher)
-          if (!committed || !durableActive('final', true)) {
+          if (!committed) {
+            batcher.dispose()
+            if (!this.shuttingDown && !this.cancellationDrains.has(taskId) && durableActive('final', true)) {
+              const failure: BackendTurnResult = { ok: false, response: '', error: persistenceProblem || '事件日志未能写入，待本地恢复' }
+              router.closeTurn(stamp.id)
+              onTurnEnd?.(failure)
+              life.resolveResume(token, failure)
+            } else router.abandonTurn(stamp.id)
+            return
+          }
+          if (!durableActive('final', true)) {
             router.abandonTurn(stamp.id)
             return
           }
@@ -1037,20 +1076,74 @@ export class TaskRunner {
     }
     return { entries, seenKeys: new Set(state.seenKeys) }
   }
-  /** 记录一条被拒派单的原因。只收「目标解析失败」（名单外/不存在）——这类改派有用；
-   *  护栏拒单（防环/层级/预算）是政策性拒绝，回灌只会诱导模型再烧一轮，只留痕不回灌 */
-  private recordDelegateRejection(taskId: string, reason: string) {
+  recordDelegateRejection(taskId: string, reason: string, dispatch?: { to: string; prompt: string }) {
+    const key = dispatch ? `${dispatch.to}\n${dispatch.prompt}` : undefined
+    const storedReason = dispatch
+      ? `${reason}${DELEGATE_REJECT_EXCERPT_MARK}${dispatch.prompt.replace(/\s+/g, ' ').trim().slice(0, 60)}）`
+      : reason
+    const task = this.store.get(taskId)
+    const runId = this.claims.get(taskId)?.runId ?? task?.runId
+    if (task && runId) {
+      const pending = task.delegateRejections ?? []
+      if (pending.some((entry) => entry.runId === runId && (key !== undefined
+        ? entry.key === key
+        : entry.key === undefined && entry.reason === reason))) return
+      this.store.updateIf(taskId, { runId }, { delegateRejections: [...pending, { runId, reason: storedReason, ...(key !== undefined ? { key } : {}) }] })
+      return
+    }
     const list = this.delegateRejections.get(taskId) ?? []
-    list.push(reason)
+    if (list.some((entry) => entry.runId === runId && (key !== undefined
+      ? entry.key === key
+      : entry.key === undefined && entry.reason === reason))) return
+    list.push({ runId, reason: storedReason, ...(key !== undefined ? { key } : {}) })
     this.delegateRejections.set(taskId, list)
+  }
+  peekDelegateRejections(taskId: string, expectedRunId?: string): string[] {
+    if (expectedRunId !== undefined && this.claims.get(taskId)?.runId !== expectedRunId) return []
+    const stored = this.store.get(taskId)?.delegateRejections?.filter((entry) => entry.runId === expectedRunId && !entry.deliveredAt).map((entry) => entry.reason) ?? []
+    const memory = (this.delegateRejections.get(taskId) ?? [])
+      .filter((entry) => entry.runId === undefined || expectedRunId === undefined || entry.runId === expectedRunId)
+      .map((entry) => entry.reason)
+    return [...stored, ...memory]
+  }
+  acknowledgeDelegateRejections(taskId: string, expectedRunId: string | undefined, count: number): void {
+    if (expectedRunId !== undefined && this.claims.get(taskId)?.runId !== expectedRunId) return
+    const task = this.store.get(taskId)
+    const entries = task?.delegateRejections
+    if (task && entries && expectedRunId) {
+      let acknowledged = 0
+      this.store.updateIf(taskId, { runId: expectedRunId }, { delegateRejections: entries.map((entry) => {
+        if (entry.runId !== expectedRunId || entry.deliveredAt || acknowledged >= count) return entry
+        acknowledged++
+        return { ...entry, deliveredAt: Date.now() }
+      }) })
+      count -= acknowledged
+    }
+    const memory = this.delegateRejections.get(taskId) ?? []
+    const remaining = memory.filter((entry) => {
+      if (entry.runId !== undefined && expectedRunId !== undefined && entry.runId !== expectedRunId) return true
+      if (count <= 0) return true
+      count--
+      return false
+    })
+    if (remaining.length) this.delegateRejections.set(taskId, remaining)
+    else this.delegateRejections.delete(taskId)
   }
   /** 取走并清空本任务被拒派单的原因（委派循环每轮回灌用；不残留到后续轮）。
    *  expectedRunId 限定只有仍持有该运行的循环才能取走，替换运行不被陈旧循环掏空。 */
   takeDelegateRejections(taskId: string, expectedRunId?: string): string[] {
-    if (expectedRunId !== undefined && this.claims.get(taskId)?.runId !== expectedRunId) return []
-    const list = this.delegateRejections.get(taskId) ?? []
-    this.delegateRejections.delete(taskId)
+    const list = this.peekDelegateRejections(taskId, expectedRunId)
+    this.acknowledgeDelegateRejections(taskId, expectedRunId, list.length)
     return list
+  }
+  acknowledgeDelegateReceipts(taskId: string, runId: string | undefined, childIds: readonly string[]): void {
+    if (!runId || this.claims.get(taskId)?.runId !== runId) return
+    for (const childId of childIds) {
+      const child = this.store.get(childId)
+      if (child?.parentTaskId === taskId && child.delegateSourceRunId === runId && !child.delegateDeliveredAt) {
+        this.store.updateIf(childId, { runId: child.runId }, { delegateDeliveredAt: Date.now() })
+      }
+    }
   }
   /** 逐条 text 事件增量扫描：闭合一个 <delegate to="...">...</delegate> 即提前建单 */
   private sniffDelegates(taskId: string, delta?: string) {
@@ -1135,7 +1228,7 @@ export class TaskRunner {
         ? `在团队里但不是你的队员（${(elsewhere.subordinates?.length ?? 0) > 0 ? '它是队长' : '它不归你管'}；只能 <consult> 咨询，不能被派活）`
         : '不在你的队员名单里'
       guardedNote(`⚠ 未找到可驱使的队员 "${call.to}"（${why}；你的队员：${rosterText}），跳过`)
-      this.recordDelegateRejection(taskId, `to="${call.to}"：${why}`)
+      this.recordDelegateRejection(taskId, `to="${call.to}"：${why}`, { to: call.to, prompt: call.prompt })
       return null
     }
     // 防环：目标已在祖先链上（或就是自己）→ 拒绝派发；顺带执行层级闸与全链轮数预算闸
@@ -1144,18 +1237,24 @@ export class TaskRunner {
     const targetKey = target.id || `@${target.backend}`
     if (ancestors.has(targetKey)) {
       guardedNote(`⚠ 拒绝派给 ${call.to}：它在当前委派链上（防环），请改派他人或自己做`)
+      this.recordDelegateRejection(taskId, `to="${call.to}"：防环拒单，当前委派链已有该队员；不要原样重派`, { to: call.to, prompt: call.prompt })
       return null
     }
     const delegateMaxDepth = this.opts().delegateMaxDepth ?? MAX_DEPTH
     const delegateTotalRounds = this.opts().delegateMaxTotalRounds ?? MAX_TOTAL_ROUNDS
     if (depth >= delegateMaxDepth) {
       guardedNote(`⚠ 委派层级已达上限（${delegateMaxDepth} 层），拒绝派给 ${call.to}`)
+      this.recordDelegateRejection(taskId, `to="${call.to}"：委派层级已达上限（${delegateMaxDepth} 层）；不要原样重派`, { to: call.to, prompt: call.prompt })
       return null
     }
     if (delegateTotalRounds - inherited <= 0) {
       guardedNote(`⚠ 全链委派轮数预算已耗尽，拒绝派给 ${call.to}`)
+      this.recordDelegateRejection(taskId, `to="${call.to}"：全链委派轮数预算已耗尽；不要原样重派`, { to: call.to, prompt: call.prompt })
       return null
     }
+    const dedupeKey = expectedRunId ? `delegate:${createHash('sha256').update(JSON.stringify([taskId, expectedRunId, call.to, call.prompt])).digest('hex')}` : undefined
+    const alreadyCreated = dedupeKey && this.store.list().find((candidate) => candidate.dedupeKey === dedupeKey && candidate.parentTaskId === taskId)
+    if (alreadyCreated) return alreadyCreated
     const workerIndex = this.reserveWorkerIndex(taskId)
     let workdir = task.workdir
     let unavailableReason: string | undefined
@@ -1165,7 +1264,7 @@ export class TaskRunner {
     if (gitProbe?.status === 'error') {
       const why = `无法确认工作区是否可安全隔离，拒绝共享工作区派单——${gitProbe.reason}`
       guardedNote(`⚠ 拒绝派给 ${call.to}：${why}`)
-      this.recordDelegateRejection(taskId, `to="${call.to}"：${why}`)
+      this.recordDelegateRejection(taskId, `to="${call.to}"：${why}`, { to: call.to, prompt: call.prompt })
       return null
     }
     if (target.sharedWorkspace) {
@@ -1180,7 +1279,7 @@ export class TaskRunner {
       if (!branchProbe.ok) {
         const why = `无法确认隔离 worktree 基线，拒绝派单——${branchProbe.reason}`
         guardedNote(`⚠ 拒绝派给 ${call.to}：${why}`)
-        this.recordDelegateRejection(taskId, `to="${call.to}"：${why}`)
+        this.recordDelegateRejection(taskId, `to="${call.to}"：${why}`, { to: call.to, prompt: call.prompt })
         return null
       }
       const base = branchProbe.branch || undefined
@@ -1191,10 +1290,10 @@ export class TaskRunner {
       let wt: { path: string; metadata: WorktreeInfo } | null = null
       let lastWtError = ''
       const leaderDir = task.workdir
-      const reclaimCancelledWorktree = async (candidate: { path: string }, phase: string) => {
+      const reclaimCancelledWorktree = async (candidate: { path: string; metadata: WorktreeInfo }, phase: string) => {
         let reason = ''
         try {
-          const cleanup = await reclaimWorktree(candidate.path, { force: true, deleteBranch: true, expectedOwnerTaskId: taskId })
+          const cleanup = await reclaimWorktree(candidate.path, { force: true, deleteBranch: true, expectedOwnerTaskId: taskId, expectedGenerationId: candidate.metadata.generationId })
           if (!cleanup.ok) reason = `回收结果 ${cleanup.status}：${cleanup.reason ?? '未知原因'}`
         } catch (error) {
           reason = `回收异常：${error instanceof Error ? error.message : String(error)}`
@@ -1234,7 +1333,7 @@ export class TaskRunner {
         if (replay.status === 'refused') {
           let cleanupFailure: string | undefined
           try {
-            const reclaimed = await reclaimWorktree(wt.path, { force: true, deleteBranch: true, expectedOwnerTaskId: taskId })
+            const reclaimed = await reclaimWorktree(wt.path, { force: true, deleteBranch: true, expectedOwnerTaskId: taskId, expectedGenerationId: wt.metadata.generationId })
             if (!reclaimed.ok) cleanupFailure = `拒单后的 worktree 回收失败（${reclaimed.status}）：${reclaimed.reason ?? '未知原因'}`
           } catch (error) {
             cleanupFailure = `拒单后的 worktree 回收异常：${String(error)}`
@@ -1248,7 +1347,7 @@ export class TaskRunner {
           }
           const refusal = `领队基线回放失败，拒建单——${replay.reason}${cleanupFailure ? `；${cleanupFailure}，现场保留并已记录` : ''}`
           guardedNote(`⚠ 拒绝派给 ${call.to}：${refusal}`)
-          this.recordDelegateRejection(taskId, `to="${call.to}"：${refusal}`)
+          this.recordDelegateRejection(taskId, `to="${call.to}"：${refusal}`, { to: call.to, prompt: call.prompt })
           return null
         }
         if (replay.status === 'applied') {
@@ -1265,7 +1364,7 @@ export class TaskRunner {
         // 重试余波不顶替）；仅 workdir 非 git 仓库/只读共享的环境性共享降级（上方分支）保留。
         const why = `worktree 建立失败，请稍后重派${lastWtError ? `——${lastWtError}` : ''}`
         guardedNote(`⚠ 拒绝派给 ${call.to}：${why}（不降级共享工作区）`)
-        this.recordDelegateRejection(taskId, `to="${call.to}"：${why}`)
+        this.recordDelegateRejection(taskId, `to="${call.to}"：${why}`, { to: call.to, prompt: call.prompt })
         return null
       }
     } else if (task.workdir) {
@@ -1292,6 +1391,7 @@ export class TaskRunner {
       ...(target.id ? { agentId: target.id } : {}),
       parentTaskId: taskId,
       workerIndex,
+      ...(dedupeKey ? { dedupeKey, delegateSourceRunId: expectedRunId } : {}),
       ...(unavailableReason ? { unavailableReason } : {}),
       ...(worktree ? { worktree } : {})
     }
@@ -1398,7 +1498,9 @@ export class TaskRunner {
       let finalText = r.response
       /** <continue> 与 delegate 同源解析：领队用委派循环的全部回合文本，普通任务用首回合两源 */
       let scanTexts: string[] = [r.delegationText ?? '', r.response]
-      if (me?.subordinates?.length && task.backend !== 'dsh' && !isInvestigation) {
+      if ((me?.subordinates?.length || this.earlySpawns.get(taskId)?.seenKeys.size || (task.agentId && (!me || (me.role && /队长|领队|captain|leader/i.test(me.role)))
+        && [r.delegationText, r.response].some((text) => text && parseDelegates(text).length)))
+        && task.backend !== 'dsh' && !isInvestigation) {
         // The loop receives this Run's full execution expectation explicitly:
         // it must never rediscover the identity from whatever record is latest
         // by the time the turn's response is processed.
@@ -1792,7 +1894,14 @@ export class TaskRunner {
     const claim: RunClaim = { taskId, runId, owner }
     this.claims.set(taskId, claim)
     this.pushTask(taskId)
-    this.recordUser(taskId, task.prompt, runCondition(claim))
+    try {
+      this.recordUser(taskId, task.prompt, runCondition(claim))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      try { this.failTask(taskId, `启动日志持久化失败：${message}`, claim) }
+      catch (failure) { console.error('[TaskRunner] Could not persist launch failure', failure) }
+      return
+    }
     const runGen = this.bumpTurnGen(taskId)
     // 本会话的回合路由器：会话级通道只负责把回调交给它，归属判定集中在路由器里
     const router = new SessionTurnRouter()
@@ -1826,7 +1935,8 @@ export class TaskRunner {
       if (task.manualStartConfirmedAt && Number.isFinite(task.manualStartConfirmedAt)) prompt = `${prompt}\n\n${HANDOFF_START_CONFIRMED_CUE}`
     }
     // 领队会话武装流式派单嗅探：闭合一个 <delegate> 即提前建单（回灌仍只在回合末）
-    const isLeader = !!me?.subordinates?.length && task.backend !== 'dsh' && !(task.suppressIssue && task.parentTaskId)
+    const isLeader = (!!me?.subordinates?.length || (!!task.agentId && (!me || !!me.role && /队长|领队|captain|leader/i.test(me.role))))
+      && task.backend !== 'dsh' && !(task.suppressIssue && task.parentTaskId)
     if (isLeader) this.armDelegateSniffer(taskId)
 
     // 看门狗在 backend.start 之前武装：握手/建会话阶段挂死同样按空转判败并可硬杀，
@@ -2035,13 +2145,22 @@ export class TaskRunner {
     const backend = this.backends.get(task.backend)
     if (!backend) return { ok: false, error: '后端不可用' }
     if (!this.sessions.get(taskId) && !task.sessionId) return { ok: false, error: '无会话可恢复' }
-    const turnContent = wantsHandoff ? `${HANDOFF_CUE}\n（用户原话：${message}）` : message
+    const pendingChildren = this.store.list().filter((child) => child.parentTaskId === taskId && child.delegateSourceRunId && !child.delegateDeliveredAt)
+    const pendingRejects = (task.delegateRejections ?? []).filter((entry) => !entry.deliveredAt)
+    const safeReceipt = (value: string, limit: number) => escapeProtocolLiterals(value.slice(0, limit).replace(/[\r\n]+/g, ' '))
+    const recoveryLines = [
+      ...pendingChildren.map((child) => `- 已接单 ${child.id}（${child.status}）：${safeReceipt(child.title, 100)}${child.result ? `；结果：${safeReceipt(child.result, 400)}` : ''}`),
+      ...pendingRejects.map((entry) => `- 未建单（运行 ${entry.runId}）：${safeReceipt(entry.reason, 600)}`)
+    ].slice(0, 30)
+    const recoveryNotice = recoveryLines.length ? `\n\n【系统·历史派单对账】以下是上次未确认送达的派单结果，请先核对，不要将拒单视作在途或重复派已接单的工作：\n${recoveryLines.join('\n')}` : ''
+    const turnContent = (wantsHandoff ? `${HANDOFF_CUE}\n（用户原话：${message}）` : message) + recoveryNotice
     // 领队续聊同样武装流式派单嗅探（追问里派发 → 提前建单）
     const me = (this.getTeam?.() ?? []).find((a) => a.id === task.agentId)
-    if (me?.subordinates?.length && task.backend !== 'dsh' && !(task.suppressIssue && task.parentTaskId)) this.armDelegateSniffer(taskId)
+    if ((me?.subordinates?.length || (task.agentId && (!me || !!me.role && /队长|领队|captain|leader/i.test(me.role))))
+      && task.backend !== 'dsh' && !(task.suppressIssue && task.parentTaskId)) this.armDelegateSniffer(taskId)
 
     const runId = this.newRunId(taskId)
-    const beginRun = (): RunClaim | null => {
+    const beginRun = async (): Promise<RunClaim | null> => {
       this.toolWindows.delete(taskId)
       // Claim exactly the record this follow-up was built from. Only a
       // committed claim may start the backend; a Task that already moved on
@@ -2065,15 +2184,39 @@ export class TaskRunner {
       if (!claimed) return null
       const claim: RunClaim = { taskId, runId, owner }
       this.claims.set(taskId, claim)
-      this.recordUser(taskId, message, runCondition(claim))
+      try {
+        this.recordUser(taskId, message, runCondition(claim))
+      } catch (error) {
+        const failure = error instanceof Error ? error.message : String(error)
+        try { await this.closeSession(taskId, runIdentity(claim)) }
+        catch (closeError) { console.error('[TaskRunner] Could not close failed follow-up session', closeError) }
+        try { this.failTask(taskId, `续聊日志持久化失败：${failure}`, claim) }
+        catch (persistError) { console.error('[TaskRunner] Could not persist follow-up failure', persistError) }
+        throw error
+      }
       this.pushTask(taskId)
       return claim
     }
 
     // A dead live session may fall through to resume. Both paths belong to
     // this one follow-up Run, so initialize its identity exactly once.
-    const claim = beginRun()
+    let claim: RunClaim | null
+    try { claim = await beginRun() }
+    catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) } }
     if (!claim) return { ok: false, error: '任务已开始新的执行，本次追问未生效' }
+    const acknowledgeRecovery = () => {
+      if (!recoveryNotice || !this.isCurrentRun(claim)) return
+      for (const child of pendingChildren.slice(0, recoveryLines.length)) {
+        if (!child.delegateDeliveredAt) this.store.updateIf(child.id, { runId: child.runId }, { delegateDeliveredAt: Date.now() })
+      }
+      const acknowledgedRejects = pendingRejects.slice(0, Math.max(0, recoveryLines.length - pendingChildren.length))
+      if (acknowledgedRejects.length) {
+        const current = this.store.get(taskId)
+        const keys = new Set(acknowledgedRejects.map((entry) => JSON.stringify([entry.runId, entry.key ?? '', entry.reason])))
+        if (current?.delegateRejections) this.store.updateIf(taskId, runCondition(claim), { delegateRejections: current.delegateRejections.map((entry) =>
+          !entry.deliveredAt && keys.has(JSON.stringify([entry.runId, entry.key ?? '', entry.reason])) ? { ...entry, deliveredAt: Date.now() } : entry) })
+      }
+    }
 
     // UI 追问传 wait:false：回合在后台跑、IPC 在 beginRun 后即返回——渲染层 busy 不
     // 锁整轮，否则「停止」会禁用到回合结束。默认（goal/meeting/sidecar 等自动化
@@ -2101,6 +2244,7 @@ export class TaskRunner {
           const r = await this.sendTurn(taskId, liveSession, turnContent, claim)
           if (!this.isCurrentRun(claim)) return { ok: false, error: '回合已失效' }
           if (!r.ok) throw new Error(r.error || '续聊回合失败')
+          acknowledgeRecovery()
           const finalText = await this.completeTurn(taskId, liveSession, r, claim, opts?.consultDepth ?? 0)
           if (!this.store.matches(taskId, runIdentity(claim, { status: 'done' }))) return { ok: false, error: '回合已失效' }
           if (this.opts().notify) this.notify(task, '完成', finalText)
@@ -2192,6 +2336,7 @@ export class TaskRunner {
           sentinel.cancel()
           if (!this.isCurrentRun(claim)) return { ok: false, error: '回合已失效' }
           if (!r?.ok) throw new Error(r?.error || '续聊回合失败')
+          acknowledgeRecovery()
           const finalText = await this.completeTurn(taskId, resumeSession, r, claim, opts?.consultDepth ?? 0)
           if (!this.store.matches(taskId, runIdentity(claim, { status: 'done' }))) return { ok: false, error: '回合已失效' }
           if (this.opts().notify) this.notify(task, '完成', finalText)
@@ -2223,7 +2368,7 @@ export class TaskRunner {
     return runTurn()
   }
 
-  async cancel(taskId: string): Promise<{ ok: boolean; error?: string }> {
+  async cancel(taskId: string): Promise<{ ok: boolean; error?: string; warning?: string }> {
     const task = this.store.get(taskId)
     if (!task) return { ok: false, error: '任务不存在' }
     // Cancel the execution this call observed. The condition is captured before
@@ -2251,47 +2396,53 @@ export class TaskRunner {
       return { ok: true }
     }
     if (task.status !== 'running') return { ok: false, error: '任务不在运行中' }
-    // The Run claim is still valid here, so buffered provider data can be
-    // committed before cancellation rejects late callbacks.
-    if (!await this.closeEventBatches(taskId)) {
-      return { ok: false, error: '事件持久化尚未完成，任务仍保持运行状态' }
+    this.cancellationDrains.set(taskId, (this.cancellationDrains.get(taskId) ?? 0) + 1)
+    try {
+      // The Run claim is still valid here, so buffered provider data can be
+      // committed before cancellation rejects late callbacks.
+      const drained = await this.closeEventBatches(taskId)
+      const persistenceWarning = drained ? '' : '任务已停止，但部分事件日志写入失败；已保存的恢复副本将在重启时回放，无法写入副本的事件可能丢失'
+      const session = this.sessions.get(taskId)
+      const launchHandle = this.launchHandles.get(taskId)
+      const claim = this.claims.get(taskId)
+      if (!claim || !this.isCurrentRun(claim)) return { ok: false, error: '执行归属不在当前运行器，未取消任务' }
+      const cancelled = this.store.updateIf(taskId, runCondition(claim), { status: 'cancelled', endedAt: Date.now(), ...(persistenceWarning ? { error: persistenceWarning } : {}) })
+      if (!cancelled) return { ok: false, error: '任务状态已变化，取消未生效' }
+      this.clearRetry(taskId)
+      this.claims.delete(taskId)
+      // Resolve start/send races immediately. Waiting for the idle timeout would
+      // keep a scheduler slot occupied after cancellation.
+      this.turnWatchdogs.get(taskId)?.expire()
+      // 级联取消子任务（领队被取消时，运行中/排队的子任务一并停）
+      for (const child of this.store.list().filter((t) => t.parentTaskId === taskId && (t.status === 'running' || t.status === 'queued'))) {
+        void this.cancel(child.id)
+      }
+      // Detach the cancelled Run before awaiting provider cleanup: a retry may
+      // already be using this taskId when stop/close eventually settles.
+      this.launchHandles.delete(taskId)
+      this.sessions.delete(taskId)
+      this.sessionWorkdirs.delete(taskId)
+      if (session) this.retireSession(session)
+      this.permissionBroker.cancelTask(taskId)
+      this.toolWindows.delete(taskId)
+      this.disarmWatchdog(taskId)
+      this.earlySpawns.delete(taskId)
+      this.delegateRejections.delete(taskId)
+      this.lifecycle(taskId).dispose()
+      this.lastTerminalResponses.delete(taskId)
+      this.pushTask(taskId)
+      if (!session) {
+        try { await this.awaitCleanup(() => launchHandle?.stop()) } catch {}
+      }
+      await this.awaitCleanup(() => session?.stop())
+      await this.awaitCleanup(() => session?.close())
+      this.store.flushEvents(taskId)
+      return persistenceWarning ? { ok: true, warning: persistenceWarning } : { ok: true }
+    } finally {
+      const remaining = (this.cancellationDrains.get(taskId) ?? 1) - 1
+      if (remaining) this.cancellationDrains.set(taskId, remaining)
+      else this.cancellationDrains.delete(taskId)
     }
-    const session = this.sessions.get(taskId)
-    const launchHandle = this.launchHandles.get(taskId)
-    const claim = this.claims.get(taskId)
-    if (!claim || !this.isCurrentRun(claim)) return { ok: false, error: '执行归属不在当前运行器，未取消任务' }
-    const cancelled = this.store.updateIf(taskId, runCondition(claim), { status: 'cancelled', endedAt: Date.now() })
-    if (!cancelled) return { ok: false, error: '任务状态已变化，取消未生效' }
-    this.clearRetry(taskId)
-    this.claims.delete(taskId)
-    // Resolve start/send races immediately. Waiting for the idle timeout would
-    // keep a scheduler slot occupied after cancellation.
-    this.turnWatchdogs.get(taskId)?.expire()
-    // 级联取消子任务（领队被取消时，运行中/排队的子任务一并停）
-    for (const child of this.store.list().filter((t) => t.parentTaskId === taskId && (t.status === 'running' || t.status === 'queued'))) {
-      void this.cancel(child.id)
-    }
-    // Detach the cancelled Run before awaiting provider cleanup: a retry may
-    // already be using this taskId when stop/close eventually settles.
-    this.launchHandles.delete(taskId)
-    this.sessions.delete(taskId)
-    this.sessionWorkdirs.delete(taskId)
-    if (session) this.retireSession(session)
-    this.permissionBroker.cancelTask(taskId)
-    this.toolWindows.delete(taskId)
-    this.disarmWatchdog(taskId)
-    this.earlySpawns.delete(taskId)
-    this.delegateRejections.delete(taskId)
-    this.lifecycle(taskId).dispose()
-    this.lastTerminalResponses.delete(taskId)
-    this.pushTask(taskId)
-    if (!session) {
-      try { await this.awaitCleanup(() => launchHandle?.stop()) } catch {}
-    }
-    await this.awaitCleanup(() => session?.stop())
-    await this.awaitCleanup(() => session?.close())
-    this.store.flushEvents(taskId)
-    return { ok: true }
   }
 
   /** 空闲判定（热更 L1 apply 门控，设计 §7.4）：无在跑会话、无启动竞态句柄、store 无 running 任务。 */
@@ -2303,7 +2454,8 @@ export class TaskRunner {
   async shutdown() {
     // Drain accepted events while current Run claims are still valid, then
     // stop accepting provider callbacks before lifecycle invalidation.
-    await this.awaitCleanup(() => this.closeEventBatches(), 2_000)
+    this.shuttingDown = true
+    if (!await this.closeEventBatches(undefined, 2_000)) console.error('[TaskRunner] Shutdown left events in local recovery backups')
     this.disposeEventBatches()
     // First invalidate callbacks and stop owned sessions, then wait for any
     // Executor start races that resolve late and still need closing.

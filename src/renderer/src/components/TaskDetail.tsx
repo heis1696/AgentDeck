@@ -253,11 +253,12 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     if (!result.ok) ui.toast.error(result.error ?? '回退失败')
     else { ui.toast.success('已回退'); void refreshEvents() }
   }
-  const doAction = async (action: () => Promise<{ ok: boolean; error?: string }>) => {
+  const doAction = async (action: () => Promise<{ ok: boolean; error?: string; warning?: string }>) => {
     setBusy(true)
     try {
       const result = await action()
       if (!result.ok && result.error) ui.toast.error(result.error)
+      else if (result.warning) ui.toast.error(result.warning)
     } finally {
       setBusy(false)
     }

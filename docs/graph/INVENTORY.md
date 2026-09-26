@@ -496,6 +496,8 @@ package.json：61 条直连脚本 + 4 条聚合（`smoke:stage6`、`smoke:stage7
 
 > 2026-09-24 增补：`src/main/issue-relay.ts` 为新增模块（Issue 评论统一中继：64KB 通道钳制 + 未送达统一降级出口），被 `smoke-issue-persistence` 直连消费；`git.ts` 新增导出 `mergeIntoManagedWorktreeDetached` / `realignCleanWorktreeToHead` / `reportCopyRelPath` / `sweepReportCopies` / `deleteReportCopies` / `resolveRepositoryRoot` 被 `smoke-delegate` 与 `smoke-worktree-ownership` 直连消费，同样受本附录公共 API 保护规则约束。
 
+> 2026-09-26 增补：`smoke-worktree-lifecycle` 直连消费 `git.ts` 的 `worktreePoolEntriesForTest` / `WORKTREE_POOL_MAX_PER_REPO` / `createWorktreeAtBranch`，覆盖并发归池容量、满池回收和失败后复用；这些导出同样受本附录公共 API 保护规则约束。`smoke-delegate-reject` 直连消费 `runner` / `store` / `delegate`，覆盖拒单派单身份、回灌及重启恢复。
+
 ## 附录 B：§4.B 冗余导出完整清单（每文件一行）
 
 ```text

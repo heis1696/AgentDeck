@@ -154,6 +154,7 @@ export interface GoalCheckpointInput {
 export interface IpcResult {
   ok: boolean
   error?: string
+  warning?: string
 }
 
 /** 单文件未提交 diff 的失败原因码（`tasks:fileDiff`）。 */

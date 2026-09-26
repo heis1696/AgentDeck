@@ -989,6 +989,24 @@ async function withWorktreePathLock<T>(wtPath: string, operation: () => Promise<
   }
 }
 
+/** 仓库级归池锁（见 releaseWorktreeToPool）：串行化同仓并发归还的容量判定与登记。
+ *  键为仓库根绝对路径。实现与 withWorktreePathLock 同构。 */
+const repoRepoolLocks = new Map<string, Promise<void>>()
+
+async function withRepoRepoolLock<T>(repoRoot: string, operation: () => Promise<T>): Promise<T> {
+  const key = path.resolve(repoRoot)
+  const previous = repoRepoolLocks.get(key)
+  let release!: () => void
+  const current = new Promise<void>((resolve) => { release = resolve })
+  repoRepoolLocks.set(key, current)
+  if (previous) await previous
+  try { return await operation() }
+  finally {
+    release()
+    if (repoRepoolLocks.get(key) === current) repoRepoolLocks.delete(key)
+  }
+}
+
 function poolFor(repoRoot: string): Set<string> {
   let pool = worktreePoolByRepo.get(repoRoot)
   if (!pool) {
@@ -1003,33 +1021,48 @@ export function clearWorktreePool(): void {
   worktreePoolByRepo.clear()
 }
 
+/** 测试出口：指定仓库当前池内条目快照（只读）——并发归池容量守卫的观测面 */
+export function worktreePoolEntriesForTest(repoDir: string): string[] {
+  const pool = worktreePoolByRepo.get(path.resolve(repoDir))
+  return pool ? [...pool] : []
+}
+
 /** 归还入池：detach HEAD（同提交零文件重写，解除分支检出占用——否则调用方随后的
  *  分支删除会被 "used by worktree" 拒绝）。分支删除不在此做：归调用方决策（集成完成
  *  路径自行 deleteBranch 并跟踪失败；集成分支等保留分支不受影响）→ 元数据改挂池
  *  owner 并登记路径。目录与 git 注册保留。任何一步失败返回 false，调用方回落常规
- *  移除路径——归池是加速捷径，不改变回收语义。 */
+ *  移除路径——归池是加速捷径，不改变回收语义。
+ *  容量判定（check-then-add）整体持仓库级归池锁：同仓不同树的并发 reclaim(repool)
+ *  各自只持自己的路径锁，若 check 不在仓级互斥，三棵并发归还都会在彼此 detach 的
+ *  await 窗口里读到 pool.size < 上限而全部入池，击穿 WORKTREE_POOL_MAX_PER_REPO。
+ *  锁序恒为 worktree 路径锁 → 仓库归池锁（本锁只在已持路径锁的 reclaim 上下文获取，
+ *  持锁期间不再等任何路径锁；acquire 侧的 pool.delete 只缩不涨，不参与本锁），
+ *  无反向等待不成死锁环。失败路径（容量满/detach 失败/元数据写失败）都不登记池条目
+ *  ——无预占即无需回滚，不占死容量，后续归还与复用照常。 */
 async function releaseWorktreeToPool(repoDir: string, wtDir: string, branch: string, metadata?: WorktreeInfo | null): Promise<boolean> {
   const root = path.resolve(repoDir)
-  const pool = poolFor(root)
-  if (pool.size >= WORKTREE_POOL_MAX_PER_REPO || pool.has(wtDir) || !metadata?.generationId) return false
-  const detached = await runGit(wtDir, ['switch', '--detach'], 30000)
-  if (!detached.ok) return false
-  try {
-    writeMetadata({
-      ownerTaskId: WORKTREE_POOL_OWNER,
-      poolProcess: currentProcessIdentity(),
-      generationId: metadata.generationId,
-      repoDir: root,
-      path: wtDir,
-      branch,
-      baseSha: metadata?.baseSha ?? '',
-      createdAt: Date.now(),
-      cleanupStatus: 'pooled',
-      cleanupReason: 'idle in worktree pool awaiting reuse'
-    })
-  } catch { return false }
-  pool.add(wtDir)
-  return true
+  return withRepoRepoolLock(root, async () => {
+    const pool = poolFor(root)
+    if (pool.size >= WORKTREE_POOL_MAX_PER_REPO || pool.has(wtDir) || !metadata?.generationId) return false
+    const detached = await runGit(wtDir, ['switch', '--detach'], 30000)
+    if (!detached.ok) return false
+    try {
+      writeMetadata({
+        ownerTaskId: WORKTREE_POOL_OWNER,
+        poolProcess: currentProcessIdentity(),
+        generationId: metadata.generationId,
+        repoDir: root,
+        path: wtDir,
+        branch,
+        baseSha: metadata?.baseSha ?? '',
+        createdAt: Date.now(),
+        cleanupStatus: 'pooled',
+        cleanupReason: 'idle in worktree pool awaiting reuse'
+      })
+    } catch { return false }
+    pool.add(wtDir)
+    return true
+  })
 }
 
 /** 从池里取一棵复用：clean -ffdx（保留系统目录）→ switch -c <新分支> <基线>（只重写差异文件）

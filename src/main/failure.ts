@@ -40,10 +40,31 @@ const RULES: Rule[] = [
     retryable: false
   },
   {
+    code: 'provider_model_missing',
+    re: /\b400\s*[-:]\s*1211\b|\bmodel(?:[_\s-]?name)?[_\s-]*(?:does[_\s-]+not[_\s-]+exist|not[_\s-]+found)\b|模型(?:不存在|未找到)/i,
+    title: '模型不存在或不可用',
+    hint: '检查模型名称/ID 是否填写正确，以及当前渠道是否支持该模型；修正模型配置后再运行。',
+    retryable: false
+  },
+  {
+    code: 'provider_channel_unavailable',
+    re: /no available channel|没有可用渠道/i,
+    title: '没有可用模型渠道',
+    hint: '检查模型平台的渠道是否启用、配置有效且支持当前模型；恢复可用渠道后再运行。',
+    retryable: false
+  },
+  {
     code: 'rate_limit',
     re: /\b429\b|\b529\b|rate.?limit|too many requests|限流/i,
     title: '被限流',
     hint: '请求过于频繁；稍等片刻再重试即可。',
+    retryable: true
+  },
+  {
+    code: 'provider_server_error',
+    re: /\bHTTP(?:\/\d(?:\.\d)?)?\s*[:：]?\s*5\d{2}\b|\bupstream\s+(?:HTTP\s*)?5\d{2}\b|\b(?:upstream|server)\s+(?:error|returned|status)\s*[:(]?\s*5\d{2}\b|\bstatus(?:\s+code)?\s*[:=]?\s*5\d{2}\b|\b5\d{2}\s+(?:internal server error|bad gateway|service unavailable|gateway timeout|server error)\b/i,
+    title: '模型服务暂时异常',
+    hint: '上游服务返回 5xx，通常是暂时性故障；稍后重试，若持续发生请检查服务状态或联系平台支持。',
     retryable: true
   },
   {

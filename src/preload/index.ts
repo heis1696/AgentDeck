@@ -37,7 +37,7 @@ const api: AgentDeckApi = {
     events: (id: string, afterSeq = 0): Promise<TaskEvent[]> => ipcRenderer.invoke('tasks:events', id, afterSeq),
     create: (input: TaskCreateInput) =>
       ipcRenderer.invoke('tasks:create', input) as Promise<Task>,
-    cancel: (id: string) => ipcRenderer.invoke('tasks:cancel', id) as Promise<{ ok: boolean; error?: string }>,
+    cancel: (id: string) => ipcRenderer.invoke('tasks:cancel', id) as Promise<{ ok: boolean; error?: string; warning?: string }>,
     followUp: (id: string, content: string, opts?: { relay?: boolean; collectFinal?: boolean; wait?: boolean }) =>
       ipcRenderer.invoke('tasks:followup', id, content, opts) as Promise<{ ok: boolean; error?: string }>,
     delete: (id: string) => ipcRenderer.invoke('tasks:delete', id) as Promise<{ ok: boolean; error?: string }>,

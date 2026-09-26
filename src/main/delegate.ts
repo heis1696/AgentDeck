@@ -47,6 +47,13 @@ import {
 import { clampIssueCommentBytes } from './issue-relay'
 import { currentGitChanges } from '../shared/git-snapshot'
 
+export const DELEGATE_REJECT_EXCERPT_MARK = '（被拒指令：'
+
+const stripRejectExcerpt = (reason: string): string => {
+  const excerptStart = reason.indexOf(DELEGATE_REJECT_EXCERPT_MARK)
+  return excerptStart < 0 ? reason : reason.slice(0, excerptStart)
+}
+
 /** Issue 评论的最小形状：addComment 成功返回；null = Issue 不存在（调用方必须降级，不静默丢） */
 export interface IssueCommentLike {
   id: string
@@ -418,7 +425,7 @@ const REPORT_FENCE_OPEN = '```text'
 const REPORT_FENCE_CLOSE = '```'
 
 /** 序列内部破坏：命中字面量在末字符前插「\」；破坏后的形态不再命中，重复处理幂等 */
-function escapeProtocolLiterals(text: string): string {
+export function escapeProtocolLiterals(text: string): string {
   return text.replace(REPORT_LITERAL_RE, (m) => `${m.slice(0, -1)}\\${m.slice(-1)}`)
 }
 
@@ -599,7 +606,6 @@ export async function runDelegationLoop(
     && path.resolve(child.worktree.path) === path.resolve(child.workdir)
   const me = team.find((a) => a.id === task.agentId)
   const subs = (me?.subordinates ?? []).map((id) => team.find((a) => a.id === id)).filter(Boolean) as AgentLike[]
-  if (!subs.length) return { rounds: 0, children: [], finalText: first.response, scanTexts: [first.delegationText ?? '', first.response] }
 
   const note = (text: string) => {
     if (!active()) return
@@ -609,8 +615,14 @@ export async function runDelegationLoop(
     const full = store.appendEvent(taskId, e, expected)
     if (full) pushEvent(taskId, full)
   }
+  const pendingRejections = () => typeof runner.peekDelegateRejections === 'function'
+    ? runner.peekDelegateRejections(taskId, runId)
+    : runner.takeDelegateRejections(taskId, runId)
+  const acknowledgeRejections = (count: number) => {
+    if (typeof runner.acknowledgeDelegateRejections === 'function') runner.acknowledgeDelegateRejections(taskId, runId, count)
+  }
 
-  const hasRepo = task.workdir ? await isGitRepo(task.workdir) : false
+  const hasRepo = subs.length && task.workdir ? await isGitRepo(task.workdir) : false
   if (!active()) return abandoned()
   const baseBranch = hasRepo && task.workdir ? await currentBranch(task.workdir) : ''
   if (!active()) return abandoned()
@@ -620,8 +632,28 @@ export async function runDelegationLoop(
   const maxDepth = ctx.opts().maxDepth ?? MAX_DEPTH
   const maxRounds = ctx.opts().maxRounds ?? MAX_ROUNDS
   const maxTotalRounds = ctx.opts().maxTotalRounds ?? MAX_TOTAL_ROUNDS
-  const bail = (why: string): DelegationOutcome => {
+  const bail = async (why: string): Promise<DelegationOutcome> => {
     note(`⚠ ${why}，本任务不再下派`)
+    const queued = pendingRejections()
+    const calls = queued.length ? [] : parseDelegatesMerged(first.delegationText ?? '', first.response)
+    let rejects = queued
+    if (!rejects.length && calls.length) {
+      calls.forEach((call) => runner.recordDelegateRejection(taskId, `to="${call.to}"：${why}；不要原样重派`, { to: call.to, prompt: call.prompt }))
+      rejects = pendingRejections()
+    }
+    if (rejects.length) {
+      try {
+        const turn = await runner.sendTurn(taskId, session,
+          `【系统·派单拒绝】以下派单均未建单：\n${rejects.map((reason) => `- ${reason}`).join('\n')}\n本轮已触及政策护栏，不要再派发；请输出当前工作结论。`, runId)
+        if (!active()) return abandoned()
+        if (!turn.ok) throw new Error(turn.error || '拒单回灌失败')
+        acknowledgeRejections(rejects.length)
+        return { rounds: 0, children: [], finalText: stripDelegates(turn.response), scanTexts: [turn.delegationText ?? '', turn.response] }
+      } catch (error) {
+        note(`⚠ 政策拒单未送达领队：${error instanceof Error ? error.message : String(error)}`)
+        if (task.issueId) ctx.addIssueComment?.(task.issueId, leftoverRejectsComment(rejects))
+      }
+    }
     return { rounds: 0, children: [], finalText: stripDelegates(first.response), scanTexts: [first.delegationText ?? '', first.response] }
   }
   if (depth >= maxDepth) return bail(`委派层级已达上限（${maxDepth} 层）`)
@@ -643,17 +675,19 @@ export async function runDelegationLoop(
   // 「领队没派任何新单」的收尾回合——那种回合没有报告可搭。目标护栏拒单时领队并不知道，
   // 若不回灌它会在「等回灌」的幻觉里干等（实际事故：派给队长 claude/codex 被跳过，单子永远不出现）。
   let rejectedFeedbacks = 0
-  const rosterText = subs.map((a) => `${a.name}（${a.backend}）`).join('、')
+  const rosterText = subs.map((a) => `${a.name}（${a.backend}）`).join('、') || '当前为空'
   const feedbackRejections = async (): Promise<boolean> => {
     if (!active()) return false
-    const rejects = runner.takeDelegateRejections(taskId, runId)
-    if (!rejects.length || rejectedFeedbacks >= 2) return false
+    const rejects = pendingRejections()
+    const policyOnly = rejects.length > 0 && rejects.every((reason) => /防环拒单|委派层级已达上限|全链委派轮数预算已耗尽/.test(stripRejectExcerpt(reason)))
+    if (!rejects.length || rejectedFeedbacks >= (policyOnly ? 1 : 2)) return false
     rejectedFeedbacks++
     note(`⚠ ${rejects.length} 条派单被拒（未建单），原因回灌给领队改派`)
     try {
       const turn = await runner.sendTurn(taskId, session, buildRejectionFeedbackPrompt(rejects, rosterText), runId)
       if (!active()) return false
       if (!turn.ok) throw new Error(turn.error || '回灌回合失败')
+      acknowledgeRejections(rejects.length)
       for (const n of parseRoundNotes(turn.response)) {
         note(`领队评估：${n.outcome}${n.reason ? ' — ' + n.reason : ''}`)
       }
@@ -679,26 +713,28 @@ export async function runDelegationLoop(
       if (await feedbackRejections()) continue
       break
     }
-    round++
+    const nextRound = round + 1
     const roundChildren = new Map<string, DelegateCall>()
     for (const entry of early.entries) {
       if (entry.childId && store.get(entry.childId)) roundChildren.set(entry.childId, entry.call)
     }
     if (fresh.length) {
-      note(`第 ${round} 轮派发：${fresh.map((c) => `${c.to}${c.reason ? `（${c.reason}）` : ''}`).join('、')}${early.entries.length ? `（另有 ${early.entries.length} 单已在流式中提前接单）` : ''}`)
+      note(`第 ${nextRound} 轮派发：${fresh.map((c) => `${c.to}${c.reason ? `（${c.reason}）` : ''}`).join('、')}${early.entries.length ? `（另有 ${early.entries.length} 单已在流式中提前接单）` : ''}`)
       for (const call of fresh) {
         const child = await runner.spawnDelegateChild(taskId, call, runId)
         if (!active()) return abandoned()
         if (child) roundChildren.set(child.id, call)
       }
     } else {
-      note(`第 ${round} 轮：${early.entries.length} 个子任务已在流式中提前接单`)
+      note(`第 ${nextRound} 轮：${early.entries.length} 个子任务已在流式中提前接单`)
     }
     if (!roundChildren.size) {
+      if (round === 0) round = 1
       // 本轮新建的派单全部被护栏拒绝：回灌原因让领队改派，而不是静默结束这轮
       if (await feedbackRejections()) continue
       break
     }
+    round = nextRound
     const childIds = [...roundChildren.keys()]
     allChildren.push(...childIds)
     pushTask(taskId)
@@ -806,7 +842,7 @@ export async function runDelegationLoop(
     // 拒单随报告捎带：只靠「整轮零新单」兜底送达的话，领队每轮都有新单时永远收不到，
     // 会带着「该单在途」的幻觉继续排计划（iss_t_mu5t2em6_ymbllw 实测：混合轮里一单被拒，
     // 领队连着多轮评估「仍在途等回灌」，该工作项无人领）。take 即清空，兜底通道不会重复送。
-    const rideAlongRejects = runner.takeDelegateRejections(taskId, runId)
+    const rideAlongRejects = pendingRejections()
     let rejectNotice = ''
     let continueInstruction = CONTINUE_INSTRUCTION
     if (rideAlongRejects.length) {
@@ -821,6 +857,8 @@ export async function runDelegationLoop(
       )
       if (!active()) return abandoned()
       if (!turn.ok) throw new Error(turn.error || '回灌回合失败')
+      acknowledgeRejections(rideAlongRejects.length)
+      runner.acknowledgeDelegateReceipts?.(taskId, runId, childIds)
       for (const n of parseRoundNotes(turn.response)) {
         note(`第 ${round} 轮评估：${n.outcome}${n.reason ? ' — ' + n.reason : ''}`)
       }
@@ -863,7 +901,7 @@ export async function runDelegationLoop(
 
   // 循环结束仍有未送达的拒单（预算耗尽等路径）：留痕 + Issue 评论，不让工作项静默消失
   if (!active()) return abandoned()
-  const leftoverRejects = runner.takeDelegateRejections(taskId, runId)
+  const leftoverRejects = pendingRejections()
   if (leftoverRejects.length) {
     note(`⚠ 委派结束仍有 ${leftoverRejects.length} 条派单被拒且未回灌：${leftoverRejects.map((r) => r.slice(0, 80)).join('；')}`)
     if (task.issueId) {

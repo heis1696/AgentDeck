@@ -24,7 +24,16 @@ const cases = [
   ['zcode app-server 进程退出 (code 1): Error: ZCODE_RUNTIME_MODEL_UNAVAILABLE', 'protocol_config'],
   ['HTTP 401 Unauthorized', 'provider_auth'],
   ['402 Payment Required: insufficient balance', 'provider_quota'],
+  ['HTTP 400-1211: model does not exist', 'provider_model_missing'],
+  ['model_not_found: requested model is unavailable', 'provider_model_missing'],
+  ['模型不存在: bad-model', 'provider_model_missing'],
+  ['No available channel for model gpt-example', 'provider_channel_unavailable'],
   ['Error: 429 Too Many Requests', 'rate_limit'],
+  ['HTTP 500 Internal Server Error', 'provider_server_error'],
+  ['upstream 502: bad gateway', 'provider_server_error'],
+  ['upstream returned 502', 'provider_server_error'],
+  ['status code: 503 Service Unavailable', 'provider_server_error'],
+  ['HTTP 504 Gateway Timeout', 'provider_server_error'],
   ['等待回合结束超时（30 分钟）', 'timeout'],
   ['resume 超时（120s）', 'timeout'],
   ['输出超过 300KB，疑似模型生成循环，强制停止本回合', 'output_limit'],
@@ -39,6 +48,10 @@ for (const [err, code] of cases) {
 }
 ok(classifyFailure({ error: 'Error: 429 rate limit' }).retryable === true, 'rate_limit 标记可重试')
 ok(classifyFailure({ error: 'HTTP 401' }).retryable === false, 'provider_auth 不重试')
+ok(classifyFailure({ error: 'HTTP 400-1211: model does not exist' }).retryable === false, '模型不存在属于配置错误，不自动重试')
+ok(classifyFailure({ error: 'No available channel' }).retryable === false, '没有可用渠道不自动重试')
+ok(classifyFailure({ error: 'HTTP 503 Service Unavailable' }).retryable === true, '上游 5xx 标记可重试')
+ok(classifyFailure({ error: 'HTTP 529 rate limit' }).code === 'rate_limit', '529 仍归类为限流')
 ok(!!classifyFailure({ error: 'x' }).hint && !!classifyFailure({ error: 'x' }).title, 'unknown 也有 title/hint')
 
 // runner 层：假后端抛带特征错误 → task.failure 落库

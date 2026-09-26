@@ -13,6 +13,8 @@ export interface BoundedEventBatcherOptions<T> {
   merge?: (previous: T, next: T) => T
   onFlush: (events: readonly T[]) => boolean
   onRetry?: (attempt: number, delayMs: number) => void
+  onPending?: (events: readonly T[]) => boolean
+  maxPendingBytes?: number
 }
 
 export class BoundedEventBatcher<T> {
@@ -38,6 +40,11 @@ export class BoundedEventBatcher<T> {
       && (this.pendingItems >= this.options.maxItems || this.pendingBytes + eventBytes > this.options.maxBytes)) {
       this.flush()
     }
+    if (this.retryAttempt > 0 && this.options.maxPendingBytes !== undefined
+      && this.pendingBytes + eventBytes > this.options.maxPendingBytes) return false
+    const previous = this.retryAttempt > 0 ? [...this.pending] : undefined
+    const previousItems = this.pendingItems
+    const previousBytes = this.pendingBytes
 
     const last = this.pending.at(-1)
     if (last && this.options.canMerge?.(last, event) && this.options.merge) {
@@ -50,6 +57,15 @@ export class BoundedEventBatcher<T> {
     this.pendingBytes += eventBytes
 
     if (this.retryAttempt > 0) {
+      let protectedPending = true
+      try { protectedPending = this.options.onPending?.(this.pending) ?? true }
+      catch { protectedPending = false }
+      if (!protectedPending) {
+        this.pending = previous!
+        this.pendingItems = previousItems
+        this.pendingBytes = previousBytes
+        return false
+      }
       this.scheduleRetry()
     } else if (this.pendingItems >= this.options.maxItems || this.pendingBytes >= this.options.maxBytes) {
       this.flush()
@@ -86,11 +102,22 @@ export class BoundedEventBatcher<T> {
   }
 
   /** Stop accepting new events and resolve once all accepted events commit. */
-  close(): Promise<boolean> {
+  close(timeoutMs?: number): Promise<boolean> {
     this.accepting = false
-    if (this.closed) return Promise.resolve(true)
+    if (this.closed) return Promise.resolve(!this.pending.length)
     if (this.flush()) return Promise.resolve(true)
-    return new Promise((resolve) => this.drainWaiters.push(resolve))
+    return new Promise((resolve) => {
+      let timeout: ReturnType<typeof setTimeout> | undefined
+      this.drainWaiters.push((committed) => { if (timeout) clearTimeout(timeout); resolve(committed) })
+      if (timeoutMs !== undefined) {
+        timeout = setTimeout(() => {
+          this.clearTimer()
+          this.closed = true
+          this.finishDrain(false)
+        }, timeoutMs)
+        timeout.unref?.()
+      }
+    })
   }
 
   /** Stop retries and release memory. Pending events are reported as uncommitted. */

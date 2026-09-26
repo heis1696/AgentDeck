@@ -50,7 +50,9 @@ export class Scheduler {
   private launch(task: Task, worker: boolean) {
     if (worker) this.runningWorkers++
     else this.runningNormal++
-    void this.run(task.id).finally(() => {
+    void this.run(task.id).catch((error) => {
+      console.error('[Scheduler] Task launch failed', error)
+    }).finally(() => {
       if (worker) this.runningWorkers--
       else this.runningNormal--
       this.pump()

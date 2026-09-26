@@ -43,6 +43,8 @@ export type CreateTaskInput = TaskCreateInput
 
 export interface ChildTaskCreateInput {
   parentTaskId: string
+  dedupeKey?: string
+  delegateSourceRunId?: string
   title: string
   prompt: string
   workdir?: string
@@ -175,7 +177,7 @@ export class TaskService {
     return this.createTask(input, trigger)
   }
 
-  createTask(input: TaskCreateInput, trigger: RunTrigger = input.trigger ?? 'assignment'): Task {
+  createTask(input: TaskCreateInput, trigger: RunTrigger = input.trigger ?? 'assignment', delegateSourceRunId?: string): Task {
     const dedupeKey = this.normalizeDedupeKey(input)
     const agent = input.agentId ? this.getAgent?.(input.agentId) : undefined
     const backend = agent?.backend ?? input.backend ?? this.defaultBackend
@@ -199,7 +201,8 @@ export class TaskService {
         ...(input.unavailableReason ? { unavailableReason: input.unavailableReason } : {}),
         ...(input.worktree ? { worktree: input.worktree } : {}),
         ...(input.titleAuto ? { titleAuto: true } : {}),
-        ...(dedupeKey ? { dedupeKey } : {})
+        ...(dedupeKey ? { dedupeKey } : {}),
+        ...(delegateSourceRunId ? { delegateSourceRunId } : {})
       })
       if (!created.suppressIssue && !created.issueId) tx.update(created.id, { issueId: 'iss_' + created.id })
       return tx.get(created.id)!
@@ -217,12 +220,13 @@ export class TaskService {
       backend: input.backend,
       ...(input.agentId ? { agentId: input.agentId } : {}),
       parentTaskId: input.parentTaskId,
+      dedupeKey: input.dedupeKey,
       workerIndex: input.workerIndex,
       unavailableReason: input.unavailableReason,
       worktree: input.worktree,
       suppressIssue: input.suppressIssue,
       titleAuto: true
-    }, input.trigger ?? 'assignment')
+    }, input.trigger ?? 'assignment', input.delegateSourceRunId)
   }
 
   /**

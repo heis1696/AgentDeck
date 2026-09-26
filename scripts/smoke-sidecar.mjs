@@ -85,7 +85,7 @@ await build({ entryPoints: [path.join(root, 'src/main/store.ts')], outfile: stor
 await build({ entryPoints: [path.join(root, 'src/main/persistence.ts')], outfile: persistenceOut, bundle: true, platform: 'node', format: 'cjs', target: 'node18' })
 await build({ entryPoints: [path.join(root, 'src/main/ipc/tasks.ts')], outfile: ipcOut, bundle: true, platform: 'node', format: 'cjs', target: 'node18', plugins: [electronStub] })
 
-const { SidecarManager } = await import(pathToFileURL(managerOut).href)
+const { SidecarManager, SIDECAR_DIAGNOSTIC_FILE, SIDECAR_DIAGNOSTIC_LIMIT, SIDECAR_DIAGNOSTIC_LINE_LIMIT, SIDECAR_STDERR_TAIL_LINES } = await import(pathToFileURL(managerOut).href)
 const { startSidecarServer } = await import(pathToFileURL(serverOut).href)
 const { TaskRunner } = await import(pathToFileURL(runnerOut).href)
 const { TaskStore } = await import(pathToFileURL(storeOut).href)
@@ -174,9 +174,101 @@ const sidecarTask = await manager.rpc('tasks.create', { input: { title: 'sidecar
 if (!sidecarTask || sidecarTask.status !== 'queued') throw new Error('sidecar task creation RPC failed')
 if (!(await manager.rpc('tasks.list')).some((task) => task.id === sidecarTask.id)) throw new Error('sidecar task projection was not authoritative')
 
+const originalFetch = globalThis.fetch
+let responseLost = false
+let creationKey = ''
+globalThis.fetch = async (resource, init) => {
+  if (!responseLost && String(resource).endsWith('/rpc') && init?.body) {
+    const request = JSON.parse(String(init.body))
+    if (request.method === 'tasks.create' && request.params?.input?.title === 'lost-response') {
+      creationKey = request.params.input.requestId
+      const response = await originalFetch(resource, init)
+      assert(response.ok, 'lost-response creation did not commit')
+      responseLost = true
+      throw new Error('connection reset after commit')
+    }
+  }
+  return originalFetch(resource, init)
+}
+let replayedTask
+try {
+  replayedTask = await manager.rpc('tasks.create', { input: { title: 'lost-response', prompt: 'dedupe retry', workdir: tmp, backend: 'fake', suppressIssue: true } })
+} finally {
+  globalThis.fetch = originalFetch
+}
+assert(responseLost && typeof creationKey === 'string' && creationKey.startsWith('sidecar:'), 'creation request lacked a stable retry key')
+assert((await manager.rpc('tasks.list')).filter((task) => task.dedupeKey === creationKey).length === 1 && replayedTask.dedupeKey === creationKey, 'a lost creation response duplicated the Task')
+
 const stateFile = path.join(tmp, 'sidecar-state.json')
 const persisted = JSON.parse(fs.readFileSync(stateFile, 'utf8'))
 if (persisted.port !== first.port || persisted.token !== first.token) throw new Error('sticky sidecar state was not persisted')
+
+{
+  const failDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-sidecar-fail-'))
+  const bomb = path.join(failDir, 'bomb.cjs')
+  fs.writeFileSync(bomb, [
+    "console.log('SECRET-TASK-BODY-STDOUT')",
+    "const token = process.env.AGENTDECK_SIDECAR_TOKEN || ''",
+    "for (let i = 0; i < 64; i++) console.error((i === 63 ? `FATAL token=${token} ` : 'noise-') + i + '-' + 'x'.repeat(400))",
+    'process.exit(7)'
+  ].join('\n'))
+  const failManager = new SidecarManager({ userDataDir: failDir, entrypoint: bomb, preferredPort: 0 })
+  const bootStartedAt = Date.now()
+  let bootFailure = null
+  try { await failManager.start() } catch (error) { bootFailure = error }
+  assert(bootFailure instanceof Error, `a child that exits during boot must fail manager.start() (${bootFailure})`)
+  assert(String(bootFailure.message).includes('exited with code 7'), `the startup failure carries the exit evidence (${bootFailure.message})`)
+  assert(Date.now() - bootStartedAt < 8000, 'a dead child must fail the start fast instead of exhausting the full retry budget')
+  await sleep(150)
+  const degraded = failManager.snapshot
+  assert(degraded?.status === 'degraded', `the failed start lands in degraded (got ${degraded?.status})`)
+  const diags = degraded?.diagnostics ?? []
+  const exitNote = diags.find((d) => d.source === 'exit')
+  assert(exitNote?.code === 'code:7', `the abnormal exit is recorded verbatim (${JSON.stringify(exitNote)})`)
+  const stderrTail = diags.filter((d) => d.source === 'stderr')
+  assert(stderrTail.length > 0 && stderrTail.length <= SIDECAR_STDERR_TAIL_LINES, `only a bounded stderr tail survives (${stderrTail.length})`)
+  const failToken = JSON.parse(fs.readFileSync(path.join(failDir, 'sidecar-state.json'), 'utf8')).token
+  assert(stderrTail.some((d) => d.message?.includes('FATAL token=[redacted] 63-')), `the stderr line nearest the exit is retained with its token redacted (${JSON.stringify(stderrTail)})`)
+  assert(stderrTail.every((d) => !d.message?.includes(failToken)), 'the raw session token never appears in diagnostics')
+  assert(stderrTail.every((d) => !d.message?.includes('noise-0-')), 'stderr lines beyond the tail are evicted, not accumulated')
+  for (const d of diags) {
+    assert(!d.message || d.message.length <= SIDECAR_DIAGNOSTIC_LINE_LIMIT, `diagnostic lines are clamped (got ${d.message?.length})`)
+    assert(!d.message?.includes('SECRET-TASK-BODY-STDOUT'), 'stdout (task bodies) is never retained as diagnostics')
+  }
+  const diagnosticFile = path.join(failDir, SIDECAR_DIAGNOSTIC_FILE)
+  const savedDiagnostics = JSON.parse(fs.readFileSync(diagnosticFile, 'utf8'))
+  assert(savedDiagnostics.some((entry) => entry.source === 'exit' && entry.code === 'code:7'), 'exit code survives to bounded metadata file')
+  assert(savedDiagnostics.every((entry) => !('message' in entry) && !('token' in entry)), 'metadata file never stores stderr or credentials')
+  const reopened = new SidecarManager({ userDataDir: failDir, entrypoint: bomb, preferredPort: 0 })
+  try { await reopened.start() } catch {}
+  assert(reopened.snapshot?.diagnostics.some((entry) => entry.at === exitNote.at && entry.code === 'code:7'), 'a new manager replays prior exit metadata')
+  await reopened.stop()
+
+  const spawnDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-sidecar-spawn-'))
+  const spawnManager = new SidecarManager({ userDataDir: spawnDir, entrypoint: path.join(spawnDir, 'unreachable.cjs'), nodePath: path.join(spawnDir, 'no-such-node'), preferredPort: 0 })
+  let spawnFailure = null
+  const spawnStartedAt = Date.now()
+  try { await spawnManager.start() } catch (error) { spawnFailure = error }
+  assert(spawnFailure instanceof Error, `a missing child binary must fail manager.start() (${spawnFailure})`)
+  assert(Date.now() - spawnStartedAt < 8000, 'a spawn failure must fail the start fast')
+  assert((spawnManager.snapshot?.diagnostics ?? []).some((d) => d.source === 'spawn' && d.message?.includes('ENOENT')), `the spawn error is recorded (${JSON.stringify(spawnManager.snapshot?.diagnostics)})`)
+  await spawnManager.stop()
+
+  for (let cycle = 0; cycle < 6; cycle++) {
+    let again = null
+    try { await failManager.start() } catch (error) { again = error }
+    assert(again instanceof Error, `repeated failed starts keep failing with evidence (${again})`)
+    await sleep(120)
+  }
+  const bounded = failManager.snapshot?.diagnostics ?? []
+  assert(bounded.length === SIDECAR_DIAGNOSTIC_LIMIT, `the diagnostics ring stays capped at the limit (got ${bounded.length})`)
+  assert(bounded.some((d) => d.source === 'exit' && d.code === 'code:7'), 'the newest crash evidence survives eviction')
+  assert(JSON.parse(fs.readFileSync(diagnosticFile, 'utf8')).length <= SIDECAR_DIAGNOSTIC_LIMIT, 'metadata history is bounded across crashes')
+  const failStateRaw = fs.readFileSync(path.join(failDir, 'sidecar-state.json'), 'utf8')
+  assert(!failStateRaw.includes('noise-') && !failStateRaw.includes('FATAL') && !failStateRaw.includes('SECRET-TASK-BODY'), 'no child output is persisted into the sticky state file')
+  assert(!('diagnostics' in JSON.parse(failStateRaw)), 'diagnostics are never persisted')
+  await failManager.stop()
+}
 
 // ------------------------------- real two-entry race for the same dead run
 // A real sidecar child process and a second, independent sidecar server race
@@ -365,6 +457,9 @@ for (let i = 0; i < 80; i++) {
   } catch {}
 }
 if (!recovered) throw new Error('sidecar did not recover after child restart')
+const crashDiags = manager.snapshot?.diagnostics ?? []
+if (!crashDiags.some((d) => d.source === 'exit')) throw new Error(`the crashed sidecar left no exit evidence (${JSON.stringify(crashDiags)})`)
+if (crashDiags.length > SIDECAR_DIAGNOSTIC_LIMIT) throw new Error(`diagnostics exceed the ring cap (${crashDiags.length})`)
 const stillRunning = await manager.sync()
 if (stillRunning.tasks.find((task) => task.id === unknownRun.id)?.status !== 'running') throw new Error('reconnect adopted a run with unknown ownership')
 if (stillRunning.tasks.find((task) => task.id === liveRun.id)?.status !== 'running') throw new Error('reconnect adopted a live run past its lease')

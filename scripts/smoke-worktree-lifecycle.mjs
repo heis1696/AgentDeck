@@ -8,7 +8,7 @@ import path from 'node:path'
 const root = path.resolve(import.meta.dirname, '..')
 const outfile = path.join(root, 'out', 'smoke-worktree-lifecycle.cjs')
 await build({ entryPoints: [path.join(root, 'src/main/git.ts')], outfile, bundle: true, platform: 'node', format: 'cjs', target: 'node18' })
-const { createWorktree, listWorktreeMetadata, reclaimWorktree, pruneWorktrees, setWorktreeManualKeep, branchExists, worktreeAvailability, removeWorktree, clearWorktreePool, clearWorktreeFileCountCache } = await import(pathToFileURL(outfile).href)
+const { createWorktree, createWorktreeAtBranch, listWorktreeMetadata, reclaimWorktree, pruneWorktrees, setWorktreeManualKeep, branchExists, worktreeAvailability, removeWorktree, clearWorktreePool, clearWorktreeFileCountCache, WORKTREE_POOL_MAX_PER_REPO, worktreePoolEntriesForTest } = await import(pathToFileURL(outfile).href)
 
 const check = (condition, message) => {
   if (!condition) throw new Error(message)
@@ -340,6 +340,85 @@ try {
   check(await branchExists(dir, 'agentdeck/foreign_task_c1'), 'pre-existing branch survives failed attempts untouched')
   check(!fs.existsSync(path.join(dir, '.agentdeck-worktrees', 'foreign_task_c1')), 'fast-fail path leaves no directory behind')
   git('branch', '-D', 'agentdeck/foreign_task_c1')
+
+  // ---- 并发归池容量守卫：同仓不同树并发 reclaim(repool=true) 最多入池
+  // WORKTREE_POOL_MAX_PER_REPO 棵，多余树回落常规回收；每仓容量判定由仓库级归池锁互斥 ----
+  clearWorktreePool()
+  check(worktreePoolEntriesForTest(dir).length === 0, 'pool starts empty for the concurrent repool capacity regression')
+  const capTrees = []
+  for (const name of ['pool_cap_c1', 'pool_cap_c2', 'pool_cap_c3']) {
+    const tree = await createWorktree(dir, name, 'main', `owner_${name}`)
+    check(!!tree?.metadata?.generationId, `${name} fixture created with generation identity`)
+    capTrees.push(tree)
+  }
+  const capResults = await Promise.all(capTrees.map((tree) => reclaimWorktree(tree.path, {
+    repool: true,
+    deleteBranch: true,
+    expectedOwnerTaskId: tree.metadata.ownerTaskId,
+    expectedGenerationId: tree.metadata.generationId
+  })))
+  const capPooled = capResults.filter((item) => item.ok && item.status === 'pooled')
+  const capRemoved = capResults.filter((item) => item.ok && item.status === 'removed')
+  check(capPooled.length === WORKTREE_POOL_MAX_PER_REPO, `three simultaneous returns pool exactly ${WORKTREE_POOL_MAX_PER_REPO} trees (capacity race guarded)`)
+  check(capRemoved.length === capTrees.length - WORKTREE_POOL_MAX_PER_REPO, 'excess concurrent tree falls back to normal reclamation')
+  const capPoolPaths = worktreePoolEntriesForTest(dir)
+  check(capPoolPaths.length === WORKTREE_POOL_MAX_PER_REPO && capPooled.every((item) => capPoolPaths.includes(item.path)), 'in-process pool holds exactly the pooled winners')
+  for (const item of capPooled) {
+    check(fs.existsSync(item.path) && listWorktreeMetadata(dir).some((meta) => meta.path === item.path && meta.cleanupStatus === 'pooled'), `${path.basename(item.path)} keeps its directory with a pooled sidecar`)
+  }
+  for (const item of capRemoved) {
+    check(!fs.existsSync(item.path) && !await branchExists(dir, item.branch), `${path.basename(item.path)} excess tree is reclaimed with its branch`)
+  }
+  // 容量已满时的后续归还：探针树走 createWorktreeAtBranch 造出（该路径不取池），顺序归还被容量拒收
+  git('branch', 'agentdeck/pool_cap_probe_c1', 'main')
+  const capProbe = await createWorktreeAtBranch(dir, 'pool_cap_probe_c1', 'agentdeck/pool_cap_probe_c1', 'owner_pool_cap_probe')
+  check(!!capProbe && capProbe.pooled !== true && worktreePoolEntriesForTest(dir).length === WORKTREE_POOL_MAX_PER_REPO, 'capacity probe tree is built without consuming the pool')
+  const capProbeOut = await reclaimWorktree(capProbe.path, {
+    repool: true,
+    deleteBranch: true,
+    expectedOwnerTaskId: capProbe.metadata.ownerTaskId,
+    expectedGenerationId: capProbe.metadata.generationId
+  })
+  check(capProbeOut.ok && capProbeOut.status === 'removed', 'repool at full capacity is refused and reclaimed')
+  check(worktreePoolEntriesForTest(dir).length === WORKTREE_POOL_MAX_PER_REPO, 'capacity refusal leaves the pooled winners untouched')
+
+  // 归池失败不占死容量：陈旧 HEAD.lock 卡死 detach 步骤 → 该树回落常规回收，池内不留幽灵
+  // 条目，空出的容量立即可被下一次派单复用
+  clearWorktreePool()
+  const failTree = await createWorktree(dir, 'pool_fail_c1', 'main', 'owner_pool_fail_c1')
+  check(!!failTree, 'repool failure fixture created')
+  const failPointer = fs.readFileSync(path.join(failTree.path, '.git'), 'utf8')
+  const failGitdir = path.resolve(failTree.path, /^gitdir:\s*(.+?)\s*$/im.exec(failPointer)[1])
+  fs.writeFileSync(path.join(failGitdir, 'HEAD.lock'), '')
+  const failPeer = await createWorktree(dir, 'pool_fail_c2', 'main', 'owner_pool_fail_c2')
+  check(!!failPeer && failPeer.path !== failTree.path, 'repool failure peer created')
+  const [failOut, peerOut] = await Promise.all([
+    reclaimWorktree(failTree.path, {
+      repool: true,
+      deleteBranch: true,
+      expectedOwnerTaskId: failTree.metadata.ownerTaskId,
+      expectedGenerationId: failTree.metadata.generationId
+    }),
+    reclaimWorktree(failPeer.path, {
+      repool: true,
+      deleteBranch: true,
+      expectedOwnerTaskId: failPeer.metadata.ownerTaskId,
+      expectedGenerationId: failPeer.metadata.generationId
+    })
+  ])
+  check(failOut.ok && failOut.status === 'removed', 'failed repool falls back to normal reclamation')
+  check(!fs.existsSync(failTree.path) && !await branchExists(dir, failTree.branch), 'failed repool tree is reclaimed with its branch')
+  check(peerOut.ok && peerOut.status === 'pooled', 'healthy tree still pools beside the failed repool')
+  const failPoolPaths = worktreePoolEntriesForTest(dir)
+  check(failPoolPaths.length === 1 && failPoolPaths[0] === failPeer.path, 'failed repool never occupies a pool slot')
+  const failReuse = await createWorktree(dir, 'pool_fail_c3', 'main', 'owner_pool_fail_c3')
+  check(!!failReuse && failReuse.pooled === true && failReuse.path === failPeer.path, 'freed capacity is reusable by the next dispatch')
+  const failRepool = await reclaimWorktree(failReuse.path, {
+    repool: true,
+    expectedOwnerTaskId: failReuse.metadata.ownerTaskId,
+    expectedGenerationId: failReuse.metadata.generationId
+  })
+  check(failRepool.ok && failRepool.status === 'pooled', 'reuse cycle keeps repooling after a failure')
   console.log('\nWORKTREE LIFECYCLE SMOKE PASSED')
 } finally {
   fs.rmSync(dir, { recursive: true, force: true })
