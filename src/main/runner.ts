@@ -130,6 +130,11 @@ const RETITLE_TURN_BUDGET_MS = Number(process.env.AGENTDECK_RETITLE_MS) > 0
   ? Number(process.env.AGENTDECK_RETITLE_MS)
   : 90_000
 const RETITLE_BUDGET_EXCEEDED = 'retitle-budget-exceeded'
+/**
+ * 总结轮硬预算：委派协议 summary 层（派单标 summary 且结果超回灌界）对子单会话追加的
+ * 一轮压缩总结，预期 ≤1000 字快速返回；到点放弃并把回灌按入口指引回退，绝不无限等。
+ */
+const SUMMARY_TURN_BUDGET_MS = 120_000
 /** 后端连接已死的特征：命中后丢弃内存会话、降级 resume 重建（不再需要重启应用） */
 const SESSION_DEAD_RE = /连接已关闭|进程退出|EPIPE|ENOTCONN|ECONNRESET|ECONNREFUSED|disconnected/i
 
@@ -1519,7 +1524,8 @@ export class TaskRunner {
           pushTask: (id) => this.pushTask(id),
           pushEvent: (id, e) => this.pushEvent(id, e),
           applyReview: (childId, verdict, note) => this.applyChildReview(childId, verdict, note),
-          addIssueComment: (issueId, text) => this.addIssueComment(issueId, text)
+          addIssueComment: (issueId, text) => this.addIssueComment(issueId, text),
+          sendChildSummaryTurn: (childId, content) => this.sendChildSummaryTurn(childId, content)
         })
         finalText = outcome.finalText || r.response
         scanTexts = outcome.scanTexts
@@ -1859,6 +1865,62 @@ export class TaskRunner {
       // 已放弃回合（预算超时后被护栏的）不得清理后继回合的等待句柄；
       // lifecycle generation 守卫只允许清理属于自己的那一回合。
       if (life.generation === gen) unregisterResume()
+    }
+  }
+
+  /**
+   * 总结轮通路（独立实现）：对已终态子单的存活会话追加一轮 prompt→reply，供委派循环
+   * 在全文双落之后换取压缩总结。有意独立于 sendTurn——子单已终态、claim 已释放，
+   * running 闸门必然拒绝；本通路直接在既有会话路由上登记一个一次性回合记录，回复只经
+   * 本方法返回值交给调用方：不落任务事件、不改终态、不写 store，也不触碰派单去重/
+   * 归属交接/建树清理边界（委派协议 summary 层，见 delegate.ts 的 DelegationContext）。
+   * 返回 null = 无存活会话或连接无法证明回合归属（非 turnScoped / 已弃用 / 恢复挂起）；
+   * 回合超时按失败裁决但不 stop 会话——终态子单的会话可能还要服务追问续聊。
+   */
+  async sendChildSummaryTurn(childId: string, content: string): Promise<BackendTurnResult | null> {
+    const session = this.sessions.get(childId)
+    const router = session ? this.sessionTurns.get(session) : undefined
+    if (!session || !router || session.turnScoped !== true || !router.mayOpenNewTurn()) return null
+    if (this.lifecycle(childId).pendingResume) return null
+    const seq = router.nextSeq()
+    const stamp: BackendTurnStamp = Object.freeze({
+      seq,
+      id: `turn_summary_${childId}_${++this.turnSeq}_${Math.random().toString(36).slice(2, 8)}`
+    })
+    let settle: (r: BackendTurnResult) => void = () => {}
+    const settled = new Promise<BackendTurnResult>((resolve) => { settle = resolve })
+    const record: TurnRecord = {
+      taskId: childId,
+      seq,
+      stamp,
+      generation: -1,
+      claim: { taskId: childId, runId: this.store.get(childId)?.runId ?? '' },
+      token: Object.freeze({ generation: -1, sessionOwner: session.sessionId }),
+      events: {
+        onEvent: () => {},
+        onTurnEnd: (r) => { router.closeTurn(stamp.id); settle(r) }
+      }
+    }
+    router.openTurn(record)
+    try {
+      await session.send(content, stamp)
+    } catch (error) {
+      router.abandonTurn(stamp.id)
+      return { ok: false, response: '', error: error instanceof Error ? error.message : String(error) }
+    }
+    const budget = Math.min(this.turnBudgetMs(childId), SUMMARY_TURN_BUDGET_MS)
+    let timer: NodeJS.Timeout | undefined
+    let timedOut = false
+    const timeout = new Promise<BackendTurnResult>((resolve) => {
+      timer = setTimeout(() => { timedOut = true; resolve(turnTimeoutError(budget)) }, budget)
+    })
+    try {
+      const result = await Promise.race([settled, timeout])
+      // 超时收场：撤销路由记录，让迟到终态从此无人接收（不 stop 会话，追问续聊不受扰）
+      if (timedOut) router.abandonTurn(stamp.id)
+      return result
+    } finally {
+      if (timer) clearTimeout(timer)
     }
   }
 
