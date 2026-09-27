@@ -1893,7 +1893,9 @@ export class TaskRunner {
    * 本方法返回值交给调用方：不落任务事件、不改终态、不写 store，也不触碰派单去重/
    * 归属交接/建树清理边界（委派协议 summary 层，见 delegate.ts 的 DelegationContext）。
    * 返回 null = 无存活会话或连接无法证明回合归属（非 turnScoped / 已弃用 / 恢复挂起）；
-   * 回合超时按失败裁决但不 stop 会话——终态子单的会话可能还要服务追问续聊。
+   * 回合超时按失败裁决，并取消在飞请求（session.stop）+ 退役连接（不可复用）——适配器
+   * 单槽在飞，迟到响应会顶着「当前回合」身份投递给同连接的下个回合，必须让追问改走
+   * resume 重建；被顶掉/退役的旧回合由 onRevoked 立即收口，不等预算。
    */
   async sendChildSummaryTurn(childId: string, content: string): Promise<BackendTurnResult | null> {
     const session = this.sessions.get(childId)
@@ -1924,7 +1926,7 @@ export class TaskRunner {
     // 入口检查到 openTurn 之间零 await：同会话单在飞回合的互斥在这个同步段内闭合
     router.openTurn(record)
     // 预算计时与发起 send 同时启动：终态、发送失败、预算三者竞速——send 悬挂（既不
-    // resolve 也不 reject、终态也永不到达）同样必然在预算内返回；超时撤销路由记录。
+    // resolve 也不 reject、终态也永不到达）同样必然在预算内返回；超时收口见 finally。
     const budget = Math.min(this.turnBudgetMs(childId), SUMMARY_TURN_BUDGET_MS)
     let timer: NodeJS.Timeout | undefined
     let timedOut = false
@@ -1940,8 +1942,17 @@ export class TaskRunner {
       })
       return await Promise.race([settled, timeout])
     } finally {
-      // 超时收场：撤销路由记录，让迟到终态从此无人接收（不 stop 会话，追问续聊不受扰）
-      if (timedOut) router.abandonTurn(stamp.id)
+      // 超时收场（双保险）：适配器是单槽在飞请求（如 dsh-acp 的 session/prompt + 当前槽裁决），
+      // 只撤路由记录挡不住迟到响应——旧请求的迟到终态会顶着「当前回合」的通道身份投递，
+      // 同连接上的下个回合将收到旧回合的响应、自己的响应反被槽丢弃，旧 send 也悬而无收口。
+      // ①取消在飞请求：BackendSession.stop 的契约即「中止当前回合」（dsh-acp 走
+      //   session/cancel 通知，连接保活），旧请求尽快落终态、旧 send 得到收口；
+      // ②退役连接（标记不可复用）：followUp 的复用门禁 sessionMayOpenNewTurn 据此拒绝旧
+      //   连接，下个追问走既有 resume 重建通路，旧连接上的迟到消息随会话关闭无人接收。
+      if (timedOut) {
+        void session.stop().catch(() => {})
+        router.retire('replaced')
+      }
       if (timer) clearTimeout(timer)
     }
   }

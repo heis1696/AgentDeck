@@ -72,15 +72,17 @@ export interface DelegateCall {
 }
 
 /** 属性扫描：name 必须是独立属性名（名称边界——data-summary 不撞 summary），
- *  值支持双/单引号与裸词；引号值整体一个 token 消费，值内部出现的其他属性名字样
+ *  值支持双/单引号与裸词（裸词值必须有捕获组，否则 to=Worker 一律落空串派不出去、
+ *  summary=false 判真）；引号值整体一个 token 消费，值内部出现的其他属性名字样
  *  不会被再认出来（单引号 reason 值内的 summary="true" 不误启）。残缺引号按裸词
  *  吸收，不再向后方扩散。 */
 function parseTagAttrs(attrs: string): Array<{ name: string; value: string }> {
   const out: Array<{ name: string; value: string }> = []
-  const re = /([a-zA-Z_][\w:-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|[^\s>]*)|([a-zA-Z_][\w:-]*)/g
+  // 组号：1=属性名（带=）；2=双引号值；3=单引号值；4=裸词值；5=独立属性名（裸属性）
+  const re = /([a-zA-Z_][\w:-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]*))|([a-zA-Z_][\w:-]*)/g
   let m: RegExpExecArray | null
   while ((m = re.exec(attrs))) {
-    out.push({ name: (m[1] ?? m[4]).toLowerCase(), value: (m[2] ?? m[3] ?? '').trim() })
+    out.push({ name: (m[1] ?? m[5]).toLowerCase(), value: (m[2] ?? m[3] ?? m[4] ?? '').trim() })
   }
   return out
 }
