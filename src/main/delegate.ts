@@ -22,7 +22,9 @@ import {
   leftoverRejectsComment,
   workerFullReportComment,
   reportCopyMarkdown,
-  fullTextPointerLines
+  fullTextPointerLines,
+  CHILD_SUMMARY_BODY_PREFIX,
+  childSummaryPrompt
 } from './prompts'
 import {
   branchExists,
@@ -64,12 +66,38 @@ export interface DelegateCall {
   prompt: string
   /** 派工理由（领队自述，留痕展示用） */
   reason?: string
+  /** summary 属性（可选布尔）：领队自评该单回灌需要压缩结论时才加——
+   *  结果超回灌界时向子单会话追加一轮总结，用总结（非全文）作回灌体 */
+  summary?: boolean
 }
 
-/** 解析 delegate 标签的属性（属性顺序任意） */
+/** 属性扫描：name 必须是独立属性名（名称边界——data-summary 不撞 summary），
+ *  值支持双/单引号与裸词（裸词值必须有捕获组，否则 to=Worker 一律落空串派不出去、
+ *  summary=false 判真）；引号值整体一个 token 消费，值内部出现的其他属性名字样
+ *  不会被再认出来（单引号 reason 值内的 summary="true" 不误启）。残缺引号按裸词
+ *  吸收，不再向后方扩散。 */
+function parseTagAttrs(attrs: string): Array<{ name: string; value: string }> {
+  const out: Array<{ name: string; value: string }> = []
+  // 组号：1=属性名（带=）；2=双引号值；3=单引号值；4=裸词值；5=独立属性名（裸属性）
+  const re = /([a-zA-Z_][\w:-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]*))|([a-zA-Z_][\w:-]*)/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(attrs))) {
+    out.push({ name: (m[1] ?? m[5]).toLowerCase(), value: (m[2] ?? m[3] ?? m[4] ?? '').trim() })
+  }
+  return out
+}
+
 function tagAttr(attrs: string, name: string): string | undefined {
-  const m = attrs.match(new RegExp(`${name}\\s*=\\s*"([^"]*)"`, 'i'))
-  return m ? m[1].trim() : undefined
+  const hit = parseTagAttrs(attrs).find((a) => a.name === name.toLowerCase())
+  return hit ? hit.value : undefined
+}
+
+/** summary 布尔属性：支持裸属性（summary）与显式值（summary="true"/"false"），
+ *  值按大小写规范化布尔（"FALSE"/"False" 同样为假）；解析走同一份属性扫描——
+ *  名称边界与引号值整体消费由扫描器保证，reason 值内出现 summary 一词不误判。 */
+function summaryAttr(attrs: string): boolean {
+  const hit = parseTagAttrs(attrs).find((a) => a.name === 'summary')
+  return !!hit && hit.value.toLowerCase() !== 'false'
 }
 
 /** 从领队回复中提取 delegate 标记（容错：任意属性顺序、md fence 内）。
@@ -83,7 +111,7 @@ export function parseDelegates(text: string): DelegateCall[] {
     const prompt = m[2].trim()
     const to = tagAttr(m[1], 'to')
     const reason = tagAttr(m[1], 'reason')
-    if (prompt && to) out.push({ to, prompt, ...(reason ? { reason } : {}) })
+    if (prompt && to) out.push({ to, prompt, ...(reason ? { reason } : {}), ...(summaryAttr(m[1]) ? { summary: true } : {}) })
   }
   return out
 }
@@ -358,6 +386,9 @@ export interface DelegationContext {
   /** Issue 评论（队员全文报告与回灌失败兜底的落点）。返回 null = Issue 不存在，未送达——
    *  调用方必须降级到任务证据/事件通道，绝不静默丢弃。 */
   addIssueComment?: (issueId: string, text: string) => IssueCommentLike | null
+  /** 总结轮通路（独立实现）：对已终态子单的存活会话追加一轮 prompt→reply。
+   *  返回 null = 无存活会话/后端不支持续轮；回合 !ok = 总结轮失败——调用方一律按 C 行为回退。 */
+  sendChildSummaryTurn?: (childId: string, content: string) => Promise<BackendTurnResult | null>
 }
 
 export interface DelegationOutcome {
@@ -492,12 +523,24 @@ export function buildGitReportSection(digest: WorktreeChangeDigest): string | nu
   return `${fence(inner)}${endMark}`
 }
 
-// ---- 单条回灌摘要的结构化组装（A1：结论段有界 + git 小节 + 全文入口指引；4000 只兜底） ----
+// ---- 单条回灌正文的结构化组装（C 保底：短文原文整段回灌；长文只回 git 小节 + 全文入口） ----
 
-/** 结论段摘录字数：result 首部进摘要的量；全文走双落通道（Issue 评论 + 报告副本） */
-export const REPORT_CONCLUSION_CHARS = 1200
-/** 摘要物理硬顶：结构化摘要下正常到不了这里，只是最后防线；触发必须带「N 字未送」标记 */
-export const REPORT_BODY_HARD_CAP = 4000
+/** 回灌原文整段回灌的体量界（码点级）：≤ 此界原文整段进正文；超过则正文不放原文，
+ *  只回 git 改动小节 + 全文入口指引（全文已双落），领队可选派单时标 summary 走总结轮。 */
+export const REPORT_INLINE_MAX = 2000
+
+/** 码点级计数（O(n) 零分配）：代理对算一个码点 */
+function countCodepoints(text: string): number {
+  let count = 0
+  for (let i = 0; i < text.length; i++, count++) {
+    const code = text.charCodeAt(i)
+    if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
+      const next = text.charCodeAt(i + 1)
+      if (next >= 0xdc00 && next <= 0xdfff) i++
+    }
+  }
+  return count
+}
 
 export interface ChildReportBodyInput {
   status: string
@@ -507,58 +550,34 @@ export interface ChildReportBodyInput {
   gitSection?: string | null
   /** 全文入口指引行（原文；这里统一过转义防护） */
   pointers?: string[]
+  /** 已采纳的队员总结（总结轮产出；原文，这里统一过转义防护）——采纳时正文以它为回灌体 */
+  summary?: string
+  /** 总结轮回退注记（系统文案原样进正文；如「总结轮未产出」「总结仍超长」） */
+  summaryFallbackNote?: string
 }
 
-/** 码点级切割：切点落在代理对中间时回退一位，绝不孤立代理项 */
-function sliceCodepoints(text: string, max: number): string {
-  if (max <= 0) return ''
-  if (text.length <= max) return text
-  let cut = max
-  const prev = text.charCodeAt(cut - 1)
-  if (prev >= 0xd800 && prev <= 0xdbff) cut -= 1
-  return text.slice(0, cut)
-}
-
-const FENCE_LINE_RE = /^[ \t]*```/
-
-/** 切点落在未闭合 ``` 围栏内时截至块前（防半截围栏在渲染层吞掉后续小节） */
-function cutBeforeUnclosedFence(text: string): string {
-  let count = 0
-  let lastOpenOffset = -1
-  let offset = 0
-  for (const line of text.split('\n')) {
-    if (FENCE_LINE_RE.test(line)) {
-      count++
-      lastOpenOffset = offset
-    }
-    offset += line.length + 1
-  }
-  if (count % 2 === 1 && lastOpenOffset >= 0) return text.slice(0, lastOpenOffset).replace(/\n$/, '')
-  return text
-}
-
-/** 结构化摘要体：结论段（result 首部有界，码点级切割 + 围栏感知；与 git 小节同源的
- *  序列内破坏转义——队员可控文本里不再有可解析的活标记）+ git 改动小节 + 全文入口指引。
- *  4000 字物理截断只是最后防线（触发带截断标记），全文已双落，摘要不承担携带全文的职责。 */
+/** 回灌正文：done 单 = 队员总结（已采纳时，前置非全文标注）或原文整段（≤体量界，码点级）；
+ *  原文超界且无可用总结时正文不放原文，只留回退注记 + git 改动小节 + 全文入口指引。
+ *  任何路径不做切片、不留截断标记——全文由双落通道（Issue 评论 + 报告副本）携带。
+ *  队员可控文本统一过序列内破坏转义（与 git 小节同源），回灌体里不再有可解析的活标记。 */
 export function buildChildReportBody(input: ChildReportBodyInput): string {
   const parts: string[] = []
   if (input.status === 'done') {
-    const result = input.result ?? ''
-    const head = cutBeforeUnclosedFence(sliceCodepoints(result, REPORT_CONCLUSION_CHARS))
-    parts.push(escapeProtocolLiterals(head))
-    if (result.length > head.length) {
-      parts.push(`…（结论段只摘前 ${REPORT_CONCLUSION_CHARS} 字，后 ${result.length - head.length} 字未进摘要；全文见下方入口）`)
+    const summary = (input.summary ?? '').trim()
+    if (summary) {
+      parts.push(`${CHILD_SUMMARY_BODY_PREFIX}\n${escapeProtocolLiterals(summary)}`)
+    } else {
+      const result = (input.result ?? '').trim()
+      if (result && countCodepoints(result) <= REPORT_INLINE_MAX) parts.push(escapeProtocolLiterals(result))
     }
+    if (input.summaryFallbackNote) parts.push(input.summaryFallbackNote)
   } else {
-    parts.push(`状态 ${input.status}${input.error ? ': ' + input.error.slice(0, 300) : ''}`)
+    // failed/error 路径与 result/总结同源转义：队员可控的 error 文本不得携带可解析的活标记
+    parts.push(`状态 ${input.status}${input.error ? ': ' + escapeProtocolLiterals(input.error) : ''}`)
   }
   if (input.gitSection) parts.push(input.gitSection)
   if (input.pointers?.length) parts.push(input.pointers.map((line) => escapeProtocolLiterals(line)).join('\n'))
-  const body = parts.filter((part) => part !== '').join('\n\n')
-  const overflow = body.length - REPORT_BODY_HARD_CAP
-  if (overflow <= 0) return body
-  return sliceCodepoints(body, REPORT_BODY_HARD_CAP)
-    + `\n…（回灌正文超 ${REPORT_BODY_HARD_CAP} 字触发最后防线截断：后 ${overflow} 字未送；全文见 Issue 评论与报告副本）`
+  return parts.filter((part) => part !== '').join('\n\n')
 }
 
 /**
@@ -801,9 +820,43 @@ export async function runDelegationLoop(
       fullTextEntries.set(id, { seq, issueOk, copyPath: copyAbs ? reportCopyRelPath(task.workdir!, copyAbs) : '' })
     }
 
-    // 汇报回灌（带单号；审核协议追加）。摘要改为结构化组装：单号+状态在条目标题，
-    // 体是「结论段（result 首部有界）+ git 改动小节 + 全文入口指引」——4000 字物理截断
-    // 只是最后防线（触发带截断标记），全文已双落，摘要不再承担携带全文的职责。
+    // ---- summary 层（可选）：派单标了 summary 且结果超回灌界时，在全文双落之后向该
+    // 子单会话追加一轮总结请求，产出（≤回灌界才采纳）作为回灌体并前置「非全文」标注。
+    // 时序契约：commitAll 与全文双落已在上方完成且行为不变；总结轮不改子单终态；
+    // 领队反馈等总结回合完成后才发出（下方回灌组装在此之后）。失败/不支持续轮/
+    // 总结仍超长都只按 C 行为回退并注明原因，绝不循环重试。
+    const summaryBodies = new Map<string, string>()
+    const summaryFallbackNotes = new Map<string, string>()
+    for (let idx = 0; idx < childIds.length; idx++) {
+      const id = childIds[idx]
+      const c = store.get(id)
+      const call = roundChildren.get(id)
+      if (!c || c.status !== 'done' || call?.summary !== true) continue
+      const fullResult = (c.result ?? '').trim()
+      if (!fullResult || countCodepoints(fullResult) <= REPORT_INLINE_MAX) continue
+      if (!active()) return abandoned()
+      const seq = idx + 1
+      let turn: BackendTurnResult | null | undefined
+      try {
+        turn = await ctx.sendChildSummaryTurn?.(id, childSummaryPrompt())
+      } catch {
+        turn = null
+      }
+      if (!active()) return abandoned()
+      const produced = turn?.ok ? (turn.response ?? '').trim() : ''
+      if (produced && countCodepoints(produced) <= REPORT_INLINE_MAX) {
+        summaryBodies.set(id, produced)
+        note(`单 #${seq} 总结轮已产出（${countCodepoints(produced)} 字），作为回灌体`)
+      } else {
+        const why = produced ? '总结仍超长' : '总结轮未产出'
+        summaryFallbackNotes.set(id, `（${why}：原文超回灌界不进正文，全文见下方入口）`)
+        note(`单 #${seq} ${why}，回灌按全文入口指引回退`)
+      }
+    }
+
+    // 汇报回灌（带单号；审核协议追加）。正文按 C 保底组装：短文原文整段回灌；长文只回
+    // git 改动小节 + 全文入口指引（标 summary 的单先走总结轮，产出前置非全文标注）。
+    // 任何路径不做切片、不留截断标记；全文已双落，正文不承担携带全文的职责。
     // done 单的 git 小节：集成期 commitAll 在循环之后才跑，此刻 worktree 里是未提交
     // 改动——digest 只读计算（对 worktree 基线 sha diff + 未跟踪列名），让领队不依赖
     // 集成就能「验收」改动面。
@@ -834,7 +887,9 @@ export async function runDelegationLoop(
         result: c.result,
         error: c.error,
         gitSection,
-        pointers: full ? fullTextPointerLines(full.copyPath, full.issueOk, full.seq) : []
+        pointers: full ? fullTextPointerLines(full.copyPath, full.issueOk, full.seq) : [],
+        summary: summaryBodies.get(id),
+        summaryFallbackNote: summaryFallbackNotes.get(id)
       })
       reportEntries.push(childReportEntry(call?.to ?? c.agentId ?? c.backend, c.status, seq, body))
     }

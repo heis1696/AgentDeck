@@ -54,6 +54,7 @@ ${roster}
 - reason 建议带上——它会展示在执行日志里，方便人理解你的调度决策。
 - 指令只写增量：领队接到的任务原文会自动附给队员，不必复述背景；只写目标、专属约束、验收要点，两三句通常足够。
 - 指令里的文件一律用仓库相对路径（如 src/app.ts）——队员在仓库的隔离副本里工作，绝对路径会改错地方。
+- 可选布尔属性 summary：自评该单的结果会很长、且你只需要压缩结论回灌时才加上（如 <delegate to="队员名" summary>指令</delegate>）。系统会在全文落盘后向该队员追加一轮总结请求，把其 ≤1000 字总结（结论/关键改动/风险）回灌给你；不加的短结果原文整段回灌，长结果只回 git 改动小节与全文入口指引。
 
 每轮结果回灌后，先输出一行评估再决定下一步（没有新派发也要评估后收尾）：
 <round outcome="action|no_action|failed" reason="一句话：本轮结果如何、下一步打算"/>
@@ -148,11 +149,25 @@ export function reportCopyMarkdown(opts: { childId: string; title: string; seq: 
   return `${head}\n\n${opts.body}\n`
 }
 
-/** 摘要尾的全文入口指引行（报告副本相对路径 + Issue 评论）；原文由调用方统一过转义防护 */
+/** 摘要尾的全文入口指引行（报告副本相对路径 + Issue 评论）；原文由调用方统一过转义防护。
+ *  非 Git 工作区（无报告副本）且无 Issue 通道时兜底指向任务时间线/子任务详情——
+ *  回灌体绝不能只剩标题，至少给领队一个指向子任务全文的可用入口。 */
 export function fullTextPointerLines(copyPath: string, issueOk: boolean, seq: number): string[] {
   const lines: string[] = []
   if (copyPath) lines.push(`· 报告副本：${copyPath}（领队工作区内）`)
   if (issueOk) lines.push(`· Issue 评论「队员报告全文（单号 #${seq}）」`)
-  if (lines.length) lines.unshift('— 全文入口 —')
+  if (!lines.length) lines.push(`· 任务时间线：展开看板里单号 #${seq} 对应子任务的详情即可查看结果全文（本工作区无报告副本、亦无 Issue 通道）`)
+  lines.unshift('— 全文入口 —')
   return lines
+}
+
+// ---- 总结轮（派单 summary 属性）：超长结果在全文双落后向子单会话追加一轮压缩总结 ----
+
+/** 总结被采纳时回灌体的前置标注行（系统文案，不过转义；队员总结本身由调用方转义） */
+export const CHILD_SUMMARY_BODY_PREFIX = '以下是队员总结（非全文），具体全文见下方入口：'
+
+/** 总结轮提示词（纯函数）：对已终态子单会话追加的一轮请求——把已交付的全文压成
+ *  ≤1000 字结论（结论/关键改动/风险），禁止复述全文；产出是否被采纳由回灌侧按体量界裁决 */
+export function childSummaryPrompt(): string {
+  return '【系统】你的最终报告全文较长，回灌给领队的正文只保留全文入口指引。请追加一条总结供领队直接阅读：不超过 1000 字，依次覆盖 ① 结论（完成了什么、结果在哪） ② 关键改动（文件与位置，用仓库相对路径） ③ 风险与未尽事项；禁止复述全文，不要输出任何协议标记。'
 }

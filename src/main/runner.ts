@@ -130,6 +130,11 @@ const RETITLE_TURN_BUDGET_MS = Number(process.env.AGENTDECK_RETITLE_MS) > 0
   ? Number(process.env.AGENTDECK_RETITLE_MS)
   : 90_000
 const RETITLE_BUDGET_EXCEEDED = 'retitle-budget-exceeded'
+/**
+ * 总结轮硬预算：委派协议 summary 层（派单标 summary 且结果超回灌界）对子单会话追加的
+ * 一轮压缩总结，预期 ≤1000 字快速返回；到点放弃并把回灌按入口指引回退，绝不无限等。
+ */
+const SUMMARY_TURN_BUDGET_MS = 120_000
 /** 后端连接已死的特征：命中后丢弃内存会话、降级 resume 重建（不再需要重启应用） */
 const SESSION_DEAD_RE = /连接已关闭|进程退出|EPIPE|ENOTCONN|ECONNRESET|ECONNREFUSED|disconnected/i
 
@@ -176,6 +181,9 @@ interface TurnRecord {
   readonly claim: RunClaim
   readonly token: EventGateToken
   readonly events: BackendSessionEvents
+  /** 回合没等到终态就被撤销（被后继回合顶掉/连接退役/显式放弃）时，等待方经此立即落败，
+   *  不必各自等到预算兜底；可选——常规回合由看门狗与一次性 waiter 护送，无需此钩子。 */
+  readonly onRevoked?: () => void
 }
 
 /** Reported when a session cannot prove which turn a callback belongs to. */
@@ -212,6 +220,9 @@ class SessionTurnRouter {
   }
 
   openTurn(record: TurnRecord) {
+    // 同一会话同时只允许一个在飞回合：开新回合时仍开着的旧记录都是被顶掉的，
+    // 在此可靠撤销（等待方经 onRevoked 立即落败），而不是留在 open 表里继续抢收回调。
+    for (const id of [...this.open.keys()]) this.revoke(id)
     this.open.set(record.stamp.id, record)
     this.currentId = record.stamp.id
   }
@@ -225,14 +236,23 @@ class SessionTurnRouter {
    * The turn was given up (watchdog, cancel, send failure) before any terminal.
    * Its callbacks are dropped from now on, and a connection that cannot stamp
    * callbacks is marked unpinnable so the next turn rebuilds it.
+   * 带 id 时按 id 精确撤销——被后继回合顶掉的旧记录不再是 currentId，
+   * 只认 currentId 的旧语义会让它永远留在 open 表里继续抢收回调。
    */
   abandonTurn(id?: string) {
-    if (!this.currentId) return
-    if (id !== undefined && id !== this.currentId) return
-    const record = this.open.get(this.currentId)
+    const target = id !== undefined ? id : this.currentId
+    if (!target) return
+    this.revoke(target)
+  }
+
+  /** 撤销一个在飞回合：移出路由表；legacy 连接失去当前归属锚点时标记不可复用；
+   *  最后才通知等待方（onRevoked 里若同步开新回合，看到的是已清空的 open 表）。 */
+  private revoke(id: string) {
+    const record = this.open.get(id)
     if (!record) return
-    this.open.delete(record.stamp.id)
-    if (this.legacy) this.ambiguous = true
+    this.open.delete(id)
+    if (id === this.currentId && this.legacy) this.ambiguous = true
+    record.onRevoked?.()
   }
 
   abandonOpen() {
@@ -241,7 +261,7 @@ class SessionTurnRouter {
 
   /** Drop every callback still associated with this connection. */
   retire(reason: 'closed' | 'replaced' = 'closed') {
-    this.open.clear()
+    for (const id of [...this.open.keys()]) this.revoke(id)
     this.currentId = undefined
     if (reason === 'replaced') this.ambiguous = true
   }
@@ -258,9 +278,12 @@ class SessionTurnRouter {
     return this.currentId ? this.open.get(this.currentId) : undefined
   }
 
-  /** A connection without turn identity may only be reused while unambiguous. */
+  /** A connection without turn identity may only be reused while unambiguous;
+   *  且同一时刻只允许一个在飞回合——仍有回合没收终态就不得开新回合
+   *  （总结轮×总结轮、总结轮×追问在此互斥；入口检查到 openTurn 之间零 await，
+   *  检查通过即占住唯一名额，窗口就此收口）。 */
   mayOpenNewTurn() {
-    return !this.ambiguous
+    return !this.ambiguous && this.open.size === 0
   }
 }
 
@@ -1519,7 +1542,8 @@ export class TaskRunner {
           pushTask: (id) => this.pushTask(id),
           pushEvent: (id, e) => this.pushEvent(id, e),
           applyReview: (childId, verdict, note) => this.applyChildReview(childId, verdict, note),
-          addIssueComment: (issueId, text) => this.addIssueComment(issueId, text)
+          addIssueComment: (issueId, text) => this.addIssueComment(issueId, text),
+          sendChildSummaryTurn: (childId, content) => this.sendChildSummaryTurn(childId, content)
         })
         finalText = outcome.finalText || r.response
         scanTexts = outcome.scanTexts
@@ -1859,6 +1883,77 @@ export class TaskRunner {
       // 已放弃回合（预算超时后被护栏的）不得清理后继回合的等待句柄；
       // lifecycle generation 守卫只允许清理属于自己的那一回合。
       if (life.generation === gen) unregisterResume()
+    }
+  }
+
+  /**
+   * 总结轮通路（独立实现）：对已终态子单的存活会话追加一轮 prompt→reply，供委派循环
+   * 在全文双落之后换取压缩总结。有意独立于 sendTurn——子单已终态、claim 已释放，
+   * running 闸门必然拒绝；本通路直接在既有会话路由上登记一个一次性回合记录，回复只经
+   * 本方法返回值交给调用方：不落任务事件、不改终态、不写 store，也不触碰派单去重/
+   * 归属交接/建树清理边界（委派协议 summary 层，见 delegate.ts 的 DelegationContext）。
+   * 返回 null = 无存活会话或连接无法证明回合归属（非 turnScoped / 已弃用 / 恢复挂起）；
+   * 回合超时按失败裁决，并取消在飞请求（session.stop）+ 退役连接（不可复用）——适配器
+   * 单槽在飞，迟到响应会顶着「当前回合」身份投递给同连接的下个回合，必须让追问改走
+   * resume 重建；被顶掉/退役的旧回合由 onRevoked 立即收口，不等预算。
+   */
+  async sendChildSummaryTurn(childId: string, content: string): Promise<BackendTurnResult | null> {
+    const session = this.sessions.get(childId)
+    const router = session ? this.sessionTurns.get(session) : undefined
+    if (!session || !router || session.turnScoped !== true || !router.mayOpenNewTurn()) return null
+    if (this.lifecycle(childId).pendingResume) return null
+    const seq = router.nextSeq()
+    const stamp: BackendTurnStamp = Object.freeze({
+      seq,
+      id: `turn_summary_${childId}_${++this.turnSeq}_${Math.random().toString(36).slice(2, 8)}`
+    })
+    let settle: (r: BackendTurnResult) => void = () => {}
+    const settled = new Promise<BackendTurnResult>((resolve) => { settle = resolve })
+    const record: TurnRecord = {
+      taskId: childId,
+      seq,
+      stamp,
+      generation: -1,
+      claim: { taskId: childId, runId: this.store.get(childId)?.runId ?? '' },
+      token: Object.freeze({ generation: -1, sessionOwner: session.sessionId }),
+      events: {
+        onEvent: () => {},
+        onTurnEnd: (r) => { router.closeTurn(stamp.id); settle(r) }
+      },
+      // 被顶掉（后继回合接管/连接退役）时立即落败等待方：撤销不等预算兜底
+      onRevoked: () => settle({ ok: false, response: '', error: '总结回合被撤销：会话被后继回合接管' })
+    }
+    // 入口检查到 openTurn 之间零 await：同会话单在飞回合的互斥在这个同步段内闭合
+    router.openTurn(record)
+    // 预算计时与发起 send 同时启动：终态、发送失败、预算三者竞速——send 悬挂（既不
+    // resolve 也不 reject、终态也永不到达）同样必然在预算内返回；超时收口见 finally。
+    const budget = Math.min(this.turnBudgetMs(childId), SUMMARY_TURN_BUDGET_MS)
+    let timer: NodeJS.Timeout | undefined
+    let timedOut = false
+    const timeout = new Promise<BackendTurnResult>((resolve) => {
+      timer = setTimeout(() => { timedOut = true; resolve(turnTimeoutError(budget)) }, budget)
+    })
+    try {
+      // send 不阻塞裁决：立即失败先 settle（失败原因直达调用方）再撤销本回合记录；
+      // 悬挂/慢速 resolve 不得拖住预算竞速，迟到的 reject 只作废仍在表中的自己
+      void session.send(content, stamp).catch((e) => {
+        settle({ ok: false, response: '', error: e instanceof Error ? e.message : String(e) })
+        router.abandonTurn(stamp.id)
+      })
+      return await Promise.race([settled, timeout])
+    } finally {
+      // 超时收场（双保险）：适配器是单槽在飞请求（如 dsh-acp 的 session/prompt + 当前槽裁决），
+      // 只撤路由记录挡不住迟到响应——旧请求的迟到终态会顶着「当前回合」的通道身份投递，
+      // 同连接上的下个回合将收到旧回合的响应、自己的响应反被槽丢弃，旧 send 也悬而无收口。
+      // ①取消在飞请求：BackendSession.stop 的契约即「中止当前回合」（dsh-acp 走
+      //   session/cancel 通知，连接保活），旧请求尽快落终态、旧 send 得到收口；
+      // ②退役连接（标记不可复用）：followUp 的复用门禁 sessionMayOpenNewTurn 据此拒绝旧
+      //   连接，下个追问走既有 resume 重建通路，旧连接上的迟到消息随会话关闭无人接收。
+      if (timedOut) {
+        void session.stop().catch(() => {})
+        router.retire('replaced')
+      }
+      if (timer) clearTimeout(timer)
     }
   }
 

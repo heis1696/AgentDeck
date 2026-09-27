@@ -498,6 +498,8 @@ package.json：61 条直连脚本 + 4 条聚合（`smoke:stage6`、`smoke:stage7
 
 > 2026-09-26 增补：`smoke-worktree-lifecycle` 直连消费 `git.ts` 的 `worktreePoolEntriesForTest` / `WORKTREE_POOL_MAX_PER_REPO` / `createWorktreeAtBranch`，覆盖并发归池容量、满池回收和失败后复用；这些导出同样受本附录公共 API 保护规则约束。`smoke-delegate-reject` 直连消费 `runner` / `store` / `delegate`，覆盖拒单派单身份、回灌及重启恢复。
 
+> 2026-09-28 增补：`smoke-delegate` 直连消费 `delegate.ts` 的 `REPORT_INLINE_MAX` / `buildChildReportBody`（回灌 C 保底与 summary 总结轮断言）及 `runner.ts` 的 `sendChildSummaryTurn`（总结轮独立通路，经 `DelegationContext.sendChildSummaryTurn` 接线），同样受本附录公共 API 保护规则约束；原直连符号 `REPORT_CONCLUSION_CHARS` / `REPORT_BODY_HARD_CAP` 已随回灌去截断改造移除，无残留消费。
+
 ## 附录 B：§4.B 冗余导出完整清单（每文件一行）
 
 ```text
