@@ -181,6 +181,9 @@ interface TurnRecord {
   readonly claim: RunClaim
   readonly token: EventGateToken
   readonly events: BackendSessionEvents
+  /** 回合没等到终态就被撤销（被后继回合顶掉/连接退役/显式放弃）时，等待方经此立即落败，
+   *  不必各自等到预算兜底；可选——常规回合由看门狗与一次性 waiter 护送，无需此钩子。 */
+  readonly onRevoked?: () => void
 }
 
 /** Reported when a session cannot prove which turn a callback belongs to. */
@@ -217,6 +220,9 @@ class SessionTurnRouter {
   }
 
   openTurn(record: TurnRecord) {
+    // 同一会话同时只允许一个在飞回合：开新回合时仍开着的旧记录都是被顶掉的，
+    // 在此可靠撤销（等待方经 onRevoked 立即落败），而不是留在 open 表里继续抢收回调。
+    for (const id of [...this.open.keys()]) this.revoke(id)
     this.open.set(record.stamp.id, record)
     this.currentId = record.stamp.id
   }
@@ -230,14 +236,23 @@ class SessionTurnRouter {
    * The turn was given up (watchdog, cancel, send failure) before any terminal.
    * Its callbacks are dropped from now on, and a connection that cannot stamp
    * callbacks is marked unpinnable so the next turn rebuilds it.
+   * 带 id 时按 id 精确撤销——被后继回合顶掉的旧记录不再是 currentId，
+   * 只认 currentId 的旧语义会让它永远留在 open 表里继续抢收回调。
    */
   abandonTurn(id?: string) {
-    if (!this.currentId) return
-    if (id !== undefined && id !== this.currentId) return
-    const record = this.open.get(this.currentId)
+    const target = id !== undefined ? id : this.currentId
+    if (!target) return
+    this.revoke(target)
+  }
+
+  /** 撤销一个在飞回合：移出路由表；legacy 连接失去当前归属锚点时标记不可复用；
+   *  最后才通知等待方（onRevoked 里若同步开新回合，看到的是已清空的 open 表）。 */
+  private revoke(id: string) {
+    const record = this.open.get(id)
     if (!record) return
-    this.open.delete(record.stamp.id)
-    if (this.legacy) this.ambiguous = true
+    this.open.delete(id)
+    if (id === this.currentId && this.legacy) this.ambiguous = true
+    record.onRevoked?.()
   }
 
   abandonOpen() {
@@ -246,7 +261,7 @@ class SessionTurnRouter {
 
   /** Drop every callback still associated with this connection. */
   retire(reason: 'closed' | 'replaced' = 'closed') {
-    this.open.clear()
+    for (const id of [...this.open.keys()]) this.revoke(id)
     this.currentId = undefined
     if (reason === 'replaced') this.ambiguous = true
   }
@@ -263,9 +278,12 @@ class SessionTurnRouter {
     return this.currentId ? this.open.get(this.currentId) : undefined
   }
 
-  /** A connection without turn identity may only be reused while unambiguous. */
+  /** A connection without turn identity may only be reused while unambiguous;
+   *  且同一时刻只允许一个在飞回合——仍有回合没收终态就不得开新回合
+   *  （总结轮×总结轮、总结轮×追问在此互斥；入口检查到 openTurn 之间零 await，
+   *  检查通过即占住唯一名额，窗口就此收口）。 */
   mayOpenNewTurn() {
-    return !this.ambiguous
+    return !this.ambiguous && this.open.size === 0
   }
 }
 
@@ -1899,15 +1917,14 @@ export class TaskRunner {
       events: {
         onEvent: () => {},
         onTurnEnd: (r) => { router.closeTurn(stamp.id); settle(r) }
-      }
+      },
+      // 被顶掉（后继回合接管/连接退役）时立即落败等待方：撤销不等预算兜底
+      onRevoked: () => settle({ ok: false, response: '', error: '总结回合被撤销：会话被后继回合接管' })
     }
+    // 入口检查到 openTurn 之间零 await：同会话单在飞回合的互斥在这个同步段内闭合
     router.openTurn(record)
-    try {
-      await session.send(content, stamp)
-    } catch (error) {
-      router.abandonTurn(stamp.id)
-      return { ok: false, response: '', error: error instanceof Error ? error.message : String(error) }
-    }
+    // 预算计时与发起 send 同时启动：终态、发送失败、预算三者竞速——send 悬挂（既不
+    // resolve 也不 reject、终态也永不到达）同样必然在预算内返回；超时撤销路由记录。
     const budget = Math.min(this.turnBudgetMs(childId), SUMMARY_TURN_BUDGET_MS)
     let timer: NodeJS.Timeout | undefined
     let timedOut = false
@@ -1915,11 +1932,16 @@ export class TaskRunner {
       timer = setTimeout(() => { timedOut = true; resolve(turnTimeoutError(budget)) }, budget)
     })
     try {
-      const result = await Promise.race([settled, timeout])
+      // send 不阻塞裁决：立即失败先 settle（失败原因直达调用方）再撤销本回合记录；
+      // 悬挂/慢速 resolve 不得拖住预算竞速，迟到的 reject 只作废仍在表中的自己
+      void session.send(content, stamp).catch((e) => {
+        settle({ ok: false, response: '', error: e instanceof Error ? e.message : String(e) })
+        router.abandonTurn(stamp.id)
+      })
+      return await Promise.race([settled, timeout])
+    } finally {
       // 超时收场：撤销路由记录，让迟到终态从此无人接收（不 stop 会话，追问续聊不受扰）
       if (timedOut) router.abandonTurn(stamp.id)
-      return result
-    } finally {
       if (timer) clearTimeout(timer)
     }
   }

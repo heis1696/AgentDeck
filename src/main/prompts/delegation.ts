@@ -149,12 +149,15 @@ export function reportCopyMarkdown(opts: { childId: string; title: string; seq: 
   return `${head}\n\n${opts.body}\n`
 }
 
-/** 摘要尾的全文入口指引行（报告副本相对路径 + Issue 评论）；原文由调用方统一过转义防护 */
+/** 摘要尾的全文入口指引行（报告副本相对路径 + Issue 评论）；原文由调用方统一过转义防护。
+ *  非 Git 工作区（无报告副本）且无 Issue 通道时兜底指向任务时间线/子任务详情——
+ *  回灌体绝不能只剩标题，至少给领队一个指向子任务全文的可用入口。 */
 export function fullTextPointerLines(copyPath: string, issueOk: boolean, seq: number): string[] {
   const lines: string[] = []
   if (copyPath) lines.push(`· 报告副本：${copyPath}（领队工作区内）`)
   if (issueOk) lines.push(`· Issue 评论「队员报告全文（单号 #${seq}）」`)
-  if (lines.length) lines.unshift('— 全文入口 —')
+  if (!lines.length) lines.push(`· 任务时间线：展开看板里单号 #${seq} 对应子任务的详情即可查看结果全文（本工作区无报告副本、亦无 Issue 通道）`)
+  lines.unshift('— 全文入口 —')
   return lines
 }
 

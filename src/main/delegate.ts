@@ -71,19 +71,31 @@ export interface DelegateCall {
   summary?: boolean
 }
 
-/** 解析 delegate 标签的属性（属性顺序任意） */
-function tagAttr(attrs: string, name: string): string | undefined {
-  const m = attrs.match(new RegExp(`${name}\\s*=\\s*"([^"]*)"`, 'i'))
-  return m ? m[1].trim() : undefined
+/** 属性扫描：name 必须是独立属性名（名称边界——data-summary 不撞 summary），
+ *  值支持双/单引号与裸词；引号值整体一个 token 消费，值内部出现的其他属性名字样
+ *  不会被再认出来（单引号 reason 值内的 summary="true" 不误启）。残缺引号按裸词
+ *  吸收，不再向后方扩散。 */
+function parseTagAttrs(attrs: string): Array<{ name: string; value: string }> {
+  const out: Array<{ name: string; value: string }> = []
+  const re = /([a-zA-Z_][\w:-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|[^\s>]*)|([a-zA-Z_][\w:-]*)/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(attrs))) {
+    out.push({ name: (m[1] ?? m[4]).toLowerCase(), value: (m[2] ?? m[3] ?? '').trim() })
+  }
+  return out
 }
 
-/** summary 布尔属性：支持裸属性（summary）与显式值（summary="true"/"false"）。
- *  先剥掉全部带引号的属性值再找裸字样——reason 等值内出现 summary 一词不误判。 */
+function tagAttr(attrs: string, name: string): string | undefined {
+  const hit = parseTagAttrs(attrs).find((a) => a.name === name.toLowerCase())
+  return hit ? hit.value : undefined
+}
+
+/** summary 布尔属性：支持裸属性（summary）与显式值（summary="true"/"false"），
+ *  值按大小写规范化布尔（"FALSE"/"False" 同样为假）；解析走同一份属性扫描——
+ *  名称边界与引号值整体消费由扫描器保证，reason 值内出现 summary 一词不误判。 */
 function summaryAttr(attrs: string): boolean {
-  const stated = tagAttr(attrs, 'summary')
-  if (stated !== undefined) return stated !== 'false'
-  const bare = attrs.replace(/[a-zA-Z_][\w:-]*\s*=\s*(?:"[^"]*"|'[^']*')/g, ' ')
-  return /\bsummary\b/i.test(bare)
+  const hit = parseTagAttrs(attrs).find((a) => a.name === 'summary')
+  return !!hit && hit.value.toLowerCase() !== 'false'
 }
 
 /** 从领队回复中提取 delegate 标记（容错：任意属性顺序、md fence 内）。
@@ -558,7 +570,8 @@ export function buildChildReportBody(input: ChildReportBodyInput): string {
     }
     if (input.summaryFallbackNote) parts.push(input.summaryFallbackNote)
   } else {
-    parts.push(`状态 ${input.status}${input.error ? ': ' + input.error : ''}`)
+    // failed/error 路径与 result/总结同源转义：队员可控的 error 文本不得携带可解析的活标记
+    parts.push(`状态 ${input.status}${input.error ? ': ' + escapeProtocolLiterals(input.error) : ''}`)
   }
   if (input.gitSection) parts.push(input.gitSection)
   if (input.pointers?.length) parts.push(input.pointers.map((line) => escapeProtocolLiterals(line)).join('\n'))
