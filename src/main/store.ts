@@ -4,6 +4,7 @@ import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { isTaskEventDurable, isTaskStatus, type Task, type TaskEvent, type IntegrationInfo, type ExecutionOwner, type TaskStatus, type TaskGitOperation } from '../shared/types'
 import { executionRecordFromTask } from '../shared/taskflow'
+import { worktreePathKey } from './git'
 import { EventLog } from './event-log'
 import { atomicWriteJson, readJsonFile, withStorageTransaction, assertSynchronousAction, assertTransactionToken, processOwnerState, createExecutionOwner, type SynchronousAction, type TransactionToken } from './persistence'
 
@@ -543,13 +544,16 @@ export class TaskStore {
     })
   }
 
-  /** Reserve terminal tasks before reclaiming their worktree or a repo merge worktree. */
+  /** Reserve terminal tasks before reclaiming their worktree or a repo merge worktree.
+   *  仓库归属判定与 git.ts 的路径键同源折叠：在跑任务的 workdir/worktree.repoDir 按
+   *  别名写法（大小写/盘符拼写差异）登记时，mergeWorktree 租约必须照样覆盖它——
+   *  漏覆盖会在仓库仍有在跑任务时误发租约，清扫就能动到活任务的现场。 */
   claimWorktreeCleanup(repoDir: string, ownerTaskId: string, mergeWorktree = false): GitOperationClaim | undefined {
-    const root = path.resolve(repoDir)
+    const rootKey = worktreePathKey(repoDir)
     const belongsToRepo = (task: Task) => [task.worktree?.repoDir, task.workdir].some((candidate) => {
       if (!candidate) return false
-      const resolved = path.resolve(candidate)
-      return resolved === root || resolved.startsWith(root + path.sep)
+      const key = worktreePathKey(candidate)
+      return key === rootKey || key.startsWith(rootKey + path.sep)
     })
     const operation: TaskGitOperation = { token: randomUUID(), owner: createExecutionOwner(), createdAt: Date.now() }
     return this.transaction((tx) => {

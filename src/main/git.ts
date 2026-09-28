@@ -437,7 +437,9 @@ export function shouldKeepTaskWorktree(
   return tasks.some((task) => (task.status === 'queued' || task.status === 'running' || task.gitOperation !== undefined) && [task.worktree?.repoDir, task.workdir].some((candidate) => {
     if (!candidate) return false
     const resolved = path.resolve(candidate)
-    return resolved === root || isWithin(root, resolved)
+    // 根目录等值按别名折叠判定：别名写法恰好等于根目录时 isWithin 会因 relative==='' 漏判，
+    // 裸 === 又大小写敏感——merge 脚手架的在跑任务会被误放行给清扫（误拒保留）
+    return sameWorktreePath(resolved, root) || isWithin(root, resolved)
   }))
 }
 
@@ -709,6 +711,16 @@ function listManagedWorktreeRegistrations(repoDir: string, gitDir: string): Map<
   return result
 }
 
+/** 按 worktree 路径查 Git 注册表：键名匹配与路径键同一套别名折叠（win32），
+ *  别名写法的树名段在注册表按字面量键查不到会让世代核验误判「注册不在案」。 */
+function registeredWorktreeForPath(registrations: Map<string, RegisteredWorktree>, wtPath: string): RegisteredWorktree | undefined {
+  const name = path.basename(wtPath)
+  if (process.platform !== 'win32') return registrations.get(name)
+  const folded = name.toLowerCase()
+  for (const [key, value] of registrations) if (key.toLowerCase() === folded) return value
+  return undefined
+}
+
 function writeMetadata(metadata: WorktreeInfo) {
   const file = metadataFile(metadata.repoDir, path.basename(metadata.path))
   fs.mkdirSync(path.dirname(file), { recursive: true })
@@ -755,14 +767,30 @@ const WORKTREE_GENERATION_FILE = 'agentdeck-generation'
 
 /** 路径键统一规范化：与 sameWorktreePath 同一套等价判定（resolve + Windows 大小写折叠）。
  *  锁键/池键/池成员检查必须与路径等价判定同源——否则同一棵树按大小写/盘符别名两种
- *  写法会拿到两把锁、两份池登记，互斥失效、池成员检查漏命中（fix：路径键专项）。 */
-function worktreePathKey(candidate: string): string {
+ *  写法会拿到两把锁、两份池登记，互斥失效、池成员检查漏命中（fix：路径键专项）。
+ *  导出给 store/delegate/runner/ipc 等模块复用：路径键与等价判定全库只此一份实现。 */
+export function worktreePathKey(candidate: string): string {
   const resolved = path.resolve(candidate)
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved
 }
 
-function sameWorktreePath(left: string, right: string): boolean {
+/** Windows 路径别名（大小写/盘符拼写差异）下的同一路径等价判定；POSIX 退化为字面量相等。 */
+export function sameWorktreePath(left: string, right: string): boolean {
   return worktreePathKey(left) === worktreePathKey(right)
+}
+
+/** 路径集合按 worktreePathKey 折叠去重：同一目录的别名写法只留一个元素，且保留首个
+ *  解析写法供真实文件系统调用（POSIX 上退化为 resolve 去重，行为不变）。启动/手动
+ *  清扫的仓库集合等遍历入口共用：否则同一仓库的别名写法会重复清扫、并发重扫同一现场。 */
+export function uniquePathsByKey(dirs: Iterable<string | undefined | null>): string[] {
+  const unique = new Map<string, string>()
+  for (const dir of dirs) {
+    if (!dir) continue
+    const resolved = path.resolve(dir)
+    const key = worktreePathKey(resolved)
+    if (!unique.has(key)) unique.set(key, resolved)
+  }
+  return [...unique.values()]
 }
 
 function worktreeAdminDir(wtPath: string, commonDir: string): string | null {
@@ -815,7 +843,7 @@ async function verifyWorktreeGeneration(
   if (!common.ok || !common.stdout.trim()) return 'Git worktree registration could not be verified'
   const commonDir = commonGitDir(repoDir, common.stdout.trim())
   const registrations = listManagedWorktreeRegistrations(repoDir, commonDir)
-  const registration = registrations.get(path.basename(wtPath))
+  const registration = registeredWorktreeForPath(registrations, wtPath)
   if (!registration || !sameWorktreePath(registration.path, wtPath)) return 'current Git worktree registration could not be found'
   let pointer: string
   try {
@@ -902,14 +930,15 @@ export async function estimateWorktreeFileCount(workdir: string): Promise<number
 
 /** 解析 worktree add 超时：TTL 内吃缓存，否则计数并缓存（注入的估计器同样走缓存，供 smoke 断言）。
  *  计数起点与缓存键都先归一到仓库根：否则子目录调用的低值会以根为键缓存 10 分钟，
- *  重派继续撞超时——归一后子目录调用与根调用同键同值。 */
+ *  重派继续撞超时——归一后子目录调用与根调用同键同值。缓存键再走 worktreePathKey
+ *  折叠别名：同一仓库按别名写法调用必须命中同一份缓存，绝不重复计数。 */
 async function planWorktreeAddTimeout(repoRoot: string, countFrom: string, injected?: (repoRoot: string) => Promise<number>): Promise<{ timeoutMs: number; fileCount?: number }> {
   const root = (await repositoryRoot(countFrom || repoRoot)) ?? path.resolve(repoRoot)
-  const key = path.resolve(root)
+  const key = worktreePathKey(root)
   const now = Date.now()
   const hit = worktreeFileCountCache.get(key)
   if (hit && now - hit.at < WORKTREE_FILE_COUNT_TTL_MS) return { timeoutMs: worktreeAddTimeoutFor(hit.count), fileCount: hit.count }
-  const count = injected ? await injected(key) : await estimateWorktreeFileCount(root)
+  const count = injected ? await injected(path.resolve(root)) : await estimateWorktreeFileCount(root)
   if (count === null) return { timeoutMs: worktreeAddTimeoutFor(0) }
   worktreeFileCountCache.set(key, { count, at: now })
   return { timeoutMs: worktreeAddTimeoutFor(count), fileCount: count }
@@ -1469,10 +1498,11 @@ export function reportCopyRelPath(leaderWorkdir: string, copyAbsPath: string): s
   return path.relative(path.resolve(leaderWorkdir), path.resolve(copyAbsPath)).split(path.sep).join('/')
 }
 
-/** 报告副本 GC（挂线一/二共用）：按任务 id 清掉对应副本文件；幂等，缺失忽略。返回删除的绝对路径 */
+/** 报告副本 GC（挂线一/二共用）：按任务 id 清掉对应副本文件；幂等，缺失忽略。返回删除的绝对路径。
+ *  仓库集合按 uniquePathsByKey 折叠去重：同一仓库的别名写法不重复遍历、不重复删除。 */
 export function deleteReportCopies(repoDirs: readonly (string | undefined | null)[], taskIds: readonly string[]): string[] {
   const removed: string[] = []
-  for (const root of new Set(repoDirs.filter(Boolean).map((dir) => path.resolve(dir as string)))) {
+  for (const root of uniquePathsByKey(repoDirs)) {
     for (const id of taskIds) {
       const file = path.join(root, REPORTS_DIR_NAME, `${id}.md`)
       try { fs.unlinkSync(file); removed.push(file) } catch { /* 缺失或不可删：幂等跳过 */ }
@@ -1903,7 +1933,11 @@ async function resolveManagedWorktree(wtDir: string): Promise<{ repoDir: string;
   if (!wtDir) return null
   const absolute = path.resolve(wtDir)
   const marker = `${path.sep}.agentdeck-worktrees${path.sep}`
-  const normalized = `${absolute}${path.sep}`
+  // 标记段切分与路径键同一套别名等价判定（win32 折叠大小写后定位，切片仍用原始写法）：
+  // 否则全路径别名（托管目录标记段大小写不同）会在切分处误判「不在托管目录内」，
+  // 让锁/池已收口的别名写法在入口处漏液
+  const probe = process.platform === 'win32' ? absolute.toLowerCase() : absolute
+  const normalized = `${probe}${path.sep}`
   const markerIndex = normalized.indexOf(marker)
   if (markerIndex < 0) return null
   const root = absolute.slice(0, markerIndex)
@@ -2164,14 +2198,23 @@ export async function pruneWorktrees(
   for (const name of registrations.keys()) names.add(name)
   const now = options.now ?? Date.now()
   const maxAgeMs = Math.max(0, options.maxAgeMs ?? DEFAULT_WORKTREE_MAX_AGE_MS)
+  // 遍历按路径键去重：磁盘目录（真实写法）与 sidecar/Git 注册表记录的别名写法是同一棵树，
+  // 折叠后重复计数会把同一现场扫两遍（第二遍因第一遍已收场误报「元数据缺失」）
+  const scannedKeys = new Set<string>()
   for (const name of names) {
+    const scanKey = worktreePathKey(path.join(worktreeDir, name))
+    if (scannedKeys.has(scanKey)) continue
+    scannedKeys.add(scanKey)
     const wtPath = path.join(worktreeDir, name)
     const sidecarPath = metadataFile(root, name)
     let metadata = readMetadataFile(sidecarPath)
     const hasOwnerMetadata = !!metadata
     let verifiedMergeScaffold = false
     result.scanned++
-    const registration = registrations.get(name)
+    // 登记查找与世代核验同一套折叠语义（registeredWorktreeForPath）：磁盘目录名与
+    // Git 注册表键仅大小写不同（别名写法落盘的 gitdir）时，字面量键取不到登记——
+    // merge 脚手架的分支归属、失败证据里的注册路径/分支全都跟着丢失
+    const registration = registeredWorktreeForPath(registrations, wtPath)
     if (!metadata && !fs.existsSync(sidecarPath) && name.startsWith('.agentdeck-merge-')) {
       const generationId = await currentWorktreeGeneration(root, wtPath)
       if (generationId && !await verifyWorktreeGeneration(root, wtPath, generationId, registration?.branch)) {
@@ -2190,8 +2233,10 @@ export async function pruneWorktrees(
       }
     }
     const reliableMetadata = metadata
-      && path.resolve(metadata.repoDir) === path.resolve(root)
-      && path.resolve(metadata.path) === path.resolve(wtPath)
+      // 元数据 repoDir/path 与现场的一致性按别名折叠判定：另一进程按别名写法落盘的
+      // 元数据不得被误判「不匹配」而拒绝清扫（漏回收），也不得放过真正错位的登记
+      && sameWorktreePath(metadata.repoDir, root)
+      && sameWorktreePath(metadata.path, wtPath)
       && !!metadata.ownerTaskId.trim()
     if (!metadata || !reliableMetadata) {
       const registeredBranchExists = registration?.branch ? await branchExists(root, registration.branch) : false
@@ -2423,7 +2468,10 @@ export async function mergeIntoManagedWorktree(
   const gcd = await runGit(wtDir, ['rev-parse', '--git-common-dir'], 15000)
   if (!gcd.ok) return refuse(`refusing in-place merge: cannot resolve git dir: ${gitError(gcd)}`)
   const gitDir = path.resolve(wtDir, gcd.stdout.trim())
-  if (!(gitDir === path.resolve(repoDir, '.git') || isWithin(path.resolve(repoDir, '.git'), gitDir))) {
+  // 根目录归属按别名折叠判定：别名写法的 gitDir 恰为仓库 .git 时 isWithin 因 relative==='' 漏判、
+  // 裸 === 大小写敏感——原位合并会被误拒
+  const repoGitDir = path.resolve(repoDir, '.git')
+  if (!(sameWorktreePath(gitDir, repoGitDir) || isWithin(repoGitDir, gitDir))) {
     return refuse(`refusing in-place merge: worktree does not belong to ${repoDir}`)
   }
   const cleanliness = await worktreeDirty(wtDir)

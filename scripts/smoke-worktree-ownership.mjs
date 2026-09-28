@@ -52,6 +52,13 @@ const [{ TaskStore }, { createExecutionOwner, currentProcessIdentity }, git, { r
 ])
 const identity = (task) => ({ status: task.status, runId: task.runId, executionOwner: task.executionOwner, attempt: task.attempt })
 const runGit = (dir, ...args) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8', windowsHide: true }).trim()
+// Windows 路径别名写法：翻转首段（盘符/根段）大小写——与真实写法指同一目录
+const flipCase = (p) => {
+  const sep = p.indexOf(path.sep)
+  const head = sep === -1 ? p : p.slice(0, sep)
+  const flipped = head[0] === head[0].toLowerCase() ? head[0].toUpperCase() + head.slice(1) : head[0].toLowerCase() + head.slice(1)
+  return sep === -1 ? flipped : flipped + p.slice(sep)
+}
 
 async function fixture(name) {
   const repo = path.join(temp, name, 'repo')
@@ -230,6 +237,40 @@ try {
   cleanup.store.flush()
   cleanup.peer.flush()
   console.log('PASS cleanup-first ordering is mutually exclusive with restart and integration')
+
+  // 别名租约覆盖面（fix：清理租约路径别名收口）：mergeWorktree 租约的仓库任务选取
+  // 与 git.ts 的 worktreePathKey 同源折叠——在跑任务按别名写法（大小写差异）登记
+  // workdir/worktree.repoDir 时租约必须照样覆盖它；漏覆盖会在仓库仍有在跑任务时
+  // 误发租约，清扫就能动到活任务的现场。
+  if (process.platform === 'win32') {
+    const aliasLease = await fixture('alias-lease')
+    const aliasRepo = flipCase(aliasLease.repo)
+    assert.notEqual(aliasRepo, aliasLease.repo, '前置：别名写法与真实写法不同')
+    assert.equal(aliasRepo.toLowerCase(), aliasLease.repo.toLowerCase(), '前置：别名写法仅大小写不同')
+    const leaseParent = aliasLease.peer.get(aliasLease.parent.id)
+    aliasLease.peer.updateIf(leaseParent.id, identity(leaseParent), { status: 'done', endedAt: Date.now() })
+    // 在跑任务一：workdir 恰为仓库根本身的别名写法（根等值分支）
+    const runningRoot = aliasLease.store.create({ title: 'alias running root', prompt: 'work', workdir: aliasRepo, backend: 'fake', agentId: 'runner_root' })
+    aliasLease.store.claimRun(runningRoot.id, { status: 'queued' }, 'run_alias_root', createExecutionOwner())
+    aliasLease.store.update(runningRoot.id, { status: 'running', startedAt: Date.now(), worktree: { ...aliasLease.worktree.metadata, ownerTaskId: runningRoot.id, repoDir: aliasRepo, path: aliasRepo } })
+    // 在跑任务二：workdir 为仓库内子目录的别名写法（startsWith 包含分支）
+    const aliasSub = path.join(aliasRepo, '.agentdeck-worktrees', 'alias_lease_sub_c1')
+    const runningSub = aliasLease.store.create({ title: 'alias running sub', prompt: 'work', workdir: aliasSub, backend: 'fake', agentId: 'runner_sub' })
+    aliasLease.store.claimRun(runningSub.id, { status: 'queued' }, 'run_alias_sub', createExecutionOwner())
+    aliasLease.store.update(runningSub.id, { status: 'running', startedAt: Date.now() })
+    const leaseDuringAliasRunning = aliasLease.peer.claimWorktreeCleanup(aliasLease.repo, '.agentdeck-merge-alias-lease', true)
+    assert.equal(leaseDuringAliasRunning, undefined, '别名租约覆盖：在跑任务按别名写法登记时 mergeWorktree 租约必须拒发（仓库仍有在跑任务）')
+    assert.equal(aliasLease.peer.get(aliasLease.parent.id).gitOperation, undefined, '租约拒发是整体落空：终态任务也不残留 Git 预约')
+    // 对照组：别名在跑任务全部终态后，租约恢复发放——拒发确因别名在跑任务被租约覆盖
+    aliasLease.peer.update(runningRoot.id, { status: 'done', endedAt: Date.now() })
+    aliasLease.peer.update(runningSub.id, { status: 'done', endedAt: Date.now() })
+    const leaseAfterAliasDone = aliasLease.peer.claimWorktreeCleanup(aliasLease.repo, '.agentdeck-merge-alias-lease', true)
+    assert.ok(leaseAfterAliasDone, '别名在跑任务终态后租约恢复发放（对照：拒发不是夹具坏了）')
+    aliasLease.peer.releaseGitOperation(leaseAfterAliasDone)
+    aliasLease.store.flush()
+    aliasLease.peer.flush()
+    console.log('PASS alias lease coverage: running tasks recorded under alias spellings are covered by the cleanup lease')
+  }
 
   // cancelled 子单的现场原样保留：终态即落盘对 cancelled 例外，清扫不得代替删任务的
   // 显式路径收走现场——目录与分支都留，否则「保留现场」只活到下次重启。
@@ -480,6 +521,29 @@ try {
     corpse.store.flush()
     corpse.peer.flush()
     console.log('PASS merge corpse sweep: crashLeftover beats owner keep, ownership retain names the lease, failed cleanup lands on the timeline')
+  }
+
+  // 清扫状态同步按别名折叠配对（fix：worktrees:prune 的任务↔sidecar 配对）：
+  // 任务登记的 worktree.path 与 sidecar 元数据写法不同（大小写别名）时，字面量 ===
+  // 配不上对，清扫后的状态同步漏更新——渲染层会一直显示过期状态。
+  if (process.platform === 'win32') {
+    const syncAlias = await fixture('sweep-sync-alias')
+    const syncChild = syncAlias.peer.get(syncAlias.child.id)
+    assert.ok(syncChild.worktree?.path, '前置：子单带 worktree 登记')
+    const aliasWorktreePath = flipCase(syncChild.worktree.path)
+    assert.notEqual(aliasWorktreePath, syncChild.worktree.path, '前置：别名写法与真实写法不同')
+    // 任务登记写成别名 + 过期的 removed 状态；磁盘 sidecar 实为 active（领队还在跑，清扫保留现场）
+    syncAlias.peer.update(syncChild.id, { worktree: { ...syncChild.worktree, path: aliasWorktreePath, cleanupStatus: 'removed' } })
+    registerSystemIpc({ store: syncAlias.peer, settings: { worktreeMaxAgeDays: 30 }, getWindow: () => null })
+    const syncReport = await globalThis.__worktreeHandlers.get('worktrees:prune')()
+    assert.ok(syncReport, '前置：清扫完成')
+    const synced = syncAlias.peer.get(syncChild.id)
+    assert.equal(synced.worktree.cleanupStatus, 'active', '别名配对：状态同步把别名写法的任务登记对上 sidecar（过期 removed 被纠正为 active）')
+    assert.equal(synced.worktree.path, syncChild.worktree.path, '同步写入的是 sidecar 的真实写法')
+    assert.ok(fs.existsSync(syncChild.worktree.path), '别名配对的同步不误动现场：在跑领队的子单树保留')
+    syncAlias.store.flush()
+    syncAlias.peer.flush()
+    console.log('PASS sweep status sync pairs task records with sidecar metadata across alias spellings')
   }
 
   // 显式删除路径（tasks:delete → removeWorktree）才允许带走集成分支

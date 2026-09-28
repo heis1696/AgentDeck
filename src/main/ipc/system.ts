@@ -4,7 +4,7 @@ import { buildAnalytics } from '../analytics'
 import { parseAnalyticsRange, parseContent, parseNotification, parseSettingsPatch } from '../ipc-validation'
 import { probeRuntimes } from '../runtime'
 import { zcodeDefaultPaths } from '../backends/zcode-config'
-import { listWorktreeMetadata, pruneWorktrees, shouldKeepTaskWorktree } from '../git'
+import { listWorktreeMetadata, pruneWorktrees, sameWorktreePath, shouldKeepTaskWorktree, uniquePathsByKey } from '../git'
 import type { IpcContext } from './context'
 
 export function registerSystemIpc(ctx: IpcContext) {
@@ -27,7 +27,9 @@ export function registerSystemIpc(ctx: IpcContext) {
     return publicSnapshot
   })
   ipcMain.handle('worktrees:prune', async () => {
-    const dirs = new Set(ctx.store.list().map((task) => task.worktree?.repoDir || task.workdir).filter(Boolean))
+    // 手动清扫目录集合与启动清扫同源折叠去重（uniquePathsByKey）：同一仓库的别名写法
+    // 只扫一次，不并发重扫同一现场；保留首个写法做真实文件系统调用
+    const dirs = uniquePathsByKey(ctx.store.list().map((task) => task.worktree?.repoDir || task.workdir))
     const maxAgeMs = ctx.settings.worktreeMaxAgeDays * 24 * 60 * 60 * 1000
     const results = []
     for (const repoDir of dirs) {
@@ -42,7 +44,9 @@ export function registerSystemIpc(ctx: IpcContext) {
       // 清扫失败不再静默：owner 任务在册 → 时间线事件（目录名+原因），连续多轮失败可见
       for (const failure of report.failed) ctx.store.noteWorktreeCleanupFailure(repoDir, failure)
       for (const metadata of listWorktreeMetadata(repoDir)) {
-        const task = ctx.store.list().find((item) => item.worktree?.path === metadata.path)
+        // 任务-元数据配对按别名折叠判定（与 git.ts 路径键同源）：任务登记与 sidecar
+        // 落盘写法不同（大小写/盘符别名）时，字面量 === 配不上对，清扫状态同步漏更新
+        const task = ctx.store.list().find((item) => !!item.worktree && sameWorktreePath(item.worktree.path, metadata.path))
         if (task && task.worktree && task.worktree.cleanupStatus !== metadata.cleanupStatus) {
           ctx.store.update(task.id, { worktree: metadata })
         }

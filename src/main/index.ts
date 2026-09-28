@@ -26,7 +26,7 @@ import { createDshBackend } from './backends/dsh'
 import type { AgentBackend } from './backends/types'
 import type { AppSettings, Task, RunTrigger } from '../shared/types'
 import { ensureSharedDir } from './skills'
-import { shouldKeepTaskWorktree, setWorktreeOwner, sweepReportCopies, sweepWorktrees } from './git'
+import { shouldKeepTaskWorktree, setWorktreeOwner, sweepReportCopies, sweepWorktrees, uniquePathsByKey } from './git'
 import { relayIssueCommentOrEvent, type IssueRelayChannels } from './issue-relay'
 import { registerIpcHandlers, type CreateTaskInput } from './ipc/register'
 import { SidecarManager } from './sidecar'
@@ -315,8 +315,10 @@ const initMain = async (): Promise<void> => {
   store.recoverDeadGitOperations()
   issueStore = new IssueStore(app.getPath('userData'))
   issueStore.syncEventually(store.list())
-  // 启动清扫：回收上次会话遗留的委派 worktree（合并临时目录 + 已删任务的目录），后台执行不阻塞启动
-  for (const dir of new Set(store.list().map((t) => t.worktree?.repoDir || t.workdir).filter(Boolean))) {
+  // 启动清扫：回收上次会话遗留的委派 worktree（合并临时目录 + 已删任务的目录），后台执行不阻塞启动。
+  // 目录集合按 uniquePathsByKey 折叠去重：同一仓库的别名写法（大小写/盘符差异）不再
+  // 重复清扫、并发重扫同一现场；去重后保留首个写法做真实文件系统调用
+  for (const dir of uniquePathsByKey(store.list().map((t) => t.worktree?.repoDir || t.workdir))) {
     void sweepWorktrees(dir, (owner, worktree) => shouldKeepTaskWorktree(store.list(), dir, owner, worktree), {
       claimWorktree: (owner, merge) => {
         const claim = store.claimWorktreeCleanup(dir, owner, merge)

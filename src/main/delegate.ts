@@ -42,6 +42,7 @@ import {
   mergeIntoManagedWorktreeDetached,
   reclaimWorktree,
   reportCopyRelPath,
+  sameWorktreePath,
   snapshotGitAfter,
   worktreeChangeDigest,
   writeReportCopy,
@@ -671,15 +672,18 @@ export async function runDelegationLoop(
   const task = store.get(taskId)
   if (!task) return abandoned()
   const team = ctx.getTeam()
+  // 共享目录/子单树归属按别名折叠判定（与 git.ts 路径键同源）：共享工作区与自有树
+  // 的等值判断大小写敏感时，别名写法的 child.workdir 会被误判「独占树」或漏判共享，
+  // 回收归属随之出错（共享目录误回收/自有树漏回收）
   const sharesLeaderWorkspace = (child: Task) => {
     const agent = team.find((candidate) => candidate.id === child.agentId)
     return agent?.sharedWorkspace === true && !!task.workdir && !!child.workdir
-      && path.resolve(child.workdir) === path.resolve(task.workdir)
+      && sameWorktreePath(child.workdir, task.workdir)
   }
   const childOwnsWorktree = (child: Task) => !!child.worktree && !!child.workdir
     && !sharesLeaderWorkspace(child)
     && child.worktree.ownerTaskId === child.id
-    && path.resolve(child.worktree.path) === path.resolve(child.workdir)
+    && sameWorktreePath(child.worktree.path, child.workdir)
   const me = team.find((a) => a.id === task.agentId)
   const subs = (me?.subordinates ?? []).map((id) => team.find((a) => a.id === id)).filter(Boolean) as AgentLike[]
 
