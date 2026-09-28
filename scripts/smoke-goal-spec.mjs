@@ -26,6 +26,33 @@ const verifierFixtureGoal = { workdir: root, acceptanceCriteria: [{ id: 'file', 
 const verifierEvidence = verifyAcceptance(verifierFixtureGoal, { workdir: root, gitDiff: '' })
 ok(verifierEvidence?.find((item) => item.criterionId === 'file')?.passed === true && verifierEvidence?.find((item) => item.criterionId === 'natural')?.passed === false, 'host verifier checks explicit machine rules and fails closed for natural language')
 
+// 根目录归属按别名折叠判定（与 git.ts 路径键同源）：判据里的绝对路径按另一套别名
+// 写法（大小写差异）指向仓库内文件时仍算界内；目录边界照旧——折叠后共享前缀但
+// 非根目录的文件（repo vs repo2 前缀陷阱）不得误包含
+const boundaryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-goal-spec-bound-'))
+const nestedRoot = path.join(boundaryDir, 'repo')
+const prefixTrapDir = `${nestedRoot}2`
+fs.mkdirSync(nestedRoot)
+fs.mkdirSync(prefixTrapDir)
+fs.writeFileSync(path.join(nestedRoot, 'inside.txt'), 'inside\n')
+fs.writeFileSync(path.join(prefixTrapDir, 'outside.txt'), 'outside\n')
+const aliasSpelling = (candidate) => candidate
+  .split(path.sep)
+  .map((segment, index) => (index >= 1 && segment ? (segment === segment.toLowerCase() ? segment.toUpperCase() : segment.toLowerCase()) : segment))
+  .join(path.sep)
+if (process.platform === 'win32') {
+  const aliasInside = verifyAcceptance(
+    { workdir: nestedRoot, acceptanceCriteria: [{ id: 'file_alias', text: `file exists: ${aliasSpelling(path.join(nestedRoot, 'inside.txt'))}`, status: 'pending' }] },
+    { workdir: nestedRoot, gitDiff: '' }
+  )
+  ok(aliasInside?.[0]?.passed === true, 'root ownership folds alias spellings: a repo file named with an aliased root prefix is still inside')
+}
+const prefixTrapOutside = verifyAcceptance(
+  { workdir: nestedRoot, acceptanceCriteria: [{ id: 'file_outside', text: `file exists: ${path.join(prefixTrapDir, 'outside.txt')}`, status: 'pending' }] },
+  { workdir: nestedRoot, gitDiff: '' }
+)
+ok(prefixTrapOutside?.[0]?.passed === false, 'directory boundary holds: a prefix-trap sibling directory stays outside the root')
+
 // diff 验收证据必须绑定「当前执行 + available 快照」：其他 Run / 其他阶段 / 无来源旧数据
 // 以及失败、取消后残留的 diff 都不能认证本轮。
 const acceptanceGoal = { workdir: root, acceptanceCriteria: [{ id: 'diff', text: 'git diff contains: hello', status: 'pending' }] }

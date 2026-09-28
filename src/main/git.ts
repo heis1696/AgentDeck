@@ -779,6 +779,20 @@ export function sameWorktreePath(left: string, right: string): boolean {
   return worktreePathKey(left) === worktreePathKey(right)
 }
 
+/** 路径集合按 worktreePathKey 折叠去重：同一目录的别名写法只留一个元素，且保留首个
+ *  解析写法供真实文件系统调用（POSIX 上退化为 resolve 去重，行为不变）。启动/手动
+ *  清扫的仓库集合等遍历入口共用：否则同一仓库的别名写法会重复清扫、并发重扫同一现场。 */
+export function uniquePathsByKey(dirs: Iterable<string | undefined | null>): string[] {
+  const unique = new Map<string, string>()
+  for (const dir of dirs) {
+    if (!dir) continue
+    const resolved = path.resolve(dir)
+    const key = worktreePathKey(resolved)
+    if (!unique.has(key)) unique.set(key, resolved)
+  }
+  return [...unique.values()]
+}
+
 function worktreeAdminDir(wtPath: string, commonDir: string): string | null {
   const worktreesDir = path.join(commonDir, 'worktrees')
   try {
@@ -1485,18 +1499,10 @@ export function reportCopyRelPath(leaderWorkdir: string, copyAbsPath: string): s
 }
 
 /** 报告副本 GC（挂线一/二共用）：按任务 id 清掉对应副本文件；幂等，缺失忽略。返回删除的绝对路径。
- *  仓库集合按 worktreePathKey 规范键去重：同一仓库的别名写法不重复遍历、不重复删除，
- *  去重后保留首个解析写法做真实文件系统调用（POSIX 上与旧行为完全一致）。 */
+ *  仓库集合按 uniquePathsByKey 折叠去重：同一仓库的别名写法不重复遍历、不重复删除。 */
 export function deleteReportCopies(repoDirs: readonly (string | undefined | null)[], taskIds: readonly string[]): string[] {
   const removed: string[] = []
-  const roots = new Map<string, string>()
-  for (const dir of repoDirs) {
-    if (!dir) continue
-    const resolved = path.resolve(dir)
-    const key = worktreePathKey(resolved)
-    if (!roots.has(key)) roots.set(key, resolved)
-  }
-  for (const root of roots.values()) {
+  for (const root of uniquePathsByKey(repoDirs)) {
     for (const id of taskIds) {
       const file = path.join(root, REPORTS_DIR_NAME, `${id}.md`)
       try { fs.unlinkSync(file); removed.push(file) } catch { /* 缺失或不可删：幂等跳过 */ }
@@ -2205,7 +2211,10 @@ export async function pruneWorktrees(
     const hasOwnerMetadata = !!metadata
     let verifiedMergeScaffold = false
     result.scanned++
-    const registration = registrations.get(name)
+    // 登记查找与世代核验同一套折叠语义（registeredWorktreeForPath）：磁盘目录名与
+    // Git 注册表键仅大小写不同（别名写法落盘的 gitdir）时，字面量键取不到登记——
+    // merge 脚手架的分支归属、失败证据里的注册路径/分支全都跟着丢失
+    const registration = registeredWorktreeForPath(registrations, wtPath)
     if (!metadata && !fs.existsSync(sidecarPath) && name.startsWith('.agentdeck-merge-')) {
       const generationId = await currentWorktreeGeneration(root, wtPath)
       if (generationId && !await verifyWorktreeGeneration(root, wtPath, generationId, registration?.branch)) {

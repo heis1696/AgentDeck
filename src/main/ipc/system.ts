@@ -4,7 +4,7 @@ import { buildAnalytics } from '../analytics'
 import { parseAnalyticsRange, parseContent, parseNotification, parseSettingsPatch } from '../ipc-validation'
 import { probeRuntimes } from '../runtime'
 import { zcodeDefaultPaths } from '../backends/zcode-config'
-import { listWorktreeMetadata, pruneWorktrees, sameWorktreePath, shouldKeepTaskWorktree } from '../git'
+import { listWorktreeMetadata, pruneWorktrees, sameWorktreePath, shouldKeepTaskWorktree, uniquePathsByKey } from '../git'
 import type { IpcContext } from './context'
 
 export function registerSystemIpc(ctx: IpcContext) {
@@ -27,7 +27,9 @@ export function registerSystemIpc(ctx: IpcContext) {
     return publicSnapshot
   })
   ipcMain.handle('worktrees:prune', async () => {
-    const dirs = new Set(ctx.store.list().map((task) => task.worktree?.repoDir || task.workdir).filter(Boolean))
+    // 手动清扫目录集合与启动清扫同源折叠去重（uniquePathsByKey）：同一仓库的别名写法
+    // 只扫一次，不并发重扫同一现场；保留首个写法做真实文件系统调用
+    const dirs = uniquePathsByKey(ctx.store.list().map((task) => task.worktree?.repoDir || task.workdir))
     const maxAgeMs = ctx.settings.worktreeMaxAgeDays * 24 * 60 * 60 * 1000
     const results = []
     for (const repoDir of dirs) {

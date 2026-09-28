@@ -8,7 +8,7 @@ import path from 'node:path'
 const root = path.resolve(import.meta.dirname, '..')
 const outfile = path.join(root, 'out', 'smoke-worktree-lifecycle.cjs')
 await build({ entryPoints: [path.join(root, 'src/main/git.ts')], outfile, bundle: true, platform: 'node', format: 'cjs', target: 'node18' })
-const { createWorktree, createWorktreeAtBranch, listWorktreeMetadata, reclaimWorktree, pruneWorktrees, setWorktreeManualKeep, setWorktreeOwner, branchExists, worktreeAvailability, removeWorktree, clearWorktreePool, clearWorktreeFileCountCache, WORKTREE_POOL_MAX_PER_REPO, WORKTREE_POOL_OWNER, worktreePoolEntriesForTest, setWorktreePathLockProbeForTest } = await import(pathToFileURL(outfile).href)
+const { createWorktree, createWorktreeAtBranch, listWorktreeMetadata, reclaimWorktree, pruneWorktrees, setWorktreeManualKeep, setWorktreeOwner, branchExists, worktreeAvailability, removeWorktree, clearWorktreePool, clearWorktreeFileCountCache, WORKTREE_POOL_MAX_PER_REPO, WORKTREE_POOL_OWNER, worktreePoolEntriesForTest, setWorktreePathLockProbeForTest, uniquePathsByKey } = await import(pathToFileURL(outfile).href)
 
 const check = (condition, message) => {
   if (!condition) throw new Error(message)
@@ -550,8 +550,13 @@ try {
     check(fs.existsSync(poolFullTree.path), 'pooled tree survives the full-alias reclaim attempt')
 
     // D3｜清扫命中：sidecar 按全路径别名写法落盘（repoDir/path 三段全变体）时，清扫
-    // 必须照样认定为可靠元数据并回收陈旧池条目；同树别名写法不重复扫描、不误报
+    // 必须照样认定为可靠元数据并回收陈旧池条目；同树别名写法不重复扫描、不误报。
+    // 扫描计数/removed/failed 全按路径键折叠比对：别名条目二次扫描或以别名名字记账
+    // 都会被抓住（字面量比对会被别名名字骗过）
     clearWorktreePool()
+    const sweepRoots = uniquePathsByKey([dir, aliasRepo])
+    check(sweepRoots.length === 1 && sweepRoots[0] === path.resolve(dir),
+      'sweep repo set folds alias repo spellings into one sweep root and keeps the first spelling')
     const sweepTree = await createWorktree(dir, 'alias_full_sweep_c1', 'main', 'alias_full_sweep_leader')
     check(!!sweepTree && sweepTree.pooled !== true, 'full-alias sweep fixture tree created (full build, not pool reuse)')
     const sweepRepooled = await reclaimWorktree(sweepTree.path, { repool: true, expectedOwnerTaskId: 'alias_full_sweep_leader', expectedGenerationId: sweepTree.metadata.generationId })
@@ -564,11 +569,35 @@ try {
     sweepMeta.path = fullAliasSpelling(sweepMeta.path)
     sweepMeta.poolProcess = { ...sweepMeta.poolProcess, pid: 2147483647 }
     fs.writeFileSync(sweepSidecar, JSON.stringify(sweepMeta))
+    // 扫描数预言机：磁盘目录 + sidecar + Git 注册表三个来源的并集按路径键折叠后的
+    // 元素数。别名树名（sidecar 的 ALIAS_FULL_SWEEP_C1 / 注册表与磁盘的 alias_full_sweep_c1）
+    // 必须折叠成一次扫描——遍历去重失效时 scanned 会多出一枚别名条目
+    const managedDir = path.join(dir, '.agentdeck-worktrees')
+    const diskTreePaths = fs.readdirSync(managedDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && entry.name !== '.metadata')
+      .map((entry) => path.join(managedDir, entry.name))
+    const registrationTreePaths = (() => {
+      try {
+        return fs.readdirSync(path.join(dir, '.git', 'worktrees'), { withFileTypes: true })
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => path.dirname(fs.readFileSync(path.join(dir, '.git', 'worktrees', entry.name, 'gitdir'), 'utf8').trim()))
+      } catch { return [] }
+    })()
+    const distinctScanKeys = new Set([...diskTreePaths, ...listWorktreeMetadata(dir).map((item) => item.path), ...registrationTreePaths]
+      .map((candidate) => path.resolve(candidate).toLowerCase()))
     const sweepAlias = await pruneWorktrees(aliasRepo, () => false, { maxAgeMs: 0, claimWorktree: () => undefined })
-    check(sweepAlias.removed.includes('alias_full_sweep_c1'), 'startup sweep honors alias-spelled sidecar metadata and reclaims the stale pooled tree')
-    check(sweepAlias.failed.every((item) => item.name !== 'alias_full_sweep_c1'), 'alias-spelled sidecar is not misreported as unowned residue')
+    check(sweepAlias.scanned === distinctScanKeys.size,
+      `alias entries are scanned exactly once (scanned=${sweepAlias.scanned}, folded distinct=${distinctScanKeys.size})`)
+    check(sweepAlias.removed.some((name) => name.toLowerCase() === 'alias_full_sweep_c1'), 'startup sweep honors alias-spelled sidecar metadata and reclaims the stale pooled tree')
+    check(sweepAlias.failed.every((item) => item.name.toLowerCase() !== 'alias_full_sweep_c1'), 'alias-spelled sidecar is not misreported as unowned residue')
     check(!fs.existsSync(sweepTree.path), 'alias sidecar sweep removes the stale worktree directory')
-    check(listWorktreeMetadata(dir).every((item) => path.basename(item.path) !== 'alias_full_sweep_c1'), 'alias sidecar is consumed exactly once')
+    // 回收后 sidecar 按设计保留为审计记录（与 pooled metadata is auditable 同一语义）：
+    // 「恰好消费一次」按路径键折叠判定——同名折叠的 sidecar 文件与记录各只有一份
+    // （别名迭代若重复处理/重复落盘会多出第二份），且它就是本轮回收的 removed 审计记录
+    const sweepSidecarFiles = fs.readdirSync(path.join(dir, '.agentdeck-worktrees', '.metadata')).filter((file) => file.toLowerCase() === 'alias_full_sweep_c1.json')
+    const sweepAudit = listWorktreeMetadata(dir).filter((item) => path.basename(item.path).toLowerCase() === 'alias_full_sweep_c1')
+    check(sweepSidecarFiles.length === 1 && sweepAudit.length === 1 && sweepAudit[0].cleanupStatus === 'removed',
+      `alias sidecar is processed exactly once: a single removal audit record remains (files=${sweepSidecarFiles.length}, records=${sweepAudit.length}, status=${sweepAudit[0]?.cleanupStatus})`)
   } else {
     console.log('  SKIP 大小写别名并发专项（非 win32 平台，路径等价判定退化为字面量比较）')
   }

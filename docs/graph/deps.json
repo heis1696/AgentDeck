@@ -19,6 +19,23 @@
           "matchesDoNotFollow": false,
           "circular": false,
           "valid": true
+        },
+        {
+          "module": "./git",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/git.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
         }
       ],
       "dependents": [
@@ -38,6 +55,55 @@
         "src/renderer/src/components/TaskDetail.tsx",
         "src/renderer/src/components/task/GitSummary.tsx",
         "src/renderer/src/components/task/WorkerOverview.tsx"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
+      "source": "src/main/git.ts",
+      "dependencies": [
+        {
+          "module": "./persistence",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/persistence.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
+      "dependents": [
+        "src/main/acceptance-verifier.ts",
+        "src/main/delegate.ts",
+        "src/main/store.ts",
+        "src/main/index.ts",
+        "src/main/ipc/system.ts",
+        "src/main/ipc/tasks.ts",
+        "src/main/retention.ts",
+        "src/main/runner.ts",
+        "src/main/task-finalizer.ts"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
+      "source": "src/main/persistence.ts",
+      "dependencies": [],
+      "dependents": [
+        "src/main/git.ts",
+        "src/main/event-log.ts",
+        "src/main/store.ts",
+        "src/main/issue-store.ts",
+        "src/main/runner.ts",
+        "src/main/sidecar-server.ts"
       ],
       "orphan": false,
       "valid": true
@@ -1270,54 +1336,6 @@
       ],
       "dependents": [
         "src/main/runner.ts"
-      ],
-      "orphan": false,
-      "valid": true
-    },
-    {
-      "source": "src/main/git.ts",
-      "dependencies": [
-        {
-          "module": "./persistence",
-          "moduleSystem": "es6",
-          "dynamic": false,
-          "exoticallyRequired": false,
-          "dependencyTypes": [
-            "local",
-            "import"
-          ],
-          "resolved": "src/main/persistence.ts",
-          "coreModule": false,
-          "followable": true,
-          "couldNotResolve": false,
-          "matchesDoNotFollow": false,
-          "circular": false,
-          "valid": true
-        }
-      ],
-      "dependents": [
-        "src/main/delegate.ts",
-        "src/main/store.ts",
-        "src/main/index.ts",
-        "src/main/ipc/system.ts",
-        "src/main/ipc/tasks.ts",
-        "src/main/retention.ts",
-        "src/main/runner.ts",
-        "src/main/task-finalizer.ts"
-      ],
-      "orphan": false,
-      "valid": true
-    },
-    {
-      "source": "src/main/persistence.ts",
-      "dependencies": [],
-      "dependents": [
-        "src/main/git.ts",
-        "src/main/event-log.ts",
-        "src/main/store.ts",
-        "src/main/issue-store.ts",
-        "src/main/runner.ts",
-        "src/main/sidecar-server.ts"
       ],
       "orphan": false,
       "valid": true
@@ -9911,9 +9929,9 @@
     "ignore": 0,
     "advisedExitCode": 0,
     "totalCruised": 189,
-    "totalDependenciesCruised": 454,
+    "totalDependenciesCruised": 455,
     "optionsUsed": {
-      "baseDir": "D:\\agentdeck\\.agentdeck-worktrees\\t_muk3gcd6_1838995e71a2_c31",
+      "baseDir": "D:\\agentdeck\\.agentdeck-worktrees\\t_muk3gcd6_1838995e71a2_c12",
       "combinedDependencies": false,
       "detectJSDocImports": false,
       "detectProcessBuiltinModuleCalls": false,
