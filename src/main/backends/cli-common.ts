@@ -79,6 +79,16 @@ export interface CliJsonlRunner {
   kill: () => Promise<KillProcessResult>
 }
 
+/** 可执行路径等值判定：win32 路径大小写不敏感，同一可执行文件的别名写法（大小写
+ *  差异）必须判等——否则 command 以别名写法登记时漏判「command 即 electron 本体」，
+ *  漏打 ELECTRON_RUN_AS_NODE 兜底、打包版把自己再启动一遍。大小写敏感平台（posix
+ *  文件名大小写即身份）精确比较。 */
+export function sameExecutablePath(left: string, right: string): boolean {
+  const resolvedLeft = path.resolve(left)
+  const resolvedRight = path.resolve(right)
+  return process.platform === 'win32' ? resolvedLeft.toLowerCase() === resolvedRight.toLowerCase() : resolvedLeft === resolvedRight
+}
+
 export function runCliJsonl(opts: {
   command: string
   prefixArgs: string[]
@@ -96,7 +106,7 @@ export function runCliJsonl(opts: {
   // 兜底场景 command = process.execPath（electron 充当 node，见 cli-locator）：
   // 不带 ELECTRON_RUN_AS_NODE 打包版会忽略脚本参数把自己再启动一遍
   const env: NodeJS.ProcessEnv = opts.env ? { ...process.env, ...opts.env } : { ...process.env }
-  if (process.versions.electron && path.resolve(opts.command).toLowerCase() === path.resolve(process.execPath).toLowerCase()) {
+  if (process.versions.electron && sameExecutablePath(opts.command, process.execPath)) {
     env.ELECTRON_RUN_AS_NODE = '1'
   }
   const child = spawn(opts.command, [...opts.prefixArgs, ...opts.args], {

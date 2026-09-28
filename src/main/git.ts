@@ -793,6 +793,18 @@ export function uniquePathsByKey(dirs: Iterable<string | undefined | null>): str
   return [...unique.values()]
 }
 
+/** 托管 merge 脚手架的树名标记：临时合并目录 `.agentdeck-merge-*` 与其 detach 变体
+ *  `.agentdeck-merge-detach-*`。树名标记判断按平台路径语义识别——win32 目录名大小写
+ *  不敏感，同一棵脚手架以别名写法（大小写差异）报进核验/清扫时，字面量 startsWith
+ *  判不中：detach 守卫（重挂分支的树必须拒绝回收）与 crashLeftover 强制回收豁免会
+ *  全部落空。非 win32 目录名大小写敏感，别名写法即另一棵树，维持精确比较。 */
+const MERGE_SCAFFOLD_MARKER = '.agentdeck-merge-'
+const MERGE_DETACH_SCAFFOLD_MARKER = '.agentdeck-merge-detach-'
+
+function hasMergeScaffoldMarker(treeName: string, marker: typeof MERGE_SCAFFOLD_MARKER | typeof MERGE_DETACH_SCAFFOLD_MARKER): boolean {
+  return process.platform === 'win32' ? treeName.toLowerCase().startsWith(marker) : treeName.startsWith(marker)
+}
+
 function worktreeAdminDir(wtPath: string, commonDir: string): string | null {
   const worktreesDir = path.join(commonDir, 'worktrees')
   try {
@@ -863,7 +875,7 @@ async function verifyWorktreeGeneration(
   const attachedHead = !!registration.head && /^ref: refs\/heads\/.+/.test(registration.head) && !!registration.branch
   if (!detachedHead && !attachedHead) return 'current Git worktree registration is incomplete (missing HEAD)'
   if (attachedHead && !(await branchExists(repoDir, registration.branch!))) return 'current Git worktree registration is incomplete (missing HEAD target)'
-  if (path.basename(wtPath).startsWith('.agentdeck-merge-detach-')) {
+  if (hasMergeScaffoldMarker(path.basename(wtPath), MERGE_DETACH_SCAFFOLD_MARKER)) {
     if (!detachedHead) return 'detached merge worktree is no longer detached'
   } else if (expectedBranch && registration.branch !== expectedBranch) {
     return 'current Git worktree branch does not match its metadata'
@@ -1987,7 +1999,7 @@ async function reclaimWorktreeUnlocked(
   const { repoDir, name, metadata } = resolved
   if (!metadata) {
     const missingSidecar = !fs.existsSync(metadataFile(repoDir, name))
-    if (!allowVerifiedMergeScaffold || !missingSidecar || !name.startsWith('.agentdeck-merge-') || !options.expectedGenerationId) {
+    if (!allowVerifiedMergeScaffold || !missingSidecar || !hasMergeScaffoldMarker(name, MERGE_SCAFFOLD_MARKER) || !options.expectedGenerationId) {
       return { ok: false, status: 'retained', path: wtDir, reason: 'worktree owner metadata is missing or invalid' }
     }
   } else if (!metadata.ownerTaskId.trim() || !metadata.branch.trim()
@@ -2215,7 +2227,7 @@ export async function pruneWorktrees(
     // Git 注册表键仅大小写不同（别名写法落盘的 gitdir）时，字面量键取不到登记——
     // merge 脚手架的分支归属、失败证据里的注册路径/分支全都跟着丢失
     const registration = registeredWorktreeForPath(registrations, wtPath)
-    if (!metadata && !fs.existsSync(sidecarPath) && name.startsWith('.agentdeck-merge-')) {
+    if (!metadata && !fs.existsSync(sidecarPath) && hasMergeScaffoldMarker(name, MERGE_SCAFFOLD_MARKER)) {
       const generationId = await currentWorktreeGeneration(root, wtPath)
       if (generationId && !await verifyWorktreeGeneration(root, wtPath, generationId, registration?.branch)) {
         const stat = (() => { try { return fs.statSync(wtPath) } catch { return null } })()
@@ -2255,7 +2267,7 @@ export async function pruneWorktrees(
     // 集成结果都落在分支上，owner 存续（哪怕在册且检出同一集成分支）不构成保留理由——
     // crashLeftover 判定先于 keepTask，直接进回收流程（租约照拿，拿不到 retain 待下轮）；
     // isIntegrationBranch 守卫照旧：只删目录与侧车，集成分支仅删任务的显式路径可带走。
-    const crashLeftover = name.startsWith('.agentdeck-merge-')
+    const crashLeftover = hasMergeScaffoldMarker(name, MERGE_SCAFFOLD_MARKER)
     const owner = metadata.ownerTaskId
     const pooledEntry = metadata?.ownerTaskId === WORKTREE_POOL_OWNER
     if (pooledEntry && worktreePoolByRepo.get(worktreePathKey(root))?.has(worktreePathKey(wtPath))) {
@@ -2293,7 +2305,7 @@ export async function pruneWorktrees(
       continue
     }
     if (metadata?.cleanupStatus === 'removed' && !fs.existsSync(wtPath)) {
-      const lease = pooledEntry ? undefined : options.claimWorktree?.(owner, name.startsWith('.agentdeck-merge-'))
+      const lease = pooledEntry ? undefined : options.claimWorktree?.(owner, hasMergeScaffoldMarker(name, MERGE_SCAFFOLD_MARKER))
       if (!lease && !pooledEntry) {
         result.retained.push({ name, reason: 'cleanup ownership could not be established' })
         continue

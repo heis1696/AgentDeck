@@ -1,12 +1,27 @@
 import { BrowserWindow, ipcMain } from 'electron'
 import { validateMove } from '../../shared/taskflow'
 import { aggregateUsage } from '../usage'
-import { deleteReportCopies, fileDiff, fileDiffFailure, removeWorktree, resolveRepositoryRoot } from '../git'
+import { deleteReportCopies, fileDiff, fileDiffFailure, removeWorktree, resolveRepositoryRoot, worktreePathKey } from '../git'
 import { parseContent, parseFollowUpOptions, parseId, parseNonNegativeInteger, parsePermissionDecision, parseRepoRelativePath, parseTaskCreate, parseTaskStatus } from '../ipc-validation'
 import type { IpcContext } from './context'
 import type { Task } from '../../shared/types'
 import { sameExecutionOwner } from '../store'
 import { prepareManualTaskStart, taskIdentity } from '../handoff'
+
+/** 删单回收清单：同一棵树的别名写法（大小写/盘符差异）只回收一次——去重键按路径键
+ *  折叠（与 git.ts 的锁/池键同一套语义），折叠命中时保留首个原始写法与它自己的 owner，
+ *  真实文件调用拿原始路径（回收失败上报的路径要能对上登记写法）。字面量 Map 键会让
+ *  领队/子单各按一种写法登记同一棵树时发起两次并发回收，同树双删互踩。 */
+export function collectWorktreeReclaims(items: ReadonlyArray<Pick<Task, 'id' | 'workdir' | 'worktree'>>): Array<{ worktreePath: string; ownerTaskId: string }> {
+  const byKey = new Map<string, { worktreePath: string; ownerTaskId: string }>()
+  for (const item of items) {
+    const worktreePath = item.worktree?.path || item.workdir
+    if (!worktreePath) continue
+    const key = worktreePathKey(worktreePath)
+    if (!byKey.has(key)) byKey.set(key, { worktreePath, ownerTaskId: item.worktree?.ownerTaskId || item.id })
+  }
+  return [...byKey.values()]
+}
 
 export function registerTaskIpc(ctx: IpcContext) {
   const send = (channel: string, payload: unknown) => ctx.getWindow()?.webContents.send(channel, payload)
@@ -79,10 +94,7 @@ export function registerTaskIpc(ctx: IpcContext) {
     if (children.some((item) => item.status === 'running')) return { ok: false, error: '请先取消运行中的子任务' }
     const observed = [task, ...children]
     // 删除前先取 workdir（索引里没了任务对象就取不到了）
-    const worktrees = [...new Map(observed.flatMap((item) => {
-      const worktreePath = item.worktree?.path || item.workdir
-      return worktreePath ? [[worktreePath, item.worktree?.ownerTaskId || item.id] as const] : []
-    })).entries()].map(([worktreePath, ownerTaskId]) => ({ worktreePath, ownerTaskId }))
+    const worktrees = collectWorktreeReclaims(observed)
     const workdirs = worktrees.map((item) => item.worktreePath)
     // 先按捕获身份校验并提交删除，再清理内存会话：校验失败不留任何副作用，
     // 也不可能让清理先于删除去伤及替换执行（新运行仍持有该任务身份）。

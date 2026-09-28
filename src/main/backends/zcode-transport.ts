@@ -1,6 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
-import path from 'node:path'
-import { isJsonObject, killProcessTree, type JsonValue, type KillProcessResult } from './cli-common'
+import { isJsonObject, killProcessTree, sameExecutablePath, type JsonValue, type KillProcessResult } from './cli-common'
 
 export interface ZcodeWireMessage {
   id?: number | string
@@ -31,7 +30,7 @@ export class ZcodeConnection {
 
   constructor(nodePath: string, zcodePath: string, cwd: string) {
     const env: NodeJS.ProcessEnv = { ...process.env }
-    if (path.resolve(nodePath).toLowerCase() === path.resolve(process.execPath).toLowerCase()) env.ELECTRON_RUN_AS_NODE = '1'
+    if (sameExecutablePath(nodePath, process.execPath)) env.ELECTRON_RUN_AS_NODE = '1'
     else delete env.ELECTRON_RUN_AS_NODE
     this.child = spawn(nodePath, [zcodePath, 'app-server', '--stdio'], { cwd, env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
     this.child.stdout!.setEncoding('utf8')

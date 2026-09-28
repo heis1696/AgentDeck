@@ -854,6 +854,134 @@ async function main() {
 main().catch((e) => { console.error(e); process.exit(3) })
 `
 
+// 红13｜树名标记按平台折叠（detach 守卫）：旧代码（字面量 startsWith）下「重挂分支的
+// detach 脚手架按大写别名写法回收必须同样被拒、目录存活」断言必红——别名写法判不中
+// 树名标记会让 detach 守卫落空，重挂的树被连目录强删
+const RED13 = `
+${PRELUDE}
+const { reclaimWorktree } = require(__MUT_GIT__)
+async function main() {
+  const { repo, git } = makeRepo('mut-r13-')
+  // mergeIntoManagedWorktreeDetached 的落盘形态：detach 脚手架 + 世代标记 + sidecar
+  const scaffoldName = '.agentdeck-merge-detach-r13'
+  const scaffoldBranch = 'agentdeck/task-r13-integrated'
+  const scaffoldPath = path.join(repo, '.agentdeck-worktrees', scaffoldName)
+  const aliasSpelling = path.join(repo, '.agentdeck-worktrees', '.AGENTDECK-MERGE-DETACH-R13')
+  assert(aliasSpelling.toLowerCase() === scaffoldPath.toLowerCase() && aliasSpelling !== scaffoldPath, '前置：别名树名同目录不同拼写')
+  git('branch', scaffoldBranch, 'main')
+  execFileSync('git', ['-C', repo, 'worktree', 'add', '--detach', scaffoldPath, scaffoldBranch], { stdio: 'ignore' })
+  const pointer = fs.readFileSync(path.join(scaffoldPath, '.git'), 'utf8')
+  const gitdir = path.resolve(scaffoldPath, /^gitdir:\\s*(.+?)\\s*$/im.exec(pointer)[1])
+  const generation = 'mut-r13-generation'
+  fs.writeFileSync(path.join(gitdir, 'agentdeck-generation'), generation + '\\n')
+  fs.mkdirSync(path.join(repo, '.agentdeck-worktrees', '.metadata'), { recursive: true })
+  fs.writeFileSync(path.join(repo, '.agentdeck-worktrees', '.metadata', scaffoldName + '.json'), JSON.stringify({
+    ownerTaskId: scaffoldName, generationId: generation, repoDir: repo, path: scaffoldPath,
+    branch: scaffoldBranch, baseSha: git('rev-parse', scaffoldBranch), createdAt: Date.now(), cleanupStatus: 'active'
+  }))
+  // 重挂分支：detach 树内检出集成分支（attached HEAD）——detach 守卫的唯一拦截对象
+  git('-C', scaffoldPath, 'switch', scaffoldBranch)
+  const canonicalRefused = await reclaimWorktree(scaffoldPath, { force: true, expectedOwnerTaskId: scaffoldName, expectedGenerationId: generation })
+  assert(canonicalRefused.ok === false && canonicalRefused.status === 'retained' && (canonicalRefused.reason ?? '').includes('no longer detached'),
+    '小写写法拒绝重挂分支的 detach 脚手架（实际 ' + canonicalRefused.status + ': ' + (canonicalRefused.reason ?? '') + '）')
+  assert(fs.existsSync(scaffoldPath), '小写拒绝后目录存活')
+  const aliasRefused = await reclaimWorktree(aliasSpelling, { force: true, expectedOwnerTaskId: scaffoldName, expectedGenerationId: generation })
+  assert(aliasRefused.ok === false && aliasRefused.status === 'retained' && (aliasRefused.reason ?? '').includes('no longer detached'),
+    '大写别名写法同样拒绝回收重挂分支的 detach 脚手架（实际 ' + aliasRefused.status + ': ' + (aliasRefused.reason ?? '') + '）')
+  assert(fs.existsSync(scaffoldPath), '别名拒绝后目录必须存活（守卫落空会被连目录强删）')
+  console.log('SCENARIO-OK')
+  process.exit(0)
+}
+main().catch((e) => { console.error(e); process.exit(3) })
+`
+
+// 红14｜验收器盘符根：旧代码（根键无脑再拼第二个 sep）下「盘符根 workdir 界内目标
+// 判界内且存在」断言必红——c:\\file 不以 c:\\\\ 为前缀，界内文件全被误判到界外
+const RED14 = `
+const path = require('path')
+const fs = require('fs')
+const os = require('os')
+const { verifyAcceptance } = require(__MUT_VERIFY__)
+const assert = (cond, msg) => { if (!cond) { console.error('RED:' + msg); process.exit(3) } }
+async function main() {
+  const boundary = fs.mkdtempSync(path.join(os.tmpdir(), 'mut-r14-'))
+  const rootWorkdir = path.parse(boundary).root
+  const inside = verifyAcceptance(
+    { workdir: rootWorkdir, acceptanceCriteria: [{ id: 'inside', text: 'path exists: ' + boundary, status: 'pending' }] },
+    { workdir: rootWorkdir, gitDiff: '' }
+  )
+  assert(inside[0].passed === true, '盘符根 workdir 下界内目标必须判界内且存在（实际 passed=' + inside[0].passed + '）')
+  const otherDrive = 'DEFGHIJKLMNOPQRSTUVWXYZ'.split('').map((letter) => letter + ':\\\\').find((driveRoot) => driveRoot.toUpperCase() !== rootWorkdir.toUpperCase() && fs.existsSync(driveRoot))
+  const outsideTarget = otherDrive ?? (rootWorkdir.toUpperCase() === 'C:\\\\' ? 'Q:\\\\mut-r14-out' : 'C:\\\\mut-r14-out')
+  const outside = verifyAcceptance(
+    { workdir: rootWorkdir, acceptanceCriteria: [{ id: 'outside', text: 'path exists: ' + path.join(outsideTarget, 'probe'), status: 'pending' }] },
+    { workdir: rootWorkdir, gitDiff: '' }
+  )
+  assert(outside[0].passed === false, '盘符根 workdir 下另一根的目标必须判界外（不得越界放行）')
+  console.log('SCENARIO-OK')
+  process.exit(0)
+}
+main().catch((e) => { console.error(e); process.exit(3) })
+`
+
+// 红15｜删单回收去重：旧代码（字面量 Map 键）下「同一棵树的双别名写法只回收一次、
+// 保留首个原始写法与它自己的 owner」断言必红——字面量键会对同树发起两次并发回收
+const RED15 = `
+const path = require('path')
+const fs = require('fs')
+const os = require('os')
+const electron = require('electron')
+const { collectWorktreeReclaims } = require(__MUT_TASKS__)
+const assert = (cond, msg) => { if (!cond) { console.error('RED:' + msg); process.exit(3) } }
+const flip = (p) => {
+  const sepIndex = p.indexOf(path.sep)
+  const head = p.slice(0, sepIndex)
+  const flipped = head[0] === head[0].toLowerCase() ? head[0].toUpperCase() + head.slice(1) : head[0].toLowerCase() + head.slice(1)
+  return flipped + p.slice(sepIndex)
+}
+async function main() {
+  const realPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'mut-r15-')), '.agentdeck-worktrees', 'wt_c1')
+  assert(collectWorktreeReclaims([{ id: 'a', workdir: realPath }, { id: 'b', workdir: realPath }]).length === 1, '基线：完全相同写法折叠成一条')
+  if (process.platform === 'win32') {
+    const aliasPath = flip(realPath)
+    assert(aliasPath !== realPath && aliasPath.toLowerCase() === realPath.toLowerCase(), '前置：别名写法仅大小写不同')
+    const deduped = collectWorktreeReclaims([
+      { id: 'leader', workdir: '', worktree: { path: realPath, ownerTaskId: 'leader' } },
+      { id: 'child', workdir: aliasPath }
+    ])
+    assert(deduped.length === 1, '同一棵树的双别名写法只回收一次（实际 ' + deduped.length + ' 条，字面量 Map 键会发两次并发回收）')
+    assert(deduped[0].worktreePath === realPath && deduped[0].ownerTaskId === 'leader', '折叠保留首个原始写法与它自己的 owner（实际 ' + JSON.stringify(deduped[0]) + '）')
+  }
+  console.log('SCENARIO-OK')
+  process.exit(0)
+}
+main().catch((e) => { console.error(e); process.exit(3) })
+`
+
+// 红16｜可执行路径比较按平台：旧代码（无条件精确比较的变异形态）下「win32 别名写法
+// 判等」断言必红——别名 command 判不等会漏打 ELECTRON_RUN_AS_NODE 兜底
+const RED16 = `
+const path = require('path')
+const { sameExecutablePath } = require(__MUT_CLICOMMON__)
+const assert = (cond, msg) => { if (!cond) { console.error('RED:' + msg); process.exit(3) } }
+const flip = (p) => {
+  const sepIndex = p.indexOf(path.sep)
+  const head = p.slice(0, sepIndex)
+  const flipped = head[0] === head[0].toLowerCase() ? head[0].toUpperCase() + head.slice(1) : head[0].toLowerCase() + head.slice(1)
+  return flipped + p.slice(sepIndex)
+}
+async function main() {
+  if (process.platform !== 'win32') { console.log('SCENARIO-OK'); process.exit(0) }
+  const alias = flip(process.execPath)
+  assert(alias !== process.execPath, '前置：别名写法与真实写法不同')
+  assert(sameExecutablePath(alias, process.execPath) === true, 'win32 下可执行路径别名写法必须判等（实际 false：ELECTRON_RUN_AS_NODE 兜底会漏打）')
+  assert(sameExecutablePath(process.execPath, process.execPath) === true, '完全相同写法判等')
+  console.log('SCENARIO-OK')
+  process.exit(0)
+}
+main().catch((e) => { console.error(e); process.exit(3) })
+`
+
 const MUTATIONS = [
   {
     name: '红1｜建单门禁：旧代码（无 holding；绑定失败直接撤销）下「让位不撤销」断言必红',
@@ -1129,6 +1257,61 @@ const MUTATIONS = [
     ],
     scenario: RED12,
     expectedRed: '空路径残缺登记归具名终态'
+  },
+  {
+    name: '红13｜树名标记按平台折叠（detach 守卫）：旧代码（字面量 startsWith）下「重挂分支的 detach 脚手架按大写别名写法回收同样被拒、目录存活」断言必红',
+    mutations: [
+      {
+        file: 'src/main/git.ts',
+        find: "  if (hasMergeScaffoldMarker(path.basename(wtPath), MERGE_DETACH_SCAFFOLD_MARKER)) {",
+        replace: "  if (path.basename(wtPath).startsWith('.agentdeck-merge-detach-')) {"
+      }
+    ],
+    bundles: [{ src: 'src/main/git.ts', var: 'GIT' }],
+    scenario: RED13,
+    expectedRed: '大写别名写法同样拒绝回收'
+  },
+  {
+    name: '红14｜验收器盘符根：旧代码（根键无脑再拼第二个 sep）下「盘符根 workdir 界内目标判界内且存在」断言必红',
+    mutations: [
+      {
+        file: 'src/main/acceptance-verifier.ts',
+        find: "      const rootPrefix = rootKey.endsWith(path.sep) ? rootKey : `${rootKey}${path.sep}`",
+        replace: "      const rootPrefix = `${rootKey}${path.sep}`"
+      }
+    ],
+    bundles: [{ src: 'src/main/acceptance-verifier.ts', var: 'VERIFY' }],
+    scenario: RED14,
+    expectedRed: '盘符根 workdir 下界内目标必须判界内且存在'
+  },
+  {
+    name: '红15｜删单回收去重：旧代码（字面量 Map 键）下「同一棵树的双别名写法只回收一次、保留首个原始写法与 owner」断言必红',
+    mutations: [
+      {
+        file: 'src/main/ipc/tasks.ts',
+        find: "    const key = worktreePathKey(worktreePath)",
+        replace: "    const key = worktreePath"
+      }
+    ],
+    bundles: [{ src: 'src/main/ipc/tasks.ts', var: 'TASKS' }],
+    files: [
+      ['node_modules/electron/index.js', "module.exports = {\n  handlers: {},\n  ipcMain: { handle: (channel, fn) => { module.exports.handlers[channel] = fn } },\n  BrowserWindow: { getAllWindows: () => [] }\n}\n"]
+    ],
+    scenario: RED15,
+    expectedRed: '只回收一次'
+  },
+  {
+    name: '红16｜可执行路径比较按平台：旧代码（不分平台精确比较）下「win32 别名写法判等」断言必红',
+    mutations: [
+      {
+        file: 'src/main/backends/cli-common.ts',
+        find: "  return process.platform === 'win32' ? resolvedLeft.toLowerCase() === resolvedRight.toLowerCase() : resolvedLeft === resolvedRight",
+        replace: "  return resolvedLeft === resolvedRight"
+      }
+    ],
+    bundles: [{ src: 'src/main/backends/cli-common.ts', var: 'CLICOMMON' }],
+    scenario: RED16,
+    expectedRed: 'win32 下可执行路径别名写法必须判等'
   }
 ]
 

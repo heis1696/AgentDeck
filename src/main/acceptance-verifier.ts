@@ -29,7 +29,10 @@ export function verifyAcceptance(goal: Goal, task: Task): GoalAcceptanceVerifier
       // 误判到界外；折叠后根等值与界内前缀同源判定，目录边界照旧（非根前缀不误包含）
       const targetKey = worktreePathKey(target)
       const rootKey = worktreePathKey(root)
-      const inside = targetKey === rootKey || targetKey.startsWith(`${rootKey}${path.sep}`)
+      // 盘符根（C:\）与文件系统根（/）的路径键自带分隔符：无脑再拼第二个 sep 会把
+      // 界内文件判到界外（c:\file 不以 c:\\ 为前缀）——根前缀只在缺分隔符时补
+      const rootPrefix = rootKey.endsWith(path.sep) ? rootKey : `${rootKey}${path.sep}`
+      const inside = targetKey === rootKey || targetKey.startsWith(rootPrefix)
       const passed = inside && fs.existsSync(target)
       evidence.push({ criterionId: criterion.id, passed, evidence: passed ? `exists: ${path.relative(root, target)}` : `missing: ${fileMatch[1].trim()}` })
       continue

@@ -53,6 +53,34 @@ const prefixTrapOutside = verifyAcceptance(
 )
 ok(prefixTrapOutside?.[0]?.passed === false, 'directory boundary holds: a prefix-trap sibling directory stays outside the root')
 
+// 盘符根/文件系统根（C:\ 或 /）：根路径键自带分隔符，归属前缀不得再拼第二个 sep——
+// 否则界内文件（c:\file 不以 c:\\ 为前缀）全被误判到界外，验收器在盘符根 workdir 下全盲
+{
+  const rootWorkdir = path.parse(boundaryDir).root
+  const rootInsideTarget = boundaryDir
+  const rootInside = verifyAcceptance(
+    { workdir: rootWorkdir, acceptanceCriteria: [{ id: 'file_root_inside', text: `path exists: ${rootInsideTarget}`, status: 'pending' }] },
+    { workdir: rootWorkdir, gitDiff: '' }
+  )
+  ok(rootInside?.[0]?.passed === true, 'drive/filesystem root workdir: a target inside the root is inside (no doubled separator)')
+  const rootAliasInside = process.platform === 'win32'
+    ? verifyAcceptance(
+      { workdir: rootWorkdir, acceptanceCriteria: [{ id: 'file_root_alias', text: `path exists: ${aliasSpelling(rootInsideTarget)}`, status: 'pending' }] },
+      { workdir: rootWorkdir, gitDiff: '' }
+    )
+    : rootInside
+  ok(rootAliasInside?.[0]?.passed === true, 'drive/filesystem root workdir: an alias-spelled target inside the root is still inside')
+  // 界外判定：另一块真实存在的盘（界外且存在 → passed=false 只能是边界判定所为）；
+  // 找不到第二块盘时退化为不存在的盘符路径（守卫归属判定不得越出根）
+  const candidateDrive = 'DEFGHIJKLMNOPQRSTUVWXYZ'.split('').map((letter) => `${letter}:\\`).find((driveRoot) => driveRoot.toUpperCase() !== rootWorkdir.toUpperCase() && fs.existsSync(driveRoot))
+  const rootOutsideTarget = candidateDrive ?? (rootWorkdir.toUpperCase() === 'C:\\' ? 'Q:\\agentdeck-out-of-root' : 'C:\\agentdeck-out-of-root')
+  const rootOutside = verifyAcceptance(
+    { workdir: rootWorkdir, acceptanceCriteria: [{ id: 'file_root_outside', text: `path exists: ${path.join(rootOutsideTarget, 'probe')}`, status: 'pending' }] },
+    { workdir: rootWorkdir, gitDiff: '' }
+  )
+  ok(rootOutside?.[0]?.passed === false, 'drive/filesystem root workdir: a target on another root stays outside')
+}
+
 // diff 验收证据必须绑定「当前执行 + available 快照」：其他 Run / 其他阶段 / 无来源旧数据
 // 以及失败、取消后残留的 diff 都不能认证本轮。
 const acceptanceGoal = { workdir: root, acceptanceCriteria: [{ id: 'diff', text: 'git diff contains: hello', status: 'pending' }] }

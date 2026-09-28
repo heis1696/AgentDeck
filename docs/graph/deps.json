@@ -5499,6 +5499,23 @@
       "source": "src/renderer/src/App.tsx",
       "dependencies": [
         {
+          "module": "../../shared/path-key",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/shared/path-key.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "./api",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -5669,6 +5686,23 @@
           "valid": true
         },
         {
+          "module": "./components/WorkspaceSwitcher",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/components/WorkspaceSwitcher.tsx",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "./components/WorkspaceView",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -5695,23 +5729,6 @@
             "import"
           ],
           "resolved": "src/renderer/src/hooks/useInteraction.ts",
-          "coreModule": false,
-          "followable": true,
-          "couldNotResolve": false,
-          "matchesDoNotFollow": false,
-          "circular": false,
-          "valid": true
-        },
-        {
-          "module": "./hooks/useInteractionLayer",
-          "moduleSystem": "es6",
-          "dynamic": false,
-          "exoticallyRequired": false,
-          "dependencyTypes": [
-            "local",
-            "import"
-          ],
-          "resolved": "src/renderer/src/hooks/useInteractionLayer.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -5858,6 +5875,16 @@
       ],
       "dependents": [
         "src/renderer/src/main.tsx"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
+      "source": "src/shared/path-key.ts",
+      "dependencies": [],
+      "dependents": [
+        "src/renderer/src/App.tsx",
+        "src/renderer/src/components/WorkspaceSwitcher.tsx"
       ],
       "orphan": false,
       "valid": true
@@ -6083,7 +6110,6 @@
         }
       ],
       "dependents": [
-        "src/renderer/src/App.tsx",
         "src/renderer/src/components/AgentsView.tsx",
         "src/renderer/src/ui/Menu.tsx",
         "src/renderer/src/components/AutomationView.tsx",
@@ -6092,6 +6118,7 @@
         "src/renderer/src/ui/FloatWindow.tsx",
         "src/renderer/src/components/goal/GoalCreateDialog.tsx",
         "src/renderer/src/components/task/ActionMenu.tsx",
+        "src/renderer/src/components/WorkspaceSwitcher.tsx",
         "src/renderer/src/components/AgentPicker.tsx",
         "src/renderer/src/ui/Confirm.tsx",
         "src/renderer/src/ui/Palette.tsx"
@@ -8981,6 +9008,50 @@
       "valid": true
     },
     {
+      "source": "src/renderer/src/components/WorkspaceSwitcher.tsx",
+      "dependencies": [
+        {
+          "module": "../../../shared/path-key",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/shared/path-key.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "../hooks/useInteractionLayer",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/hooks/useInteractionLayer.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
+      "dependents": [
+        "src/renderer/src/App.tsx"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
       "source": "src/renderer/src/components/WorkspaceView.tsx",
       "dependencies": [
         {
@@ -9928,10 +9999,10 @@
     "info": 0,
     "ignore": 0,
     "advisedExitCode": 0,
-    "totalCruised": 189,
-    "totalDependenciesCruised": 455,
+    "totalCruised": 191,
+    "totalDependenciesCruised": 458,
     "optionsUsed": {
-      "baseDir": "D:\\agentdeck\\.agentdeck-worktrees\\t_muk3gcd6_1838995e71a2_c12",
+      "baseDir": "D:\\agentdeck\\.agentdeck-worktrees\\t_muk3gcd6_1838995e71a2_c36",
       "combinedDependencies": false,
       "detectJSDocImports": false,
       "detectProcessBuiltinModuleCalls": false,

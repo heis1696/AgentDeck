@@ -1694,10 +1694,19 @@ export class TaskRunner {
   private async gitRepositoryProbe(dir: string): Promise<GitRepositoryProbeResult> {
     const key = worktreePathKey(dir)
     const cached = this.gitUsableCache.get(key)
-    if (cached) return cached
+    if (cached) {
+      gitRepositoryProbeCacheProbe?.('hit')
+      return cached
+    }
+    gitRepositoryProbeCacheProbe?.('miss')
     const probe = await probeGitRepository(dir)
     if (probe.status !== 'error') this.gitUsableCache.set(key, probe)
     return probe
+  }
+
+  /** 测试出口：直连探测缓存（配 setGitRepositoryProbeCacheProbeForTest 观测命中/未命中）。 */
+  gitRepositoryProbeForTest(dir: string): Promise<GitRepositoryProbeResult> {
+    return this.gitRepositoryProbe(dir)
   }
 
   /** agent 引用的 API 预设 → 会话连接覆盖（预设 + 模型须同时具备） */
@@ -2805,4 +2814,12 @@ export class TaskRunner {
   sessionCount() {
     return this.sessions.size
   }
+}
+
+/** 测试探针出口：观测 Git 工作区探测缓存的命中/未命中（同一目录按别名写法调用必须
+ *  命中同一缓存键——事件序 hit 前必有且仅有一次 miss）。 */
+export type GitRepositoryProbeCacheEvent = 'hit' | 'miss'
+let gitRepositoryProbeCacheProbe: ((event: GitRepositoryProbeCacheEvent) => void) | undefined
+export function setGitRepositoryProbeCacheProbeForTest(listener: ((event: GitRepositoryProbeCacheEvent) => void) | undefined): void {
+  gitRepositoryProbeCacheProbe = listener
 }

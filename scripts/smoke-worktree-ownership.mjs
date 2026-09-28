@@ -44,12 +44,13 @@ const load = async (file, name, plugins = []) => {
   await build({ entryPoints: [path.join(root, file)], outfile, bundle: true, platform: 'node', format: 'cjs', plugins, external: plugins.includes(electronStub) ? [] : ['electron'], logLevel: 'silent' })
   return import(pathToFileURL(outfile).href)
 }
-const [{ TaskStore }, { createExecutionOwner, currentProcessIdentity }, git, { runDelegationLoop }, { registerTaskIpc }, { registerSystemIpc }] = await Promise.all([
+const [{ TaskStore }, { createExecutionOwner, currentProcessIdentity }, git, { runDelegationLoop }, ipcTasks, { registerSystemIpc }] = await Promise.all([
   load('src/main/store.ts', 'store'), load('src/main/persistence.ts', 'persistence'),
   load('src/main/git.ts', 'git'), load('src/main/delegate.ts', 'delegate', [gatePlugin]),
   load('src/main/ipc/tasks.ts', 'ipc-tasks', [electronStub]),
   load('src/main/ipc/system.ts', 'ipc-system', [electronStub])
 ])
+const { registerTaskIpc, collectWorktreeReclaims } = ipcTasks
 const identity = (task) => ({ status: task.status, runId: task.runId, executionOwner: task.executionOwner, attempt: task.attempt })
 const runGit = (dir, ...args) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8', windowsHide: true }).trim()
 // Windows 路径别名写法：翻转首段（盘符/根段）大小写——与真实写法指同一目录
@@ -544,6 +545,102 @@ try {
     syncAlias.store.flush()
     syncAlias.peer.flush()
     console.log('PASS sweep status sync pairs task records with sidecar metadata across alias spellings')
+  }
+
+  // 删单回收去重（collectWorktreeReclaims）：领队/子单各按一种写法登记同一棵树时只回收
+  // 一次；去重键按路径键折叠，文件调用保留首个原始写法与它自己的 owner。字面量 Map 键
+  // 会对同一棵树发起两次并发 removeWorktree（同树双删互踩）。
+  {
+    const dedupeTree = await fixture('delete-reclaim-dedupe')
+    const realPath = dedupeTree.worktree.path
+    const aliasRealPath = process.platform === 'win32' ? flipCase(realPath) : realPath
+    // 平台无关基线：两棵不同的树各回收一次；完全相同写法只回收一次
+    const distinct = collectWorktreeReclaims([
+      { id: 't1', workdir: '', worktree: { path: realPath, ownerTaskId: 't1' } },
+      { id: 't2', workdir: path.join(dedupeTree.repo, 'elsewhere'), worktree: undefined }
+    ])
+    assert.equal(distinct.length, 2, '基线：两棵不同的树各保留一条回收项')
+    assert.equal(collectWorktreeReclaims([{ id: 't1', workdir: '', worktree: { path: realPath, ownerTaskId: 't1' } }, { id: 't2', workdir: realPath }]).length, 1, '基线：完全相同写法折叠成一条')
+    if (process.platform === 'win32') {
+      assert.notEqual(aliasRealPath, realPath, '前置：别名写法与真实写法不同')
+      const deduped = collectWorktreeReclaims([
+        { id: 'leader', workdir: '', worktree: { path: realPath, ownerTaskId: 'leader' } },
+        { id: 'child', workdir: aliasRealPath }
+      ])
+      assert.equal(deduped.length, 1, '别名去重：同一棵树的双别名写法只回收一次')
+      assert.equal(deduped[0].worktreePath, realPath, '别名去重保留首个原始写法供真实文件调用')
+      assert.equal(deduped[0].ownerTaskId, 'leader', '别名去重保留首条自己的 owner')
+      console.log('PASS delete reclaim list folds alias spellings into a single reclaim entry')
+    }
+    dedupeTree.store.flush()
+    dedupeTree.peer.flush()
+  }
+  // 端到端：tasks:delete 对「领队真实写法 + 子单别名写法」的同一棵树照常收场——
+  // 「恰好一次」的语义由 collectWorktreeReclaims 的折叠去重单测钉死（处理器 bundle
+  // 内嵌自己的 git 副本，路径锁探针跨 bundle 不可见），这里证端到端接线不回归
+  if (process.platform === 'win32') {
+    const e2eTree = await fixture('delete-reclaim-alias-e2e')
+    await e2eTree.execute()
+    const e2eLeader = e2eTree.peer.get(e2eTree.parent.id)
+    e2eTree.peer.updateIf(e2eLeader.id, identity(e2eLeader), { status: 'done', endedAt: Date.now() })
+    const e2eWtPath = e2eLeader.worktree.path
+    const e2eBranch = e2eLeader.worktree.branch
+    const e2eChild = e2eTree.peer.get(e2eTree.child.id)
+    // 子单的 workdir 改写成同一棵集成树的别名写法（无 worktree 登记，走 workdir 通道）
+    e2eTree.peer.update(e2eChild.id, { workdir: flipCase(e2eWtPath), worktree: undefined })
+    registerTaskIpc({ store: e2eTree.peer, runner: { pushTask() {} }, issueStore: { sync() {}, syncEventually() {} }, getWindow: () => null })
+    const e2eDelete = await globalThis.__worktreeHandlers.get('tasks:delete')(null, e2eTree.parent.id)
+    assert.ok(e2eDelete.ok, '端到端：双别名删单成功')
+    const deadline = Date.now() + 8000
+    while (Date.now() < deadline && (fs.existsSync(e2eWtPath) || await git.branchExists(e2eTree.repo, e2eBranch))) {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    assert.ok(!fs.existsSync(e2eWtPath), '端到端：双别名删单把同一棵树收场')
+    assert.equal(await git.branchExists(e2eTree.repo, e2eBranch), false, '端到端：托管分支一并删除')
+    e2eTree.store.flush()
+    e2eTree.peer.flush()
+    console.log('PASS tasks:delete reclaims an alias-referenced tree end to end')
+  }
+
+  // 手动清扫直断：worktrees:prune 处理器的仓库集合按路径键折叠——领队/子单各按一种
+  // 写法登记同一仓库时只扫一次（scanned 恰等于折叠预言机，去重失效会对同一现场扫两遍）
+  if (process.platform === 'win32') {
+    const manualSweep = await fixture('manual-sweep-alias-repo')
+    await manualSweep.execute()
+    const manualLeader = manualSweep.peer.get(manualSweep.parent.id)
+    manualSweep.peer.updateIf(manualLeader.id, identity(manualLeader), { status: 'done', endedAt: Date.now() })
+    // 领队登记真实仓库写法（worktree.repoDir），另造一单按别名写法登记同一仓库（workdir）
+    const aliasRepoSpelling = flipCase(manualSweep.repo)
+    const extraRunner = manualSweep.peer.create({ title: 'alias repo viewer', prompt: 'work', workdir: aliasRepoSpelling, backend: 'fake', agentId: 'viewer' })
+    manualSweep.peer.update(extraRunner.id, { status: 'done', endedAt: Date.now() })
+    // 拆掉续链保留判定（integration.branch 在册即保留集成树）：让断言只考验「别名仓库
+    // 集合去重 + 终态任务树回收」，不被续链保留规则截住
+    manualSweep.peer.update(manualLeader.id, { integration: undefined })
+    registerSystemIpc({ store: manualSweep.peer, settings: { worktreeMaxAgeDays: 0 }, getWindow: () => null })
+    // 扫描数预言机：磁盘目录 + sidecar + Git 注册表三源并集按路径键折叠后的元素数
+    const manualManagedDir = path.join(manualSweep.repo, '.agentdeck-worktrees')
+    const manualDiskTrees = fs.readdirSync(manualManagedDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && entry.name !== '.metadata')
+      .map((entry) => path.join(manualManagedDir, entry.name))
+    const manualRegistrationTrees = (() => {
+      try {
+        return fs.readdirSync(path.join(manualSweep.repo, '.git', 'worktrees'), { withFileTypes: true })
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => path.dirname(fs.readFileSync(path.join(manualSweep.repo, '.git', 'worktrees', entry.name, 'gitdir'), 'utf8').trim()))
+      } catch { return [] }
+    })()
+    const manualOracle = new Set([
+      ...manualDiskTrees,
+      ...manualRegistrationTrees,
+      ...git.listWorktreeMetadata(manualSweep.repo).map((item) => item.path)
+    ].map((candidate) => path.resolve(candidate).toLowerCase())).size
+    const manualReport = await globalThis.__worktreeHandlers.get('worktrees:prune')()
+    assert.equal(manualReport.scanned, manualOracle, `手动清扫：同一仓库的别名写法只扫一次（scanned=${manualReport.scanned}，预言机=${manualOracle}，去重失效会翻倍）`)
+    assert.ok(manualReport.removed.includes(path.basename(manualLeader.worktree.path)), '手动清扫：终态领队的集成树照常回收')
+    assert.ok(!fs.existsSync(manualLeader.worktree.path), '手动清扫：目录收场')
+    manualSweep.store.flush()
+    manualSweep.peer.flush()
+    console.log('PASS manual sweep folds alias repo spellings into a single scan')
   }
 
   // 显式删除路径（tasks:delete → removeWorktree）才允许带走集成分支

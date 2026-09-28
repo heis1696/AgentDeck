@@ -8,7 +8,7 @@ import path from 'node:path'
 const root = path.resolve(import.meta.dirname, '..')
 const outfile = path.join(root, 'out', 'smoke-worktree-lifecycle.cjs')
 await build({ entryPoints: [path.join(root, 'src/main/git.ts')], outfile, bundle: true, platform: 'node', format: 'cjs', target: 'node18' })
-const { createWorktree, createWorktreeAtBranch, listWorktreeMetadata, reclaimWorktree, pruneWorktrees, setWorktreeManualKeep, setWorktreeOwner, branchExists, worktreeAvailability, removeWorktree, clearWorktreePool, clearWorktreeFileCountCache, WORKTREE_POOL_MAX_PER_REPO, WORKTREE_POOL_OWNER, worktreePoolEntriesForTest, setWorktreePathLockProbeForTest, uniquePathsByKey } = await import(pathToFileURL(outfile).href)
+const { createWorktree, createWorktreeAtBranch, listWorktreeMetadata, reclaimWorktree, pruneWorktrees, setWorktreeManualKeep, setWorktreeOwner, branchExists, worktreeAvailability, removeWorktree, clearWorktreePool, clearWorktreeFileCountCache, WORKTREE_POOL_MAX_PER_REPO, WORKTREE_POOL_OWNER, worktreePoolEntriesForTest, setWorktreePathLockProbeForTest, uniquePathsByKey, sweepWorktrees } = await import(pathToFileURL(outfile).href)
 
 const check = (condition, message) => {
   if (!condition) throw new Error(message)
@@ -201,6 +201,49 @@ try {
   check(!fs.existsSync(detachedPath) && !fs.existsSync(detachedGitdir), 'detached merge tree and registration are removed')
   check(await branchExists(dir, detachedBranch), 'detached merge cleanup preserves the integration branch')
 
+  // ---- 别名写法拒绝回收（win32）：重挂分支的 detach 脚手架按别名树名回收必须同样被拒。
+  // 复现场景：mergeIntoManagedWorktreeDetached 建的 .agentdeck-merge-detach-* 带 sidecar，
+  // 崩溃残留被重挂回分支；回收再以别名写法报进来时，字面量 startsWith 判不中 detach
+  // 守卫，会把重挂的树连目录一起强删——别名写法必须同样拒绝、目录存活。----
+  if (process.platform === 'win32') {
+    const aliasDetachName = '.agentdeck-merge-detach-alias-smoke'
+    const aliasDetachBranch = 'agentdeck/task-merge-detach-alias-smoke'
+    const aliasDetachPath = path.join(dir, '.agentdeck-worktrees', aliasDetachName)
+    const aliasDetachSpelling = path.join(dir, '.agentdeck-worktrees', '.AGENTDECK-MERGE-DETACH-ALIAS-SMOKE')
+    check(aliasDetachSpelling.toLowerCase() === aliasDetachPath.toLowerCase() && aliasDetachSpelling !== aliasDetachPath, '前置：别名树名写法与真实写法同目录不同拼写')
+    git('branch', aliasDetachBranch, 'main')
+    execFileSync('git', ['-C', dir, 'worktree', 'add', '--detach', aliasDetachPath, aliasDetachBranch], { stdio: 'ignore' })
+    const aliasDetachPointer = fs.readFileSync(path.join(aliasDetachPath, '.git'), 'utf8')
+    const aliasDetachGitdir = path.resolve(aliasDetachPath, /^gitdir:\s*(.+?)\s*$/im.exec(aliasDetachPointer)[1])
+    const aliasDetachGeneration = 'smoke-detached-alias-generation'
+    fs.writeFileSync(path.join(aliasDetachGitdir, 'agentdeck-generation'), `${aliasDetachGeneration}\n`)
+    fs.writeFileSync(path.join(dir, '.agentdeck-worktrees', '.metadata', `${aliasDetachName}.json`), JSON.stringify({
+      ownerTaskId: aliasDetachName,
+      generationId: aliasDetachGeneration,
+      repoDir: dir,
+      path: aliasDetachPath,
+      branch: aliasDetachBranch,
+      baseSha: git('rev-parse', aliasDetachBranch),
+      createdAt: Date.now(),
+      cleanupStatus: 'active'
+    }))
+    // 重挂分支：detach 树内检出集成分支（attached HEAD）——detach 守卫的唯一拦截对象
+    git('-C', aliasDetachPath, 'switch', aliasDetachBranch)
+    const canonicalRefused = await reclaimWorktree(aliasDetachPath, { force: true, expectedOwnerTaskId: aliasDetachName, expectedGenerationId: aliasDetachGeneration })
+    check(!canonicalRefused.ok && canonicalRefused.status === 'retained' && (canonicalRefused.reason ?? '').includes('no longer detached'),
+      `lowercase spelling refuses a reattached merge tree (got ${canonicalRefused.status}: ${canonicalRefused.reason ?? ''})`)
+    check(fs.existsSync(aliasDetachPath), 'lowercase refusal keeps the reattached merge tree alive')
+    const aliasRefused = await reclaimWorktree(aliasDetachSpelling, { force: true, expectedOwnerTaskId: aliasDetachName, expectedGenerationId: aliasDetachGeneration })
+    check(!aliasRefused.ok && aliasRefused.status === 'retained' && (aliasRefused.reason ?? '').includes('no longer detached'),
+      `alias spelling equally refuses a reattached merge tree (got ${aliasRefused.status}: ${aliasRefused.reason ?? ''})`)
+    check(fs.existsSync(aliasDetachPath), 'alias refusal keeps the reattached merge tree alive')
+    // 收场：拆掉重挂恢复 detach，下一轮清扫照常兜走，不影响后续夹具
+    git('-C', aliasDetachPath, 'switch', '--detach', aliasDetachBranch)
+    const aliasDetachSweep = await pruneWorktrees(dir, () => false, { maxAgeMs: 0, claimWorktree: testClaim })
+    check(aliasDetachSweep.removed.some((name) => name.toLowerCase() === aliasDetachName), 're-detached alias fixture tree is swept by the next round')
+    check(!fs.existsSync(aliasDetachPath), 'alias fixture tree is fully reclaimed after re-detach')
+  }
+
   const registrationOnly = await createWorktree(dir, 'registration_only_c1', 'main', 'registration_only_owner')
   git('-C', registrationOnly.path, 'switch', '--detach', 'main')
   const registrationOnlyMetadataFile = path.join(dir, '.agentdeck-worktrees', '.metadata', 'registration_only_c1.json')
@@ -212,6 +255,27 @@ try {
   const registrationOnlySweep = await pruneWorktrees(dir, () => false, { maxAgeMs: 0, claimWorktree: testClaim })
   check(registrationOnlySweep.failed.some((item) => item.name === 'registration_only_c1' && item.reason.includes('Git registration remains')), 'removed sidecar reports a registration-only residue')
   check(!registrationOnlySweep.removed.includes('registration_only_c1'), 'registration-only residue is not reported as silently removed')
+
+  // ---- D3b｜Git 注册路径与磁盘目录大小写不同（win32）：gitdir 以别名写法落盘时，
+  // 清扫的注册表折叠查找（registeredWorktreeForPath）必须照样命中——「目录与分支都没了
+  // 但 Git 注册残留」的具名上报依赖它，字面量键会静默漏报成无事发生。----
+  if (process.platform === 'win32') {
+    const aliasReg = await createWorktree(dir, 'alias_registration_c1', 'main', 'alias_registration_owner')
+    git('-C', aliasReg.path, 'switch', '--detach', 'main')
+    const aliasRegMetadataFile = path.join(dir, '.agentdeck-worktrees', '.metadata', 'alias_registration_c1.json')
+    const aliasRegMetadata = JSON.parse(fs.readFileSync(aliasRegMetadataFile, 'utf8'))
+    aliasRegMetadata.cleanupStatus = 'removed'
+    fs.writeFileSync(aliasRegMetadataFile, JSON.stringify(aliasRegMetadata))
+    // 注册的 gitdir 内容改写成别名落盘形态：登记的 worktree 路径与磁盘目录仅大小写不同
+    const aliasRegGitdirFile = path.join(dir, '.git', 'worktrees', 'alias_registration_c1', 'gitdir')
+    const aliasRegGitdir = fs.readFileSync(aliasRegGitdirFile, 'utf8')
+    fs.writeFileSync(aliasRegGitdirFile, aliasRegGitdir.replace(/alias_registration_c1\.git\s*$/i, 'ALIAS_REGISTRATION_C1.git\n'))
+    fs.rmSync(aliasReg.path, { recursive: true, force: true })
+    git('branch', '-D', aliasReg.branch)
+    const aliasRegSweep = await pruneWorktrees(dir, () => false, { maxAgeMs: 0, claimWorktree: testClaim })
+    check(aliasRegSweep.failed.some((item) => item.name === 'alias_registration_c1' && item.reason.includes('Git registration remains')),
+      'registration keyed under an alias-cased path is still found by the folded sweep lookup')
+  }
 
   const unsafe = await reclaimWorktree(dir)
   check(!unsafe.ok && unsafe.status === 'failed', 'real repository path is never treated as a managed worktree')
@@ -598,6 +662,15 @@ try {
     const sweepAudit = listWorktreeMetadata(dir).filter((item) => path.basename(item.path).toLowerCase() === 'alias_full_sweep_c1')
     check(sweepSidecarFiles.length === 1 && sweepAudit.length === 1 && sweepAudit[0].cleanupStatus === 'removed',
       `alias sidecar is processed exactly once: a single removal audit record remains (files=${sweepSidecarFiles.length}, records=${sweepAudit.length}, status=${sweepAudit[0]?.cleanupStatus})`)
+
+    // 启动清扫直断：index.ts 启动清扫循环体就是 sweepWorktrees——别名写法仓库根直连
+    // 启动清扫必须照常回收陈旧树（不只经 uniquePathsByKey/清理仓库集合 helper 间接覆盖）
+    clearWorktreePool()
+    const startupAliasTree = await createWorktree(dir, 'startup_alias_sweep_c1', 'main', 'startup_alias_sweep_leader')
+    check(!!startupAliasTree && startupAliasTree.pooled !== true, 'startup sweep alias fixture tree created')
+    const startupSweep = await sweepWorktrees(aliasRepo, () => false, { claimWorktree: testClaim })
+    check(startupSweep.removed.includes('startup_alias_sweep_c1'), 'startup sweep reclaims a stale tree driven through the alias repo spelling')
+    check(!fs.existsSync(startupAliasTree.path), 'startup sweep through the alias repo spelling removes the directory')
   } else {
     console.log('  SKIP 大小写别名并发专项（非 win32 平台，路径等价判定退化为字面量比较）')
   }
