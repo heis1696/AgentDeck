@@ -23,7 +23,7 @@ for (const [src, out] of [
 }
 const { TaskRunner } = await import(pathToFileURL(path.join(root, 'out/sd-runner.cjs')).href)
 const { TaskStore } = await import(pathToFileURL(path.join(root, 'out/sd-store.cjs')).href)
-const { parseDelegates, stripDelegates, parseReviews, stripReviews, parseConsults, parseInvestigates, parseRoundNotes, parseContinue, delegateChildBranch, buildGitReportSection, GIT_REPORT_SECTION_MAX_CHARS, buildChildReportBody, REPORT_INLINE_MAX } = await import(pathToFileURL(path.join(root, 'out/sd-delegate.cjs')).href)
+const { parseDelegates, stripDelegates, parseReviews, stripReviews, parseConsults, parseInvestigates, parseRoundNotes, parseContinue, delegateChildBranch, buildGitReportSection, GIT_REPORT_SECTION_MAX_CHARS, buildChildReportBody, REPORT_INLINE_MAX, findUnmatchedDelegateOpens } = await import(pathToFileURL(path.join(root, 'out/sd-delegate.cjs')).href)
 const { fullTextPointerLines } = await import(pathToFileURL(path.join(root, 'out/sd-delegation.cjs')).href)
 const { createWorktree, reclaimWorktree, replayLeaderBaseline, probeGitRepository, probeCurrentBranch, writeReportCopy, reportCopyRelPath, sweepReportCopies, REPORTS_DIR_NAME, REPLAY_MAX_FILES, REPLAY_MAX_BYTES, worktreeChangeDigest } = await import(pathToFileURL(path.join(root, 'out/sd-git.cjs')).href)
 const { clampIssueCommentBytes, ISSUE_COMMENT_MAX_BYTES } = await import(pathToFileURL(path.join(root, 'out/sd-issue-relay.cjs')).href)
@@ -213,6 +213,24 @@ assert(!parseDelegates('<delegate to=Worker summary=FALSE>任务</delegate>')[0]
 const bareMixed = parseDelegates('<delegate to=Worker reason="引号理由" summary=false>派工</delegate>')[0]
 assert(bareMixed.to === 'Worker' && bareMixed.reason === '引号理由' && !bareMixed.summary && bareMixed.prompt === '派工', '解析器：裸词与引号值混排各取各值')
 assert(stripDelegates('前<delegate to=Worker reason=紧急>A</delegate>后') === '前后', 'stripDelegates 兼容裸词值标记')
+
+// 吞单回归（案情一：无效示例标记 + 有效派单混批，实测 2 次静默丢单）：体部哨兵化——
+// 残缺标记（引用语法示例忘写闭合 / 闭合写坏）的匹配在自己身上失败，绝不吞并其后有效派单
+const mixedBatch = '我来分工。\n\n<delegate to="X" reason="…">这是语法示例（忘写闭合）\n\n<delegate to="甲">修复空指针</delegate>'
+const mixedParsed = parseDelegates(mixedBatch)
+assert(mixedParsed.length === 1 && mixedParsed[0].to === '甲' && mixedParsed[0].prompt === '修复空指针', '吞单回归①：残缺示例标记不吞并其后有效派单（案情一形态）')
+const brokenOpens = findUnmatchedDelegateOpens(mixedBatch)
+assert(brokenOpens.length === 1 && brokenOpens[0].to === 'X', '吞单回归②：残缺开标记被检出（待具名回执）')
+const strippedMixed = stripDelegates(mixedBatch)
+assert(strippedMixed.includes('这是语法示例') && !strippedMixed.includes('修复空指针') && !strippedMixed.includes('<delegate to="甲">'), '吞单回归③：剥离不越界——有效派单标记照常剥除、残缺标记正文保留展示')
+const garbledClose = '<delegate to="X">示例< /delegate>\n\n<delegate to="甲">修复空指针</delegate>'
+assert(parseDelegates(garbledClose).length === 1 && parseDelegates(garbledClose)[0].to === '甲', '吞单回归④：闭合写坏的标记同样不吞并有效派单')
+assert(findUnmatchedDelegateOpens(garbledClose).length === 1 && findUnmatchedDelegateOpens(garbledClose)[0].to === 'X', '吞单回归⑤：闭合写坏的开标记被检出')
+const cleanPair = '<delegate to="甲">A</delegate>\n<delegate to="乙">B</delegate>'
+assert(parseDelegates(cleanPair).length === 2, '吞单回归⑥：完整双标记照常各解析一单（哨兵化不伤既有行为）')
+assert(stripDelegates('前' + cleanPair + '后') === '前\n后', '吞单回归⑦：完整标记剥离照常')
+assert(parseDelegates('<delegate to="甲">指令里引用 <delegate to="乙">示例</delegate> 结束</delegate>')[0].to === '乙', '吞单回归⑧：体部出现内嵌标记时哨兵在下一个开标记处截断，内嵌标记成为独立匹配（不再并进外层）')
+assert(findUnmatchedDelegateOpens('<delegate to="甲">无 to 缺失</delegate>普通正文<delegate>裸标记不检出</delegate>').length === 0, '吞单回归⑨：无 to 的裸标记字样不进残缺检出（对齐解析器 lookahead 约定）')
 
 // parseReviews 单测（v2 审核流）
 assert(parseReviews('<review of="#1" verdict="pass" note="ok"/>').length === 1, 'parseReviews 提取 review')
