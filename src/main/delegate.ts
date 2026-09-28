@@ -102,23 +102,62 @@ function summaryAttr(attrs: string): boolean {
 
 /** 从领队回复中提取 delegate 标记（容错：任意属性顺序、md fence 内）。
  *  开标签必须带 to 属性才构成匹配（lookahead）：无 to 的裸标记字样不成为匹配起点，
- *  否则非贪婪体会一路延伸、吞掉后方真实派单的闭合标签（幻影吞单）。 */
-export function parseDelegates(text: string): DelegateCall[] {
-  const out: DelegateCall[] = []
-  const re = /<delegate\b(?=[^>]*\bto\s*=)([^>]*)>([\s\S]*?)<\/delegate>/g
+ *  否则非贪婪体会一路延伸、吞掉后方真实派单的闭合标签（幻影吞单）。
+ *  体部哨兵化：正文绝不跨过下一个 <delegate 开标记——残缺标记（漏写闭合/闭合损坏）
+ *  的匹配在自己身上失败，吞不了其后真实派单（实测事故：领队引用语法示例
+ *  <delegate to="X" reason="…"> 忘写闭合，非贪婪体吃到真实派单的闭合标签，
+ *  有效单被并进无效单的 prompt 整体消失，只余对 X 的拒单、有效单零痕迹）。 */
+const DELEGATE_RE = /<delegate\b(?=[^>]*\bto\s*=)([^>]*)>((?:(?!<delegate\b)[\s\S])*?)<\/delegate>/
+
+interface DelegateMatch {
+  call?: DelegateCall
+  start: number
+  end: number
+}
+
+function matchDelegates(text: string): DelegateMatch[] {
+  const out: DelegateMatch[] = []
+  const re = new RegExp(DELEGATE_RE.source, 'g')
   let m: RegExpExecArray | null
   while ((m = re.exec(text))) {
+    // 区间对空 prompt/缺 to 的匹配同样登记：它们结构完整（展示剥离要剥掉），
+    // 只是构不成派单；残缺开标记的判定（findUnmatchedDelegateOpens）依赖完整区间
+    const entry: DelegateMatch = { start: m.index, end: re.lastIndex }
     const prompt = m[2].trim()
     const to = tagAttr(m[1], 'to')
     const reason = tagAttr(m[1], 'reason')
-    if (prompt && to) out.push({ to, prompt, ...(reason ? { reason } : {}), ...(summaryAttr(m[1]) ? { summary: true } : {}) })
+    if (prompt && to) entry.call = { to, prompt, ...(reason ? { reason } : {}), ...(summaryAttr(m[1]) ? { summary: true } : {}) }
+    out.push(entry)
   }
   return out
 }
 
-/** 把 delegate 标记从对外展示文本中剥掉（同解析规则：只剥带 to 的真实派单，不吞裸字样后的正文） */
+export function parseDelegates(text: string): DelegateCall[] {
+  return matchDelegates(text).flatMap((m) => (m.call ? [m.call] : []))
+}
+
+/** 检出残缺的 delegate 开标记：带 to= 却未被任何完整匹配消费 = 没写闭合或闭合损坏。
+ *  残缺标记的正文边界不可知、自身不构成派单，但必须被具名回执（走既有拒单通道），
+ *  绝不允许领队按协议「只有已接单或具名拒单才能确认结果」等到永远。 */
+export function findUnmatchedDelegateOpens(text: string): Array<{ to: string; excerpt: string }> {
+  const out: Array<{ to: string; excerpt: string }> = []
+  const matched = matchDelegates(text)
+  const reOpen = /<delegate\b(?=[^>]*\bto\s*=)([^>]*)>/g
+  let m: RegExpExecArray | null
+  while ((m = reOpen.exec(text))) {
+    if (matched.some((range) => m!.index >= range.start && m!.index < range.end)) continue
+    const to = tagAttr(m[1], 'to')
+    if (!to) continue
+    const bodyStart = m.index + m[0].length
+    out.push({ to, excerpt: text.slice(bodyStart, bodyStart + 80).trim() })
+  }
+  return out
+}
+
+/** 把 delegate 标记从对外展示文本中剥掉（同解析规则：只剥带 to 的真实派单，不吞裸字样后的正文；
+ *  哨兵化同源——残缺标记剥不掉自身、其文本保留展示，绝不越界吞掉后方派单的展示文本） */
 export function stripDelegates(text: string): string {
-  return text.replace(/<delegate\b(?=[^>]*\bto\s*=)[^>]*>[\s\S]*?<\/delegate>/g, '').trim()
+  return text.replace(new RegExp(DELEGATE_RE.source, 'g'), '').trim()
 }
 
 // ---- 队长间咨询（阶段 1）：目标是另一位队长的办公室会话 ----
@@ -660,6 +699,17 @@ export async function runDelegationLoop(
       calls.forEach((call) => runner.recordDelegateRejection(taskId, `to="${call.to}"：${why}；不要原样重派`, { to: call.to, prompt: call.prompt }))
       rejects = pendingRejections()
     }
+    // 残缺开标记同样具名（解析不出派单≠可以无痕）：护栏触发时领队也要知道它们未建单
+    const bailBrokenSeen = new Set<string>()
+    for (const text of [first.delegationText ?? '', first.response]) {
+      for (const broken of findUnmatchedDelegateOpens(text)) {
+        const key = `${broken.to}\n${broken.excerpt}`
+        if (bailBrokenSeen.has(key)) continue
+        bailBrokenSeen.add(key)
+        runner.recordDelegateRejection(taskId, `to="${broken.to}"：标记残缺（缺 </delegate> 闭合或闭合损坏），未建单——${why}`, { to: broken.to, prompt: broken.excerpt })
+      }
+    }
+    rejects = pendingRejections()
     if (rejects.length) {
       try {
         const turn = await runner.sendTurn(taskId, session,
@@ -727,6 +777,19 @@ export async function runDelegationLoop(
     const early = await runner.takeEarlySpawns(taskId, runId)
     if (!active()) return abandoned()
     const fresh = calls.filter((c) => !early.seenKeys.has(`${c.to}\n${c.prompt}`))
+    // 残缺标记（带 to= 但缺闭合/闭合损坏）具名回执：它们不构成派单，但领队协议是
+    // 「只有已接单或具名拒单才能确认结果」，不回执它就会永远等下去（案情一的有效单
+    // 正是先被残缺示例标记吞没、再整单无痕）。recordDelegateRejection 按 key 去重，
+    // 同一文本多轮扫描不会重复记录。
+    const brokenReported = new Set<string>()
+    for (const text of scanTexts) {
+      for (const broken of findUnmatchedDelegateOpens(text)) {
+        const key = `${broken.to}\n${broken.excerpt}`
+        if (brokenReported.has(key)) continue
+        brokenReported.add(key)
+        runner.recordDelegateRejection(taskId, `to="${broken.to}"：标记残缺（缺 </delegate> 闭合或闭合损坏），未建单`, { to: broken.to, prompt: broken.excerpt })
+      }
+    }
     if (!fresh.length && !early.entries.length) {
       // 全部派单已在流式阶段处理且无一建单：把拒单原因回灌，让领队当场改派
       if (await feedbackRejections()) continue
@@ -734,19 +797,47 @@ export async function runDelegationLoop(
     }
     const nextRound = round + 1
     const roundChildren = new Map<string, DelegateCall>()
+    // 已受理（建出子单）的派单 key：扫尾时区分「已受理/已有具名拒单/静默丢失」
+    const acceptedKeys = new Set<string>()
     for (const entry of early.entries) {
-      if (entry.childId && store.get(entry.childId)) roundChildren.set(entry.childId, entry.call)
+      if (entry.childId && store.get(entry.childId)) {
+        roundChildren.set(entry.childId, entry.call)
+        acceptedKeys.add(`${entry.call.to}\n${entry.call.prompt}`)
+      }
     }
+    let lostSpawns = 0
     if (fresh.length) {
       note(`第 ${nextRound} 轮派发：${fresh.map((c) => `${c.to}${c.reason ? `（${c.reason}）` : ''}`).join('、')}${early.entries.length ? `（另有 ${early.entries.length} 单已在流式中提前接单）` : ''}`)
       for (const call of fresh) {
-        const child = await runner.spawnDelegateChild(taskId, call, runId)
+        let child: Task | null = null
+        try {
+          child = await runner.spawnDelegateChild(taskId, call, runId)
+        } catch (error) {
+          // 建单通道异常不得连累整批：该单具名拒单走回执通道，其余派单照常受理
+          lostSpawns++
+          runner.recordDelegateRejection(taskId, `to="${call.to}"：建单异常（${error instanceof Error ? error.message : String(error)}），本单未执行`, { to: call.to, prompt: call.prompt })
+          continue
+        }
         if (!active()) return abandoned()
-        if (child) roundChildren.set(child.id, call)
+        if (child) {
+          roundChildren.set(child.id, call)
+          acceptedKeys.add(`${call.to}\n${call.prompt}`)
+        }
       }
     } else {
       note(`第 ${nextRound} 轮：${early.entries.length} 个子任务已在流式中提前接单`)
     }
+    // 逐单受理扫尾：既没建出子单、又没有具名拒单的派单 = 静默丢失（历史事故：seenKeys
+    // 先登记 + 建单静默失败 → 回合末被「已处理」过滤整单无痕）。补具名拒单走既有回执
+    // 通道，让「每一单要么有报告、要么有拒单」成为不变量。
+    for (const call of fresh) {
+      const key = `${call.to}\n${call.prompt}`
+      if (acceptedKeys.has(key)) continue
+      if (runner.delegateRejectionRecorded?.(taskId, runId, key)) continue
+      lostSpawns++
+      runner.recordDelegateRejection(taskId, `to="${call.to}"：建单未成功且无拒单原因（系统侧异常），本单未执行`, { to: call.to, prompt: call.prompt })
+    }
+    if (lostSpawns) note(`⚠ ${lostSpawns} 条派单未建成单（原因见拒单回灌），已具名回灌领队`)
     if (!roundChildren.size) {
       if (round === 0) round = 1
       // 本轮新建的派单全部被护栏拒绝：回灌原因让领队改派，而不是静默结束这轮

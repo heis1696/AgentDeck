@@ -480,4 +480,110 @@ console.log('\n✅ 派单被拒回灌冒烟全绿')
   assert(store.list().filter((child) => child.parentTaskId === task.id).length === 0, '场景H 未创建幽灵子任务')
 }
 
+// ================= 场景 I：吞单回归（案情一）——残缺示例标记 + 有效派单混批 =================
+// 实测事故：领队引用语法示例 <delegate to="X" reason="…"> 忘写闭合，解析体一路吃到
+// 有效派单的闭合标签——只回报 X 的拒单，有效单未建单、无回执、时间线无痕。
+// 契约：无效/残缺标记具名回执，同批有效派单照常建单，绝不静默。
+{
+  const team = [
+    { id: 'L1', name: 'Boss', backend: 'zcode', role: 'leader', systemPrompt: '', subordinates: ['W1'] },
+    { id: 'W1', name: 'Alpha', backend: 'alpha', role: 'worker', systemPrompt: '' }
+  ]
+  const brokenThenValid = '先说明语法：<delegate to="X" reason="…">这是示例（忘写闭合）\n\n正式派单：<delegate to="Alpha">做 A</delegate>'
+  const leader = makeLeaderBackend({
+    step(round, { events, content }) {
+      if (round === 0) {
+        emitTurn(events, brokenThenValid, [brokenThenValid])
+      } else if (content.includes('队员执行结果汇报')) {
+        emitTurn(events, '收到结果，最终总结：A 已完成。')
+      } else if (content.includes('没有被执行')) {
+        emitTurn(events, 'X 是笔误，不重派。最终总结：A 已完成。')
+      } else {
+        emitTurn(events, '继续。')
+      }
+    }
+  })
+  const { store, runner } = harness(team, leader)
+  const task = store.create({ title: '残缺标记混批', prompt: '处理 A', backend: 'zcode', agentId: 'L1' })
+  runner.enqueue(task)
+  const result = await settle(store, task.id, 30000)
+  const children = store.list().filter((child) => child.parentTaskId === task.id)
+
+  assert(result.status === 'done', `场景I 领队 done（${result.status}${result.error ? ' ' + result.error : ''}）`)
+  assert(children.length === 1 && children[0].backend === 'alpha', `残缺标记旁的有效派单照常建单（${children.length}）`)
+  assert(leader.sent.some((content) => content.includes('队员 Alpha 的结果') && content.includes('done alpha')), '有效单的结果回灌给领队')
+  const brokenReceipt = leader.sent.find((content) => content.includes('没有被执行'))
+  assert(!!brokenReceipt && brokenReceipt.includes('to="X"') && brokenReceipt.includes('标记残缺'), '残缺标记走拒单通道具名回执（不等同有效单被吞）')
+  const iReceipts = result.delegateRejections ?? []
+  assert(iReceipts.length === 1 && iReceipts[0].reason.includes('标记残缺') && iReceipts[0].deliveredAt, '残缺标记回执恰好一条且送达')
+}
+
+// ================= 场景 J：丢失型静默丢弃回归（案情二）——review + 干净派单，建单通道异常 =================
+// 实测事故：流式提前建单静默失败（异常被 takeEarlySpawns 的 allSettled 吞掉、key 卡死
+// seenKeys）→ 回合末判「已处理」→ 无回执无建单无痕迹，原样重发（prompt 微调后 key 不同）才被受理。
+// 契约：建单失败必须留痕；重试成功照常建单；重试仍败必须具名拒单回执。
+{
+  const team = [
+    { id: 'L1', name: 'Boss', backend: 'zcode', role: 'leader', systemPrompt: '', subordinates: ['W1'] },
+    { id: 'W1', name: 'Alpha', backend: 'alpha', role: 'worker', systemPrompt: '' }
+  ]
+  const reviewPlusDelegate = '<review of="#1" verdict="pass" note="复核通过"/>\n\n<delegate to="Alpha">做 A</delegate>'
+  const emitIncidentTurn = (events) => {
+    events.onEvent({ ts: Date.now(), kind: 'text', text: '<review of="#1" verdict="pass" note="复核通过"/>' })
+    events.onEvent({ ts: Date.now(), kind: 'text', text: '<delegate to="Alpha">做 A</delegate>' })
+    events.onEvent({ ts: Date.now(), kind: 'final', text: reviewPlusDelegate })
+    events.onTurnEnd({ response: reviewPlusDelegate, delegationText: reviewPlusDelegate, ok: true })
+  }
+  // J1：建单异常恰好一次 → 撤键重试成功，子单照常建立且留痕
+  {
+    const leader = makeLeaderBackend({
+      step(round, { events, content }) {
+        if (round === 0) emitIncidentTurn(events)
+        else if (content.includes('队员执行结果汇报')) emitTurn(events, '收到结果，最终总结：A 已完成。')
+        else emitTurn(events, '继续。')
+      }
+    })
+    const { store, runner } = harness(team, leader)
+    const realCreate = store.create.bind(store)
+    let injected = 0
+    runner.attachTaskCreator((input) => {
+      if (injected++ === 0) throw new Error('注入的建单通道异常')
+      return realCreate(input)
+    })
+    const task = store.create({ title: '建单异常重试', prompt: '处理 A', backend: 'zcode', agentId: 'L1' })
+    runner.enqueue(task)
+    const result = await settle(store, task.id, 30000)
+    const children = store.list().filter((child) => child.parentTaskId === task.id)
+
+    assert(result.status === 'done', `场景J1 领队 done（${result.status}${result.error ? ' ' + result.error : ''}）`)
+    assert(children.length === 1 && children[0].backend === 'alpha', `J1 建单异常后重试成功、子单照常建立（${children.length}）`)
+    assert(store.readEvents(task.id).some((event) => (event.text ?? '').includes('流式提前建单失败')), 'J1 建单异常在时间线留痕（不再静默）')
+    assert(leader.sent.some((content) => content.includes('队员 Alpha 的结果')), 'J1 有效单的结果回灌给领队（有回执）')
+    assert(!leader.sent.some((content) => content.includes('没有被执行')), 'J1 重试已成功，不产生误导性拒单回执')
+  }
+  // J2：建单持续异常 → 具名拒单回执，有界收尾，绝不静默
+  {
+    const leader = makeLeaderBackend({
+      step(round, { events, content }) {
+        if (round === 0) emitIncidentTurn(events)
+        else if (content.includes('没有被执行')) emitTurn(events, '确认未送达，等系统恢复再派。最终总结：暂停。')
+        else emitTurn(events, '继续。')
+      }
+    })
+    const { store, runner } = harness(team, leader)
+    runner.attachTaskCreator(() => { throw new Error('注入的建单通道持续异常') })
+    const task = store.create({ title: '建单持续异常', prompt: '处理 A', backend: 'zcode', agentId: 'L1' })
+    runner.enqueue(task)
+    const result = await settle(store, task.id, 30000)
+    const children = store.list().filter((child) => child.parentTaskId === task.id)
+
+    assert(result.status === 'done', `场景J2 领队 done（${result.status}${result.error ? ' ' + result.error : ''}）`)
+    assert(children.length === 0, 'J2 持续异常下没有建出子单')
+    const failedReceipt = leader.sent.find((content) => content.includes('没有被执行'))
+    assert(!!failedReceipt && failedReceipt.includes('to="Alpha"') && failedReceipt.includes('建单异常'), 'J2 建单持续异常以具名拒单回执（列明被丢的派单）')
+    const jReceipts = result.delegateRejections ?? []
+    assert(jReceipts.length >= 1 && jReceipts.every((entry) => entry.deliveredAt), 'J2 拒单回执送达（不残留未送达回执）')
+  }
+}
+
 process.exit(0)

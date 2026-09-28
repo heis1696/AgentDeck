@@ -1100,10 +1100,28 @@ export class TaskRunner {
     const entries: Array<{ call: DelegateCall; childId: string }> = []
     for (const [key, entry] of state.spawned) {
       state.spawned.delete(key)
-      state.seenKeys.add(key)
-      if (entry.childId) entries.push(entry)
+      if (entry.childId) {
+        state.seenKeys.add(key)
+        entries.push(entry)
+        continue
+      }
+      // 建单已收场却没建出子单：有具名拒单 = 已走回执通道（key 留在 seenKeys，回合末
+      // 不再重试）；无拒单 = 静默丢失（建单异常被吞 / silent null）——撤键让回合末把该单
+      // 当新单重试或具名回灌。绝不能把“seenKeys 判已处理”变成丢单通道（实测事故：
+      // 流式提前建单静默失败后整单无回执无建单无时间线痕迹，重发才被受理）。
+      if (this.delegateRejectionRecorded(taskId, expectedRunId, key)) state.seenKeys.add(key)
+      else state.seenKeys.delete(key)
     }
     return { entries, seenKeys: new Set(state.seenKeys) }
+  }
+  /** 该派单 key 是否已有未交付的具名拒单（store 持久层 + 内存层都查）。丢失型建单
+   *  收场（无子单无拒单）与此判定联用：有拒单不再重试，无拒单必须补回执。 */
+  delegateRejectionRecorded(taskId: string, expectedRunId: string | undefined, key: string): boolean {
+    const runMatches = (entryRunId: string | undefined) => expectedRunId === undefined || entryRunId === undefined || entryRunId === expectedRunId
+    const stored = this.store.get(taskId)?.delegateRejections
+      ?.some((entry) => !entry.deliveredAt && entry.key === key && runMatches(entry.runId))
+    if (stored) return true
+    return (this.delegateRejections.get(taskId) ?? []).some((entry) => entry.key === key && runMatches(entry.runId))
   }
   recordDelegateRejection(taskId: string, reason: string, dispatch?: { to: string; prompt: string }) {
     const key = dispatch ? `${dispatch.to}\n${dispatch.prompt}` : undefined
@@ -1211,6 +1229,13 @@ export class TaskRunner {
           state.spawned.set(key, { call, childId: child.id })
           this.pushTask(taskId)
         }
+      }).catch((error) => {
+        // 建单通道异常绝不静默（takeEarlySpawns 的 allSettled 会吞掉 rejection，占位
+        // 留在 spawned 里会被当「已处理」整单吞成无痕）：撤键 + 时间线留痕，回合末把
+        // 该单当新单重试（成功→正常报告回执；再败→护栏具名拒单/扫尾具名回执）
+        state.spawned.delete(key)
+        state.seenKeys.delete(key)
+        this.note(taskId, `⚠ 流式提前建单失败（${error instanceof Error ? error.message : String(error)}），该派单将在回合末重试`)
       })
       state.pending.push(p)
     }
