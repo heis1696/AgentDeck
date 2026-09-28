@@ -182,6 +182,7 @@ async function main() {
     const resumeBackend = {
       id: 'resume',
       label: 'resume',
+      supportsResume: true, // followUp 走 resume 重建通路
       async probe() { return { ok: true, detail: 'resume' } },
       async start({ resumeSessionId }) {
         if (resumeSessionId) {
@@ -354,6 +355,7 @@ async function main() {
     let starts = 0
     const backend = {
       id: 'binding-write', label: 'binding-write',
+      supportsResume: true, // resume 变体的 followUp 走 resume 重建通路
       async probe() { return { ok: true, detail: 'fake' } },
       async start({ events }) {
         const first = ++starts === 1

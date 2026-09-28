@@ -141,6 +141,8 @@ export function createClaudeBackend(): AgentBackend {
   return {
     id: 'claude',
     label: 'Claude Code',
+    // resumeSessionId 走 `claude --resume <id>`：每回合独立进程按 provider 落盘的会话恢复
+    supportsResume: true,
     async probe() {
       const p = await probeCli('claude')
       return p.ok ? { ok: true, detail: `claude ${p.version}` } : { ok: false, detail: p.error ?? '未安装' }

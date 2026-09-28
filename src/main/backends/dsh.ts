@@ -122,6 +122,10 @@ export function createDshBackend(getPaths: () => { dshPath: string }): AgentBack
   return {
     id: 'dsh',
     label: 'DeepSeek Harness',
+    // 无跨进程恢复通路：ACP 模式的 startDshAcpSession 参数表没有 resume 通道
+    // （dsh-acp 启动握手固定 session/new），headless 模式每回合一次性进程、sessionId
+    // 是合成的 dsh_* 且 send 直接抛错——提供 resumeSessionId 只会静默开新会话
+    supportsResume: false,
     async probe() {
       const dsh = findDshBin(getPaths().dshPath || undefined)
       if (!dsh) return { ok: false, detail: '找不到 deepseek-harness 安装（可指定 apps/cli/lib/bin.js 路径）' }

@@ -35,6 +35,7 @@ let notifications = 0
 const backend = {
   id: 'fake-office',
   label: 'Fake office',
+  supportsResume: true, // 对齐真实适配器：恢复能力声明
   async probe() { return { ok: true, detail: 'fake' } },
   async start({ events }) {
     starts++

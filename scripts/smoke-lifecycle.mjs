@@ -87,6 +87,7 @@ const ghostEmitters = []
 const ghostResumes = []
 const ghost = {
   id: 'ghost', label: 'Ghost',
+  supportsResume: true, // 场景 2 的 followUp 走 resume 重建通路
   async probe() { return { ok: true, detail: '' } },
   async start({ events, resumeSessionId }) {
     ghostEmitters.push(events)
@@ -224,6 +225,7 @@ for (const mode of ['initial', 'follow-up']) {
   const emitters = []
   const backend = {
     id: `cleanup-${mode}`, label: 'Cleanup race',
+    supportsResume: true, // cancel 后的 replacement followUp 走 resume 重建通路
     async probe() { return { ok: true, detail: '' } },
     async start({ events, turn }) {
       let activeTurn = turn
@@ -282,6 +284,7 @@ for (const kind of ['investigate', 'consult']) {
   const sends = []
   const backend = {
     id: `orchestration-${kind}`, label: 'Orchestration race',
+    supportsResume: true, // cancel 后的 replacement followUp 走 resume 重建通路
     async probe() { return { ok: true, detail: '' } },
     async start({ events, turn }) {
       let activeTurn = turn
@@ -329,6 +332,7 @@ for (const kind of ['investigate', 'consult']) {
   let releaseInvestigation
   const backend = {
     id: 'delegate-replacement', label: 'Delegate replacement',
+    supportsResume: true, // cancel 后的 replacement followUp 走 resume 重建通路
     async probe() { return { ok: true, detail: '' } },
     async start({ events, turn }) {
       let activeTurn = turn

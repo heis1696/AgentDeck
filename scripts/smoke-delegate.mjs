@@ -21,7 +21,7 @@ for (const [src, out] of [
 ]) {
   await build({ entryPoints: [path.join(root, src)], outfile: path.join(root, out), bundle: true, platform: 'node', format: 'cjs', target: 'node18', external: ['electron'] })
 }
-const { TaskRunner } = await import(pathToFileURL(path.join(root, 'out/sd-runner.cjs')).href)
+const { TaskRunner, RESUME_UNSUPPORTED_MESSAGE } = await import(pathToFileURL(path.join(root, 'out/sd-runner.cjs')).href)
 const { TaskStore } = await import(pathToFileURL(path.join(root, 'out/sd-store.cjs')).href)
 const { parseDelegates, stripDelegates, parseReviews, stripReviews, parseConsults, parseInvestigates, parseRoundNotes, parseContinue, delegateChildBranch, buildGitReportSection, GIT_REPORT_SECTION_MAX_CHARS, buildChildReportBody, REPORT_INLINE_MAX } = await import(pathToFileURL(path.join(root, 'out/sd-delegate.cjs')).href)
 const { fullTextPointerLines } = await import(pathToFileURL(path.join(root, 'out/sd-delegation.cjs')).href)
@@ -76,6 +76,7 @@ function makeLeaderBackend() {
   return {
     id: 'zcode',
     label: 'ZetCode',
+    supportsResume: true, // M2 换基线后的追问强制走 resume 重建（sess_lead_resumed_*）
     async probe() { return { ok: true, detail: '' } },
     async start({ prompt, workdir, resumeSessionId, events: rawEvents, turn }) {
       leaderStarts.push({ prompt, workdir, resumeSessionId })
@@ -1731,6 +1732,7 @@ assert(execSync(`git show ${ibE}:f2.txt`, { cwd: repo5, encoding: 'utf8' }).incl
   const commentsSpy = []
   const leader7 = {
     id: 'lead7g', label: 'lead7g',
+    supportsResume: true, // followG 的追问经 resume 重建（resumeSessionId 分支）
     async probe() { return { ok: true, detail: '' } },
     async start({ prompt, workdir, resumeSessionId, events: rawEvents, turn }) {
       const scoped = scopedCallbacks(rawEvents, turn)
@@ -2237,6 +2239,7 @@ assert(execSync(`git show ${ibE}:f2.txt`, { cwd: repo5, encoding: 'utf8' }).incl
   const stopsL = []
   const wl = {
     id: 'wl', label: 'wl',
+    supportsResume: true,
     async probe() { return { ok: true, detail: '' } },
     async start({ prompt, resumeSessionId, events, turn }) {
       const sid = `s_wl_${startsL.push({ resumeSessionId: resumeSessionId ?? '' })}`
@@ -2290,7 +2293,8 @@ assert(execSync(`git show ${ibE}:f2.txt`, { cwd: repo5, encoding: 'utf8' }).incl
 // 真实适配器（dsh-acp）是每连接一个「当前槽」（session/prompt 单槽在飞，settleTurn 按
 // 槽裁决、经当前槽的回合身份投递 onTurnEnd）——若超时后同连接还能开新回合，旧响应会
 // 顶替新回合的终态（污染）且旧 send 永悬。修复语义：超时即取消在飞（stop）+ 退役连接，
-// 追问经 resume 重建到新连接，迟到响应随旧连接消亡。
+// 重建时 close 按真实 ACP 语义裁决在飞槽（旧 send 的 Promise 随之失败收口），追问经
+// resume 重建到新连接，迟到响应找不到槽、随旧连接消亡。
 {
   process.env.AGENTDECK_TURN_IDLE_MS = '1200'
   const dirM = fs.mkdtempSync(path.join(os.tmpdir(), 'dele-race-'))
@@ -2307,6 +2311,11 @@ assert(execSync(`git show ${ibE}:f2.txt`, { cwd: repo5, encoding: 'utf8' }).incl
         // 对应 runTurn 的 setTurn：新回合换槽——此后到达的旧响应会顶槽投递（竞态根源）
         state.slotStamp = stamp
         const p = new Promise((resolve) => { state.slot = { content, resolve } })
+        // 记录 send Promise 的真实收口（兑现/拒绝都算）：区别于槽记录变化
+        p.then(
+          (r) => state.sendSettled.push({ content, ok: !!(r && r.ok), error: (r && r.error) ?? '' }),
+          (e) => state.sendSettled.push({ content, ok: false, error: e instanceof Error ? e.message : String(e) })
+        )
         // s_wm_1 的第一条 send（总结轮）永不主动应答；重建连接健康应答
         if (sid !== 's_wm_1') setTimeout(() => session.settle({ ok: true, response: '追问已收到：新回合自己的结论。' }), 10)
         return p
@@ -2316,21 +2325,28 @@ assert(execSync(`git show ${ibE}:f2.txt`, { cwd: repo5, encoding: 'utf8' }).incl
         if (!t) return
         state.slot = undefined
         state.settled.push(t.content)
+        state.settledResults.push({ content: t.content, ok: !!result.ok, error: result.error ?? '' })
         // 经「当前槽」的回合身份投递（settleTurn 语义：迟到响应顶着开槽回合的身份）
         state.events.onTurnEnd(result, state.slotStamp)
         t.resolve(result)
       },
       async stop() { state.stops.push(sid) },
-      async close() { state.closes.push(sid) }
+      // 真实 ACP 语义（dsh-acp close → settleTurn）：关闭裁决在飞槽——旧请求以
+      // 「会话已关闭」失败收口，此后到达的迟到响应找不到槽、无人接收
+      async close() {
+        state.closes.push(sid)
+        session.settle({ ok: false, response: '', error: '会话已关闭' })
+      }
     }
     state.settle = session.settle // 测试驱动口：从连接状态触发「线上响应到达」
     return session
   }
   const wm = {
     id: 'wm', label: 'wm',
+    supportsResume: true, // 对应 zcode/claude/codex：resumeSessionId 通路真实生效
     async probe() { return { ok: true, detail: '' } },
     async start({ prompt, events, resumeSessionId, turn }) {
-      const state = { events, sends: [], settled: [], stops: [], closes: [], slot: undefined, slotStamp: undefined }
+      const state = { events, sends: [], settled: [], settledResults: [], sendSettled: [], stops: [], closes: [], slot: undefined, slotStamp: undefined }
       const sid = `s_wm_${startsM.push({ resumeSessionId: resumeSessionId ?? '', state })}`
       // start 即首回合投递：重建连接的追问本体走这里（resume 通路不经 send）
       state.sends.push(prompt ?? '')
@@ -2363,23 +2379,80 @@ assert(execSync(`git show ${ibE}:f2.txt`, { cwd: repo5, encoding: 'utf8' }).incl
   assert(raceMs >= 1000 && raceMs < 10000, `场景 M①：在预算内返回（${raceMs}ms，预算 1200ms）`)
   assert(conn1.state.stops.includes('s_wm_1'), '场景 M①：超时即取消在飞请求（session.stop 已发出）')
   assert(conn1.state.settled.length === 0, '场景 M①：取消丢失路径下旧请求暂未收口（保险路径由④收口）')
-  // ②同会话追问开始：连接已退役，追问必须经 resume 重建到新连接
+  // ②同会话追问开始：连接已退役，追问必须经 resume 重建到新连接（恢复能力后端的重建成功路径）
   const followM = runnerM.followUp(taskM.id, '追问：给一句结论', { collectFinal: true })
   const tRebuild = Date.now()
   while (Date.now() - tRebuild < 15000 && !(startsM.length === 2 && startsM[1].state.sends.length >= 1)) {
     await new Promise((r) => setTimeout(r, 50))
   }
   assert(startsM.length === 2 && startsM[1].resumeSessionId === 's_wm_1', '场景 M②：追问被复用门禁拒绝旧连接、经 resume 重建执行')
-  assert(startsM[1].state.sends[0].includes('追问'), '场景 M②：新连接收到的是追问本体')
-  // ③旧响应迟到到达（追问已在新连接上开跑之后）
+  assert(startsM[1].state.sends[0].includes('追问'), '场景 M②：重建成功且新连接收到的是追问本体（start 首回合即追问原文）')
+  assert(conn1.state.closes.includes('s_wm_1'), '场景 M②：重建前旧连接已关闭')
+  assert(conn1.state.sendSettled.some((e) => e.content.includes('总结请求') && !e.ok && e.error.includes('会话已关闭')),
+    '场景 M②：close 按真实 ACP 语义裁决在飞槽——旧 send 的 Promise 真正收口（失败收场，非永悬、非仅槽记录变化）')
+  // ③旧响应迟到到达（追问已在新连接上开跑之后）：旧槽已被 close 裁决，迟到正文无人接收
   conn1.state.settle({ ok: true, response: '迟到响应：这是旧总结的正文' })
   const followResultM = await followM
   assert(followResultM.ok === true, `场景 M③：追问正常完成（${followResultM.error ?? 'ok'}）`)
   assert(!(followResultM.finalText ?? '').includes('迟到响应'), '场景 M③：新回合不受污染——旧响应未进入新回合结论')
   assert((followResultM.finalText ?? '').includes('新回合自己的结论'), '场景 M③：新回合拿到的是自己的响应')
-  // ④旧 send 收口：迟到响应恰好落进旧连接自己的槽，且未窜入新连接
-  assert(conn1.state.settled.includes('总结请求（响应会迟到）'), '场景 M④：旧 send 收口——迟到响应由旧连接的槽裁决')
+  assert(conn1.state.settledResults.every((r) => !r.ok && r.error.includes('会话已关闭')),
+    '场景 M③：迟到响应找不到槽——旧请求唯一一次收口来自 close，迟到正文随旧连接消亡')
+  // ④收口归属：旧请求只在旧连接自己的槽上收口，未窜入新连接
+  assert(conn1.state.settled.includes('总结请求（响应会迟到）'), '场景 M④：旧 send 收口——由旧连接自己的槽裁决')
   assert(!startsM[1].state.settled.includes('总结请求（响应会迟到）'), '场景 M④：迟到响应未窜入新连接')
+}
+
+// 场景 N：诚实降级——不支持跨进程恢复的后端（supportsResume=false，对应 dsh：
+// ACP 固定 session/new、headless 无续聊），旧会话退役后的追问必须按失败收场并给出
+// 可行动报错，绝不静默开新会话冒充恢复成功
+{
+  process.env.AGENTDECK_TURN_IDLE_MS = '1200'
+  const dirN = fs.mkdtempSync(path.join(os.tmpdir(), 'dele-nores-'))
+  const teamN = [{ id: 'WN', name: 'WorkerN', backend: 'wn', role: '工程师', systemPrompt: '' }]
+  const startsN = []
+  const wn = {
+    id: 'wn', label: 'wn',
+    supportsResume: false, // 提供 resumeSessionId 也只会被静默忽略、开新会话
+    async probe() { return { ok: true, detail: '' } },
+    async start({ prompt, events, turn }) {
+      startsN.push({ prompt: prompt ?? '' })
+      setTimeout(() => {
+        events.onEvent({ ts: Date.now(), kind: 'final', text: 'N 任务完成' }, turn)
+        events.onTurnEnd({ response: 'N 任务完成', ok: true }, turn)
+      }, 20)
+      return {
+        sessionId: `s_wn_${startsN.length}`, turnScoped: true,
+        async send() { return new Promise(() => {}) }, // 在飞请求永不收口（等预算超时退役连接）
+        async stop() {}, async close() {}
+      }
+    }
+  }
+  const runnerN = new TaskRunner(store, new Map([['wn', wn]]),
+    () => ({ concurrency: 1, mode: 'yolo', notify: false, workerConcurrency: 2 }))
+  runnerN.attachTeam(() => teamN)
+  const taskN = store.create({ title: '无恢复降级', prompt: '直接执行', workdir: dirN, backend: 'wn', agentId: 'WN' })
+  runnerN.enqueue(taskN)
+  const tN = Date.now()
+  while (Date.now() - tN < 15000) {
+    const t = store.get(taskN.id)
+    if (t.status === 'done' || t.status === 'failed') break
+    await new Promise((r) => setTimeout(r, 100))
+  }
+  assert(store.get(taskN.id).status === 'done', '场景 N：任务完成、会话存活')
+  // ①制造「已退役」前提：总结轮在飞悬挂 → 预算超时取消在飞并退役连接
+  const raceN = await runnerN.sendChildSummaryTurn(taskN.id, '总结请求（悬挂）')
+  assert(raceN !== null && raceN.ok === false && (raceN.error ?? '').includes('回合超时'), '场景 N①：总结轮按预算超时落败、连接退役')
+  // ②追问重建：门禁必须拒绝——回合失败、报错可行动、绝不静默二次 start 冒充恢复
+  const followN = await runnerN.followUp(taskN.id, '追问：继续', { collectFinal: true })
+  assert(followN.ok === false, `场景 N②：追问按失败收场（${followN.error ?? '意外成功'}）`)
+  assert((followN.error ?? '').includes('不支持跨进程恢复') && (followN.error ?? '').includes('重新派单'),
+    `场景 N②：报错可行动（${followN.error}）`)
+  assert(followN.error === RESUME_UNSUPPORTED_MESSAGE, '场景 N②：报错与 runner 契约文案逐字一致')
+  assert(startsN.length === 1, `场景 N②：未发生静默重建（start 次数 ${startsN.length}，不得开新会话冒充恢复）`)
+  const failedN = store.get(taskN.id)
+  assert(failedN.status === 'failed' && (failedN.error ?? '').includes('不支持跨进程恢复'),
+    `场景 N②：任务显式 failed 且错误可见（${failedN.status}${failedN.error ? ' ' + failedN.error : ''}）`)
 }
 
 console.log('\n✅ DELEGATION SMOKE PASSED (v2 + review flow)')
