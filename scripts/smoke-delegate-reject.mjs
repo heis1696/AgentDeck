@@ -1165,6 +1165,96 @@ console.log('\n✅ 派单被拒回灌冒烟全绿')
   fs.rmSync(repo, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
 }
 
+// ================= 场景 J3B3：收口撤销竞态（重读后、撤销前被领取）→ 撤销落空让位零回收 =================
+// 契约：closeSpawnedChild 的撤销必须带 holding+出生身份条件，且**撤销成功才允许 force 回收**。
+// 重读（仍 holding）与撤销提交之间的跨进程窗口里，并发方翻面释放门禁并派发（确定性注入：
+// 拦截撤销的条件提交，在其落库前一刻完成翻面+派发）→ 撤销必须落空 → 重读最新归属让位：
+// 不撤销在跑子单、不 force 回收在用树、不宣称「未执行」。
+{
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'sdr-j3b3-'))
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim()
+  git('init', '-q', '-b', 'main')
+  git('config', 'user.email', 'smoke@example.invalid')
+  git('config', 'user.name', 'Smoke')
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'a v1\n')
+  git('add', 'a.txt')
+  git('commit', '-qm', 'init')
+  const team = [
+    { id: 'L1', name: 'Boss', backend: 'zcode', role: 'leader', systemPrompt: '', subordinates: ['W1'] },
+    { id: 'W1', name: 'Alpha', backend: 'alpha', role: 'worker', systemPrompt: '' }
+  ]
+  const leader = makeLeaderBackend({
+    step(round, { events, content }) {
+      if (round === 0) {
+        const tag = '<delegate to="Alpha">把 a.txt 改成 v2</delegate>'
+        events.onEvent({ ts: Date.now(), kind: 'text', text: tag })
+        events.onEvent({ ts: Date.now(), kind: 'final', text: '派单。' })
+        events.onTurnEnd({ response: '派单。', delegationText: tag, ok: true })
+      } else if (content.includes('队员执行结果汇报')) {
+        emitTurn(events, '收到结果，最终总结：a.txt 已升级。')
+      } else {
+        emitTurn(events, '继续。')
+      }
+    }
+  })
+  const tmpStore = fs.mkdtempSync(path.join(os.tmpdir(), 'sdr-j3b3-store-'))
+  const store = new TaskStore(tmpStore)
+  let workerStarts = 0
+  const alphaBackend = {
+    id: 'alpha', label: 'alpha',
+    async probe() { return { ok: true, detail: '' } },
+    async start({ events, workdir }) {
+      workerStarts++
+      setTimeout(() => {
+        fs.writeFileSync(path.join(workdir, 'a.txt'), 'a v2 by Alpha\n')
+        events.onEvent({ ts: Date.now(), kind: 'final', text: 'done alpha' })
+        events.onTurnEnd({ response: 'done alpha', ok: true })
+      }, 60)
+      return { sessionId: 'sess_w', async send() {}, async stop() {}, async close() {} }
+    }
+  }
+  const backends = new Map([[ 'zcode', leader ], [ 'alpha', alphaBackend ]])
+  const runner = new TaskRunner(store, backends, () => ({ concurrency: 1, mode: 'yolo', notify: false, workerConcurrency: 3 }))
+  runner.attachTeam(() => team)
+  const realCreate = store.create.bind(store)
+  let injected = 0
+  runner.attachTaskCreator((input) => {
+    const child = realCreate(input)
+    if (injected++ === 0) {
+      // 落盘后拆归属元数据：原建单路径的 setWorktreeOwner 将失败 → 走 closeSpawnedChild 收口
+      const metadataJson = path.join(repo, '.agentdeck-worktrees', '.metadata', `${path.basename(input.worktree.path)}.json`)
+      fs.rmSync(metadataJson, { force: true })
+      // 拦截收口撤销的条件提交：在撤销落库前一刻，并发方完成翻面并派发——确定性命中
+      // 「重读后、撤销前被领取」窗口（等价跨进程翻转恰落在重读与撤销提交之间）。
+      const realUpdateIf = store.updateIf.bind(store)
+      let armed = true
+      store.updateIf = (id, expected, patch) => {
+        if (armed && id === child.id && patch.status === 'cancelled') {
+          armed = false
+          const flipped = realUpdateIf(child.id, { status: 'queued', runId: child.runId, executionOwner: child.executionOwner, dispatchHold: true }, { dispatchHold: undefined })
+          assert(flipped, 'J3B3 前置：竞态注入的翻面成立（撤销提交前一刻门禁已被并发方释放）')
+          setTimeout(() => runner.enqueue(child), 0)
+        }
+        return realUpdateIf(id, expected, patch)
+      }
+    }
+    return child
+  })
+  const task = store.create({ title: '收口撤销竞态', prompt: '处理 A', workdir: repo, backend: 'zcode', agentId: 'L1' })
+  runner.enqueue(task)
+  const result = await settle(store, task.id, 30000)
+  const children = store.list().filter((child) => child.parentTaskId === task.id)
+
+  assert(result.status === 'done', `场景J3B3 领队 done（${result.status}${result.error ? ' ' + result.error : ''}）`)
+  assert(children.length === 1 && children[0].status === 'done', `J3B3 撤销落空后子单由在跑方驱动跑到终态，不被收口撤销（${children.map((c) => c.status).join(',') || '无'}）`)
+  assert(workerStarts === 1, `J3B3 子单恰好被执行一次（${workerStarts}）`)
+  assert(!!children[0].workdir && fs.existsSync(children[0].workdir), 'J3B3 让位后零回收：在用 worktree 目录原样保留')
+  assert(!leader.sent.some((content) => content.includes('没有被执行')), 'J3B3 撤销落空不产生「本单未执行」误导拒单')
+  assert(store.readEvents(task.id).some((event) => (event.text ?? '').includes('让位')), 'J3B3 撤销落空让位在时间线留痕')
+  fs.rmSync(repo, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
+  fs.rmSync(tmpStore, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
+}
+
 // ================= 场景 J3R：绑定期间调度器领取（确定性竞态注入）→ 让位不撤销 =================
 // 契约：子单持有 holding，归属绑定 await 期间被并发方释放并派发（等价于调度器领取在跑）。
 // 建单流程收口（绑定失败）前必须重读子单最新归属：已被领取/在跑 → 让位交还当前记录

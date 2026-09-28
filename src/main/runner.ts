@@ -1590,7 +1590,9 @@ export class TaskRunner {
   /**
    * 建单失败收口：处置前先重读子单最新归属与状态（第五轮门禁的收口语义）。
    * 已被释放/领取（在跑）→ 让位交还当前记录：不回收在用树、不 cancel、不宣称「未执行」；
-   * 仍 holding → 从未被任何执行方领取，安全撤销 + 按归属尽力回收 + 具名拒单。
+   * 仍 holding → 条件撤销（出生身份+holding 一起进条件）：撤销提交时点子单从未被任何
+   * 执行方领取才成立，成立才允许 force 回收现场；撤销落空 = 重读与提交之间的跨进程窗口里
+   * 刚翻面被领取 → 重读最新归属并让位，绝不回收在用树。
    * 返回 null = 已按具名拒单收口；返回 Task = 让位（调用方原样交回，由在跑方驱动）。
    */
   private async closeSpawnedChild(taskId: string, child: Task, call: DelegateCall, expected: TaskExpectation, why: string, reclaimOwnerTaskId: string): Promise<Task | null> {
@@ -1600,7 +1602,17 @@ export class TaskRunner {
       this.note(taskId, `⚠ ${why}，但子单「${latest.title}」已被领取（${latest.status}）——让位交还当前执行，不撤销不回收`, expected)
       return latest
     }
-    await this.cancel(child.id)
+    // 条件撤销：holding+出生身份一起作为撤销条件。重读（上方）与撤销提交之间隔着跨进程
+    // 窗口，并发方可能恰好翻面释放门禁并派发——无条件撤销会把刚被领取的子单杀掉再回收
+    // 其在用树；条件提交落空即让位（holding 子单从未起跑，无需会话/claim 清理）。
+    const cancelled = this.store.updateIf(latest.id, { status: 'queued', runId: latest.runId, executionOwner: latest.executionOwner, dispatchHold: true }, { status: 'cancelled', endedAt: Date.now() })
+    if (!cancelled) {
+      const claimed = this.store.get(latest.id)
+      this.note(taskId, `⚠ ${why}，但子单「${claimed?.title ?? latest.title}」已被领取（${claimed?.status ?? '已删除'}）——让位交还当前执行，不撤销不回收`, expected)
+      return claimed ?? null
+    }
+    this.pushTask(latest.id)
+    // 撤销成立（提交时点仍未被领取）才走到这里：force 回收现场是安全的
     let cleanup = ''
     if (latest.worktree && latest.workdir) {
       try {

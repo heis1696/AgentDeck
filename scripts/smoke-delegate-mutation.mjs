@@ -32,12 +32,15 @@ async function bundle(tree, srcFile, outfile) {
 async function runScenario(tree, scenarioScript) {
   const runnerOut = path.join(tree, 'out-runner.cjs')
   const storeOut = path.join(tree, 'out-store.cjs')
+  const handoffOut = path.join(tree, 'out-handoff.cjs')
   await bundle(tree, 'src/main/runner.ts', runnerOut)
   await bundle(tree, 'src/main/store.ts', storeOut)
+  await bundle(tree, 'src/main/handoff.ts', handoffOut)
   const scriptFile = path.join(tree, 'scenario.cjs')
   fs.writeFileSync(scriptFile, scenarioScript
     .replace('__MUT_RUNNER__', JSON.stringify(runnerOut))
-    .replace('__MUT_STORE__', JSON.stringify(storeOut)))
+    .replace('__MUT_STORE__', JSON.stringify(storeOut))
+    .replace('__MUT_HANDOFF__', JSON.stringify(handoffOut)))
   try {
     const stdout = execFileSync('node', [scriptFile], { encoding: 'utf8', timeout: 180000, stdio: ['ignore', 'pipe', 'pipe'] })
     return { red: false, output: stdout }
@@ -265,6 +268,107 @@ async function main() {
 main().catch((e) => { console.error(e); process.exit(3) })
 `
 
+// 红5｜收口撤销竞态：旧代码（无条件 cancel，不看撤销结果就回收）下「撤销落空让位零回收」断言必红
+const RED5 = `
+${PRELUDE}
+async function main() {
+  const { repo } = makeRepo('mut-r5-')
+  const team = [
+    { id: 'L1', name: 'Boss', backend: 'zcode', role: 'leader', systemPrompt: '', subordinates: ['W1'] },
+    { id: 'W1', name: 'Alpha', backend: 'alpha', role: 'worker', systemPrompt: '' }
+  ]
+  const leader = makeLeader((n, { events, content }) => {
+    if (n === 0) emitTurn(events, '派单。', ['<delegate to="Alpha">把 a.txt 改成 v2</delegate>'])
+    else if (content.includes('队员执行结果汇报')) emitTurn(events, '最终总结：a.txt 已升级。')
+    else emitTurn(events, '继续。')
+  })
+  const store = new TaskStore(fs.mkdtempSync(path.join(os.tmpdir(), 'mut-r5-store-')))
+  let workerStarts = 0
+  const alpha = { id: 'alpha', label: 'alpha', async probe() { return { ok: true, detail: '' } },
+    async start({ events, workdir }) {
+      workerStarts++
+      setTimeout(() => {
+        fs.writeFileSync(path.join(workdir, 'a.txt'), 'a v2 by Alpha\\n')
+        events.onTurnEnd({ response: 'done alpha', ok: true })
+      }, 80)
+      return { sessionId: 'sess_w', async send() {}, async stop() {}, async close() {} }
+    } }
+  const runner = new TaskRunner(store, new Map([['zcode', leader], ['alpha', alpha]]),
+    () => ({ concurrency: 1, mode: 'yolo', notify: false, workerConcurrency: 3 }))
+  runner.attachTeam(() => team)
+  const realCreate = store.create.bind(store)
+  let injected = 0
+  runner.attachTaskCreator((input) => {
+    const child = realCreate(input)
+    if (injected++ === 0) {
+      const metadataJson = path.join(repo, '.agentdeck-worktrees', '.metadata', path.basename(input.worktree.path) + '.json')
+      fs.rmSync(metadataJson, { force: true })
+      const realUpdateIf = store.updateIf.bind(store)
+      let armed = true
+      store.updateIf = (id, expected, patch) => {
+        if (armed && id === child.id && patch.status === 'cancelled') {
+          armed = false
+          const flipped = realUpdateIf(child.id, { status: 'queued', runId: child.runId, executionOwner: child.executionOwner, dispatchHold: true }, { dispatchHold: undefined })
+          assert(!!flipped, '前置：竞态注入的翻面成立')
+          setTimeout(() => runner.enqueue(child), 0)
+        }
+        return realUpdateIf(id, expected, patch)
+      }
+    }
+    return child
+  })
+  const task = store.create({ title: '收口撤销竞态', prompt: '处理 A', workdir: repo, backend: 'zcode', agentId: 'L1' })
+  runner.enqueue(task)
+  const fin = await settle(store, task.id)
+  const children = store.list().filter((c) => c.parentTaskId === task.id)
+  assert(fin.status === 'done', '领队 done（实际 ' + fin.status + '）')
+  assert(children.length === 1 && children[0].status === 'done', '撤销落空后子单跑到终态，不被收口撤销（实际 ' + children.map((c) => c.status).join(',') + '）')
+  assert(workerStarts === 1, '子单恰好执行一次（实际 ' + workerStarts + '）')
+  assert(!!children[0].workdir && fs.existsSync(children[0].workdir), '让位后零回收：在用 worktree 原样保留')
+  assert(!leader.sent.some((c) => c.includes('没有被执行')), '撤销落空不产生「本单未执行」误导拒单')
+  console.log('SCENARIO-OK')
+  process.exit(0)
+}
+main().catch((e) => { console.error(e); process.exit(3) })
+`
+
+// 红6｜holding 崩溃收场：旧代码（无 dispatchHold 单独收场）下「翻面派发/具名终态」断言必红
+const RED6 = `
+const path = require('path')
+const fs = require('fs')
+const os = require('os')
+const { TaskStore } = require(__MUT_STORE__)
+const { reconcileStartupTasks } = require(__MUT_HANDOFF__)
+const assert = (cond, msg) => { if (!cond) { console.error('RED:' + msg); process.exit(3) } }
+async function main() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mut-r6-'))
+  const store = new TaskStore(dir)
+  const source = store.create({ title: '阶段1', prompt: 'x', workdir: '', backend: 'fake' })
+  store.update(source.id, { status: 'done', endedAt: Date.now() })
+  const holdingSub = store.create({ title: 'holding子单', prompt: 'h', workdir: '', backend: 'fake', parentTaskId: source.id, dispatchHold: true })
+  const holdingTree = store.create({ title: 'holding有树', prompt: 't', workdir: path.join(dir, 'repo'), backend: 'fake', parentTaskId: source.id, dispatchHold: true,
+    worktree: { ownerTaskId: 'lost', repoDir: path.join(dir, 'repo'), path: path.join(dir, 'missing-wt'), branch: 'b', baseSha: 's', createdAt: Date.now(), cleanupStatus: 'active' } })
+  const enqueued = []
+  const result = await reconcileStartupTasks({
+    store,
+    pushEvent: () => {},
+    enqueue: (task) => enqueued.push(task.id),
+    notifyTaskChanged: () => {},
+    bindWorktreeOwner: (wtDir) => Promise.resolve(fs.existsSync(wtDir))
+  })
+  assert(result.holdingResumed && result.holdingResumed.length === 1, 'holding 收场二分：恢复派发 1 单（实际 ' + (result.holdingResumed ?? []).length + '）')
+  assert(result.holdingTerminated && result.holdingTerminated.length === 1, 'holding 收场二分：具名终态 1 单（实际 ' + (result.holdingTerminated ?? []).length + '）')
+  assert(enqueued.includes(holdingSub.id), '无树 holding 子单翻面后恢复派发')
+  assert(store.get(holdingSub.id).dispatchHold === undefined && !store.get(holdingSub.id).parked, '恢复派发的子单门禁已释放、不挂起')
+  assert(store.get(holdingTree.id).status === 'cancelled', '磁盘归属无法核实的子单转具名终态（实际 ' + store.get(holdingTree.id).status + '）')
+  assert(store.readEvents(holdingTree.id).some((e) => (e.text ?? '').includes('启动对账') && (e.text ?? '').includes('现场保留')), '终态子单时间线留痕并给出现场处置提示')
+  assert(!store.list().some((t) => t.dispatchHold === true && t.status === 'queued'), '不允许静默悬挂：没有 queued 持门禁的残留')
+  console.log('SCENARIO-OK')
+  process.exit(0)
+}
+main().catch((e) => { console.error(e); process.exit(3) })
+`
+
 const MUTATIONS = [
   {
     name: '红1｜建单门禁：旧代码（无 holding；绑定失败直接撤销）下「让位不撤销」断言必红',
@@ -313,6 +417,28 @@ const MUTATIONS = [
       }
     ],
     scenario: RED4
+  },
+  {
+    name: '红5｜收口撤销竞态：旧代码（无条件 cancel、不看撤销结果就 force 回收）下「撤销落空让位零回收」断言必红',
+    mutations: [
+      {
+        file: 'src/main/runner.ts',
+        find: '    const cancelled = this.store.updateIf(latest.id, { status: \'queued\', runId: latest.runId, executionOwner: latest.executionOwner, dispatchHold: true }, { status: \'cancelled\', endedAt: Date.now() })\n    if (!cancelled) {\n      const claimed = this.store.get(latest.id)\n      this.note(taskId, `⚠ ${why}，但子单「${claimed?.title ?? latest.title}」已被领取（${claimed?.status ?? \'已删除\'}）——让位交还当前执行，不撤销不回收`, expected)\n      return claimed ?? null\n    }\n    this.pushTask(latest.id)',
+        replace: '    await this.cancel(child.id)'
+      }
+    ],
+    scenario: RED5
+  },
+  {
+    name: '红6｜holding 崩溃收场：旧代码（无 dispatchHold 单独收场，残单永久悬挂）下「翻面派发/具名终态」断言必红',
+    mutations: [
+      {
+        file: 'src/main/handoff.ts',
+        find: "  for (const stale of store.list().filter((task) => task.dispatchHold === true && task.status === 'queued')) {",
+        replace: '  for (const stale of store.list().filter(() => false)) {'
+      }
+    ],
+    scenario: RED6
   }
 ]
 
