@@ -753,12 +753,16 @@ function updateMetadata(metadata: WorktreeInfo, patch: Partial<WorktreeInfo>) {
 
 const WORKTREE_GENERATION_FILE = 'agentdeck-generation'
 
+/** 路径键统一规范化：与 sameWorktreePath 同一套等价判定（resolve + Windows 大小写折叠）。
+ *  锁键/池键/池成员检查必须与路径等价判定同源——否则同一棵树按大小写/盘符别名两种
+ *  写法会拿到两把锁、两份池登记，互斥失效、池成员检查漏命中（fix：路径键专项）。 */
+function worktreePathKey(candidate: string): string {
+  const resolved = path.resolve(candidate)
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved
+}
+
 function sameWorktreePath(left: string, right: string): boolean {
-  const resolvedLeft = path.resolve(left)
-  const resolvedRight = path.resolve(right)
-  return process.platform === 'win32'
-    ? resolvedLeft.toLowerCase() === resolvedRight.toLowerCase()
-    : resolvedLeft === resolvedRight
+  return worktreePathKey(left) === worktreePathKey(right)
 }
 
 function worktreeAdminDir(wtPath: string, commonDir: string): string | null {
@@ -970,31 +974,44 @@ export const WORKTREE_POOL_MAX_PER_REPO = 2
 /** 池条目的 owner 标记（非真实任务 id）：元数据/清扫据此识别池资产 */
 export const WORKTREE_POOL_OWNER = '.agentdeck-pool'
 
-/** 进程内池：repoRoot → 可复用 worktree 路径集合。会话级资产——重启即空，
- *  留盘池条目由启动清扫按 WORKTREE_POOL_OWNER 归属回收，不依赖任务册记录。 */
-const worktreePoolByRepo = new Map<string, Set<string>>()
+/** 进程内池：仓库规范键 → (树路径规范键 → 树真实路径)。会话级资产——重启即空，
+ *  留盘池条目由启动清扫按 WORKTREE_POOL_OWNER 归属回收，不依赖任务册记录。
+ *  双层键与 worktreePathKey 同源规范化：别名写法读写同一份登记。 */
+const worktreePoolByRepo = new Map<string, Map<string, string>>()
 const worktreePathLocks = new Map<string, Promise<void>>()
 
+/** 测试出口：路径锁计数探针（并发夹具证明别名路径写法串行化的观测面）。
+ *  'acquire' 在锁真正到手后发出，'release' 在临界区退出时发出——键为规范化路径键。 */
+export type WorktreePathLockProbe = (event: 'acquire' | 'release', key: string) => void
+let worktreePathLockProbe: WorktreePathLockProbe | undefined
+
+export function setWorktreePathLockProbeForTest(probe?: WorktreePathLockProbe): void {
+  worktreePathLockProbe = probe
+}
+
 async function withWorktreePathLock<T>(wtPath: string, operation: () => Promise<T>): Promise<T> {
-  const key = path.resolve(wtPath)
+  const key = worktreePathKey(wtPath)
   const previous = worktreePathLocks.get(key)
   let release!: () => void
   const current = new Promise<void>((resolve) => { release = resolve })
   worktreePathLocks.set(key, current)
   if (previous) await previous
-  try { return await operation() }
-  finally {
+  try {
+    worktreePathLockProbe?.('acquire', key)
+    return await operation()
+  } finally {
+    worktreePathLockProbe?.('release', key)
     release()
     if (worktreePathLocks.get(key) === current) worktreePathLocks.delete(key)
   }
 }
 
 /** 仓库级归池锁（见 releaseWorktreeToPool）：串行化同仓并发归还的容量判定与登记。
- *  键为仓库根绝对路径。实现与 withWorktreePathLock 同构。 */
+ *  键为仓库根规范化路径键（与路径等价判定同源）。实现与 withWorktreePathLock 同构。 */
 const repoRepoolLocks = new Map<string, Promise<void>>()
 
 async function withRepoRepoolLock<T>(repoRoot: string, operation: () => Promise<T>): Promise<T> {
-  const key = path.resolve(repoRoot)
+  const key = worktreePathKey(repoRoot)
   const previous = repoRepoolLocks.get(key)
   let release!: () => void
   const current = new Promise<void>((resolve) => { release = resolve })
@@ -1007,11 +1024,12 @@ async function withRepoRepoolLock<T>(repoRoot: string, operation: () => Promise<
   }
 }
 
-function poolFor(repoRoot: string): Set<string> {
-  let pool = worktreePoolByRepo.get(repoRoot)
+function poolFor(repoRoot: string): Map<string, string> {
+  const key = worktreePathKey(repoRoot)
+  let pool = worktreePoolByRepo.get(key)
   if (!pool) {
-    pool = new Set<string>()
-    worktreePoolByRepo.set(repoRoot, pool)
+    pool = new Map<string, string>()
+    worktreePoolByRepo.set(key, pool)
   }
   return pool
 }
@@ -1021,10 +1039,11 @@ export function clearWorktreePool(): void {
   worktreePoolByRepo.clear()
 }
 
-/** 测试出口：指定仓库当前池内条目快照（只读）——并发归池容量守卫的观测面 */
+/** 测试出口：指定仓库当前池内条目快照（只读，树真实路径）——并发归池容量守卫的观测面。
+ *  仓库参数按规范化键查找：别名写法命中的是同一个池。 */
 export function worktreePoolEntriesForTest(repoDir: string): string[] {
-  const pool = worktreePoolByRepo.get(path.resolve(repoDir))
-  return pool ? [...pool] : []
+  const pool = worktreePoolByRepo.get(worktreePathKey(repoDir))
+  return pool ? [...pool.values()] : []
 }
 
 /** 归还入池：detach HEAD（同提交零文件重写，解除分支检出占用——否则调用方随后的
@@ -1043,7 +1062,7 @@ async function releaseWorktreeToPool(repoDir: string, wtDir: string, branch: str
   const root = path.resolve(repoDir)
   return withRepoRepoolLock(root, async () => {
     const pool = poolFor(root)
-    if (pool.size >= WORKTREE_POOL_MAX_PER_REPO || pool.has(wtDir) || !metadata?.generationId) return false
+    if (pool.size >= WORKTREE_POOL_MAX_PER_REPO || pool.has(worktreePathKey(wtDir)) || !metadata?.generationId) return false
     const detached = await runGit(wtDir, ['switch', '--detach'], 30000)
     if (!detached.ok) return false
     try {
@@ -1060,7 +1079,7 @@ async function releaseWorktreeToPool(repoDir: string, wtDir: string, branch: str
         cleanupReason: 'idle in worktree pool awaiting reuse'
       })
     } catch { return false }
-    pool.add(wtDir)
+    pool.set(worktreePathKey(wtDir), wtDir)
     return true
   })
 }
@@ -1078,12 +1097,12 @@ async function acquirePooledWorktree(
   timeoutMs: number
 ): Promise<WorktreeCreateResult | null> {
   const root = path.resolve(repoDir)
-  const pool = worktreePoolByRepo.get(root)
+  const pool = worktreePoolByRepo.get(worktreePathKey(root))
   if (!pool || !pool.size) return null
-  for (const wtPath of [...pool]) {
+  for (const wtPath of [...pool.values()]) {
     const reused = await withWorktreePathLock(wtPath, async () => {
-      if (!pool.has(wtPath)) return null
-      pool.delete(wtPath)
+      if (!pool.has(worktreePathKey(wtPath))) return null
+      pool.delete(worktreePathKey(wtPath))
       const poolMetadata = readMetadataFile(metadataFile(root, path.basename(wtPath)))
       const generationId = poolMetadata?.generationId
       if (!generationId || await verifyWorktreeGeneration(root, wtPath, generationId)) return null
@@ -1961,7 +1980,7 @@ async function reclaimWorktreeUnlocked(
     )
     if (generationMismatch) return { ok: false, status: 'retained', path: wtDir, reason: generationMismatch }
   }
-  if (metadata?.ownerTaskId === WORKTREE_POOL_OWNER && worktreePoolByRepo.get(path.resolve(repoDir))?.has(path.resolve(wtDir))) {
+  if (metadata?.ownerTaskId === WORKTREE_POOL_OWNER && worktreePoolByRepo.get(worktreePathKey(repoDir))?.has(worktreePathKey(wtDir))) {
     return { ok: false, status: 'retained', path: wtDir, reason: 'worktree is active in the reuse pool' }
   }
   // Legacy worktrees predate the sidecar but use the deterministic managed
@@ -2041,13 +2060,57 @@ export async function setWorktreeManualKeep(wtDir: string, manualKeep = true): P
   return true
 }
 
-/** Rebind metadata after a TaskStore allocates the child task id. */
-export async function setWorktreeOwner(wtDir: string, ownerTaskId: string): Promise<boolean> {
+/** 改绑核验的任务侧证据（全部取自任务登记，绝不拿磁盘现场自证）。 */
+export interface WorktreeOwnerExpectation {
+  /** 任务登记里固化的世代 id——缺失即拒绝核实（同名删树重建后旧残单不得凭磁盘自证翻面） */
+  generationId?: string
+  /** 出生时的磁盘 owner（建单时挂在领队名下）；绑定-翻面之间崩溃的恢复重入按目标 owner 放行 */
+  ownerTaskId?: string
+  /** 出生分支——池化复用会换分支，世代不变，靠它挡「旧任务携原世代认领换branch后的树」 */
+  branch?: string
+}
+
+/**
+ * 磁盘归属核实+改绑（建单门禁翻面前的唯一绑定出口）。核验+写入整体持同一路径锁
+ * （与池化复用/回收的临界区互斥，池化复用给新任务不能插进核验与写入之间）。
+ * 全部条件过才允许改绑：
+ * ① 任务侧独立证据齐备——世代/出生 owner/出生分支三项都取自任务登记；缺任一即
+ *    拒绝核实（世代绝不退回 sidecar 元数据自带值自证：同名删树重建后磁盘是棵
+ *    陌生新树，自证等于替别人认领）；
+ * ② 目录存在——被外力清掉的目录（崩溃竞态/手工删除）一律 false，不认「元数据还在」；
+ * ③ 身份对应——sidecar 元数据的 repoDir/path 与目标路径一致（同名不同位的登记不认），
+ *    且元数据世代与任务证据世代严格相等；
+ * ④ 树处于可绑定状态——未归池（owner 非池标记、状态非 pooled、不在进程内池登记）、
+ *    磁盘 owner 恰为出生 owner（正常建单交接）或已是目标 owner（绑定-翻面之间崩溃
+ *    的恢复重入）；池化复用已把树交给新任务时，旧任务携原世代调用必须 false 且
+ *    新 owner 不被改写；
+ * ⑤ Git 注册在案+分支一致+世代一致——verifyWorktreeGeneration 盘 .git 指针、admin
+ *    目录、Git 注册表，分支以任务证据为准（不用元数据自带分支自证）。
+ * 任一步不满足返回 false（fail-closed）：调用方保持门禁走具名终态，绝不把子单
+ * 派发到不存在/不属于自己的树上。
+ */
+export async function setWorktreeOwner(wtDir: string, ownerTaskId: string, expected: WorktreeOwnerExpectation = {}): Promise<boolean> {
   if (!ownerTaskId.trim()) return false
-  const resolved = await resolveManagedWorktree(wtDir)
-  if (!resolved?.metadata) return false
-  try { updateMetadata(resolved.metadata, { ownerTaskId: ownerTaskId.trim() }) } catch { return false }
-  return true
+  const generationId = expected.generationId?.trim()
+  if (!generationId) return false
+  const expectedOwner = expected.ownerTaskId?.trim()
+  if (!expectedOwner) return false
+  const expectedBranch = expected.branch?.trim()
+  if (!expectedBranch) return false
+  return withWorktreePathLock(wtDir, async () => {
+    if (!fs.existsSync(wtDir)) return false
+    const resolved = await resolveManagedWorktree(wtDir)
+    if (!resolved?.metadata) return false
+    const { repoDir, metadata } = resolved
+    if (!sameWorktreePath(metadata.repoDir, repoDir) || !sameWorktreePath(metadata.path, wtDir)) return false
+    if (!metadata.generationId || metadata.generationId !== generationId) return false
+    if (metadata.ownerTaskId === WORKTREE_POOL_OWNER || metadata.cleanupStatus === 'pooled') return false
+    if (worktreePoolByRepo.get(worktreePathKey(repoDir))?.has(worktreePathKey(wtDir))) return false
+    if (metadata.ownerTaskId !== expectedOwner && metadata.ownerTaskId !== ownerTaskId.trim()) return false
+    if (await verifyWorktreeGeneration(repoDir, wtDir, generationId, expectedBranch)) return false
+    try { updateMetadata(metadata, { ownerTaskId: ownerTaskId.trim() }) } catch { return false }
+    return true
+  })
 }
 
 /** Update cleanup provenance when a secondary branch operation fails. */
@@ -2150,7 +2213,7 @@ export async function pruneWorktrees(
     const crashLeftover = name.startsWith('.agentdeck-merge-')
     const owner = metadata.ownerTaskId
     const pooledEntry = metadata?.ownerTaskId === WORKTREE_POOL_OWNER
-    if (pooledEntry && worktreePoolByRepo.get(path.resolve(root))?.has(path.resolve(wtPath))) {
+    if (pooledEntry && worktreePoolByRepo.get(worktreePathKey(root))?.has(worktreePathKey(wtPath))) {
       result.retained.push({ name, reason: 'worktree is active in the reuse pool' })
       continue
     }
