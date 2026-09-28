@@ -1,6 +1,14 @@
 // 派单被拒回灌冒烟：领队派给名单外的目标（不存在的 / 队长）→ 拒单原因回灌 →
 // 场景A 改派成功交付；场景B 回合末解析被拒后自行收尾；场景C 顽固重派时有界终止；
 // 场景D 混合轮（好单坏单同回合）→ 拒单随报告捎带送达，不等「零新单」兜底。
+// 场景K 字面标记契约（外层正文内嵌完整标记：内嵌单按字面独立受理 + 外层残缺具名拒单，
+// 文案为保守事实性描述、不断言内嵌单已执行）；
+// 场景L bail 逐单对账（X 流式被拒 + Y 只在终态文本出现 → Y 同样具名拒单）；
+// 场景L2 bail 拒单回灌回复再出新标记同样逐单对账；
+// 场景M 预算收尾护栏（收尾回复流式新标记不建单走具名拒单；复述已接单标记零误拒；
+// 残缺开标记不绕过；收编单 cancelled 保留终局回执）；
+// 场景J3W/J3B 归属交接核实（带 worktree 的落盘后抛错恢复全链路 / 绑定失败具名失败留痕）；
+// 场景J3C await 期间并发领取不双跑不漏跑。
 import { build } from 'esbuild'
 import { pathToFileURL } from 'node:url'
 import path from 'node:path'
@@ -78,11 +86,11 @@ function makeWorkerBackend(id, onStart) {
     }
   }
 }
-function harness(team, leaderBackend, onWorkerStart) {
+function harness(team, leaderBackend, onWorkerStart, optsExtra = {}) {
   const tmpStore = fs.mkdtempSync(path.join(os.tmpdir(), 'sdr-store-'))
   const store = new TaskStore(tmpStore)
   const backends = new Map(team.map((a) => [a.backend, a.backend === 'zcode' ? leaderBackend : makeWorkerBackend(a.backend, onWorkerStart)]))
-  const runner = new TaskRunner(store, backends, () => ({ concurrency: 1, mode: 'yolo', notify: false, workerConcurrency: 3 }))
+  const runner = new TaskRunner(store, backends, () => ({ concurrency: 1, mode: 'yolo', notify: false, workerConcurrency: 3, ...optsExtra }))
   runner.attachTeam(() => team)
   return { store, runner }
 }
@@ -584,6 +592,520 @@ console.log('\n✅ 派单被拒回灌冒烟全绿')
     const jReceipts = result.delegateRejections ?? []
     assert(jReceipts.length >= 1 && jReceipts.every((entry) => entry.deliveredAt), 'J2 拒单回执送达（不残留未送达回执）')
   }
+  // J3：创建器落盘子单后抛错（J1 只测了创建前抛错）——撤键重试命中已落盘但未入队的
+  // 子单时，spawnDelegateChild 的去重键短路必须核实并恢复其调度状态（重新入队），
+  // 不得让委派循环干等一个永不入队的 queued 子单。
+  {
+    const leader = makeLeaderBackend({
+      step(round, { events, content }) {
+        if (round === 0) emitIncidentTurn(events)
+        else if (content.includes('队员执行结果汇报')) emitTurn(events, '收到结果，最终总结：A 已完成。')
+        else emitTurn(events, '继续。')
+      }
+    })
+    const { store, runner } = harness(team, leader)
+    const realCreate = store.create.bind(store)
+    let injected = 0
+    runner.attachTaskCreator((input) => {
+      if (injected++ === 0) {
+        realCreate(input) // 落盘：子单已存在（queued），但入队永远不会发生
+        throw new Error('注入的落盘后异常')
+      }
+      return realCreate(input)
+    })
+    const task = store.create({ title: '落盘后抛错恢复', prompt: '处理 A', backend: 'zcode', agentId: 'L1' })
+    runner.enqueue(task)
+    const result = await settle(store, task.id, 30000)
+    const children = store.list().filter((child) => child.parentTaskId === task.id)
+
+    assert(result.status === 'done', `场景J3 领队 done（${result.status}${result.error ? ' ' + result.error : ''}）`)
+    assert(children.length === 1 && children[0].status === 'done', `J3 落盘后抛错的子单被恢复调度并跑到终态、不悬空（${children.map((c) => c.status).join(',') || '无'}）`)
+    assert(leader.sent.some((content) => content.includes('队员 Alpha 的结果')), 'J3 恢复的单照常回灌结果（有回执）')
+    assert(!leader.sent.some((content) => content.includes('没有被执行')), 'J3 恢复成功不产生误导性拒单回执')
+    assert(store.readEvents(task.id).some((event) => (event.text ?? '').includes('恢复调度')), 'J3 恢复动作在任务时间线留痕')
+  }
+}
+
+// ================= 场景 K：字面标记契约——外层正文内嵌完整派单标记 =================
+// 契约：内嵌的完整标记按字面独立解析受理；外层标记按残缺具名拒单，文案为保守
+// 事实性描述（残缺未建单 + 其后完整标记按字面独立受理），不断言内嵌单已执行。
+{
+  const team = [
+    { id: 'L1', name: 'Boss', backend: 'zcode', role: 'leader', systemPrompt: '', subordinates: ['W1', 'W2'] },
+    { id: 'W1', name: 'Alpha', backend: 'alpha', role: 'worker', systemPrompt: '' },
+    { id: 'W2', name: 'Beta', backend: 'beta', role: 'worker', systemPrompt: '' }
+  ]
+  const nested = '<delegate to="Alpha">外壳任务 <delegate to="Beta">内嵌任务</delegate> 外壳收尾</delegate>'
+  const leader = makeLeaderBackend({
+    step(round, { events, content }) {
+      if (round === 0) {
+        emitTurn(events, `分工如下：${nested}`, [nested])
+      } else if (content.includes('队员执行结果汇报')) {
+        emitTurn(events, '收到结果，最终总结：内嵌任务已完成。')
+      } else if (content.includes('没有被执行')) {
+        emitTurn(events, '外壳是笔误，不重派。最终总结：内嵌任务已完成。')
+      } else {
+        emitTurn(events, '继续。')
+      }
+    }
+  })
+  const { store, runner } = harness(team, leader)
+  const task = store.create({ title: '内嵌标记字面契约', prompt: '处理', backend: 'zcode', agentId: 'L1' })
+  runner.enqueue(task)
+  const result = await settle(store, task.id, 30000)
+  const children = store.list().filter((child) => child.parentTaskId === task.id)
+
+  assert(result.status === 'done', `场景K 领队 done（${result.status}${result.error ? ' ' + result.error : ''}）`)
+  assert(children.length === 1 && children[0].backend === 'beta' && children[0].status === 'done', `内嵌完整标记按字面独立受理（Beta 照常执行），外层未建单（${children.map((c) => c.backend).join(',') || '无'}）`)
+  assert(leader.sent.some((content) => content.includes('队员 Beta 的结果')), '内嵌单的结果照常回灌领队')
+  const kReceipts = result.delegateRejections ?? []
+  assert(kReceipts.length === 1 && kReceipts[0].deliveredAt, '外层残缺拒单恰好一条且送达')
+  assert(kReceipts[0].reason.includes('被其后完整派单标记截断') && kReceipts[0].reason.includes('本单未建单') && kReceipts[0].reason.includes('按字面独立受理'), '外层拒单文案为事实性描述（残缺未建单 + 其后完整标记按字面独立受理）')
+  assert(!kReceipts[0].reason.includes('已按字面执行') && !kReceipts[0].reason.includes('内嵌单已'), '外层拒单文案不再断言「内嵌单已执行」')
+  const kNotice = leader.sent.find((content) => content.includes('没有被执行'))
+  assert(!!kNotice && kNotice.includes('to="Alpha"') && kNotice.includes('按字面独立受理'), '事实性文案随报告捎带送达领队')
+}
+
+// ================= 场景 L：bail 逐单对账——X 流式被拒 + Y 只在终态文本出现 =================
+// 契约：护栏早退时对本回合文本里每个派单标记要么已有子单、要么具名拒单；
+// 拒单队列非空（X 已在队列）绝不代表整批已处理——Y 也必须具名拒单或建单。
+{
+  const team = [
+    { id: 'L1', name: 'Boss', backend: 'zcode', role: 'leader', systemPrompt: '', subordinates: ['W1'] },
+    { id: 'W1', name: 'Alpha', backend: 'alpha', role: 'worker', systemPrompt: '' }
+  ]
+  const streamOnly = '<delegate to="Ghost">做 X</delegate>'
+  const finalText = '已派两单。<delegate to="Ghost">做 X</delegate><delegate to="Alpha">做 Y</delegate>'
+  const leader = makeLeaderBackend({
+    step(round, { events, content }) {
+      if (round === 0) {
+        // X 走流式（嗅探即拒）；Y 只进终态文本，流式通道看不见它
+        emitTurn(events, finalText, [streamOnly])
+      } else if (content.includes('派单拒绝')) {
+        emitTurn(events, '确认预算已尽，不再派发。最终总结：到此为止。')
+      } else {
+        emitTurn(events, '继续。')
+      }
+    }
+  })
+  const { store, runner } = harness(team, leader, null, { delegateMaxTotalRounds: 0 })
+  const task = store.create({ title: '护栏逐单对账', prompt: '处理', backend: 'zcode', agentId: 'L1' })
+  runner.enqueue(task)
+  const result = await settle(store, task.id, 30000)
+  const children = store.list().filter((child) => child.parentTaskId === task.id)
+
+  assert(result.status === 'done', `场景L 领队 done（${result.status}${result.error ? ' ' + result.error : ''}）`)
+  assert(children.length === 0, '预算护栏触发：Y 没有建单')
+  const bailFeedback = leader.sent.find((content) => content.includes('派单拒绝'))
+  assert(!!bailFeedback, '护栏拒单回灌给领队')
+  assert(bailFeedback.includes('to="Ghost"'), 'X（流式被拒）的拒因在回灌里')
+  assert(bailFeedback.includes('to="Alpha"'), 'Y（只在终态文本出现）同样具名拒单——不得以拒单队列非空代表整批已处理')
+  const lReceipts = result.delegateRejections ?? []
+  assert(lReceipts.length === 2 && lReceipts.every((entry) => entry.deliveredAt), `X+Y 两条拒单均逐单送达（${lReceipts.length}）`)
+}
+
+// ================= 场景 L2：bail 拒单回灌回复再出新标记 → 同样逐单对账 =================
+// 契约：拒单回灌后领队若再复述已拒单/已接单标记 → 零误拒零重复；再派新标记（含流式）
+// → 不建单（护栏早退即关闭流式通道），具名拒单留痕——绝不留孤儿或无痕。
+{
+  const team = [
+    { id: 'L1', name: 'Boss', backend: 'zcode', role: 'leader', systemPrompt: '', subordinates: ['W1'] },
+    { id: 'W1', name: 'Alpha', backend: 'alpha', role: 'worker', systemPrompt: '' }
+  ]
+  const streamOnly = '<delegate to="Ghost">做 X</delegate>'
+  const finalText = '已派两单。<delegate to="Ghost">做 X</delegate><delegate to="Alpha">做 Y</delegate>'
+  const leader = makeLeaderBackend({
+    step(round, { events, content }) {
+      if (round === 0) {
+        emitTurn(events, finalText, [streamOnly])
+      } else if (content.includes('派单拒绝')) {
+        // 回灌回复：复述已拒的 X + 再派一个新标记（预算已尽，不得建单）
+        const reply = '确认预算已尽。复述在途：<delegate to="Ghost">做 X</delegate>\n补充：<delegate to="Ghost2">做 Z</delegate>'
+        emitTurn(events, reply, ['<delegate to="Ghost2">做 Z</delegate>'])
+      } else {
+        emitTurn(events, '继续。')
+      }
+    }
+  })
+  const { store, runner } = harness(team, leader, null, { delegateMaxTotalRounds: 0 })
+  const task = store.create({ title: 'bail 回复再对账', prompt: '处理', backend: 'zcode', agentId: 'L1' })
+  runner.enqueue(task)
+  const result = await settle(store, task.id, 30000)
+  const children = store.list().filter((child) => child.parentTaskId === task.id)
+
+  assert(result.status === 'done', `场景L2 领队 done（${result.status}${result.error ? ' ' + result.error : ''}）`)
+  assert(children.length === 0, 'bail 回复里的新标记没有建单（无孤儿）')
+  const receipts = result.delegateRejections ?? []
+  assert(receipts.some((entry) => entry.key === 'Ghost\n做 X'), '复述的已拒单 X 没有重复记录（按 key 去重）')
+  assert(receipts.some((entry) => entry.reason.includes('to="Ghost2"') && entry.reason.includes('全链委派轮数预算已耗尽')), 'bail 回复再出的新标记 Ghost2 具名拒单')
+  assert(receipts.length === 3, `X/Y/Ghost2 恰三条回执，无多余（${receipts.length}）`)
+  assert(store.readEvents(task.id).some((event) => (event.text ?? '').includes('拒单回灌回复仍出现')), 'bail 回复新标记在时间线留痕')
+}
+
+// ================= 场景 M：预算收尾护栏——收尾回合关闭流式建单通道 =================
+// 契约：最后预算回合的报告回灌流式提前建单 → 循环退出前收编并回灌（预算收尾轮）；
+// 不守提示的领队在收尾回复里流式输出新标记 → 不建单（无孤儿子单）、具名拒单；
+// 复述已接单标记 → 按已接单键对账零误拒；残缺开标记 → 具名拒单不绕过；
+// 收编回灌附审核协议，review 结论照常生效。
+{
+  const team = [
+    { id: 'L1', name: 'Boss', backend: 'zcode', role: 'leader', systemPrompt: '', subordinates: ['W1', 'W2'] },
+    { id: 'W1', name: 'Alpha', backend: 'alpha', role: 'worker', systemPrompt: '' },
+    { id: 'W2', name: 'Beta', backend: 'beta', role: 'worker', systemPrompt: '' }
+  ]
+  const leader = makeLeaderBackend({
+    step(n, { events, content }) {
+      if (n === 0) {
+        emitTurn(events, '先派 A。', ['<delegate to="Alpha">做 A</delegate>'])
+      } else if (content.includes('队员执行结果汇报') && !content.includes('预算收尾')) {
+        // 普通报告轮回复：流式偷派 B（它会在循环顶部被预算收尾收编）
+        emitTurn(events, '继续推进。', ['<delegate to="Beta">做 B</delegate>'])
+      } else if (content.includes('预算收尾')) {
+        // 不守提示的收尾回复：流式偷派新单 C（真实适配器会把流式文本聚进 delegationText，
+        // 这里两路都给）+ 复述已接单 B + 残缺开标记 + 审核 #2
+        events.onEvent({ ts: Date.now(), kind: 'text', text: '<delegate to="Alpha">偷跑新活 C</delegate>' })
+        const text = '收到收编结果。复述在途单：<delegate to="Beta">做 B</delegate>\n残留示例：<delegate to="GhostB">缺闭合示例\n<review of="#2" verdict="pass" note="ok"/>\n最终总结：A、B 均完成。'
+        events.onEvent({ ts: Date.now(), kind: 'final', text })
+        events.onTurnEnd({ response: text, delegationText: '<delegate to="Alpha">偷跑新活 C</delegate>', ok: true })
+      } else {
+        emitTurn(events, '继续。')
+      }
+    }
+  })
+  const { store, runner } = harness(team, leader, null, { delegateMaxRounds: 1 })
+  const task = store.create({ title: '预算收尾护栏', prompt: '处理', backend: 'zcode', agentId: 'L1' })
+  runner.enqueue(task)
+  const result = await settle(store, task.id, 30000)
+  const children = store.list().filter((child) => child.parentTaskId === task.id)
+
+  assert(result.status === 'done', `场景M 领队 done（${result.status}${result.error ? ' ' + result.error : ''}）`)
+  assert(children.length === 2, `收尾回复流式偷派 C 未建单，全程只有收编的 A、B 两单（${children.length}）`)
+  assert(children.every((child) => child.status === 'done'), 'A、B 都跑到终态')
+  const receipts = result.delegateRejections ?? []
+  assert(receipts.some((entry) => entry.reason.includes('to="Alpha"') && entry.reason.includes('偷跑新活 C') && entry.reason.includes('委派轮数预算已耗尽')), '收尾回复流式偷派的新单 C 具名拒单（预算已尽未建单）')
+  assert(receipts.some((entry) => entry.reason.includes('to="GhostB"') && entry.reason.includes('标记残缺') && entry.reason.includes('委派轮数预算已耗尽')), '收尾回复的残缺开标记同样具名拒单（不绕过出口扫尾）')
+  assert(!receipts.some((entry) => entry.reason.includes('to="Beta"')), '复述已接单的 B 不误发拒单（按已接单键对账）')
+  assert(receipts.length === 2, `拒单恰两条：偷跑 C + 残缺 GhostB（${receipts.length}）`)
+  const closing = leader.sent.find((content) => content.includes('预算收尾'))
+  assert(!!closing && closing.includes('审核结论'), '收编回灌附审核协议（与普通轮一致）')
+  assert(store.readEvents(task.id).some((event) => (event.text ?? '').includes('单 #2 审核通过')), '收编单的 review 结论照常生效')
+  assert(store.readEvents(task.id).some((event) => (event.text ?? '').includes('委派结束仍有 2 条派单被拒')), '收尾后新拒单走遗留通道留痕')
+}
+
+// ================= 场景 M3：收编单变 cancelled 保留终局回执 =================
+// 契约：预算收尾等待期收编单被取消 → 状态行照常进收尾报告，不从回灌与 allChildren 静默消失。
+{
+  const team = [
+    { id: 'L1', name: 'Boss', backend: 'zcode', role: 'leader', systemPrompt: '', subordinates: ['W1', 'W2'] },
+    { id: 'W1', name: 'Alpha', backend: 'alpha', role: 'worker', systemPrompt: '' },
+    { id: 'W2', name: 'Beta', backend: 'beta', role: 'worker', systemPrompt: '' }
+  ]
+  const m3Leader = makeLeaderBackend({
+    step(n, { events, content }) {
+      if (n === 0) {
+        emitTurn(events, '先派 A。', ['<delegate to="Alpha">做 A</delegate>'])
+      } else if (content.includes('队员执行结果汇报') && !content.includes('预算收尾')) {
+        emitTurn(events, '继续推进。', ['<delegate to="Beta">做 B</delegate>'])
+      } else if (content.includes('预算收尾')) {
+        emitTurn(events, '最终总结：A 完成，B 被取消。')
+      } else {
+        emitTurn(events, '继续。')
+      }
+    }
+  })
+  const backends = new Map([
+    ['zcode', m3Leader],
+    ['alpha', makeWorkerBackend('alpha')],
+    ['beta', {
+      id: 'beta', label: 'beta',
+      async probe() { return { ok: true, detail: '' } },
+      async start() {
+        // 挂死不终态：等测试侧主动取消，制造「收编单变 cancelled」
+        return { sessionId: 'sess_hang', async send() {}, async stop() {}, async close() {} }
+      }
+    }]
+  ])
+  const tmpStore = fs.mkdtempSync(path.join(os.tmpdir(), 'sdr-m3-'))
+  const store = new TaskStore(tmpStore)
+  const runner = new TaskRunner(store, backends, () => ({ concurrency: 1, mode: 'yolo', notify: false, delegateMaxRounds: 1, workerConcurrency: 3 }))
+  runner.attachTeam(() => team)
+  const task = store.create({ title: '收编单取消回执', prompt: '处理', backend: 'zcode', agentId: 'L1' })
+  runner.enqueue(task)
+  // 等 Beta 子单出现并取消它（预算收尾的收编等待期）
+  const t0 = Date.now()
+  let beta
+  while (Date.now() - t0 < 15000) {
+    beta = store.list().find((t) => t.parentTaskId === task.id && t.backend === 'beta')
+    if (beta && beta.status === 'running') break
+    await sleep(50)
+  }
+  assert(!!beta, 'M3 前置：流式偷派的 Beta 已建单')
+  await runner.cancel(beta.id)
+  const result = await settle(store, task.id, 30000)
+
+  assert(result.status === 'done', `场景M3 领队 done（${result.status}${result.error ? ' ' + result.error : ''}）`)
+  assert(store.get(beta.id)?.status === 'cancelled', 'Beta 终态为 cancelled')
+  const closing = m3Leader.sent.find((content) => content.includes('预算收尾'))
+  assert(!!closing && closing.includes('cancelled') && closing.includes('Beta'), '收编单变 cancelled 的终局回执照常进收尾报告（状态行不消失）')
+  assert(!!closing && closing.includes('单号 #2'), 'cancelled 收编单占报告单号 #2（allChildren 不静默丢失）')
+}
+
+// ================= 场景 J3W：带 worktree 的落盘后抛错 → 恢复成功全链路 =================
+// 契约：撤键重试命中已落盘未入队的子单时，恢复路径核实归属交接（setWorktreeOwner →
+// updateIf → 入队）——全链路成功后子单照常执行、元数据绑定到子单、结果照常回灌。
+{
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'sdr-j3w-'))
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim()
+  git('init', '-q', '-b', 'main')
+  git('config', 'user.email', 'smoke@example.invalid')
+  git('config', 'user.name', 'Smoke')
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'a v1\n')
+  git('add', 'a.txt')
+  git('commit', '-qm', 'init')
+  const team = [
+    { id: 'L1', name: 'Boss', backend: 'zcode', role: 'leader', systemPrompt: '', subordinates: ['W1'] },
+    { id: 'W1', name: 'Alpha', backend: 'alpha', role: 'worker', systemPrompt: '' }
+  ]
+  const leader = makeLeaderBackend({
+    step(round, { events, content }) {
+      if (round === 0) {
+        const tag = '<delegate to="Alpha">把 a.txt 改成 v2</delegate>'
+        events.onEvent({ ts: Date.now(), kind: 'text', text: tag })
+        events.onEvent({ ts: Date.now(), kind: 'final', text: '派单。' })
+        // delegationText 聚合流式文本（真实适配器契约）：回合末解析靠它重派被撤键的单
+        events.onTurnEnd({ response: '派单。', delegationText: tag, ok: true })
+      } else if (content.includes('队员执行结果汇报')) {
+        emitTurn(events, '收到结果，最终总结：a.txt 已升级。')
+      } else {
+        emitTurn(events, '继续。')
+      }
+    }
+  })
+  const tmpStore = fs.mkdtempSync(path.join(os.tmpdir(), 'sdr-j3w-store-'))
+  const store = new TaskStore(tmpStore)
+  const backends = new Map([[ 'zcode', leader ], [ 'alpha', makeWorkerBackend('alpha') ]])
+  const runner = new TaskRunner(store, backends, () => ({ concurrency: 1, mode: 'yolo', notify: false, workerConcurrency: 3 }))
+  runner.attachTeam(() => team)
+  const realCreate = store.create.bind(store)
+  let injected = 0
+  runner.attachTaskCreator((input) => {
+    if (injected++ === 0) {
+      realCreate(input) // 落盘：子单（含 worktree 元数据）已存在，但归属未交接、入队永远不会发生
+      throw new Error('注入的落盘后异常')
+    }
+    return realCreate(input)
+  })
+  const task = store.create({ title: '带树落盘后抛错恢复', prompt: '处理 A', workdir: repo, backend: 'zcode', agentId: 'L1' })
+  runner.enqueue(task)
+  const result = await settle(store, task.id, 30000)
+  const children = store.list().filter((child) => child.parentTaskId === task.id)
+
+  assert(result.status === 'done', `场景J3W 领队 done（${result.status}${result.error ? ' ' + result.error : ''}）`)
+  assert(children.length === 1 && children[0].status === 'done' && !!children[0].worktree, `J3W 带树子单被恢复调度并跑到终态（${children.map((c) => c.status).join(',') || '无'}）`)
+  assert(children[0].worktree.ownerTaskId === children[0].id, 'J3W 恢复路径完成归属交接：worktree 元数据绑定到子单')
+  assert(store.readEvents(task.id).some((event) => (event.text ?? '').includes('恢复调度')), 'J3W 恢复动作在时间线留痕')
+  assert(leader.sent.some((content) => content.includes('队员 Alpha 的结果')), 'J3W 恢复的单照常回灌结果')
+  assert(!leader.sent.some((content) => content.includes('没有被执行')), 'J3W 恢复成功不产生误导性拒单回执')
+  fs.rmSync(repo, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
+}
+
+// ================= 场景 J3B：恢复路径归属绑定失败 → 具名失败，非成功留痕 =================
+// 契约：setWorktreeOwner 返回 false（目录/元数据不可达）即失败——不标元数据已绑定、
+// 不记「恢复调度」成功；子单撤销为具名终态（不留 queued 僵尸），具名拒单回灌领队。
+{
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'sdr-j3b-'))
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim()
+  git('init', '-q', '-b', 'main')
+  git('config', 'user.email', 'smoke@example.invalid')
+  git('config', 'user.name', 'Smoke')
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'a v1\n')
+  git('add', 'a.txt')
+  git('commit', '-qm', 'init')
+  const team = [
+    { id: 'L1', name: 'Boss', backend: 'zcode', role: 'leader', systemPrompt: '', subordinates: ['W1'] },
+    { id: 'W1', name: 'Alpha', backend: 'alpha', role: 'worker', systemPrompt: '' }
+  ]
+  let workerStarts = 0
+  const leader = makeLeaderBackend({
+    step(round, { events, content }) {
+      if (round === 0) {
+        const tag = '<delegate to="Alpha">把 a.txt 改成 v2</delegate>'
+        events.onEvent({ ts: Date.now(), kind: 'text', text: tag })
+        events.onEvent({ ts: Date.now(), kind: 'final', text: '派单。' })
+        events.onTurnEnd({ response: '派单。', delegationText: tag, ok: true })
+      } else if (content.includes('没有被执行')) {
+        emitTurn(events, '确认绑定失败，最终总结：本单未执行。')
+      } else {
+        emitTurn(events, '继续。')
+      }
+    }
+  })
+  const tmpStore = fs.mkdtempSync(path.join(os.tmpdir(), 'sdr-j3b-store-'))
+  const store = new TaskStore(tmpStore)
+  const alphaBackend = {
+    id: 'alpha', label: 'alpha',
+    async probe() { return { ok: true, detail: '' } },
+    async start() { workerStarts++; return { sessionId: 'sess_w', async send() {}, async stop() {}, async close() {} } }
+  }
+  const backends = new Map([[ 'zcode', leader ], [ 'alpha', alphaBackend ]])
+  const runner = new TaskRunner(store, backends, () => ({ concurrency: 1, mode: 'yolo', notify: false, workerConcurrency: 3 }))
+  runner.attachTeam(() => team)
+  const realCreate = store.create.bind(store)
+  let injected = 0
+  runner.attachTaskCreator((input) => {
+    if (injected++ === 0) {
+      const child = realCreate(input)
+      // 落盘后立刻拆掉归属元数据文件（worktree 目录与元数据分开存放）：
+      // 恢复路径的 setWorktreeOwner 将返回 false（不抛错）
+      const metadataJson = path.join(repo, '.agentdeck-worktrees', '.metadata', `${path.basename(input.worktree.path)}.json`)
+      fs.rmSync(metadataJson, { force: true })
+      throw new Error('注入的落盘后异常')
+    }
+    return realCreate(input)
+  })
+  const task = store.create({ title: '绑定失败具名留痕', prompt: '处理 A', workdir: repo, backend: 'zcode', agentId: 'L1' })
+  runner.enqueue(task)
+  const result = await settle(store, task.id, 30000)
+  const children = store.list().filter((child) => child.parentTaskId === task.id)
+
+  assert(result.status === 'done', `场景J3B 领队 done（${result.status}${result.error ? ' ' + result.error : ''}）`)
+  assert(children.length === 1 && children[0].status === 'cancelled', `J3B 绑定失败的子单撤销为具名终态，不滞留 queued（${children.map((c) => c.status).join(',') || '无'}）`)
+  assert(children[0].worktree.ownerTaskId !== children[0].id, 'J3B 绑定失败不把元数据标成已绑定')
+  const events = store.readEvents(task.id).map((event) => event.text ?? '')
+  assert(events.some((text) => text.includes('恢复调度失败')), 'J3B 恢复失败在时间线具名留痕')
+  assert(!events.some((text) => text.includes('重试命中已落盘未入队')), 'J3B 绑定失败不记「恢复调度」成功')
+  assert(leader.sent.some((content) => content.includes('没有被执行') && content.includes('归属绑定失败')), 'J3B 绑定失败以具名拒单回灌领队')
+  assert(workerStarts === 0, 'J3B 绑定失败的子单从未被派发执行')
+  fs.rmSync(repo, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
+}
+
+// ================= 场景 J3C：恢复 await 期间并发领取 → 不双跑不漏跑 =================
+// 契约：两个并发恢复命中同一已落盘未入队子单——绑定/登记/入队三步核实后只派发一次，
+// 子单跑到终态（不漏跑），worker 恰好启动一次（不双跑），两路返回同一子单。
+{
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'sdr-j3c-'))
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim()
+  git('init', '-q', '-b', 'main')
+  git('config', 'user.email', 'smoke@example.invalid')
+  git('config', 'user.name', 'Smoke')
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'a v1\n')
+  git('add', 'a.txt')
+  git('commit', '-qm', 'init')
+  const team = [
+    { id: 'L1', name: 'Boss', backend: 'zcode', role: 'leader', systemPrompt: '', subordinates: ['W1'] },
+    { id: 'W1', name: 'Alpha', backend: 'alpha', role: 'worker', systemPrompt: '' }
+  ]
+  let workerStarts = 0
+  const alphaBackend = {
+    id: 'alpha', label: 'alpha',
+    async probe() { return { ok: true, detail: '' } },
+    async start({ events }) {
+      workerStarts++
+      setTimeout(() => {
+        events.onEvent({ ts: Date.now(), kind: 'final', text: 'done alpha' })
+        events.onTurnEnd({ response: 'done alpha', ok: true })
+      }, 30)
+      return { sessionId: 'sess_w', async send() {}, async stop() {}, async close() {} }
+    }
+  }
+  const tmpStore = fs.mkdtempSync(path.join(os.tmpdir(), 'sdr-j3c-store-'))
+  const store = new TaskStore(tmpStore)
+  const backends = new Map([[ 'alpha', alphaBackend ]])
+  const runner = new TaskRunner(store, backends, () => ({ concurrency: 1, mode: 'yolo', notify: false, workerConcurrency: 3 }))
+  runner.attachTeam(() => team)
+  const parent = store.create({ title: '并发领取', prompt: '处理 A', workdir: repo, backend: 'zcode', agentId: 'L1' })
+  store.update(parent.id, { status: 'done', runId: 'run_j3c', endedAt: Date.now() })
+  const call = { to: 'Alpha', prompt: '并发领取检查' }
+  // 先制造已落盘未入队的孤儿子单（落盘后抛错，真实 worktree 已建、归属未交接）
+  const realCreate = store.create.bind(store)
+  let injected = 0
+  runner.attachTaskCreator((input) => {
+    if (injected++ === 0) {
+      realCreate(input)
+      throw new Error('注入的落盘后异常')
+    }
+    return realCreate(input)
+  })
+  try { await runner.spawnDelegateChild(parent.id, call, 'run_j3c') } catch { /* 预期的落盘后异常 */ }
+  const orphans = store.list().filter((t) => t.parentTaskId === parent.id)
+  assert(orphans.length === 1 && orphans[0].status === 'queued', 'J3C 前置：孤儿子单已落盘且未入队')
+  // 两路并发恢复同一子单
+  const [a, b] = await Promise.all([
+    runner.spawnDelegateChild(parent.id, call, 'run_j3c'),
+    runner.spawnDelegateChild(parent.id, call, 'run_j3c')
+  ])
+  assert(!!a && !!b && a.id === b.id, '并发恢复两路返回同一子单')
+  const children = store.list().filter((t) => t.parentTaskId === parent.id)
+  assert(children.length === 1, `并发恢复没有重建第二单（${children.length}）`)
+  await settle(store, a.id)
+  assert(store.get(a.id)?.status === 'done', '并发恢复的子单跑到终态（不漏跑）')
+  assert(workerStarts === 1, `worker 恰好启动一次（不双跑：${workerStarts}）`)
+  assert(store.get(a.id)?.worktree?.ownerTaskId === a.id, '并发恢复后归属绑定正确')
+  fs.rmSync(repo, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
+}
+
+
+// ================= 场景 J3B2：原建单路径归属绑定失败 → fail-closed 具名拒单 =================
+// 契约（与恢复路径同一修法）：创建后 setWorktreeOwner 返回 false 即失败——不标元数据
+// 已绑定、不入队，撤销刚建的子单、尽力回收现场、具名拒单回灌领队。
+{
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'sdr-j3b2-'))
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim()
+  git('init', '-q', '-b', 'main')
+  git('config', 'user.email', 'smoke@example.invalid')
+  git('config', 'user.name', 'Smoke')
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'a v1\n')
+  git('add', 'a.txt')
+  git('commit', '-qm', 'init')
+  const team = [
+    { id: 'L1', name: 'Boss', backend: 'zcode', role: 'leader', systemPrompt: '', subordinates: ['W1'] },
+    { id: 'W1', name: 'Alpha', backend: 'alpha', role: 'worker', systemPrompt: '' }
+  ]
+  let workerStarts = 0
+  const leader = makeLeaderBackend({
+    step(round, { events, content }) {
+      if (round === 0) {
+        const tag = '<delegate to="Alpha">把 a.txt 改成 v2</delegate>'
+        events.onEvent({ ts: Date.now(), kind: 'text', text: tag })
+        events.onEvent({ ts: Date.now(), kind: 'final', text: '派单。' })
+        events.onTurnEnd({ response: '派单。', delegationText: tag, ok: true })
+      } else if (content.includes('没有被执行')) {
+        emitTurn(events, '确认绑定失败，最终总结：本单未执行。')
+      } else {
+        emitTurn(events, '继续。')
+      }
+    }
+  })
+  const tmpStore = fs.mkdtempSync(path.join(os.tmpdir(), 'sdr-j3b2-store-'))
+  const store = new TaskStore(tmpStore)
+  const alphaBackend = {
+    id: 'alpha', label: 'alpha',
+    async probe() { return { ok: true, detail: '' } },
+    async start() { workerStarts++; return { sessionId: 'sess_w', async send() {}, async stop() {}, async close() {} } }
+  }
+  const backends = new Map([[ 'zcode', leader ], [ 'alpha', alphaBackend ]])
+  const runner = new TaskRunner(store, backends, () => ({ concurrency: 1, mode: 'yolo', notify: false, workerConcurrency: 3 }))
+  runner.attachTeam(() => team)
+  const realCreate = store.create.bind(store)
+  runner.attachTaskCreator((input) => {
+    const child = realCreate(input)
+    // 创建后、绑定前拆掉归属元数据文件：原建单路径的 setWorktreeOwner 将返回 false
+    const metadataJson = path.join(repo, '.agentdeck-worktrees', '.metadata', `${path.basename(input.worktree.path)}.json`)
+    fs.rmSync(metadataJson, { force: true })
+    return child
+  })
+  const task = store.create({ title: '原路径绑定失败', prompt: '处理 A', workdir: repo, backend: 'zcode', agentId: 'L1' })
+  runner.enqueue(task)
+  const result = await settle(store, task.id, 30000)
+  const children = store.list().filter((child) => child.parentTaskId === task.id)
+
+  assert(result.status === 'done', `场景J3B2 领队 done（${result.status}${result.error ? ' ' + result.error : ''}）`)
+  assert(children.length === 1 && children[0].status === 'cancelled', `J3B2 绑定失败的子单撤销为具名终态（${children.map((c) => c.status).join(',') || '无'}）`)
+  assert(children[0].worktree.ownerTaskId !== children[0].id, 'J3B2 绑定失败不把元数据标成已绑定')
+  assert(leader.sent.some((content) => content.includes('没有被执行') && content.includes('归属绑定失败')), 'J3B2 绑定失败以具名拒单回灌领队')
+  assert(workerStarts === 0, 'J3B2 绑定失败的子单从未被派发执行')
+  assert(store.readEvents(task.id).some((event) => (event.text ?? '').includes('拒绝派给')), 'J3B2 拒绝动作在时间线留痕')
+  fs.rmSync(repo, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
 }
 
 process.exit(0)
