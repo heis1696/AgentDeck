@@ -1,15 +1,15 @@
 // 队列重启恢复冒烟：硬切(<continue>)后继任务以 queued 落库，排队启动依赖事件
 // （enqueue / 上一跑落幕触发 pump）。应用在窗口期重启后事件源全消失，任务永远滞留
 // 排队——且非 parked 的排队任务在 UI 没有任何启动入口。本冒烟复现缺口并验证
-// 启动对账恢复：僵尸运行按既有镜像断言，queued/holding 收场直接调用
-// src/main/handoff.ts 的真实 reconcileStartupTasks（与 src/main/index.ts 同一实现，杜绝镜像漂移）。
+// 启动对账恢复：running 崩溃/queued/holding 全部夹具经**同一次**真实
+// reconcileStartupTasks 单次调用断言（与 src/main/index.ts 同一实现，无镜像代码）。
 //
 // 重启后的 running 只有在**执行身份被证实已死**时才是僵尸：活跃或身份不可读的记录
 // 一律保留。接管统一走 store.recoverDeadRuns（锁外探活 + 锁内按捕获身份条件提交），
 // 且对账的每一笔写入都带上捕获的身份，绝不覆盖期间出现的替换运行。
 import { build } from 'esbuild'
 import { pathToFileURL } from 'node:url'
-import { spawn } from 'node:child_process'
+import { spawn, execFileSync } from 'node:child_process'
 import path from 'node:path'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -30,7 +30,7 @@ for (const [src, out] of [
 const { TaskRunner } = await import(pathToFileURL(path.join(root, 'out/sqr-runner.cjs')).href)
 const { TaskStore } = await import(pathToFileURL(path.join(root, 'out/sqr-store.cjs')).href)
 const { probeProcess, processOwnerState, currentProcessIdentity } = await import(pathToFileURL(path.join(root, 'out/sqr-persistence.cjs')).href)
-const { setWorktreeOwner } = await import(pathToFileURL(path.join(root, 'out/sqr-git.cjs')).href)
+const { createWorktree, reclaimWorktree, setWorktreeOwner } = await import(pathToFileURL(path.join(root, 'out/sqr-git.cjs')).href)
 const { reconcileStartupTasks } = await import(pathToFileURL(path.join(root, 'out/sqr-handoff.cjs')).href)
 
 const assert = (cond, msg) => { if (!cond) { console.error('❌', msg); process.exit(1) } console.log('  ✓', msg) }
@@ -81,6 +81,10 @@ async function deadExecutionOwner() {
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-queue-recovery-'))
 const deadOwner = await deadExecutionOwner()
 const liveOwner = { ...currentProcessIdentity(), token: 'live-owner-token', leaseExpiresAt: Date.now() - 60000 }
+// 真实托管 worktree 夹具（phase 1 建，phase 2 断言）：健康树 + 四种坏树（目录被清/
+// Git 注册被摘/世代标记被篡改/任务世代错标）+ 同名删树重建树（世代证据专项）
+const wtrepo = path.join(dir, 'wtrepo')
+let wtHealthy, wtVanished, wtUnregistered, wtTampered, wtGenflag, wtRebuiltFirst
 
 // ---- 阶段 1（重启前）：硬切后继任务以 queued 落库但不入队执行，随后应用退出 ----
 {
@@ -103,6 +107,57 @@ const liveOwner = { ...currentProcessIdentity(), token: 'live-owner-token', leas
     worktree: { ownerTaskId: 'lost-owner', repoDir: path.join(dir, 'repo'), path: path.join(dir, 'missing-worktree'), branch: 'agentdeck/missing', baseSha: 'deadbeef', createdAt: Date.now(), cleanupStatus: 'active' }
   })
   store.create({ title: 'holding挂起', prompt: 'q', workdir: '', backend: 'fake', parentTaskId: source.id, dispatchHold: true, parked: true })
+  // —— 真实托管 worktree 夹具（磁盘归属三步核实的正/反两面）：正 = 健康树翻面派发；
+  // 反 = 目录被清 / Git 注册被摘 / 世代标记被篡改 / 任务世代错标，四种坏树一律具名终态 ——
+  fs.mkdirSync(wtrepo, { recursive: true })
+  const wgit = (...args) => execFileSync('git', ['-C', wtrepo, ...args], { encoding: 'utf8' })
+  wgit('init', '-q', '-b', 'main')
+  wgit('config', 'user.email', 'smoke@example.invalid')
+  wgit('config', 'user.name', 'Smoke')
+  fs.writeFileSync(path.join(wtrepo, 'base.txt'), 'base\n')
+  wgit('add', '-A')
+  wgit('commit', '-qm', 'init')
+  const mkManagedWorktree = async (name) => {
+    const wt = await createWorktree(wtrepo, name, 'main', 'seed-owner')
+    if (!wt) throw new Error(`fixture worktree ${name} could not be created`)
+    return wt
+  }
+  wtHealthy = await mkManagedWorktree('qr-healthy')
+  wtVanished = await mkManagedWorktree('qr-vanished')
+  wtUnregistered = await mkManagedWorktree('qr-unregistered')
+  wtTampered = await mkManagedWorktree('qr-tampered')
+  wtGenflag = await mkManagedWorktree('qr-genflag')
+  fs.rmSync(wtVanished.path, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
+  fs.rmSync(path.join(wtrepo, '.git', 'worktrees', 'qr-unregistered'), { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
+  fs.writeFileSync(path.join(wtrepo, '.git', 'worktrees', 'qr-tampered', 'agentdeck-generation'), 'tampered-generation\n')
+  // 证据里的 owner 一律取磁盘出生 owner（建单时挂在领队名下）——与新契约的 owner 核对一致
+  const worktreeFixture = (wt, generationId) => ({
+    ...wt.metadata, ...(generationId ? { generationId } : {})
+  })
+  // 同名删树重建复现（任务侧独立世代证据专项）：残单登记**不带世代**（旧版快照），
+  // owner/分支/路径与重建后的磁盘完全一致；随后目录/Git 注册/sidecar 全清并按同名重建——
+  // 磁盘是棵世代不同的新树，sidecar 元数据却与登记严丝合缝。旧代码退回元数据世代自证，
+  // 旧残单就能认领陌生新树翻面入队；新代码缺任务侧独立证据一律拒绝核实。
+  wtRebuiltFirst = await mkManagedWorktree('qr-rebuilt')
+  const rebuiltLegacyGen = wtRebuiltFirst.metadata.generationId
+  fs.rmSync(wtRebuiltFirst.path, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
+  fs.rmSync(path.join(wtrepo, '.git', 'worktrees', 'qr-rebuilt'), { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
+  fs.rmSync(path.join(wtrepo, '.agentdeck-worktrees', '.metadata', 'qr-rebuilt.json'), { force: true })
+  execFileSync('git', ['-C', wtrepo, 'worktree', 'prune'], { encoding: 'utf8' })
+  execFileSync('git', ['-C', wtrepo, 'branch', '-D', 'agentdeck/qr-rebuilt'], { encoding: 'utf8' })
+  const wtRebuiltSecond = await mkManagedWorktree('qr-rebuilt')
+  if (wtRebuiltSecond.metadata.generationId === rebuiltLegacyGen) throw new Error('fixture rebuild did not mint a fresh generation')
+  if (wtRebuiltSecond.path !== wtRebuiltFirst.path) throw new Error('fixture rebuild changed the managed path')
+  store.create({ title: 'holding好树', prompt: 'wt-good', workdir: wtHealthy.path, backend: 'fake', parentTaskId: source.id, dispatchHold: true, worktree: worktreeFixture(wtHealthy) })
+  store.create({ title: 'holding树没目录', prompt: 'wt-gone', workdir: wtVanished.path, backend: 'fake', parentTaskId: source.id, dispatchHold: true, worktree: worktreeFixture(wtVanished) })
+  store.create({ title: 'holding注册被摘', prompt: 'wt-unreg', workdir: wtUnregistered.path, backend: 'fake', parentTaskId: source.id, dispatchHold: true, worktree: worktreeFixture(wtUnregistered) })
+  store.create({ title: 'holding世代被篡改', prompt: 'wt-tamper', workdir: wtTampered.path, backend: 'fake', parentTaskId: source.id, dispatchHold: true, worktree: worktreeFixture(wtTampered) })
+  store.create({ title: 'holding世代错标', prompt: 'wt-flag', workdir: wtGenflag.path, backend: 'fake', parentTaskId: source.id, dispatchHold: true, worktree: worktreeFixture(wtGenflag, 'wrong-generation') })
+  store.create({ title: 'holding同名重建', prompt: 'wt-rebuilt', workdir: wtRebuiltSecond.path, backend: 'fake', parentTaskId: source.id, dispatchHold: true,
+    worktree: { ...wtRebuiltFirst.metadata, generationId: undefined } })
+  // 残缺登记（有 worktree 记录但 path 为空）：归「无法核实」具名终态，绝不按无树子单翻面
+  store.create({ title: 'holding空路径', prompt: 'wt-empty', workdir: '', backend: 'fake', parentTaskId: source.id, dispatchHold: true,
+    worktree: { ownerTaskId: 'lost-owner', repoDir: path.join(dir, 'repo'), path: '', branch: 'agentdeck/qr-empty', baseSha: 'deadbeef', createdAt: Date.now(), cleanupStatus: 'active' } })
   // 重启时正在执行的任务（①）：执行身份已死——日志尾部有 final（实际做完，状态没来得及
   // 落盘）/ 没有 final（真中断）/ 旧回合 final 后又有新回合事件（后继回合被打断）
   const finished = store.create({ title: '中断有final', prompt: 'f', workdir: '', backend: 'fake' })
@@ -131,33 +186,52 @@ const succ = byTitle('▶ 阶段2')
 await sleep(400)
 assert(succ?.status === 'queued', '重启后硬切后继任务保持 queued（复现缺口：无人再泵队列）')
 
-// ---- 启动对账（镜像 src/main/index.ts 的恢复循环）----
-// ① running 僵尸：只有执行身份被证实已死的运行才由 recoverDeadRuns 接管；接管本身会往
-//    时间线追加恢复事件，所以先记下接管前的日志尾部，再按捕获身份条件落对账结论。
-//    不能按 status==='running' 过滤接管结果——返回的是接管前的捕获身份。
-const startupTails = new Map(store.list()
-  .filter((task) => task.status === 'running')
-  .map((task) => [task.id, store.readEvents(task.id)]))
-const deadRuns = store.recoverDeadRuns('failed')
-assert(deadRuns.length === 3 && deadRuns.every((t) => t.status === 'running'), '只有死执行身份的运行被接管（返回的是接管前捕获的身份）')
-assert(store.recoverDeadRuns('failed').length === 0, '死运行只认领一次（第二次接管为空）')
-for (const stale of deadRuns) {
-  const events = startupTails.get(stale.id) ?? []
-  // 只有 final 是日志最后一个事件才抢救；旧回合 final 后还有新回合事件 = 后继回合被打断
-  const lastEvent = events[events.length - 1]
-  const lastFinal = lastEvent?.kind === 'final' && lastEvent.text ? lastEvent : undefined
-  const captured = { status: 'failed', runId: stale.runId, executionOwner: stale.executionOwner }
-  const note = store.appendEvent(stale.id, { ts: Date.now(), kind: 'status', text: lastFinal ? '对账：补记完成' : '对账：中断留痕' }, captured)
-  if (note) runner.pushEvent(stale.id, note)
-  store.updateIf(stale.id, captured, lastFinal
-    ? { status: 'done', endedAt: lastFinal.ts, result: lastFinal.text, error: undefined }
-    : { status: 'failed', endedAt: Date.now(), error: '应用重启导致任务中断，请重新运行' })
-}
+// ---- 启动对账：全部夹具经同一次真实 reconcileStartupTasks 单次调用断言 ----
+// （src/main/handoff.ts，与 index.ts 同一实现；无任何镜像对账代码）
+// ① 单点行为（证据取自任务登记，缺任一即拒绝；健康树不进本探针——它留给下方对账正例）：
+const probe = await createWorktree(wtrepo, 'qr-probe', 'main', 'seed-owner')
+if (!probe) throw new Error('fixture probe worktree could not be created')
+const probeEvidence = () => ({ generationId: probe.metadata.generationId, ownerTaskId: 'seed-owner', branch: probe.metadata.branch })
+assert(await setWorktreeOwner(probe.path, 'probe-owner', probeEvidence()) === true, '健康托管树：目录+注册+世代+owner+分支全证据核实通过，允许改绑')
+assert(await setWorktreeOwner(probe.path, 'probe-owner') === false, '缺任务侧世代证据：拒绝核实（绝不退回磁盘元数据世代自证）')
+assert(await setWorktreeOwner(probe.path, 'probe-owner', { generationId: ' ', ownerTaskId: 'seed-owner', branch: probe.metadata.branch }) === false, '世代证据为空白：拒绝核实')
+assert(await setWorktreeOwner(probe.path, 'probe-owner', { ...probeEvidence(), ownerTaskId: '' }) === false, '缺出生 owner 证据：拒绝核实')
+assert(await setWorktreeOwner(probe.path, 'probe-owner', { ...probeEvidence(), branch: 'agentdeck/qr-wrong-branch' }) === false, '分支证据与磁盘注册不符：拒绝改绑')
+assert(await setWorktreeOwner(probe.path, 'probe-owner', probeEvidence()) === true, '已绑定目标的恢复重入（磁盘 owner=目标 owner）放行：绑定-翻面间崩溃可恢复')
+assert(await setWorktreeOwner(wtVanished.path, 'probe-owner', { generationId: wtVanished.metadata.generationId, ownerTaskId: 'seed-owner', branch: wtVanished.metadata.branch }) === false, '目录已被清：核实拒绝（不认「元数据还在就改绑」）')
+assert(await setWorktreeOwner(wtUnregistered.path, 'probe-owner', { generationId: wtUnregistered.metadata.generationId, ownerTaskId: 'seed-owner', branch: wtUnregistered.metadata.branch }) === false, 'Git 注册被摘：核实拒绝')
+assert(await setWorktreeOwner(wtTampered.path, 'probe-owner', { generationId: wtTampered.metadata.generationId, ownerTaskId: 'seed-owner', branch: wtTampered.metadata.branch }) === false, '世代标记被篡改：核实拒绝')
+assert(await setWorktreeOwner(wtGenflag.path, 'probe-owner', { generationId: 'wrong-generation', ownerTaskId: 'seed-owner', branch: wtGenflag.metadata.branch }) === false, '任务世代与树不符：核实拒绝')
+// ①′ 池化复用防旧世代认领：树归还复用池 → 复用给新任务（世代保留、owner/分支已换）→
+// 旧任务携原世代改绑必须失败，且新 owner 不被改写
+const wtPool = await createWorktree(wtrepo, 'qr-pool', 'main', 'seed-owner')
+if (!wtPool) throw new Error('fixture pool worktree could not be created')
+const repooled = await reclaimWorktree(wtPool.path, { repool: true, expectedOwnerTaskId: 'seed-owner', expectedGenerationId: wtPool.metadata.generationId })
+assert(repooled.ok === true && repooled.status === 'pooled', '前置：干净托管树归还复用池')
+const reused = await createWorktree(wtrepo, 'qr-pool-next', 'main', 'next-owner')
+assert(!!reused && reused.pooled === true && reused.path === wtPool.path, '前置：池化复用把同一棵树换基线交给新任务')
+assert(reused.metadata.generationId === wtPool.metadata.generationId, '前置：池化复用保留原世代（世代单证因此不足以排他）')
+assert(await setWorktreeOwner(wtPool.path, 'old-owner', { generationId: wtPool.metadata.generationId, ownerTaskId: 'seed-owner', branch: wtPool.metadata.branch }) === false,
+  '池化复用给新任务后，旧任务携原世代+原出生证据调用：返回 false')
+const pooledMeta = JSON.parse(fs.readFileSync(path.join(wtrepo, '.agentdeck-worktrees', '.metadata', 'qr-pool.json'), 'utf8'))
+assert(pooledMeta.ownerTaskId === 'next-owner' && pooledMeta.branch === 'agentdeck/qr-pool-next', '池化复用后新 owner 不被旧任务改写（磁盘元数据核验）')
+// ② 单次调用收场全部夹具：running 僵尸接管 + queued 两路 + holding 磁盘核实二分
+const reconcileDeps = () => ({
+  store,
+  pushEvent: (taskId, event) => runner.pushEvent(taskId, event),
+  enqueue: (task) => runner.enqueue(task),
+  notifyTaskChanged: () => {},
+  bindWorktreeOwner: (wtDir, ownerTaskId, expected) => setWorktreeOwner(wtDir, ownerTaskId, expected)
+})
+const reconcileResult = await reconcileStartupTasks(reconcileDeps())
+const recoveredTitles = reconcileResult.recovered.map((task) => task.title)
+assert(reconcileResult.recovered.length === 3 && reconcileResult.recovered.every((task) => task.status === 'running'),
+  `三种 running 崩溃夹具经同一次真实对账接管（返回接管前捕获身份：${recoveredTitles.join('、')}）`)
 const rescued = byTitle('中断有final')
 assert(rescued?.status === 'done' && rescued.result === '输出其实完成了', '日志尾部有 final 的僵尸任务恢复为 done 并带回结果')
 const lost = byTitle('中断无final')
 assert(lost?.status === 'failed' && !!lost.error, '无 final 的僵尸任务保持 failed（错误信息保留「请重新运行」指引）')
-assert(store.readEvents(lost.id).some((e) => e.kind === 'status' && e.text === '对账：中断留痕'), '中断任务时间线留有说明（不再死止于最后一次自动重试）')
+assert(store.readEvents(lost.id).some((e) => e.kind === 'status' && e.text?.includes('启动对账') && e.text?.includes('自动标记为失败')), '中断任务时间线留有说明（不再死止于最后一次自动重试）')
 const staleFinal = byTitle('中断旧final')
 assert(staleFinal?.status === 'failed' && staleFinal.result === undefined, '旧回合 final 后有新回合事件：不按旧 final 抢救（后继回合真被打断）')
 // 捕获身份必须挡住陈旧对账：替换运行上的对账写入不得生效
@@ -168,31 +242,47 @@ assert(unknown?.status === 'running' && unknown.runId === 'run_unknown_identity'
 const live = byTitle('活跃运行中')
 assert(live?.status === 'running' && live.runId === 'run_live_owner', '租约已过期但进程仍活着的 running 不被接管')
 
-// ② queued/holding 对账：直接调用真实 reconcileStartupTasks（src/main/handoff.ts，
-//    与 index.ts 同一实现）——普通 queued 两路（恢复派发/挂起）与 dispatchHold 子单
-//    的磁盘归属核实收场全部走生产代码。上面的僵尸接管已被本镜像消费一次，
-//    recoverDeadRuns 只认领一次，这里的主接管段自然空转。
-const reconcileResult = await reconcileStartupTasks({
-  store,
-  pushEvent: (taskId, event) => runner.pushEvent(taskId, event),
-  enqueue: (task) => runner.enqueue(task),
-  notifyTaskChanged: () => {},
-  bindWorktreeOwner: (wtDir, ownerTaskId) => setWorktreeOwner(wtDir, ownerTaskId)
-})
-
 // —— 翻面前崩溃的 dispatchHold 子单：要么恢复派发跑通、要么具名终态可见，不允许静默悬挂 ——
 const holdingSub = byTitle('holding子单')
 const holdingTree = byTitle('holding有树')
 const holdingParked = byTitle('holding挂起')
-assert(holdingSub && holdingTree && holdingParked, '前置：三类 holding 子单夹具均已建单落盘')
-assert(reconcileResult.holdingResumed.length === 2 && reconcileResult.holdingTerminated.length === 1,
+const holdingGoodTree = byTitle('holding好树')
+const holdingVanished = byTitle('holding树没目录')
+const holdingUnregistered = byTitle('holding注册被摘')
+const holdingTampered = byTitle('holding世代被篡改')
+const holdingGenflag = byTitle('holding世代错标')
+const holdingRebuilt = byTitle('holding同名重建')
+const holdingEmptyPath = byTitle('holding空路径')
+assert(holdingSub && holdingTree && holdingParked && holdingGoodTree && holdingVanished && holdingUnregistered && holdingTampered && holdingGenflag && holdingRebuilt && holdingEmptyPath,
+  '前置：十类 holding 子单夹具均已建单落盘')
+assert(reconcileResult.holdingResumed.length === 3 && reconcileResult.holdingTerminated.length === 7,
   `holding 收场二分：恢复派发 ${reconcileResult.holdingResumed.length} 单、具名终态 ${reconcileResult.holdingTerminated.length} 单`)
 assert(await until(() => store.get(holdingSub.id)?.status === 'done'), '无树 holding 子单翻面恢复派发并跑通到 done')
 assert(store.get(holdingSub.id).dispatchHold === undefined, '恢复派发的 holding 子单门禁已释放（不再对调度器隐身）')
 assert(store.readEvents(holdingSub.id).some((e) => e.kind === 'status' && e.text?.includes('恢复派发')), '恢复派发动作在时间线留痕')
+assert(await until(() => store.get(holdingGoodTree.id)?.status === 'done') && store.get(holdingGoodTree.id).dispatchHold === undefined,
+  '健康托管树的 holding 子单三步核实通过：翻面恢复派发并跑通到 done')
 assert(holdingTree.status === 'cancelled' && !!holdingTree.error, '磁盘归属无法核实的 holding 子单转具名终态（cancelled+错误说明）')
 assert(holdingTree.dispatchHold === true && !holdingTree.parked, '终态子单不挂起：不出现「可手动启动」却领不动的假入口')
 assert(store.readEvents(holdingTree.id).some((e) => e.kind === 'status' && e.text?.includes('启动对账') && e.text?.includes('现场保留')), '终态子单时间线留痕并给出现场处置提示')
+for (const [task, why] of [[holdingVanished, '目录已被清'], [holdingUnregistered, 'Git 注册被摘'], [holdingTampered, '世代标记被篡改'], [holdingGenflag, '任务世代错标']]) {
+  assert(task.status === 'cancelled' && !!task.error && task.dispatchHold === true,
+    `坏树 holding 子单（${why}）保持门禁转具名终态，绝不翻面派发到坏树上（实际 ${task.status}）`)
+  assert(store.readEvents(task.id).some((e) => e.kind === 'status' && e.text?.includes('启动对账')), `坏树子单（${why}）时间线留痕`)
+}
+// 同名删树重建：登记不带世代（旧版快照），磁盘是 owner/分支/路径完全一致的陌生新树——
+// 缺任务侧独立世代证据必须拒绝核实，旧残单绝不认领新树翻面入队
+assert(holdingRebuilt.status === 'cancelled' && holdingRebuilt.dispatchHold === true && (holdingRebuilt.error ?? '').includes('磁盘归属无法核实'),
+  `同名重建残单（登记缺世代证据）保持门禁转具名终态，不翻面入队（实际 ${holdingRebuilt.status}）`)
+assert(store.readEvents(holdingRebuilt.id).some((e) => e.kind === 'status' && e.text?.includes('启动对账') && e.text?.includes('现场保留')),
+  '同名重建残单时间线留痕并给出现场处置提示')
+assert(!reconcileResult.holdingResumed.some((task) => task.id === holdingRebuilt.id) && holdingRebuilt.status !== 'queued',
+  '同名重建残单不在恢复派发名单、不入派发队列')
+// 残缺登记（有 worktree 但 path 为空）：归「无法核实」具名终态，绝不按无树子单翻面
+assert(holdingEmptyPath.status === 'cancelled' && holdingEmptyPath.dispatchHold === true && (holdingEmptyPath.error ?? '').includes('登记残缺'),
+  `空路径残缺登记子单保持门禁转具名终态（实际 ${holdingEmptyPath.status}，错误：${holdingEmptyPath.error ?? '无'}）`)
+assert(!reconcileResult.holdingResumed.some((task) => task.id === holdingEmptyPath.id),
+  '空路径残缺登记子单不进派发队列（holdingResumed 不含它）')
 assert(await until(() => store.get(holdingParked.id)?.status === 'done') && store.get(holdingParked.id).parked === undefined, '旧快照 parked+holding 悬挂单同样翻面恢复（parked 一并释放）')
 assert(store.list().every((t) => !(t.dispatchHold === true && t.status === 'queued')), '不允许静默悬挂：场上不存在 queued 且持门禁的子单（parked 与否皆否）')
 
@@ -207,5 +297,10 @@ assert(byTitle('goal阶段')?.status === 'queued' && byTitle('goal阶段')?.park
 assert(byTitle('worker')?.status === 'queued' && byTitle('worker')?.parked, '委派 worker 排队任务被挂起（委派循环已死）')
 assert(byTitle('parked')?.status === 'queued' && byTitle('parked')?.parked, 'parked 任务保持待启动')
 assert(byTitle('holding有树')?.status === 'cancelled', '具名终态的 holding 子单不被后续 pump 复活或扫走')
+
+// ---- 幂等：同样单次真实调用再跑一遍，全部收场为空（死运行只认领一次、queued/holding 不二次处置）----
+const second = await reconcileStartupTasks(reconcileDeps())
+assert(second.recovered.length === 0 && second.queued.length === 0 && second.holdingResumed.length === 0 && second.holdingTerminated.length === 0,
+  `对账幂等：再次单次调用零收场（recovered=${second.recovered.length}, queued=${second.queued.length}, resumed=${second.holdingResumed.length}, terminated=${second.holdingTerminated.length}）`)
 
 console.log('\n✅ 队列重启恢复冒烟通过')

@@ -1224,8 +1224,10 @@ console.log('\n✅ 派单被拒回灌冒烟全绿')
       // 落盘后拆归属元数据：原建单路径的 setWorktreeOwner 将失败 → 走 closeSpawnedChild 收口
       const metadataJson = path.join(repo, '.agentdeck-worktrees', '.metadata', `${path.basename(input.worktree.path)}.json`)
       fs.rmSync(metadataJson, { force: true })
-      // 拦截收口撤销的条件提交：在撤销落库前一刻，并发方完成翻面并派发——确定性命中
-      // 「重读后、撤销前被领取」窗口（等价跨进程翻转恰落在重读与撤销提交之间）。
+      // 拦截收口撤销的条件提交：在撤销落库前一刻，并发方**同步**完成翻面+派发并领取——
+      // enqueue→pump→claimRun 全程无 await，注入返回时子单已是 running，确定性命中
+      // 「重读后、撤销前已被领取」窗口，并断言领取状态（真证「撤销落库前已被领取」，
+      // 不只是「门禁已释放」）。
       const realUpdateIf = store.updateIf.bind(store)
       let armed = true
       store.updateIf = (id, expected, patch) => {
@@ -1233,7 +1235,9 @@ console.log('\n✅ 派单被拒回灌冒烟全绿')
           armed = false
           const flipped = realUpdateIf(child.id, { status: 'queued', runId: child.runId, executionOwner: child.executionOwner, dispatchHold: true }, { dispatchHold: undefined })
           assert(flipped, 'J3B3 前置：竞态注入的翻面成立（撤销提交前一刻门禁已被并发方释放）')
-          setTimeout(() => runner.enqueue(child), 0)
+          runner.enqueue(flipped)
+          const claimed = store.get(child.id)
+          assert(claimed.status === 'running' && claimed.dispatchHold === undefined, `J3B3 前置：撤销落库前已被领取（实际 ${claimed.status}，门禁 ${claimed.dispatchHold ?? '已释放'}）`)
         }
         return realUpdateIf(id, expected, patch)
       }

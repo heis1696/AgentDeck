@@ -46,17 +46,20 @@ check(consultBlock.includes('可咨询的队长') && consultBlock.includes('Beta
 check(!consultBlock.slice(consultBlock.indexOf('可咨询的队长')).includes('DshCap'), 'consult roster excludes dsh captains')
 
 const behavior = { starts: [], sends: [], active: 0, maxActive: 0 }
+// 复用门禁（hot.7/hot.8）要求会话声明 turnScoped 且回调带回合戳，否则回灌追问
+// 一律走 resume 重建而不是同连接 send——fixture 必须跟上契约，send 才会被观测到。
 const makeSession = (agent, events) => ({
   sessionId: `${agent}-session`,
-  async send(content) {
+  turnScoped: true,
+  async send(content, turn) {
     behavior.sends.push({ agent, content })
     behavior.active++
     behavior.maxActive = Math.max(behavior.maxActive, behavior.active)
     await sleep(10)
     behavior.active--
     const text = agent === 'beta' ? 'beta-opinion' : 'source-finished'
-    events.onEvent({ ts: Date.now(), kind: 'final', text })
-    events.onTurnEnd({ ok: true, response: text })
+    events.onEvent({ ts: Date.now(), kind: 'final', text }, turn)
+    events.onTurnEnd({ ok: true, response: text }, turn)
   },
   async stop() {},
   async close() {}
@@ -67,7 +70,7 @@ const backend = {
   label: 'Fake consult',
   supportsResume: true, // 对齐真实适配器：恢复能力声明
   async probe() { return { ok: true, detail: 'fake' } },
-  async start({ prompt, events }) {
+  async start({ prompt, events, turn }) {
     const agent = prompt.includes('Beta') || prompt.includes('beta') ? 'beta' : 'alpha'
     behavior.starts.push({ agent, prompt })
     const session = makeSession(agent, events)
@@ -75,8 +78,8 @@ const backend = {
       const response = agent === 'alpha' && prompt.includes('source-task')
         ? '<consult to="Beta" reason="need evidence">Please inspect the relevant behavior.</consult>'
         : `${agent}-office-ready`
-      events.onEvent({ ts: Date.now(), kind: 'final', text: response })
-      events.onTurnEnd({ ok: true, response })
+      events.onEvent({ ts: Date.now(), kind: 'final', text: response }, turn)
+      events.onTurnEnd({ ok: true, response }, turn)
     }, 5)
     return session
   }

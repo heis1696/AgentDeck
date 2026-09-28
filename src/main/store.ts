@@ -429,6 +429,14 @@ export class TaskStore {
             if (has('status') && patch.status !== task.status
               && !(task.status === 'running' && (patch.status === 'cancelled' || patch.status === 'failed'))) return undefined
           }
+          // 全库不变式：建单门禁（dispatchHold）只在建单时落一次（create 路径），此后任何
+          // 更新都不得把 queued+dispatchHold 组合「生产」出来——重跑/移动类补丁漏清门禁
+          // 造出的正是调度器永不可见、手动入口也领不动的僵尸。更新可以从该组合原样穿过
+          //（不触碰门禁的补丁），合成结果新出现该组合一律落空拒绝（与 updateIf 落空同规）。
+          const hasKey = (key: keyof Task) => Object.prototype.hasOwnProperty.call(patch, key)
+          const nextStatus = hasKey('status') ? patch.status : task.status
+          const nextHold = hasKey('dispatchHold') ? patch.dispatchHold : task.dispatchHold
+          if (nextStatus === 'queued' && nextHold === true && !(task.status === 'queued' && task.dispatchHold === true)) return undefined
           Object.assign(task, patch)
           if (['done', 'failed', 'cancelled'].includes(task.status)) projections.set(projectionKey(task), structuredClone(task))
           touched.add(id)
