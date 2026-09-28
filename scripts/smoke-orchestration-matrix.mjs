@@ -301,7 +301,24 @@ async function scenarioGoalDelegate() {
       })()
       : ''
     check('integration branch contains worker diff', !!finalParent?.integration?.branch && integrated.includes('worker change'))
-    check('merged worker worktree is reclaimed', child?.workdir ? !fs.existsSync(child.workdir) : false)
+    // Since hot.8 worktree pooling, a reclaimed worker worktree is either
+    // removed outright or returned to the per-repo reuse pool (directory kept,
+    // ownership moved to the pool). Wait for the reclaim terminal state — the
+    // delivery pass trails goal completion by a beat — and reject retained /
+    // failed outcomes exactly as before.
+    const reclaimedChild = child
+      ? await waitFor(() => {
+        const current = h.store.get(child.id)
+        const status = current?.worktree?.cleanupStatus
+        return status === 'pooled' || status === 'removed' ? current : null
+      })
+      : null
+    const reclaimStatus = reclaimedChild?.worktree?.cleanupStatus
+    check(
+      'merged worker worktree is reclaimed',
+      !!reclaimedChild && (reclaimStatus === 'removed' ? reclaimedChild.workdir ? !fs.existsSync(reclaimedChild.workdir) : false : true),
+      String(reclaimStatus ?? h.store.get(child?.id ?? '')?.worktree?.cleanupStatus ?? 'no worktree')
+    )
     check('parent event log records orchestration state', h.store.readEvents(parent.id).some((event) => event.kind === 'status'))
   } finally {
     await h.cleanup()
