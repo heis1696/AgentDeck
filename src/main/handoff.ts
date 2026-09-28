@@ -56,6 +56,11 @@ export interface StartupReconcileDeps {
   notifyTaskChanged: (task: Task) => void
   /** Relay an interrupted leader's already-delivered worker reports. */
   relayInterruptedLeader?: (stale: Task, children: Task[]) => void
+  /**
+   * dispatchHold 子单的磁盘归属核实+绑定（生产接线 setWorktreeOwner，fail-closed）。
+   * 缺省且子单带 worktree = 无法核实 → 一律转具名终态，绝不凭登记翻面派发。
+   */
+  bindWorktreeOwner?: (wtDir: string, ownerTaskId: string) => Promise<boolean>
 }
 
 export interface StartupReconcileResult {
@@ -63,6 +68,10 @@ export interface StartupReconcileResult {
   recovered: Task[]
   /** Legacy queued tasks handled by the startup pass (unparked or parked). */
   queued: Task[]
+  /** dispatchHold 子单收场：磁盘归属核实通过，条件翻面并恢复派发。 */
+  holdingResumed: Task[]
+  /** dispatchHold 子单收场：无法核实磁盘归属，转具名终态（现场保留+处置提示）。 */
+  holdingTerminated: Task[]
 }
 
 /**
@@ -74,8 +83,11 @@ export interface StartupReconcileResult {
  * Recovery writes an identified event. Reconciliation reads the log immediately
  * before that event under the storage lock, checks the observed Run identity,
  * and commits its result and explanatory event together.
+ *
+ * dispatchHold 子单（建单在翻面前被打断）不进本函数的普通排队两路：上面单独按磁盘
+ * 归属核实收场——翻面派发或具名终态，绝不挂起成「可手动启动却领不动」。
  */
-export function reconcileStartupTasks(deps: StartupReconcileDeps): StartupReconcileResult {
+export async function reconcileStartupTasks(deps: StartupReconcileDeps): Promise<StartupReconcileResult> {
   const { store, pushEvent, enqueue, notifyTaskChanged } = deps
   // The observation identifies which Run startup saw. Read its final log tail
   // only after recovery, while the same Run is fenced by the transaction.
@@ -124,8 +136,12 @@ export function reconcileStartupTasks(deps: StartupReconcileDeps): StartupReconc
   // ② goal 绑定 / 委派 worker → 置 parked 挂起（pump 只认非 parked，不停车迟早被
   //    后续任何一次 pump 顺带扫走，等于静默恢复）。goal 重启后由 waiting_user 确认
   //    续跑（launchNext 新建）；worker 的委派循环已死，跑了也无人收编，留 ▶ 手动入口。
+  //    已翻面的 worker 才有可用的 ▶ 入口；仍持 dispatchHold 门禁的建单残单不进本路
+  //    （手动入口释放不了门禁）——下方 holding 收场单独处理。本路必须先行：holding
+  //    翻面会释放门禁，若本路后行会把刚翻面的子单误当遗留 worker 二次 park 掉。
   const queued: Task[] = []
-  for (const stale of store.list().filter((task) => task.status === 'queued' && !task.parked)) {
+  const deferredDispatch: Task[] = []
+  for (const stale of store.list().filter((task) => task.status === 'queued' && !task.parked && task.dispatchHold !== true)) {
     const captured: TaskExpectation = { ...taskIdentity(stale), parked: stale.parked }
     const park = !!(stale.goalId || stale.parentTaskId)
     const committed = store.transaction((tx) => {
@@ -140,8 +156,66 @@ export function reconcileStartupTasks(deps: StartupReconcileDeps): StartupReconc
     if (!committed) continue
     if (committed.note) pushEvent(stale.id, committed.note)
     if (park) notifyTaskChanged(committed.task)
-    else enqueue(committed.task)
+    else deferredDispatch.push(committed.task)
     queued.push(stale)
   }
-  return { recovered, queued }
+  // dispatchHold 子单单独收场（置于排队对账之后：排队轮扫描时门禁未释放，天然互斥，
+  // 不会把翻面后的子单误当遗留 worker 再 park）：建单流程（归属绑定→登记核实→翻面）
+  // 在翻面前被重启打断，子单带着门禁停在队列外——调度器不可见、「▶ 启动」也释放不了
+  // 门禁（prepareManualTaskStart 不清 dispatchHold），按普通 worker 挂起等于留下「可手动
+  // 启动却永远领不动」的悬挂。单独按磁盘归属核实分两路：① 核实通过（目录在、归属元数据
+  // 可绑定到本子单）→ 带出生身份+holding 条件翻面并恢复派发；② 无法核实 → 具名终态 +
+  // 时间线留痕 + 现场处置提示。两路都不留 queued 持门禁的悬挂单（含旧快照的 parked+holding）。
+  // 派发延后：对账期间只做条件提交，enqueue 统一攒到收尾一次性触发——pump 由 enqueue
+  // 驱动且会顺带扫队列，若对账中途就入队，pump 会在本函数未完场时开跑（把还没 park 的
+  // 遗留 worker 抢跑掉），对账必须对 pump 原子。
+  const holdingResumed: Task[] = []
+  const holdingTerminated: Task[] = []
+  for (const stale of store.list().filter((task) => task.dispatchHold === true && task.status === 'queued')) {
+    const captured: TaskExpectation = { ...taskIdentity(stale), parked: stale.parked, dispatchHold: true }
+    let unverifiable = ''
+    if (stale.worktree?.path) {
+      const bound = deps.bindWorktreeOwner ? await deps.bindWorktreeOwner(stale.worktree.path, stale.id) : false
+      if (!bound) unverifiable = 'worktree 磁盘归属无法核实（目录缺失或归属元数据不可达）'
+    }
+    const committed = store.transaction((tx) => {
+      if (unverifiable) {
+        const task = tx.update(stale.id, {
+          status: 'cancelled', endedAt: Date.now(),
+          error: `应用重启时建单未完成（${unverifiable}），启动对账转取消`
+        }, captured)
+        if (!task) return undefined
+        const note = tx.appendEvent(stale.id, {
+          ts: Date.now(), kind: 'status',
+          text: `启动对账：建单在翻面前被重启打断，${unverifiable}，本单转取消未执行${stale.workdir ? `；worktree 现场保留于 ${stale.workdir}，可手动清理或重派` : ''}`
+        })
+        return { task, note }
+      }
+      // 翻面与 worktree 归属元数据绑定同一原子提交（与 runner 恢复路径同规），无中间可领取态
+      const task = tx.update(stale.id, {
+        dispatchHold: undefined,
+        ...(stale.parked ? { parked: undefined } : {}),
+        ...(stale.worktree ? { worktree: { ...stale.worktree, ownerTaskId: stale.id } } : {})
+      }, captured)
+      if (!task) return undefined
+      const note = tx.appendEvent(stale.id, {
+        ts: Date.now(), kind: 'status',
+        text: '启动对账：建单在翻面前被重启打断，磁盘归属已核实，恢复派发'
+      })
+      return { task, note }
+    })
+    if (!committed) continue
+    if (committed.note) pushEvent(stale.id, committed.note)
+    if (unverifiable) {
+      notifyTaskChanged(committed.task)
+      holdingTerminated.push(committed.task)
+    } else {
+      deferredDispatch.push(committed.task)
+      holdingResumed.push(committed.task)
+    }
+  }
+
+  // 对账写全部落盘后才驱动队列：此时挂起的已挂起、翻面的已翻面，pump 看到的是终态视图
+  for (const task of deferredDispatch) enqueue(task)
+  return { recovered, queued, holdingResumed, holdingTerminated }
 }

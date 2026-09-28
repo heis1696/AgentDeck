@@ -26,7 +26,7 @@ import { createDshBackend } from './backends/dsh'
 import type { AgentBackend } from './backends/types'
 import type { AppSettings, Task, RunTrigger } from '../shared/types'
 import { ensureSharedDir } from './skills'
-import { shouldKeepTaskWorktree, sweepReportCopies, sweepWorktrees } from './git'
+import { shouldKeepTaskWorktree, setWorktreeOwner, sweepReportCopies, sweepWorktrees } from './git'
 import { relayIssueCommentOrEvent, type IssueRelayChannels } from './issue-relay'
 import { registerIpcHandlers, type CreateTaskInput } from './ipc/register'
 import { SidecarManager } from './sidecar'
@@ -432,11 +432,13 @@ const initMain = async (): Promise<void> => {
   // 已死**时才是僵尸——活跃或身份不可读的运行一律保留（租约过期不是死亡证据）。
   // 接管统一走 store.recoverDeadRuns：锁外探活、锁内按捕获身份条件提交，每个死运行
   // 只认领一次；日志尾部按捕获运行绑定，替换运行之前的旧日志不能决定它的结论。
-  reconcileStartupTasks({
+  // dispatchHold 子单（建单在翻面前被打断）的磁盘归属核实接线 setWorktreeOwner。
+  await reconcileStartupTasks({
     store,
     pushEvent: (taskId, event) => runner.pushEvent(taskId, event),
     enqueue: (task) => runner.enqueue(task),
     notifyTaskChanged,
+    bindWorktreeOwner: (wtDir, ownerTaskId) => setWorktreeOwner(wtDir, ownerTaskId),
     relayInterruptedLeader: (stale, kids) => {
       if (!stale.issueId) return
       const excerpts = kids.slice(0, 5).map((kid) => `- **${kid.title}**（${kid.status}）：${(kid.result ?? '').slice(0, 400) || '（无最终输出）'}`).join('\n')
