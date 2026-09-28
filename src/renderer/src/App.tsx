@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { bridge, useIssues, useSettings, useTasks, waitForTaskListed } from './api'
 import { TASK_STATUS_LABELS, isParkedQueued, PARKED_QUEUED_LABEL } from './labels'
 import { TaskDetail } from './components/TaskDetail'
@@ -11,17 +11,18 @@ import { AutomationView } from './components/AutomationView'
 import { ExtensionsView } from './components/ExtensionsView'
 import { IssuesView } from './components/IssuesView'
 import { AgentsView } from './components/AgentsView'
-import { ListTodo, Kanban, Gauge, Settings, Search, Plus, Command, FolderOpen, ChevronDown, AlarmClock, Layers, Users } from 'lucide-react'
+import { WorkspaceSwitcher } from './components/WorkspaceSwitcher'
+import { ListTodo, Kanban, Gauge, Settings, Search, Plus, Command, AlarmClock, Layers, Users } from 'lucide-react'
 import { ToastHost } from './ui/Toasts'
 import { ConfirmHost } from './ui/Confirm'
 import { Palette, type PaletteCommand } from './ui/Palette'
 import { PageHeader } from './ui/PageHeader'
 import { ui, rootTabsOf, type UiView } from './ui/interaction-center'
 import { useInteractionSelector } from './hooks/useInteraction'
-import { useInteractionLayer } from './hooks/useInteractionLayer'
 import { PetStage } from './pet/PetStage'
 import { PetSettingsPage } from './pet/PetSettingsPage'
 import type { Task } from '../../shared/types'
+import { extendRecentWorkspaces, pushRecentWorkspace } from '../../shared/path-key'
 
 type View = UiView
 /** 最近工作区列表的上限（切换器下拉里展示） */
@@ -44,7 +45,12 @@ export function App() {
   const settingsSection = useInteractionSelector((state) => state.settingsSection)
   const [workspaceDir, setWorkspaceDir] = useState(() => localStorage.getItem('agentdeck:workspace-dir') ?? '')
   const [recentWorkspaces, setRecentWorkspaces] = useState<string[]>(() => {
-    try { return JSON.parse(localStorage.getItem('agentdeck:recent-workspaces') ?? '[]') as string[] } catch { return [] }
+    // 持久化列表读入即按路径键去重：历史版本可能存过同一目录的别名写法（大小写差异），
+    // 不去重会一直重复展示（与主进程路径等价判定同语义）
+    try {
+      const stored = JSON.parse(localStorage.getItem('agentdeck:recent-workspaces') ?? '[]') as string[]
+      return Array.isArray(stored) ? extendRecentWorkspaces([], stored, MAX_RECENT_WORKSPACES) : []
+    } catch { return [] }
   })
   const selected = tasks.find((task) => task.id === activeId) ?? null
   // 顶部页签条只列「普通页签」：子任务（祖先链完整）在领队详情的右侧分页里。
@@ -82,30 +88,28 @@ export function App() {
   }
   /** Ctrl+N/侧栏「新建任务」：导航到 Issue 主页（新建表单即主页主体）并请求聚焦输入框 */
   const goWorkspace = () => { ui.focusComposer() }
-  /** 切到某个最近用过的工作区：新任务默认目录随之变化 */
+  /** 切到某个最近用过的工作区：新任务默认目录随之变化。最近列表按路径键上浮去重：
+   *  别名写法（大小写/分隔符差异）是同一目录，不重复展示与持久化 */
   const chooseWorkspace = (dir: string) => {
     if (!dir) return
     setWorkspaceDir(dir)
     localStorage.setItem('agentdeck:workspace-dir', dir)
     setRecentWorkspaces((current) => {
-      const next = [dir, ...current.filter((d) => d !== dir)].slice(0, MAX_RECENT_WORKSPACES)
+      const next = pushRecentWorkspace(current, dir, MAX_RECENT_WORKSPACES)
       localStorage.setItem('agentdeck:recent-workspaces', JSON.stringify(next))
       return next
     })
   }
   const pickWorkspace = async () => { const dir = await bridge.pickDir(); if (dir) chooseWorkspace(dir) }
-  // 任务里出现过的工作目录自动进最近列表（新装/清缓存后不用手动重选）
+  // 任务里出现过的工作目录自动进最近列表（新装/清缓存后不用手动重选）；别名写法不重复并入
   useEffect(() => {
     const dirs = tasks.map((task) => task.workdir.trim()).filter(Boolean)
     if (!dirs.length) return
     setRecentWorkspaces((current) => {
-      const next = [...current]
-      let changed = false
-      for (const dir of dirs) if (!next.includes(dir)) { next.push(dir); changed = true }
-      if (!changed) return current
-      const capped = next.slice(0, MAX_RECENT_WORKSPACES)
-      localStorage.setItem('agentdeck:recent-workspaces', JSON.stringify(capped))
-      return capped
+      const next = extendRecentWorkspaces(current, dirs, MAX_RECENT_WORKSPACES)
+      if (next.length === current.length && next.every((dir, index) => dir === current[index])) return current
+      localStorage.setItem('agentdeck:recent-workspaces', JSON.stringify(next))
+      return next
     })
   }, [tasks])
   useEffect(() => bridge.tasks.onDeleted((id) => ui.closeTab(id)), [])
@@ -185,42 +189,6 @@ export function App() {
       {view === 'agents' ? <AgentsView /> : view === 'automation' ? <AutomationView /> : view === 'skills' ? <ExtensionsView /> : view === 'settings' ? <SettingsView section={settingsSection} onSection={(section) => ui.openSettings(section)} /> : view === 'usage' ? <UsageView /> : view === 'board' ? <div className="tasks-column"><PageHeader title="看板" icon={<Kanban size={16} />} actions={<button className="command-trigger" type="button" onClick={() => ui.palette.open()} title="搜索任务（Ctrl+K）" aria-label="搜索任务" aria-keyshortcuts="Control+K Meta+K"><Search size={14} /> 搜索任务 <kbd><Command size={10} /> K</kbd></button>} /><BoardView tasks={tasks} onOpen={openTask} /></div> : view === 'detail' && selected ? <div className="tasks-column detail-page"><Chrome title={selected.title} onBack={() => ui.navigate('issues')} />{rootTabs.length > 0 && <TabBar tabs={rootTabs} tasks={tasks} activeId={activeId} onSelect={openTask} onClose={(id) => ui.closeTab(id)} />}<TaskDetail task={selected} tasks={tasks} onSelect={openTask} /></div> : <IssuesView tasks={tasks} tabs={tabs} onOpen={openTask} onClose={(id) => ui.closeTab(id)} onBrowseAll={() => ui.navigate('board')}><WorkspaceView onCreated={(task) => openCreatedTask(task.id)} workspaceDir={workspaceDir} onPickWorkspace={pickWorkspace} /></IssuesView>}
     </main>
   </div>
-}
-
-/** 工作区切换器：下拉列出最近工作区，点击即切换新任务的默认目录 */
-function WorkspaceSwitcher({ dir, recent, onChoose, onPick }: { dir: string; recent: string[]; onChoose: (dir: string) => void; onPick: () => void }) {
-  const [open, setOpen] = useState(false)
-  const rootRef = useRef<HTMLDivElement>(null)
-  // 统一浮层：外点关闭 + 最上层 Escape + 焦点归还（原自挂 window mousedown 已收敛）
-  useInteractionLayer<HTMLDivElement>({ open, onClose: () => setOpen(false), kind: 'popover', name: 'workspace-switcher', closeOnOutside: true, autoFocus: false, layerRef: rootRef })
-  const name = (d: string) => d.split(/[\\/]/).filter(Boolean).pop() ?? d
-  return (
-    <div className="ws-switch" ref={rootRef}>
-      <button className="workspace-switcher" type="button" aria-haspopup="menu" aria-expanded={open} title={dir || '选择工作区'} onClick={() => setOpen((value) => !value)}>
-        <span className="workspace-glyph"><FolderOpen size={14} /></span>
-        <span><b>{dir ? name(dir) : '选择工作区'}</b><small>{dir || '新任务将默认在此目录执行'}</small></span>
-        <ChevronDown size={14} className={`workspace-caret ${open ? 'flip' : ''}`} />
-      </button>
-      {open && (
-        <div className="ws-menu" role="menu" aria-label="切换工作区">
-          <div className="ws-menu-label">最近工作区</div>
-          {recent.length === 0 && <div className="ws-menu-empty">还没有记录，先选一个目录</div>}
-          {recent.map((d) => (
-            <button key={d} className={`ws-menu-item ${d === dir ? 'current' : ''}`} role="menuitem" type="button" aria-current={d === dir ? 'true' : undefined} title={d} onClick={() => { onChoose(d); setOpen(false) }}>
-              <FolderOpen size={13} />
-              <span className="ws-menu-name">{name(d) || d}</span>
-              <small className="ws-menu-path">{d}</small>
-            </button>
-          ))}
-          <div className="ws-menu-sep" />
-          <button className="ws-menu-item" role="menuitem" type="button" onClick={() => { onPick(); setOpen(false) }}>
-            <Plus size={13} />
-            <span className="ws-menu-name">选择其他目录…</span>
-          </button>
-        </div>
-      )}
-    </div>
-  )
 }
 
 /** 详情页顶栏：返回 + 面包屑（从属上下文；主标题由 TaskDetail 的共享页头承担，不在这里重复大标题） */

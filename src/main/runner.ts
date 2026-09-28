@@ -9,7 +9,7 @@ import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnSta
 import { runDelegationLoop, parseContinueMerged, stripContinue, parseDelegates, parseConsultsMerged, stripConsults, parseInvestigatesMerged, stripInvestigates, ancestorBudget, sanitizeChildPrompt, escapeProtocolLiterals, MAX_DEPTH, MAX_TOTAL_ROUNDS, DELEGATE_REJECT_EXCERPT_MARK, type AgentLike, type DelegateCall, type ConsultCall, type InvestigateCall, type IssueCommentLike } from './delegate'
 import { buildAgentPrompt, buildDelegationBlock, buildChildPrompt, CONTINUE_BLOCK, HANDOFF_CUE, HANDOFF_RECEIVE_CUE, HANDOFF_START_CONFIRMED_CUE, RETITLE_PROMPT } from './prompts'
 import { findHandoffSuccessor, prepareManualTaskStart, repeatsHandoffPhase } from './handoff'
-import { probeGitRepository, probeCurrentBranch, createWorktree, setWorktreeOwner, reclaimWorktree, replayLeaderBaseline, type GitRepositoryProbeResult } from './git'
+import { probeGitRepository, probeCurrentBranch, createWorktree, setWorktreeOwner, reclaimWorktree, replayLeaderBaseline, sameWorktreePath, worktreePathKey, type GitRepositoryProbeResult } from './git'
 
 /** API 预设（主进程 presets.ts 的 ApiPreset 的运行时子集，避免环依赖） */
 interface PresetLike {
@@ -1687,14 +1687,26 @@ export class TaskRunner {
     this.workerIndexReservations.set(taskId, next)
     return next
   }
-  /** Git 工作区探测（成功/非仓库带缓存；临时探测错误不缓存）。 */
+  /** Git 工作区探测（成功/非仓库带缓存；临时探测错误不缓存）。
+   *  缓存键与 git.ts 的路径键同源折叠：同一目录按别名写法（大小写/盘符差异）调用
+   *  必须命中同一份缓存，绝不重复探测。 */
   private gitUsableCache = new Map<string, GitRepositoryProbeResult>()
   private async gitRepositoryProbe(dir: string): Promise<GitRepositoryProbeResult> {
-    const cached = this.gitUsableCache.get(dir)
-    if (cached) return cached
+    const key = worktreePathKey(dir)
+    const cached = this.gitUsableCache.get(key)
+    if (cached) {
+      gitRepositoryProbeCacheProbe?.('hit')
+      return cached
+    }
+    gitRepositoryProbeCacheProbe?.('miss')
     const probe = await probeGitRepository(dir)
-    if (probe.status !== 'error') this.gitUsableCache.set(dir, probe)
+    if (probe.status !== 'error') this.gitUsableCache.set(key, probe)
     return probe
+  }
+
+  /** 测试出口：直连探测缓存（配 setGitRepositoryProbeCacheProbeForTest 观测命中/未命中）。 */
+  gitRepositoryProbeForTest(dir: string): Promise<GitRepositoryProbeResult> {
+    return this.gitRepositoryProbe(dir)
   }
 
   /** agent 引用的 API 预设 → 会话连接覆盖（预设 + 模型须同时具备） */
@@ -2523,7 +2535,9 @@ export class TaskRunner {
       // 拿旧基线重复劳动——强制丢弃内存会话走 resume 重建（新连接以新 workdir 启动，
       // 会话内容经 sessionId 恢复；detach 保证 provider 会话不被销毁）。
       const liveWorkdir = this.sessionWorkdirs.get(taskId)
-      if (liveSession && task.workdir && liveWorkdir && path.resolve(liveWorkdir) !== path.resolve(task.workdir)) {
+      // 换基线判定按别名折叠等价（与 git.ts 路径键同源）：同一目录的大小写/盘符别名写法
+      // 不是换基线，误判会每次追问都丢弃内存会话走 resume 重建（白丢会话上下文）
+      if (liveSession && task.workdir && liveWorkdir && !sameWorktreePath(liveWorkdir, task.workdir)) {
         await this.closeSession(taskId, runIdentity(claim), true)
         liveSession = undefined
       }
@@ -2800,4 +2814,12 @@ export class TaskRunner {
   sessionCount() {
     return this.sessions.size
   }
+}
+
+/** 测试探针出口：观测 Git 工作区探测缓存的命中/未命中（同一目录按别名写法调用必须
+ *  命中同一缓存键——事件序 hit 前必有且仅有一次 miss）。 */
+export type GitRepositoryProbeCacheEvent = 'hit' | 'miss'
+let gitRepositoryProbeCacheProbe: ((event: GitRepositoryProbeCacheEvent) => void) | undefined
+export function setGitRepositoryProbeCacheProbeForTest(listener: ((event: GitRepositoryProbeCacheEvent) => void) | undefined): void {
+  gitRepositoryProbeCacheProbe = listener
 }

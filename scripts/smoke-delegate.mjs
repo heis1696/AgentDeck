@@ -1313,6 +1313,47 @@ assert(fs.existsSync(integratedWt) && JSON.parse(fs.readFileSync(leadMetaFile, '
 team.find((agent) => agent.id === 'W1').sharedWorkspace = false
 sharedWorkspaceNoop = false
 
+// M2-别名（fix：会话重建判定路径别名收口）：task.workdir 记成同一目录的别名写法
+// （大小写差异）不得误判「换基线」——内存会话必须照常直续，不经 resume 重建
+//（别名触发重建 = 每次追问都白丢会话上下文）
+if (process.platform === 'win32') {
+  const aliasIntegratedWt = integratedWt[0] === integratedWt[0].toLowerCase()
+    ? integratedWt[0].toUpperCase() + integratedWt.slice(1)
+    : integratedWt[0].toLowerCase() + integratedWt.slice(1)
+  assert(aliasIntegratedWt !== integratedWt, '前置：workdir 别名写法与真实写法不同')
+  assert(aliasIntegratedWt.toLowerCase() === integratedWt.toLowerCase(), '前置：别名写法仅大小写不同')
+  store.update(leader.id, { workdir: aliasIntegratedWt })
+  const startsBeforeAliasFollow = leaderStarts.length
+  const followAlias = await runner.followUp(leader.id, '追问派工')
+  assert(followAlias.ok, '别名 workdir 追问回合成功')
+  assert(leaderStarts.length === startsBeforeAliasFollow, '别名 workdir 不触发 resume 重建：内存会话照常直续（liveWorkdir 与 task.workdir 同目录不同写法）')
+  store.update(leader.id, { workdir: integratedWt })
+}
+
+// 探测缓存别名命中直证（fix：gitUsableCache 缓存键改 worktreePathKey 的对口探针）：
+// 同一目录按别名写法探测必须命中同一缓存键——事件序恰为【首次 miss → 别名再探 hit】，
+// 字面量键会让别名写法再探测一次（miss,miss），重复探测白丢一次磁盘往返
+if (process.platform === 'win32') {
+  const { setGitRepositoryProbeCacheProbeForTest } = await import(pathToFileURL(path.join(root, 'out/sd-runner.cjs')).href)
+  const probeRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'dele-probe-repo-'))
+  execSync('git init -q -b main', { cwd: probeRepo })
+  const aliasProbeRepo = probeRepo[0] === probeRepo[0].toLowerCase()
+    ? probeRepo[0].toUpperCase() + probeRepo.slice(1)
+    : probeRepo[0].toLowerCase() + probeRepo.slice(1)
+  assert(aliasProbeRepo !== probeRepo && aliasProbeRepo.toLowerCase() === probeRepo.toLowerCase(), '前置：探测仓库别名写法仅大小写不同')
+  const probeEvents = []
+  setGitRepositoryProbeCacheProbeForTest((event) => probeEvents.push(event))
+  try {
+    const realProbe = await runner.gitRepositoryProbeForTest(probeRepo)
+    const aliasProbe = await runner.gitRepositoryProbeForTest(aliasProbeRepo)
+    assert(realProbe.status !== 'error' && aliasProbe.status === realProbe.status, '前置：真实仓库探测成功且别名探测同结果')
+    assert(probeEvents.join(',') === 'miss,hit', `别名写法命中同一缓存键，绝不重复探测（events=${probeEvents.join(',')}）`)
+  } finally {
+    setGitRepositoryProbeCacheProbeForTest(undefined)
+  }
+  console.log('PASS git repository probe cache hits alias spellings without re-probing')
+}
+
 // ================= 场景 B：二层委派 + 防环 + 递归集成（0.7.0） =================
 const repo2 = fs.mkdtempSync(path.join(os.tmpdir(), 'dele2-repo-'))
 fs.writeFileSync(path.join(repo2, 'c.txt'), 'c v1\n')

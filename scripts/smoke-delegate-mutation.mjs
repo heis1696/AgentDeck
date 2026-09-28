@@ -28,9 +28,11 @@ async function bundle(tree, srcFile, outfile) {
   await build({ entryPoints: [path.join(tree, srcFile)], outfile, bundle: true, platform: 'node', format: 'cjs', target: 'node18', external: ['electron'] })
 }
 
-/** 用变异产物跑场景脚本：红证成立的判定是「exit 3 且输出里有具名 RED: 断言」——
- *  只按退出码计红会把场景自身的意外崩溃误当红证，红证必须断言出具体失败原因。 */
-async function runScenario(tree, scenarioScript, extraBundles = []) {
+/** 用变异产物跑场景脚本：红证成立的判定是「exit 3 且输出命中本红证预期的具名 RED: 断言」——
+ *  只按退出码计红会把场景自身的意外崩溃误当红证；只认 RED: 而不校验预期标识，会让
+ *  变异炸出的前置/无关断言被误认成红证（红证必须断言出它声称守卫的那条行为）。
+ *  expectedRed 是该红证预期命中的断言文案片段。 */
+async function runScenario(tree, scenarioScript, extraBundles = [], expectedRed = '') {
   const runnerOut = path.join(tree, 'out-runner.cjs')
   const storeOut = path.join(tree, 'out-store.cjs')
   const handoffOut = path.join(tree, 'out-handoff.cjs')
@@ -51,11 +53,12 @@ async function runScenario(tree, scenarioScript, extraBundles = []) {
   fs.writeFileSync(scriptFile, replacements.reduce((acc, [placeholder, value]) => acc.split(placeholder).join(JSON.stringify(value)), scenarioScript))
   try {
     const stdout = execFileSync('node', [scriptFile], { encoding: 'utf8', timeout: 180000, stdio: ['ignore', 'pipe', 'pipe'] })
-    return { red: false, asserted: false, output: stdout }
+    return { red: false, asserted: false, matched: '', output: stdout }
   } catch (error) {
     const output = (error.stdout ?? '') + (error.stderr ?? '')
-    const asserted = error.status === 3 && /RED:/.test(output)
-    return { red: asserted, asserted, output }
+    const matched = output.split('\n').find((line) => line.includes('RED:') && (!expectedRed || line.includes(expectedRed))) ?? ''
+    const asserted = error.status === 3 && !!matched
+    return { red: asserted, asserted, matched, output }
   }
 }
 
@@ -502,6 +505,56 @@ async function main() {
 main().catch((e) => { console.error(e); process.exit(3) })
 `
 
+// 红9①-b｜收场兜底按单捕获：旧代码（dispatchHold 子单收场写异常直接炸穿对账）下
+// 「单子单落盘异常不拖垮对账、其余子单照常翻面、坏子单门禁原样保留」断言必红
+const RED9_HOLD_WRITE = `
+const path = require('path')
+const fs = require('fs')
+const os = require('os')
+const { TaskStore } = require(__MUT_STORE__)
+const { reconcileStartupTasks } = require(__MUT_HANDOFF__)
+const assert = (cond, msg) => { if (!cond) { console.error('RED:' + msg); process.exit(3) } }
+async function main() {
+  const store = new TaskStore(fs.mkdtempSync(path.join(os.tmpdir(), 'mut-r9c-store-')))
+  const source = store.create({ title: '阶段1', prompt: 'x', workdir: '', backend: 'fake' })
+  store.update(source.id, { status: 'done', endedAt: Date.now() })
+  const badChild = store.create({ title: '落盘异常子单', prompt: 'x', workdir: '', backend: 'fake', parentTaskId: source.id, dispatchHold: true })
+  const goodChild = store.create({ title: '无树子单', prompt: 'y', workdir: '', backend: 'fake', parentTaskId: source.id, dispatchHold: true })
+  // 只让坏子单的收场写抛异常（存储故障的最小夹具）：包裹 transaction 视图，坏单 update 即炸
+  const realTransaction = store.transaction.bind(store)
+  store.transaction = (fn) => realTransaction((tx) => {
+    const realUpdate = tx.update.bind(tx)
+    const wrapped = Object.create(tx)
+    wrapped.update = (id, patch, expected) => {
+      if (id === badChild.id) throw new Error('收场落盘爆炸')
+      return realUpdate(id, patch, expected)
+    }
+    return fn(wrapped)
+  })
+  const enqueued = []
+  let result
+  try {
+    result = await reconcileStartupTasks({
+      store,
+      pushEvent: () => {},
+      enqueue: (task) => enqueued.push(task.id),
+      notifyTaskChanged: () => {},
+      bindWorktreeOwner: async () => true
+    })
+  } catch (error) {
+    console.error('RED:单个子单的收场写异常炸掉整个启动对账（兜底按单捕获缺失）：' + (error instanceof Error ? error.message : String(error)))
+    process.exit(3)
+  }
+  assert(result.holdingResumed.length === 1 && enqueued.includes(goodChild.id),
+    '单子单落盘异常不拖垮对账：无树子单照常翻面入队（实际 resumed=' + result.holdingResumed.length + ', enqueued=' + enqueued.length + '）')
+  const bad = store.get(badChild.id)
+  assert(bad.status === 'queued' && bad.dispatchHold === true, '落盘失败的子单门禁原样保留待下轮对账（实际 ' + bad.status + '/hold=' + bad.dispatchHold + '）')
+  console.log('SCENARIO-OK')
+  process.exit(0)
+}
+main().catch((e) => { console.error(e); process.exit(3) })
+`
+
 // 红9②｜转投异常按单捕获：旧代码（转投异常直接炸穿对账）下「单领队转投异常不拖垮
 // 其余领队，两个死领队都被接管」断言必红
 const RED9_RELAY = `
@@ -696,32 +749,66 @@ async function main() {
 main().catch((e) => { console.error(e); process.exit(3) })
 `
 
-// 红11④可绑定｜未归池未被占领守卫：旧代码（不核对池 owner/pooled 状态/进程内池登记）
-// 下「仍登记在池的树不能被改绑抢走」断言必红。夹具构造池注册表与 sidecar 的崩溃窗口
-// 分叉：树仍在池登记里未复用，目录现场却已恢复出生模样（重挂出生分支+sidecar owner
-// 写回）——owner/世代/分支证据全部吻合，可绑定守卫是唯一拦得住它的检查。
-const RED11_POOL = `
+// 红11④-a 可绑定｜pooled 状态守卫：旧代码（不核对 sidecar 的池 owner/pooled 状态）下
+// 「sidecar 仍挂 pooled 的树不能被改绑抢走」断言必红。夹具构造崩溃窗口：进程内池登记
+// 已丢（清空注册表），sidecar 却还挂着 pooled 且 owner 写回出生值——owner/世代/分支
+// 证据全部吻合，pooled 状态守卫是唯一拦得住它的检查。
+const RED11_POOL_STATUS = `
+${PRELUDE}
+const { createWorktree, reclaimWorktree, setWorktreeOwner, clearWorktreePool, worktreePoolEntriesForTest } = require(__MUT_GIT__)
+async function main() {
+  const { repo } = makeRepo('mut-r11-pa-')
+  const wt = await createWorktree(repo, 'mut-r11-pa', 'main', 'leader-1')
+  assert(!!wt, '前置：托管树建成')
+  const generationId = wt.metadata.generationId
+  const birthBranch = wt.metadata.branch
+  const repooled = await reclaimWorktree(wt.path, { repool: true, expectedOwnerTaskId: 'leader-1', expectedGenerationId: generationId })
+  assert(repooled.ok === true && repooled.status === 'pooled', '前置：树归还复用池（detach+池登记）')
+  clearWorktreePool()
+  assert(worktreePoolEntriesForTest(repo).length === 0, '前置：进程内池登记已清空（pooled 状态守卫是唯一拦截）')
+  // 崩溃窗口分叉：注册表已丢，sidecar 仍挂 pooled；owner 写回出生 owner 以绕过 owner 守卫
+  const sidecar = path.join(repo, '.agentdeck-worktrees', '.metadata', 'mut-r11-pa.json')
+  const restored = JSON.parse(fs.readFileSync(sidecar, 'utf8'))
+  restored.ownerTaskId = 'leader-1'
+  fs.writeFileSync(sidecar, JSON.stringify(restored, null, 2))
+  const git = (...args) => execFileSync('git', ['-C', wt.path, ...args], { encoding: 'utf8' })
+  git('switch', birthBranch)
+  const bound = await setWorktreeOwner(wt.path, 'child-1', { generationId, ownerTaskId: 'leader-1', branch: birthBranch })
+  assert(bound === false, 'pooled 状态守卫：sidecar 仍挂 pooled（进程内池登记已不在）的树必须拒绝改绑（实际 ' + bound + '）')
+  const after = JSON.parse(fs.readFileSync(sidecar, 'utf8'))
+  assert(after.ownerTaskId === 'leader-1' && after.cleanupStatus === 'pooled', '拒绝改绑后 sidecar 的 owner/pooled 状态不被改写（实际 ' + after.ownerTaskId + '/' + after.cleanupStatus + '）')
+  console.log('SCENARIO-OK')
+  process.exit(0)
+}
+main().catch((e) => { console.error(e); process.exit(3) })
+`
+
+// 红11④-b 可绑定｜进程内池登记守卫：旧代码（不核对进程内池注册表）下「仍登记在池的树
+// 不能被改绑抢走」断言必红。夹具走反向崩溃窗口：sidecar 已恢复出生模样（owner 写回 +
+// cleanupStatus 翻回 active）、目录重挂出生分支，树却仍在进程内池注册表里——登记守卫
+// 是唯一拦得住它的检查。
+const RED11_POOL_REGISTRY = `
 ${PRELUDE}
 const { createWorktree, reclaimWorktree, setWorktreeOwner, worktreePoolEntriesForTest } = require(__MUT_GIT__)
 async function main() {
-  const { repo } = makeRepo('mut-r11-pool-')
-  const wt = await createWorktree(repo, 'mut-r11-pool', 'main', 'leader-1')
+  const { repo } = makeRepo('mut-r11-pb-')
+  const wt = await createWorktree(repo, 'mut-r11-pb', 'main', 'leader-1')
   assert(!!wt, '前置：托管树建成')
   const generationId = wt.metadata.generationId
   const birthBranch = wt.metadata.branch
   const repooled = await reclaimWorktree(wt.path, { repool: true, expectedOwnerTaskId: 'leader-1', expectedGenerationId: generationId })
   assert(repooled.ok === true && repooled.status === 'pooled', '前置：树归还复用池（detach+池登记）')
   assert(worktreePoolEntriesForTest(repo).length === 1, '前置：池注册表在案')
-  // 崩溃窗口分叉模拟：树未复用、仍在池登记，目录现场恢复出生模样（重挂出生分支+sidecar owner 写回；
-  // pooled 状态与池登记残留）
-  const git = (...args) => execFileSync('git', ['-C', wt.path, ...args], { encoding: 'utf8' })
-  git('switch', birthBranch)
-  const sidecar = path.join(repo, '.agentdeck-worktrees', '.metadata', 'mut-r11-pool.json')
+  // 反向崩溃窗口：sidecar 完全恢复出生模样，三证据全吻合——只有进程内池登记拦得住
+  const sidecar = path.join(repo, '.agentdeck-worktrees', '.metadata', 'mut-r11-pb.json')
   const restored = JSON.parse(fs.readFileSync(sidecar, 'utf8'))
   restored.ownerTaskId = 'leader-1'
+  restored.cleanupStatus = 'active'
   fs.writeFileSync(sidecar, JSON.stringify(restored, null, 2))
+  const git = (...args) => execFileSync('git', ['-C', wt.path, ...args], { encoding: 'utf8' })
+  git('switch', birthBranch)
   const bound = await setWorktreeOwner(wt.path, 'child-1', { generationId, ownerTaskId: 'leader-1', branch: birthBranch })
-  assert(bound === false, '可绑定守卫：仍登记在池（pooled 状态+池注册表在案）的树必须拒绝改绑（实际 ' + bound + '）')
+  assert(bound === false, '池登记守卫：树仍在进程内池注册表（sidecar 已翻回 active）时必须拒绝改绑（实际 ' + bound + '）')
   assert(worktreePoolEntriesForTest(repo).length === 1, '拒绝后池登记原样保留（实际 ' + worktreePoolEntriesForTest(repo).length + ' 条）')
   const after = JSON.parse(fs.readFileSync(sidecar, 'utf8'))
   assert(after.ownerTaskId === 'leader-1', '拒绝改绑后池树 owner 不被改写（实际 ' + after.ownerTaskId + '）')
@@ -767,6 +854,134 @@ async function main() {
 main().catch((e) => { console.error(e); process.exit(3) })
 `
 
+// 红13｜树名标记按平台折叠（detach 守卫）：旧代码（字面量 startsWith）下「重挂分支的
+// detach 脚手架按大写别名写法回收必须同样被拒、目录存活」断言必红——别名写法判不中
+// 树名标记会让 detach 守卫落空，重挂的树被连目录强删
+const RED13 = `
+${PRELUDE}
+const { reclaimWorktree } = require(__MUT_GIT__)
+async function main() {
+  const { repo, git } = makeRepo('mut-r13-')
+  // mergeIntoManagedWorktreeDetached 的落盘形态：detach 脚手架 + 世代标记 + sidecar
+  const scaffoldName = '.agentdeck-merge-detach-r13'
+  const scaffoldBranch = 'agentdeck/task-r13-integrated'
+  const scaffoldPath = path.join(repo, '.agentdeck-worktrees', scaffoldName)
+  const aliasSpelling = path.join(repo, '.agentdeck-worktrees', '.AGENTDECK-MERGE-DETACH-R13')
+  assert(aliasSpelling.toLowerCase() === scaffoldPath.toLowerCase() && aliasSpelling !== scaffoldPath, '前置：别名树名同目录不同拼写')
+  git('branch', scaffoldBranch, 'main')
+  execFileSync('git', ['-C', repo, 'worktree', 'add', '--detach', scaffoldPath, scaffoldBranch], { stdio: 'ignore' })
+  const pointer = fs.readFileSync(path.join(scaffoldPath, '.git'), 'utf8')
+  const gitdir = path.resolve(scaffoldPath, /^gitdir:\\s*(.+?)\\s*$/im.exec(pointer)[1])
+  const generation = 'mut-r13-generation'
+  fs.writeFileSync(path.join(gitdir, 'agentdeck-generation'), generation + '\\n')
+  fs.mkdirSync(path.join(repo, '.agentdeck-worktrees', '.metadata'), { recursive: true })
+  fs.writeFileSync(path.join(repo, '.agentdeck-worktrees', '.metadata', scaffoldName + '.json'), JSON.stringify({
+    ownerTaskId: scaffoldName, generationId: generation, repoDir: repo, path: scaffoldPath,
+    branch: scaffoldBranch, baseSha: git('rev-parse', scaffoldBranch), createdAt: Date.now(), cleanupStatus: 'active'
+  }))
+  // 重挂分支：detach 树内检出集成分支（attached HEAD）——detach 守卫的唯一拦截对象
+  git('-C', scaffoldPath, 'switch', scaffoldBranch)
+  const canonicalRefused = await reclaimWorktree(scaffoldPath, { force: true, expectedOwnerTaskId: scaffoldName, expectedGenerationId: generation })
+  assert(canonicalRefused.ok === false && canonicalRefused.status === 'retained' && (canonicalRefused.reason ?? '').includes('no longer detached'),
+    '小写写法拒绝重挂分支的 detach 脚手架（实际 ' + canonicalRefused.status + ': ' + (canonicalRefused.reason ?? '') + '）')
+  assert(fs.existsSync(scaffoldPath), '小写拒绝后目录存活')
+  const aliasRefused = await reclaimWorktree(aliasSpelling, { force: true, expectedOwnerTaskId: scaffoldName, expectedGenerationId: generation })
+  assert(aliasRefused.ok === false && aliasRefused.status === 'retained' && (aliasRefused.reason ?? '').includes('no longer detached'),
+    '大写别名写法同样拒绝回收重挂分支的 detach 脚手架（实际 ' + aliasRefused.status + ': ' + (aliasRefused.reason ?? '') + '）')
+  assert(fs.existsSync(scaffoldPath), '别名拒绝后目录必须存活（守卫落空会被连目录强删）')
+  console.log('SCENARIO-OK')
+  process.exit(0)
+}
+main().catch((e) => { console.error(e); process.exit(3) })
+`
+
+// 红14｜验收器盘符根：旧代码（根键无脑再拼第二个 sep）下「盘符根 workdir 界内目标
+// 判界内且存在」断言必红——c:\\file 不以 c:\\\\ 为前缀，界内文件全被误判到界外
+const RED14 = `
+const path = require('path')
+const fs = require('fs')
+const os = require('os')
+const { verifyAcceptance } = require(__MUT_VERIFY__)
+const assert = (cond, msg) => { if (!cond) { console.error('RED:' + msg); process.exit(3) } }
+async function main() {
+  const boundary = fs.mkdtempSync(path.join(os.tmpdir(), 'mut-r14-'))
+  const rootWorkdir = path.parse(boundary).root
+  const inside = verifyAcceptance(
+    { workdir: rootWorkdir, acceptanceCriteria: [{ id: 'inside', text: 'path exists: ' + boundary, status: 'pending' }] },
+    { workdir: rootWorkdir, gitDiff: '' }
+  )
+  assert(inside[0].passed === true, '盘符根 workdir 下界内目标必须判界内且存在（实际 passed=' + inside[0].passed + '）')
+  const otherDrive = 'DEFGHIJKLMNOPQRSTUVWXYZ'.split('').map((letter) => letter + ':\\\\').find((driveRoot) => driveRoot.toUpperCase() !== rootWorkdir.toUpperCase() && fs.existsSync(driveRoot))
+  const outsideTarget = otherDrive ?? (rootWorkdir.toUpperCase() === 'C:\\\\' ? 'Q:\\\\mut-r14-out' : 'C:\\\\mut-r14-out')
+  const outside = verifyAcceptance(
+    { workdir: rootWorkdir, acceptanceCriteria: [{ id: 'outside', text: 'path exists: ' + path.join(outsideTarget, 'probe'), status: 'pending' }] },
+    { workdir: rootWorkdir, gitDiff: '' }
+  )
+  assert(outside[0].passed === false, '盘符根 workdir 下另一根的目标必须判界外（不得越界放行）')
+  console.log('SCENARIO-OK')
+  process.exit(0)
+}
+main().catch((e) => { console.error(e); process.exit(3) })
+`
+
+// 红15｜删单回收去重：旧代码（字面量 Map 键）下「同一棵树的双别名写法只回收一次、
+// 保留首个原始写法与它自己的 owner」断言必红——字面量键会对同树发起两次并发回收
+const RED15 = `
+const path = require('path')
+const fs = require('fs')
+const os = require('os')
+const electron = require('electron')
+const { collectWorktreeReclaims } = require(__MUT_TASKS__)
+const assert = (cond, msg) => { if (!cond) { console.error('RED:' + msg); process.exit(3) } }
+const flip = (p) => {
+  const sepIndex = p.indexOf(path.sep)
+  const head = p.slice(0, sepIndex)
+  const flipped = head[0] === head[0].toLowerCase() ? head[0].toUpperCase() + head.slice(1) : head[0].toLowerCase() + head.slice(1)
+  return flipped + p.slice(sepIndex)
+}
+async function main() {
+  const realPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'mut-r15-')), '.agentdeck-worktrees', 'wt_c1')
+  assert(collectWorktreeReclaims([{ id: 'a', workdir: realPath }, { id: 'b', workdir: realPath }]).length === 1, '基线：完全相同写法折叠成一条')
+  if (process.platform === 'win32') {
+    const aliasPath = flip(realPath)
+    assert(aliasPath !== realPath && aliasPath.toLowerCase() === realPath.toLowerCase(), '前置：别名写法仅大小写不同')
+    const deduped = collectWorktreeReclaims([
+      { id: 'leader', workdir: '', worktree: { path: realPath, ownerTaskId: 'leader' } },
+      { id: 'child', workdir: aliasPath }
+    ])
+    assert(deduped.length === 1, '同一棵树的双别名写法只回收一次（实际 ' + deduped.length + ' 条，字面量 Map 键会发两次并发回收）')
+    assert(deduped[0].worktreePath === realPath && deduped[0].ownerTaskId === 'leader', '折叠保留首个原始写法与它自己的 owner（实际 ' + JSON.stringify(deduped[0]) + '）')
+  }
+  console.log('SCENARIO-OK')
+  process.exit(0)
+}
+main().catch((e) => { console.error(e); process.exit(3) })
+`
+
+// 红16｜可执行路径比较按平台：旧代码（无条件精确比较的变异形态）下「win32 别名写法
+// 判等」断言必红——别名 command 判不等会漏打 ELECTRON_RUN_AS_NODE 兜底
+const RED16 = `
+const path = require('path')
+const { sameExecutablePath } = require(__MUT_CLICOMMON__)
+const assert = (cond, msg) => { if (!cond) { console.error('RED:' + msg); process.exit(3) } }
+const flip = (p) => {
+  const sepIndex = p.indexOf(path.sep)
+  const head = p.slice(0, sepIndex)
+  const flipped = head[0] === head[0].toLowerCase() ? head[0].toUpperCase() + head.slice(1) : head[0].toLowerCase() + head.slice(1)
+  return flipped + p.slice(sepIndex)
+}
+async function main() {
+  if (process.platform !== 'win32') { console.log('SCENARIO-OK'); process.exit(0) }
+  const alias = flip(process.execPath)
+  assert(alias !== process.execPath, '前置：别名写法与真实写法不同')
+  assert(sameExecutablePath(alias, process.execPath) === true, 'win32 下可执行路径别名写法必须判等（实际 false：ELECTRON_RUN_AS_NODE 兜底会漏打）')
+  assert(sameExecutablePath(process.execPath, process.execPath) === true, '完全相同写法判等')
+  console.log('SCENARIO-OK')
+  process.exit(0)
+}
+main().catch((e) => { console.error(e); process.exit(3) })
+`
+
 const MUTATIONS = [
   {
     name: '红1｜建单门禁：旧代码（无 holding；绑定失败直接撤销）下「让位不撤销」断言必红',
@@ -787,7 +1002,8 @@ const MUTATIONS = [
         replace: "      const bound = await setWorktreeOwner(worktree.path, child.id, worktree)\n      if (!bound) {\n        await this.cancel(child.id)\n        return null\n      }"
       }
     ],
-    scenario: RED1
+    scenario: RED1,
+    expectedRed: '让位后跑到终态'
   },
   {
     name: '红2｜cancelled 误合入：旧代码（终态 commitAll 含 cancelled + 集成遍历不排除 cancelled）下「半成品零合入」断言必红',
@@ -803,7 +1019,8 @@ const MUTATIONS = [
         replace: ''
       }
     ],
-    scenario: RED2
+    scenario: RED2,
+    expectedRed: '半成品零合入'
   },
   {
     name: '红4｜嗅探暂停缓冲：旧代码（suspended 早退不清缓冲）下「不持续占内存」断言必红',
@@ -814,7 +1031,8 @@ const MUTATIONS = [
         replace: '    if (state.suspended) return'
       }
     ],
-    scenario: RED4
+    scenario: RED4,
+    expectedRed: '不持续占内存'
   },
   {
     name: '红5｜收口撤销竞态：旧代码（无条件 cancel、不看撤销结果就 force 回收）下「撤销落空让位零回收」断言必红',
@@ -825,7 +1043,8 @@ const MUTATIONS = [
         replace: '    await this.cancel(child.id)'
       }
     ],
-    scenario: RED5
+    scenario: RED5,
+    expectedRed: '误导拒单'
   },
   {
     name: '红6｜holding 崩溃收场：旧代码（无 dispatchHold 单独收场，残单永久悬挂）下「翻面派发/具名终态」断言必红',
@@ -836,7 +1055,8 @@ const MUTATIONS = [
         replace: '  for (const stale of store.list().filter(() => false)) {'
       }
     ],
-    scenario: RED6
+    scenario: RED6,
+    expectedRed: '恢复派发 1 单'
   },
   {
     name: '红7｜磁盘归属核实真化：旧代码（找到元数据就改绑，不验目录/注册/世代）下「目录被清的残单不翻面派发」断言必红',
@@ -848,7 +1068,8 @@ const MUTATIONS = [
       }
     ],
     bundles: [{ src: 'src/main/git.ts', var: 'GIT' }],
-    scenario: RED7
+    scenario: RED7,
+    expectedRed: '不得翻面'
   },
   {
     name: '红8｜重跑僵尸根断：旧代码（retry 无门禁拒绝 + store 无全库不变式）下「持门禁单重跑不产生 queued+hold」断言必红',
@@ -868,16 +1089,29 @@ const MUTATIONS = [
     files: [
       ['node_modules/electron/index.js', "module.exports = {\n  handlers: {},\n  ipcMain: { handle: (channel, fn) => { module.exports.handlers[channel] = fn } },\n  BrowserWindow: { getAllWindows: () => [] }\n}\n"]
     ],
-    scenario: RED8
+    scenario: RED8,
+    expectedRed: '重跑被拒绝'
   },
   {
-    name: '红9①｜核实异常按单捕获：旧代码（核实异常直接炸穿对账）下「单子单核实异常不中断对账+具名失败路径+其余子单照常翻面」断言必红',
+    // 单守卫变异①：内层「核实异常按单捕获」catch（核实异常→具名终态，不中断对账）
+    name: '红9①-a｜核实异常按单捕获（内层守卫）：旧代码（核实异常炸穿收场、落进外层兜底）下「核实异常子单具名失败路径+其余子单照常翻面」断言必红',
     mutations: [
       {
         file: 'src/main/handoff.ts',
         find: "        } else {\n          try {\n            const bound = deps.bindWorktreeOwner\n              ? await deps.bindWorktreeOwner(stale.worktree.path, stale.id, stale.worktree)\n              : false\n            if (!bound) unverifiable = 'worktree 磁盘归属无法核实（目录缺失、Git 注册不在案或任务侧世代/归属/分支证据不符）'\n          } catch (error) {\n            unverifiable = `worktree 磁盘归属核实过程异常（${error instanceof Error ? error.message : String(error)}）`\n          }\n        }",
         replace: "        } else {\n          const bound = deps.bindWorktreeOwner\n            ? await deps.bindWorktreeOwner(stale.worktree.path, stale.id, stale.worktree)\n            : false\n          if (!bound) unverifiable = 'worktree 磁盘归属无法核实（目录缺失、Git 注册不在案或任务侧世代/归属/分支证据不符）'\n        }"
-      },
+      }
+    ],
+    bundles: [{ src: 'src/main/persistence.ts', var: 'PERSISTENCE' }],
+    scenario: RED9_VERIFY,
+    expectedRed: '对账整体走完'
+  },
+  {
+    // 单守卫变异②：外层「收场兜底按单捕获」try/catch（落盘异常→跳过该单继续对账）。
+    // try{→{ 与 catch 块删除两处文本是同一守卫的两半（拆任何一半都是语法残肢），
+    // 合并为这一枚单守卫变异。
+    name: '红9①-b｜收场兜底按单捕获（外层守卫）：旧代码（dispatchHold 子单收场写异常直接炸穿对账）下「落盘异常子单不拖垮对账、其余子单照常翻面」断言必红',
+    mutations: [
       {
         file: 'src/main/handoff.ts',
         find: '    try {\n      const captured: TaskExpectation = { ...taskIdentity(stale), parked: stale.parked, dispatchHold: true }',
@@ -890,7 +1124,8 @@ const MUTATIONS = [
       }
     ],
     bundles: [{ src: 'src/main/persistence.ts', var: 'PERSISTENCE' }],
-    scenario: RED9_VERIFY
+    scenario: RED9_HOLD_WRITE,
+    expectedRed: '收场写异常'
   },
   {
     name: '红9②｜转投异常按单捕获：旧代码（转投异常直接炸穿对账）下「单领队转投异常不拖垮其余领队，两个死领队都被接管」断言必红',
@@ -902,7 +1137,8 @@ const MUTATIONS = [
       }
     ],
     bundles: [{ src: 'src/main/persistence.ts', var: 'PERSISTENCE' }],
-    scenario: RED9_RELAY
+    scenario: RED9_RELAY,
+    expectedRed: '转投异常'
   },
   {
     name: '红9③｜index 总兜底：旧代码（对账调用不包 try/catch）下「编译产物存在『启动对账失败』降级路径」断言必红',
@@ -919,7 +1155,8 @@ const MUTATIONS = [
       }
     ],
     bundles: [{ src: 'src/main/index.ts', var: 'INDEX' }],
-    scenario: RED9_INDEX
+    scenario: RED9_INDEX,
+    expectedRed: '启动对账失败'
   },
   {
     name: '红10｜任务侧独立世代证据：旧代码（缺任务世代时退回磁盘元数据自证）下「同名删树重建后旧残单不翻面入队」断言必红',
@@ -941,7 +1178,8 @@ const MUTATIONS = [
       }
     ],
     bundles: [{ src: 'src/main/git.ts', var: 'GIT' }],
-    scenario: RED10
+    scenario: RED10,
+    expectedRed: '不得认领同名新树'
   },
   {
     name: '红11①世代｜改绑世代相等守卫：旧代码（sidecar 登记世代只验在场不验与任务证据相等）下「登记世代分叉仍改绑」断言必红',
@@ -953,7 +1191,8 @@ const MUTATIONS = [
       }
     ],
     bundles: [{ src: 'src/main/git.ts', var: 'GIT' }],
-    scenario: RED11_GEN
+    scenario: RED11_GEN,
+    expectedRed: '不一致必须拒绝改绑'
   },
   {
     name: '红11②owner｜改绑出生 owner 守卫：旧代码（不核对磁盘 owner 与出生/目标 owner）下「陌生调用方抢走他人树」断言必红',
@@ -965,7 +1204,34 @@ const MUTATIONS = [
       }
     ],
     bundles: [{ src: 'src/main/git.ts', var: 'GIT' }],
-    scenario: RED11_OWNER
+    scenario: RED11_OWNER,
+    expectedRed: '也非目标 owner 必须拒绝改绑'
+  },
+  {
+    name: '红11④-a 可绑定｜pooled 状态守卫：旧代码（不核对 sidecar 的池 owner/pooled 状态）下「sidecar 仍挂 pooled 的树被改绑抢走」断言必红',
+    mutations: [
+      {
+        file: 'src/main/git.ts',
+        find: "    if (metadata.ownerTaskId === WORKTREE_POOL_OWNER || metadata.cleanupStatus === 'pooled') return false\n",
+        replace: ''
+      }
+    ],
+    bundles: [{ src: 'src/main/git.ts', var: 'GIT' }],
+    scenario: RED11_POOL_STATUS,
+    expectedRed: '必须拒绝改绑'
+  },
+  {
+    name: '红11④-b 可绑定｜进程内池登记守卫：旧代码（不核对进程内池注册表）下「仍登记在池的树被改绑抢走」断言必红',
+    mutations: [
+      {
+        file: 'src/main/git.ts',
+        find: "    if (worktreePoolByRepo.get(worktreePathKey(repoDir))?.has(worktreePathKey(wtDir))) return false\n",
+        replace: ''
+      }
+    ],
+    bundles: [{ src: 'src/main/git.ts', var: 'GIT' }],
+    scenario: RED11_POOL_REGISTRY,
+    expectedRed: '必须拒绝改绑'
   },
   {
     name: '红11③分支｜改绑出生分支守卫：旧代码（登记核实不比对出生分支）下「池化复用换分支后旧任务携原世代认领」断言必红',
@@ -977,19 +1243,8 @@ const MUTATIONS = [
       }
     ],
     bundles: [{ src: 'src/main/git.ts', var: 'GIT' }],
-    scenario: RED11_BRANCH
-  },
-  {
-    name: '红11④可绑定｜未归池未被占领守卫：旧代码（不核对池 owner/pooled 状态/进程内池登记）下「仍登记在池的树被改绑抢走」断言必红',
-    mutations: [
-      {
-        file: 'src/main/git.ts',
-        find: "    if (metadata.ownerTaskId === WORKTREE_POOL_OWNER || metadata.cleanupStatus === 'pooled') return false\n    if (worktreePoolByRepo.get(worktreePathKey(repoDir))?.has(worktreePathKey(wtDir))) return false",
-        replace: ''
-      }
-    ],
-    bundles: [{ src: 'src/main/git.ts', var: 'GIT' }],
-    scenario: RED11_POOL
+    scenario: RED11_BRANCH,
+    expectedRed: '换 branch 后的树必须拒绝'
   },
   {
     name: '红12｜残缺登记不免检：旧代码（无 worktree 记录即免检翻面）下「空 path 残单不进派发队列」断言必红',
@@ -1000,7 +1255,63 @@ const MUTATIONS = [
         replace: '      if (stale.worktree?.path) {\n        {'
       }
     ],
-    scenario: RED12
+    scenario: RED12,
+    expectedRed: '空路径残缺登记归具名终态'
+  },
+  {
+    name: '红13｜树名标记按平台折叠（detach 守卫）：旧代码（字面量 startsWith）下「重挂分支的 detach 脚手架按大写别名写法回收同样被拒、目录存活」断言必红',
+    mutations: [
+      {
+        file: 'src/main/git.ts',
+        find: "  if (hasMergeScaffoldMarker(path.basename(wtPath), MERGE_DETACH_SCAFFOLD_MARKER)) {",
+        replace: "  if (path.basename(wtPath).startsWith('.agentdeck-merge-detach-')) {"
+      }
+    ],
+    bundles: [{ src: 'src/main/git.ts', var: 'GIT' }],
+    scenario: RED13,
+    expectedRed: '大写别名写法同样拒绝回收'
+  },
+  {
+    name: '红14｜验收器盘符根：旧代码（根键无脑再拼第二个 sep）下「盘符根 workdir 界内目标判界内且存在」断言必红',
+    mutations: [
+      {
+        file: 'src/main/acceptance-verifier.ts',
+        find: "      const rootPrefix = rootKey.endsWith(path.sep) ? rootKey : `${rootKey}${path.sep}`",
+        replace: "      const rootPrefix = `${rootKey}${path.sep}`"
+      }
+    ],
+    bundles: [{ src: 'src/main/acceptance-verifier.ts', var: 'VERIFY' }],
+    scenario: RED14,
+    expectedRed: '盘符根 workdir 下界内目标必须判界内且存在'
+  },
+  {
+    name: '红15｜删单回收去重：旧代码（字面量 Map 键）下「同一棵树的双别名写法只回收一次、保留首个原始写法与 owner」断言必红',
+    mutations: [
+      {
+        file: 'src/main/ipc/tasks.ts',
+        find: "    const key = worktreePathKey(worktreePath)",
+        replace: "    const key = worktreePath"
+      }
+    ],
+    bundles: [{ src: 'src/main/ipc/tasks.ts', var: 'TASKS' }],
+    files: [
+      ['node_modules/electron/index.js', "module.exports = {\n  handlers: {},\n  ipcMain: { handle: (channel, fn) => { module.exports.handlers[channel] = fn } },\n  BrowserWindow: { getAllWindows: () => [] }\n}\n"]
+    ],
+    scenario: RED15,
+    expectedRed: '只回收一次'
+  },
+  {
+    name: '红16｜可执行路径比较按平台：旧代码（不分平台精确比较）下「win32 别名写法判等」断言必红',
+    mutations: [
+      {
+        file: 'src/main/backends/cli-common.ts',
+        find: "  return process.platform === 'win32' ? resolvedLeft.toLowerCase() === resolvedRight.toLowerCase() : resolvedLeft === resolvedRight",
+        replace: "  return resolvedLeft === resolvedRight"
+      }
+    ],
+    bundles: [{ src: 'src/main/backends/cli-common.ts', var: 'CLICOMMON' }],
+    scenario: RED16,
+    expectedRed: 'win32 下可执行路径别名写法必须判等'
   }
 ]
 
@@ -1015,17 +1326,20 @@ for (const item of MUTATIONS) {
       fs.mkdirSync(path.dirname(target), { recursive: true })
       fs.writeFileSync(target, content)
     }
-    const result = await runScenario(tree, item.scenario, item.bundles ?? [])
+    const result = await runScenario(tree, item.scenario, item.bundles ?? [], item.expectedRed)
     if (result.red) {
-      const firstRed = result.output.split('\n').find((line) => line.includes('RED:')) ?? ''
-      console.log('  ✓ 红证成立：旧代码下断言失败 — ' + firstRed.replace('RED:', '').trim())
-    } else if (result.asserted === false && result.output.trim()) {
+      console.log('  ✓ 红证成立：旧代码下预期断言失败 — ' + result.matched.replace('RED:', '').trim())
+    } else if (result.output.split('\n').some((line) => line.includes('RED:'))) {
       console.error(result.output)
-      console.error('  ❌ 红证失败：场景退出码 3 但没有任何具名 RED: 断言命中（红证必须断言具体失败原因，意外崩溃不算红）')
+      console.error(`  ❌ 红证失败：场景变红了，但命中的不是本红证预期的断言（预期片段：${item.expectedRed}）——前置/无关断言误红不算红证`)
+      failed++
+    } else if (result.output.includes('SCENARIO-OK')) {
+      console.error(result.output)
+      console.error('  ❌ 红证失败：旧代码下断言竟然全绿（变异未触达该行为）')
       failed++
     } else {
       console.error(result.output)
-      console.error('  ❌ 红证失败：旧代码下断言竟然全绿（变异未触达该行为）')
+      console.error('  ❌ 红证失败：场景异常退出且没有任何具名 RED: 断言命中（意外崩溃不算红证）')
       failed++
     }
   } catch (error) {

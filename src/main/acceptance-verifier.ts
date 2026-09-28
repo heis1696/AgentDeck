@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import type { Goal, Task } from '../shared/types'
 import { currentGitChanges } from '../shared/git-snapshot'
+import { worktreePathKey } from './git'
 import type { GoalAcceptanceEvidence, GoalAcceptanceVerifierResult } from './goal-controller'
 
 /**
@@ -23,7 +24,15 @@ export function verifyAcceptance(goal: Goal, task: Task): GoalAcceptanceVerifier
     const diffMatch = criterion.text.match(/^\s*git\s+diff\s+contains\s*:\s*(.+?)\s*$/i)
     if (fileMatch) {
       const target = path.resolve(root, fileMatch[1].trim())
-      const inside = target === path.resolve(root) || target.startsWith(`${path.resolve(root)}${path.sep}`)
+      // 根目录归属与 git.ts 的路径键同一套别名折叠（win32 大小写/盘符拼写差异）：
+      // workdir 与目标按不同别名写法登记时，字面量 === / startsWith 会把仓库内文件
+      // 误判到界外；折叠后根等值与界内前缀同源判定，目录边界照旧（非根前缀不误包含）
+      const targetKey = worktreePathKey(target)
+      const rootKey = worktreePathKey(root)
+      // 盘符根（C:\）与文件系统根（/）的路径键自带分隔符：无脑再拼第二个 sep 会把
+      // 界内文件判到界外（c:\file 不以 c:\\ 为前缀）——根前缀只在缺分隔符时补
+      const rootPrefix = rootKey.endsWith(path.sep) ? rootKey : `${rootKey}${path.sep}`
+      const inside = targetKey === rootKey || targetKey.startsWith(rootPrefix)
       const passed = inside && fs.existsSync(target)
       evidence.push({ criterionId: criterion.id, passed, evidence: passed ? `exists: ${path.relative(root, target)}` : `missing: ${fileMatch[1].trim()}` })
       continue
