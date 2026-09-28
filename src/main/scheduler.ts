@@ -29,7 +29,8 @@ export class Scheduler {
       const tasks = this.listTasks()
       const active = new Set(tasks.filter((task) => task.status === 'queued' || task.status === 'running').map((task) => task.id))
       const queued = tasks
-        .filter((task) => task.status === 'queued' && !task.parked && task.gitOperation === undefined)
+        // dispatchHold：归属绑定+登记核实未完成的委派子单，自创建起对调度器不可见
+        .filter((task) => task.status === 'queued' && !task.parked && !task.dispatchHold && task.gitOperation === undefined)
         // A handoff may be created before its source finishes asynchronous
         // finalization. Spare concurrency must not overlap those phases.
         .filter((task) => !task.continuesFrom || !active.has(task.continuesFrom))

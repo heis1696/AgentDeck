@@ -500,6 +500,8 @@ package.json：61 条直连脚本 + 4 条聚合（`smoke:stage6`、`smoke:stage7
 
 > 2026-09-28 增补：`smoke-delegate` 直连消费 `delegate.ts` 的 `REPORT_INLINE_MAX` / `buildChildReportBody`（回灌 C 保底与 summary 总结轮断言）及 `runner.ts` 的 `sendChildSummaryTurn`（总结轮独立通路，经 `DelegationContext.sendChildSummaryTurn` 接线），同样受本附录公共 API 保护规则约束；原直连符号 `REPORT_CONCLUSION_CHARS` / `REPORT_BODY_HARD_CAP` 已随回灌去截断改造移除，无残留消费。
 
+> 2026-09-28 增补（第五轮）：`runner.ts` 新增公共诊断面 `sniffBufferChars` / `suspendDelegateSpawns`，被 `smoke-delegate-reject`（场景 SN 嗅探缓冲压缩）与 `smoke-delegate-mutation`（变异红测）直连消费；新建 `scripts/smoke-delegate-mutation.mjs`（npm `smoke:delegate-mutation`）经临时源码树变异直连 `runner` + `scheduler` + `delegate`，为建单门禁 / cancelled 零合入 / 嗅探暂停清缓冲三项修复提供「旧代码下断言必红」的红证，同样受本附录公共 API 保护规则约束。
+
 ## 附录 B：§4.B 冗余导出完整清单（每文件一行）
 
 ```text

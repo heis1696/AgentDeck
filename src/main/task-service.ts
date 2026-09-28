@@ -30,6 +30,8 @@ export interface TaskCreateInput {
   workerIndex?: number
   unavailableReason?: string
   worktree?: WorktreeInfo
+  /** 委派子单建单门禁：创建即持有，归属绑定+登记核实三步全过才翻面入队 */
+  dispatchHold?: boolean
   /** Durable idempotency key for replayed creation requests. */
   dedupeKey?: string
   /** Public request id accepted by the Task IPC boundary. */
@@ -53,6 +55,7 @@ export interface ChildTaskCreateInput {
   workerIndex?: number
   unavailableReason?: string
   worktree?: WorktreeInfo
+  dispatchHold?: boolean
   suppressIssue?: boolean
   trigger?: RunTrigger
 }
@@ -200,6 +203,7 @@ export class TaskService {
         ...(input.workerIndex !== undefined ? { workerIndex: input.workerIndex } : {}),
         ...(input.unavailableReason ? { unavailableReason: input.unavailableReason } : {}),
         ...(input.worktree ? { worktree: input.worktree } : {}),
+        ...(input.dispatchHold ? { dispatchHold: true } : {}),
         ...(input.titleAuto ? { titleAuto: true } : {}),
         ...(dedupeKey ? { dedupeKey } : {}),
         ...(delegateSourceRunId ? { delegateSourceRunId } : {})
@@ -224,6 +228,7 @@ export class TaskService {
       workerIndex: input.workerIndex,
       unavailableReason: input.unavailableReason,
       worktree: input.worktree,
+      dispatchHold: input.dispatchHold,
       suppressIssue: input.suppressIssue,
       titleAuto: true
     }, input.trigger ?? 'assignment', input.delegateSourceRunId)

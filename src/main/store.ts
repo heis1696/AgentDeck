@@ -30,7 +30,7 @@ const TASK_INDEX_FIELDS = [
   'id', 'title', 'prompt', 'workdir', 'backend', 'agentId', 'trigger', 'issueId',
   'suppressIssue', 'runId', 'executionOwner', 'gitOperation', 'goalId', 'phaseIndex', 'parentTaskId', 'workerIndex', 'integration', 'status',
   'createdAt', 'startedAt', 'endedAt', 'result', 'error', 'failure', 'attempt',
-  'roundsUsed', 'handoff', 'continuesFrom', 'parked', 'manualStartConfirmedAt', 'backgroundRunning', 'titleAuto', 'sessionId',
+  'roundsUsed', 'handoff', 'continuesFrom', 'parked', 'dispatchHold', 'manualStartConfirmedAt', 'backgroundRunning', 'titleAuto', 'sessionId',
   'gitDiff', 'gitStat', 'gitSnapshot', 'usage', 'eventCount', 'unavailableReason', 'worktree', 'workVersion', 'dedupeKey',
   'delegateSourceRunId', 'delegateDeliveredAt', 'delegateRejections'
 ] as const
@@ -152,13 +152,14 @@ export function migrateTaskIndex(raw: unknown, now = Date.now(), options: { reco
 export type TaskCreateRecord = Pick<Task, 'title' | 'prompt' | 'workdir' | 'backend'> & Partial<Pick<Task,
   'parentTaskId' | 'workerIndex' | 'integration' | 'agentId' | 'handoff' | 'continuesFrom' | 'parked' |
   'backgroundRunning' | 'suppressIssue' | 'trigger' | 'issueId' | 'goalId' | 'phaseIndex' | 'titleAuto' |
-  'unavailableReason' | 'worktree' | 'workVersion' | 'dedupeKey' | 'delegateSourceRunId'>>
+  'unavailableReason' | 'worktree' | 'workVersion' | 'dedupeKey' | 'delegateSourceRunId' | 'dispatchHold'>>
 
 export interface TaskExpectation {
   status?: TaskStatus | readonly TaskStatus[]
   runId?: string
   executionOwner?: ExecutionOwner
   parked?: boolean
+  dispatchHold?: boolean
   attempt?: number
   phaseIndex?: number
   startedAt?: number
@@ -396,7 +397,7 @@ export class TaskStore {
           }
           const fields = ['parentTaskId', 'workerIndex', 'integration', 'agentId', 'handoff', 'continuesFrom', 'parked',
             'backgroundRunning', 'suppressIssue', 'trigger', 'issueId', 'goalId', 'phaseIndex', 'titleAuto',
-            'unavailableReason', 'worktree', 'workVersion', 'dedupeKey', 'delegateSourceRunId'] as const
+            'unavailableReason', 'worktree', 'workVersion', 'dedupeKey', 'delegateSourceRunId', 'dispatchHold'] as const
           for (const field of fields) {
             const value = input[field]
             if (value || typeof value === 'number') Object.assign(task, { [field]: value })
@@ -630,7 +631,8 @@ export class TaskStore {
     if (!owner.token || owner.pid !== process.pid || processOwnerState(owner) !== 'live') throw new Error('Invalid execution owner')
     return this.transaction((tx) => {
       const task = tx.get(id)
-      if (!task || task.gitOperation !== undefined || task.status === 'running' || (task.status === 'queued' && task.parked) || !matchesTask(task, expected)) return undefined
+      // dispatchHold 是建单门禁的硬闸：归属绑定+登记核实未完成的子单，任何执行领取一律拒绝
+      if (!task || task.gitOperation !== undefined || task.dispatchHold === true || task.status === 'running' || (task.status === 'queued' && task.parked) || !matchesTask(task, expected)) return undefined
       return tx.update(id, { ...patch, status: 'running', runId, executionOwner: { ...owner, leaseExpiresAt: Date.now() + 30000 } }, expected)
     })
   }
