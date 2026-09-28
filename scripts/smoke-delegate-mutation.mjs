@@ -28,7 +28,8 @@ async function bundle(tree, srcFile, outfile) {
   await build({ entryPoints: [path.join(tree, srcFile)], outfile, bundle: true, platform: 'node', format: 'cjs', target: 'node18', external: ['electron'] })
 }
 
-/** 用变异产物跑场景脚本：exit 0 = 断言全绿（红证失败）；exit 3 = 断言变红（红证成立） */
+/** 用变异产物跑场景脚本：红证成立的判定是「exit 3 且输出里有具名 RED: 断言」——
+ *  只按退出码计红会把场景自身的意外崩溃误当红证，红证必须断言出具体失败原因。 */
 async function runScenario(tree, scenarioScript, extraBundles = []) {
   const runnerOut = path.join(tree, 'out-runner.cjs')
   const storeOut = path.join(tree, 'out-store.cjs')
@@ -50,9 +51,11 @@ async function runScenario(tree, scenarioScript, extraBundles = []) {
   fs.writeFileSync(scriptFile, replacements.reduce((acc, [placeholder, value]) => acc.split(placeholder).join(JSON.stringify(value)), scenarioScript))
   try {
     const stdout = execFileSync('node', [scriptFile], { encoding: 'utf8', timeout: 180000, stdio: ['ignore', 'pipe', 'pipe'] })
-    return { red: false, output: stdout }
+    return { red: false, asserted: false, output: stdout }
   } catch (error) {
-    return { red: error.status === 3, output: (error.stdout ?? '') + (error.stderr ?? '') }
+    const output = (error.stdout ?? '') + (error.stderr ?? '')
+    const asserted = error.status === 3 && /RED:/.test(output)
+    return { red: asserted, asserted, output }
   }
 }
 
@@ -453,9 +456,55 @@ async function main() {
 main().catch((e) => { console.error(e); process.exit(3) })
 `
 
-// 红9｜启动韧性：旧代码（核实异常/转投异常不按单捕获、index 无总兜底）下
-// 「单子单核实异常不中断整个对账 + 单领队转投异常不拖垮其余领队 + 对账整体兜底存在」断言必红
-const RED9 = `
+// 红9①｜核实异常按单捕获：旧代码（核实异常直接炸穿对账，无按单捕获）下
+// 「单子单核实异常不中断对账 + 异常子单走具名失败路径 + 其余子单照常翻面」断言必红
+const RED9_VERIFY = `
+const path = require('path')
+const fs = require('fs')
+const os = require('os')
+const { TaskStore } = require(__MUT_STORE__)
+const { reconcileStartupTasks } = require(__MUT_HANDOFF__)
+const assert = (cond, msg) => { if (!cond) { console.error('RED:' + msg); process.exit(3) } }
+async function main() {
+  const store = new TaskStore(fs.mkdtempSync(path.join(os.tmpdir(), 'mut-r9a-store-')))
+  const source = store.create({ title: '阶段1', prompt: 'x', workdir: '', backend: 'fake' })
+  store.update(source.id, { status: 'done', endedAt: Date.now() })
+  const badChild = store.create({ title: '核实异常子单', prompt: 'x', workdir: 'wt-bad', backend: 'fake', parentTaskId: source.id, dispatchHold: true,
+    worktree: { ownerTaskId: 'lost', repoDir: 'repo', path: 'wt-bad', branch: 'b', baseSha: 's', createdAt: Date.now(), cleanupStatus: 'active' } })
+  const goodChild = store.create({ title: '无树子单', prompt: 'y', workdir: '', backend: 'fake', parentTaskId: source.id, dispatchHold: true })
+  const enqueued = []
+  let result
+  try {
+    result = await reconcileStartupTasks({
+      store,
+      pushEvent: () => {},
+      enqueue: (task) => enqueued.push(task.id),
+      notifyTaskChanged: () => {},
+      bindWorktreeOwner: async (wtDir) => { if (wtDir === 'wt-bad') throw new Error('核实进程爆炸'); return true }
+    })
+  } catch (error) {
+    console.error('RED:单个子单的核实异常炸掉整个启动对账（核实异常未按单捕获）：' + (error instanceof Error ? error.message : String(error)))
+    process.exit(3)
+  }
+  assert(result.holdingTerminated.length === 1 && result.holdingResumed.length === 1,
+    '对账整体走完：核实异常子单具名终态 1 单、无树子单照常翻面 1 单（实际 ' + result.holdingTerminated.length + '/' + result.holdingResumed.length + '）')
+  const bad = store.get(badChild.id)
+  assert(bad.status === 'cancelled' && bad.dispatchHold === true && (bad.error ?? '').includes('核实过程异常'),
+    '核实异常子单按单捕获走具名失败路径（实际 ' + bad.status + '，错误：' + (bad.error ?? '无') + '）')
+  assert(store.readEvents(badChild.id).some((e) => (e.text ?? '').includes('核实过程异常')), '核实异常在时间线具名留痕')
+  const good = store.get(goodChild.id)
+  assert(good.status === 'queued' && good.dispatchHold === undefined && enqueued.includes(goodChild.id),
+    '单个子单的核实异常不拖累其余子单：无树子单照常翻面恢复派发（实际 ' + good.status + '）')
+  assert(!store.list().some((t) => t.dispatchHold === true && t.status === 'queued'), '场上不存在 queued+hold 残留')
+  console.log('SCENARIO-OK')
+  process.exit(0)
+}
+main().catch((e) => { console.error(e); process.exit(3) })
+`
+
+// 红9②｜转投异常按单捕获：旧代码（转投异常直接炸穿对账）下「单领队转投异常不拖垮
+// 其余领队，两个死领队都被接管」断言必红
+const RED9_RELAY = `
 const path = require('path')
 const fs = require('fs')
 const os = require('os')
@@ -478,13 +527,7 @@ async function deadOwner(token) {
   return { pid: child.pid, instance: observed.instance, token, leaseExpiresAt: Date.now() - 60000 }
 }
 async function main() {
-  const store = new TaskStore(fs.mkdtempSync(path.join(os.tmpdir(), 'mut-r9-store-')))
-  const source = store.create({ title: '阶段1', prompt: 'x', workdir: '', backend: 'fake' })
-  store.update(source.id, { status: 'done', endedAt: Date.now() })
-  const badChild = store.create({ title: '核实异常子单', prompt: 'x', workdir: 'wt-bad', backend: 'fake', parentTaskId: source.id, dispatchHold: true,
-    worktree: { ownerTaskId: 'lost', repoDir: 'repo', path: 'wt-bad', branch: 'b', baseSha: 's', createdAt: Date.now(), cleanupStatus: 'active' } })
-  const goodChild = store.create({ title: '无树子单', prompt: 'y', workdir: '', backend: 'fake', parentTaskId: source.id, dispatchHold: true })
-  // 转投异常按单捕获夹具：两个可接管的死领队，第一个的队员报告转投抛错
+  const store = new TaskStore(fs.mkdtempSync(path.join(os.tmpdir(), 'mut-r9b-store-')))
   const ownerA = await deadOwner('dead-a')
   const ownerB = await deadOwner('dead-b')
   const leaderA = store.create({ title: '中断领队A', prompt: 'a', workdir: '', backend: 'fake', issueId: 'iss_a' })
@@ -495,36 +538,41 @@ async function main() {
   const kidB = store.create({ title: '队员B', prompt: 'b1', workdir: '', backend: 'fake', parentTaskId: leaderB.id })
   store.update(kidB.id, { status: 'done', endedAt: Date.now(), result: 'B 的交付' })
   store.update(leaderB.id, { status: 'running', startedAt: Date.now(), runId: 'run_b', executionOwner: ownerB })
-  const enqueued = []
-  const result = await reconcileStartupTasks({
-    store,
-    pushEvent: () => {},
-    enqueue: (task) => enqueued.push(task.id),
-    notifyTaskChanged: () => {},
-    bindWorktreeOwner: async (wtDir) => { if (wtDir === 'wt-bad') throw new Error('核实进程爆炸'); return true },
-    relayInterruptedLeader: (stale) => { if (stale.id === leaderA.id) throw new Error('转投通道爆炸') }
-  })
+  let result
+  try {
+    result = await reconcileStartupTasks({
+      store,
+      pushEvent: () => {},
+      enqueue: () => {},
+      notifyTaskChanged: () => {},
+      relayInterruptedLeader: (stale) => { if (stale.id === leaderA.id) throw new Error('转投通道爆炸') }
+    })
+  } catch (error) {
+    console.error('RED:单个领队的转投异常炸掉整个启动对账（转投异常未按单捕获）：' + (error instanceof Error ? error.message : String(error)))
+    process.exit(3)
+  }
   const recoveredIds = result.recovered.map((task) => task.id)
   assert(recoveredIds.includes(leaderA.id) && recoveredIds.includes(leaderB.id),
-    '单个领队的转投异常不中断对账：两个死领队都被接管（实际 ' + recoveredIds.length + ' 个）')
-  assert(result.holdingTerminated.length === 1 && result.holdingResumed.length === 1,
-    '对账整体走完：异常子单具名终态 1 单、无树子单照常翻面 1 单（实际 ' + result.holdingTerminated.length + '/' + result.holdingResumed.length + '）')
-  const bad = store.get(badChild.id)
-  assert(bad.status === 'cancelled' && bad.dispatchHold === true && (bad.error ?? '').includes('核实过程异常'),
-    '核实异常子单按单捕获走具名失败路径（实际 ' + bad.status + '，错误：' + (bad.error ?? '无') + '）')
-  assert(store.readEvents(badChild.id).some((e) => (e.text ?? '').includes('核实过程异常')), '核实异常在时间线具名留痕')
-  const good = store.get(goodChild.id)
-  assert(good.status === 'queued' && good.dispatchHold === undefined && enqueued.includes(goodChild.id),
-    '单个子单的核实异常不拖累其余子单：无树子单照常翻面恢复派发（实际 ' + good.status + '）')
-  assert(!store.list().some((t) => t.dispatchHold === true && t.status === 'queued'), '场上不存在 queued+hold 残留')
-  // index.ts 总兜底：编译产物里对账调用必须包在 catch（启动对账跑在窗口/IPC 之前，
-  // 绝不允许它把启动炸掉）——变异删掉 try/catch 后此断言必红
-  const indexBundle = fs.readFileSync(__MUT_INDEX__, 'utf8')
-  assert(indexBundle.includes('启动对账失败'), 'index 总兜底在编译产物中存在：对账失败只降级为遗留任务待手动处理')
+    '转投异常按单捕获：领队A 的转投失败不拖垮对账，两个死领队都被接管（实际 ' + recoveredIds.length + ' 个）')
   console.log('SCENARIO-OK')
   process.exit(0)
 }
 main().catch((e) => { console.error(e); process.exit(3) })
+`
+
+// 红9③｜index 总兜底：旧代码（对账调用不包 try/catch）下「编译产物存在『启动对账失败』
+// 降级路径」断言必红——启动对账跑在窗口/IPC 之前，绝不允许它把启动炸掉
+const RED9_INDEX = `
+const fs = require('fs')
+const assert = (cond, msg) => { if (!cond) { console.error('RED:' + msg); process.exit(3) } }
+function main() {
+  const indexBundle = fs.readFileSync(__MUT_INDEX__, 'utf8')
+  assert(indexBundle.includes('启动对账失败'),
+    'index 总兜底在编译产物中存在：启动对账失败必须降级为「应用继续启动、遗留任务保留可手动处理」，不得让对账异常炸掉应用启动（编译产物中不存在「启动对账失败」降级路径）')
+  console.log('SCENARIO-OK')
+  process.exit(0)
+}
+main()
 `
 
 // 红10｜任务侧独立世代证据：旧代码（缺任务世代时退回磁盘元数据自证）下「同名删树重建后旧残单不翻面入队」断言必红
@@ -571,24 +619,112 @@ async function main() {
 main().catch((e) => { console.error(e); process.exit(3) })
 `
 
-// 红11｜改绑完备条件：旧代码（只验世代，不验 owner/池状态/分支）下「池化复用给新任务后旧任务携原世代改绑被拒且新 owner 不被改写」断言必红
-const RED11 = `
+// 红11①世代｜改绑世代相等守卫：旧代码（sidecar 登记世代只验在场不验与任务证据相等）
+// 下「登记世代与任务证据分叉必须拒绝改绑」断言必红。夹具构造登记世代与磁盘世代标记
+// 分叉的现场（sidecar 残旧/被改写）：磁盘世代标记=出生世代、世代之外的证据全部吻合，
+// 世代相等守卫是唯一拦得住它的检查。
+const RED11_GEN = `
+${PRELUDE}
+const { createWorktree, setWorktreeOwner } = require(__MUT_GIT__)
+async function main() {
+  const { repo } = makeRepo('mut-r11-gen-')
+  const wt = await createWorktree(repo, 'mut-r11-gen', 'main', 'leader-1')
+  assert(!!wt, '前置：托管树建成')
+  // 登记世代分叉：sidecar 写成陌生世代，磁盘世代标记保持出生世代（世代之外证据全吻合）
+  const sidecar = path.join(repo, '.agentdeck-worktrees', '.metadata', 'mut-r11-gen.json')
+  const tampered = JSON.parse(fs.readFileSync(sidecar, 'utf8'))
+  tampered.generationId = 'gen-tampered-not-the-birth-generation'
+  fs.writeFileSync(sidecar, JSON.stringify(tampered, null, 2))
+  const bound = await setWorktreeOwner(wt.path, 'child-1', { generationId: wt.metadata.generationId, ownerTaskId: 'leader-1', branch: wt.metadata.branch })
+  assert(bound === false, '世代守卫：登记世代与任务证据不一致必须拒绝改绑（实际 ' + bound + '）')
+  const after = JSON.parse(fs.readFileSync(sidecar, 'utf8'))
+  assert(after.ownerTaskId === 'leader-1', '拒绝改绑后磁盘 owner 不被改写（实际 ' + after.ownerTaskId + '）')
+  console.log('SCENARIO-OK')
+  process.exit(0)
+}
+main().catch((e) => { console.error(e); process.exit(3) })
+`
+
+// 红11②owner｜改绑出生 owner 守卫：旧代码（不核对磁盘 owner 与出生/目标 owner）下
+// 「陌生调用方凭吻合的世代+分支证据不能抢走他人树」断言必红。夹具走纯库内操作：
+// 合法交接一次后，磁盘 owner 既非出生 owner 也非陌生认领方。
+const RED11_OWNER = `
+${PRELUDE}
+const { createWorktree, setWorktreeOwner } = require(__MUT_GIT__)
+async function main() {
+  const { repo } = makeRepo('mut-r11-own-')
+  const wt = await createWorktree(repo, 'mut-r11-own', 'main', 'leader-1')
+  assert(!!wt, '前置：托管树建成')
+  const birth = { generationId: wt.metadata.generationId, ownerTaskId: 'leader-1', branch: wt.metadata.branch }
+  const legit = await setWorktreeOwner(wt.path, 'child-1', birth)
+  assert(legit === true, '前置：出生 owner 交接成立')
+  const stolen = await setWorktreeOwner(wt.path, 'child-2', birth)
+  assert(stolen === false, 'owner 守卫：磁盘 owner 既非出生 owner 也非目标 owner 必须拒绝改绑（实际 ' + stolen + '）')
+  const after = JSON.parse(fs.readFileSync(path.join(repo, '.agentdeck-worktrees', '.metadata', 'mut-r11-own.json'), 'utf8'))
+  assert(after.ownerTaskId === 'child-1', '陌生认领被拒后磁盘 owner 不被改写（实际 ' + after.ownerTaskId + '）')
+  console.log('SCENARIO-OK')
+  process.exit(0)
+}
+main().catch((e) => { console.error(e); process.exit(3) })
+`
+
+// 红11③分支｜改绑出生分支守卫：旧代码（登记核实不比对出生分支）下「池化复用换分支后
+// 旧任务携原世代+原出生 owner 认领换 branch 后的树必须拒绝」断言必红。夹具：同一领队
+// 先后两次派单复用同一棵树（磁盘 owner 恰为出生 owner、世代保留）——分支守卫是唯一
+// 拦得住旧任务认领的检查。
+const RED11_BRANCH = `
 ${PRELUDE}
 const { createWorktree, reclaimWorktree, setWorktreeOwner } = require(__MUT_GIT__)
 async function main() {
-  const { repo } = makeRepo('mut-r11-')
-  const wtPool = await createWorktree(repo, 'mut-r11-pool', 'main', 'seed-owner')
-  assert(!!wtPool, '前置：托管树建成')
-  const repooled = await reclaimWorktree(wtPool.path, { repool: true, expectedOwnerTaskId: 'seed-owner', expectedGenerationId: wtPool.metadata.generationId })
+  const { repo } = makeRepo('mut-r11-br-')
+  const wtFirst = await createWorktree(repo, 'mut-r11-br', 'main', 'leader-1')
+  assert(!!wtFirst, '前置：托管树建成')
+  const birthBranch = wtFirst.metadata.branch
+  const repooled = await reclaimWorktree(wtFirst.path, { repool: true, expectedOwnerTaskId: 'leader-1', expectedGenerationId: wtFirst.metadata.generationId })
   assert(repooled.ok === true && repooled.status === 'pooled', '前置：树归还复用池')
-  const reused = await createWorktree(repo, 'mut-r11-next', 'main', 'next-owner')
-  assert(!!reused && reused.pooled === true && reused.path === wtPool.path, '前置：池化复用把同一棵树交给新任务')
-  assert(reused.metadata.generationId === wtPool.metadata.generationId, '前置：世代保留（单靠世代证据无法排他）')
-  const bound = await setWorktreeOwner(wtPool.path, 'old-owner', { generationId: wtPool.metadata.generationId, ownerTaskId: 'seed-owner', branch: wtPool.metadata.branch })
-  assert(bound === false, '旧任务携原世代+原出生证据调用：必须拒绝（实际 ' + bound + '）')
-  const meta = JSON.parse(fs.readFileSync(path.join(repo, '.agentdeck-worktrees', '.metadata', 'mut-r11-pool.json'), 'utf8'))
-  assert(meta.ownerTaskId === 'next-owner' && meta.branch === 'agentdeck/mut-r11-next',
-    '新 owner/分支不被旧任务改写（实际 ' + meta.ownerTaskId + ' / ' + meta.branch + '）')
+  const wtSecond = await createWorktree(repo, 'mut-r11-br-next', 'main', 'leader-1')
+  assert(!!wtSecond && wtSecond.pooled === true && wtSecond.path === wtFirst.path, '前置：同一领队复用同一棵树')
+  assert(wtSecond.metadata.generationId === wtFirst.metadata.generationId, '前置：世代保留（单靠世代无法排他）')
+  assert(wtSecond.metadata.branch !== birthBranch, '前置：池化复用换分支')
+  const claimed = await setWorktreeOwner(wtFirst.path, 'stale-child', { generationId: wtFirst.metadata.generationId, ownerTaskId: 'leader-1', branch: birthBranch })
+  assert(claimed === false, '分支守卫：旧任务携原世代+原出生 owner 认领换 branch 后的树必须拒绝（实际 ' + claimed + '）')
+  const after = JSON.parse(fs.readFileSync(path.join(repo, '.agentdeck-worktrees', '.metadata', 'mut-r11-br.json'), 'utf8'))
+  assert(after.ownerTaskId === 'leader-1' && after.branch === wtSecond.metadata.branch, '复用现场的 owner/分支不被旧任务改写（实际 ' + after.ownerTaskId + ' / ' + after.branch + '）')
+  console.log('SCENARIO-OK')
+  process.exit(0)
+}
+main().catch((e) => { console.error(e); process.exit(3) })
+`
+
+// 红11④可绑定｜未归池未被占领守卫：旧代码（不核对池 owner/pooled 状态/进程内池登记）
+// 下「仍登记在池的树不能被改绑抢走」断言必红。夹具构造池注册表与 sidecar 的崩溃窗口
+// 分叉：树仍在池登记里未复用，目录现场却已恢复出生模样（重挂出生分支+sidecar owner
+// 写回）——owner/世代/分支证据全部吻合，可绑定守卫是唯一拦得住它的检查。
+const RED11_POOL = `
+${PRELUDE}
+const { createWorktree, reclaimWorktree, setWorktreeOwner, worktreePoolEntriesForTest } = require(__MUT_GIT__)
+async function main() {
+  const { repo } = makeRepo('mut-r11-pool-')
+  const wt = await createWorktree(repo, 'mut-r11-pool', 'main', 'leader-1')
+  assert(!!wt, '前置：托管树建成')
+  const generationId = wt.metadata.generationId
+  const birthBranch = wt.metadata.branch
+  const repooled = await reclaimWorktree(wt.path, { repool: true, expectedOwnerTaskId: 'leader-1', expectedGenerationId: generationId })
+  assert(repooled.ok === true && repooled.status === 'pooled', '前置：树归还复用池（detach+池登记）')
+  assert(worktreePoolEntriesForTest(repo).length === 1, '前置：池注册表在案')
+  // 崩溃窗口分叉模拟：树未复用、仍在池登记，目录现场恢复出生模样（重挂出生分支+sidecar owner 写回；
+  // pooled 状态与池登记残留）
+  const git = (...args) => execFileSync('git', ['-C', wt.path, ...args], { encoding: 'utf8' })
+  git('switch', birthBranch)
+  const sidecar = path.join(repo, '.agentdeck-worktrees', '.metadata', 'mut-r11-pool.json')
+  const restored = JSON.parse(fs.readFileSync(sidecar, 'utf8'))
+  restored.ownerTaskId = 'leader-1'
+  fs.writeFileSync(sidecar, JSON.stringify(restored, null, 2))
+  const bound = await setWorktreeOwner(wt.path, 'child-1', { generationId, ownerTaskId: 'leader-1', branch: birthBranch })
+  assert(bound === false, '可绑定守卫：仍登记在池（pooled 状态+池注册表在案）的树必须拒绝改绑（实际 ' + bound + '）')
+  assert(worktreePoolEntriesForTest(repo).length === 1, '拒绝后池登记原样保留（实际 ' + worktreePoolEntriesForTest(repo).length + ' 条）')
+  const after = JSON.parse(fs.readFileSync(sidecar, 'utf8'))
+  assert(after.ownerTaskId === 'leader-1', '拒绝改绑后池树 owner 不被改写（实际 ' + after.ownerTaskId + '）')
   console.log('SCENARIO-OK')
   process.exit(0)
 }
@@ -707,7 +843,7 @@ const MUTATIONS = [
     mutations: [
       {
         file: 'src/main/git.ts',
-        find: "  return withWorktreePathLock(wtDir, async () => {\n    if (!fs.existsSync(wtDir)) return false\n    const resolved = await resolveManagedWorktree(wtDir)\n    if (!resolved?.metadata) return false\n    const { repoDir, metadata } = resolved\n    if (!sameWorktreePath(metadata.repoDir, repoDir) || !sameWorktreePath(metadata.path, wtDir)) return false\n    if (!metadata.generationId || metadata.generationId !== generationId) return false\n    if (metadata.ownerTaskId === WORKTREE_POOL_OWNER || metadata.cleanupStatus === 'pooled') return false\n    if (worktreePoolByRepo.get(path.resolve(repoDir))?.has(path.resolve(wtDir))) return false\n    if (metadata.ownerTaskId !== expectedOwner && metadata.ownerTaskId !== ownerTaskId.trim()) return false\n    if (await verifyWorktreeGeneration(repoDir, wtDir, generationId, expectedBranch)) return false\n    try { updateMetadata(metadata, { ownerTaskId: ownerTaskId.trim() }) } catch { return false }\n    return true\n  })",
+        find: "  return withWorktreePathLock(wtDir, async () => {\n    if (!fs.existsSync(wtDir)) return false\n    const resolved = await resolveManagedWorktree(wtDir)\n    if (!resolved?.metadata) return false\n    const { repoDir, metadata } = resolved\n    if (!sameWorktreePath(metadata.repoDir, repoDir) || !sameWorktreePath(metadata.path, wtDir)) return false\n    if (!metadata.generationId || metadata.generationId !== generationId) return false\n    if (metadata.ownerTaskId === WORKTREE_POOL_OWNER || metadata.cleanupStatus === 'pooled') return false\n    if (worktreePoolByRepo.get(worktreePathKey(repoDir))?.has(worktreePathKey(wtDir))) return false\n    if (metadata.ownerTaskId !== expectedOwner && metadata.ownerTaskId !== ownerTaskId.trim()) return false\n    if (await verifyWorktreeGeneration(repoDir, wtDir, generationId, expectedBranch)) return false\n    try { updateMetadata(metadata, { ownerTaskId: ownerTaskId.trim() }) } catch { return false }\n    return true\n  })",
         replace: "  const resolved = await resolveManagedWorktree(wtDir)\n  if (!resolved?.metadata) return false\n  const { metadata } = resolved\n  try { updateMetadata(metadata, { ownerTaskId: ownerTaskId.trim() }) } catch { return false }\n  return true"
       }
     ],
@@ -735,17 +871,12 @@ const MUTATIONS = [
     scenario: RED8
   },
   {
-    name: '红9｜启动韧性：旧代码（核实/转投异常不按单捕获 + index 无总兜底）下「单子单异常不中断对账 + 单领队转投异常不拖垮其余领队 + 对账整体兜底存在」断言必红',
+    name: '红9①｜核实异常按单捕获：旧代码（核实异常直接炸穿对账）下「单子单核实异常不中断对账+具名失败路径+其余子单照常翻面」断言必红',
     mutations: [
       {
         file: 'src/main/handoff.ts',
-        find: "      let unverifiable = ''\n      if (stale.worktree) {\n        // 残缺登记不免检：有 worktree 记录但 path 为空 = 身份证据残缺，归「无法核实」\n        // 具名终态——绝不因「看起来没有路径要核」就按无树子单翻面派发\n        if (!stale.worktree.path) {\n          unverifiable = 'worktree 登记残缺（路径为空），磁盘归属无法核实'\n        } else {\n          try {\n            const bound = deps.bindWorktreeOwner\n              ? await deps.bindWorktreeOwner(stale.worktree.path, stale.id, stale.worktree)\n              : false\n            if (!bound) unverifiable = 'worktree 磁盘归属无法核实（目录缺失、Git 注册不在案或任务侧世代/归属/分支证据不符）'\n          } catch (error) {\n            unverifiable = `worktree 磁盘归属核实过程异常（${error instanceof Error ? error.message : String(error)}）`\n          }\n        }\n      }",
-        replace: "      let unverifiable = ''\n      if (stale.worktree?.path) {\n        const bound = deps.bindWorktreeOwner ? await deps.bindWorktreeOwner(stale.worktree.path, stale.id, stale.worktree) : false\n        if (!bound) unverifiable = 'worktree 磁盘归属无法核实（目录缺失、Git 注册不在案或任务侧世代/归属/分支证据不符）'\n      }"
-      },
-      {
-        file: 'src/main/handoff.ts',
-        find: "    if (stale.issueId && kids.length) {\n      // 转投失败只属于这一个领队的收场：按单捕获留日志，不拖垮整个启动对账\n      try { deps.relayInterruptedLeader?.(stale, kids) } catch (error) {\n        console.error('[startup-reconcile] 中断领队的队员报告转投失败', stale.id, error)\n      }\n    }",
-        replace: "    if (stale.issueId && kids.length) {\n      deps.relayInterruptedLeader?.(stale, kids)\n    }"
+        find: "        } else {\n          try {\n            const bound = deps.bindWorktreeOwner\n              ? await deps.bindWorktreeOwner(stale.worktree.path, stale.id, stale.worktree)\n              : false\n            if (!bound) unverifiable = 'worktree 磁盘归属无法核实（目录缺失、Git 注册不在案或任务侧世代/归属/分支证据不符）'\n          } catch (error) {\n            unverifiable = `worktree 磁盘归属核实过程异常（${error instanceof Error ? error.message : String(error)}）`\n          }\n        }",
+        replace: "        } else {\n          const bound = deps.bindWorktreeOwner\n            ? await deps.bindWorktreeOwner(stale.worktree.path, stale.id, stale.worktree)\n            : false\n          if (!bound) unverifiable = 'worktree 磁盘归属无法核实（目录缺失、Git 注册不在案或任务侧世代/归属/分支证据不符）'\n        }"
       },
       {
         file: 'src/main/handoff.ts',
@@ -756,7 +887,26 @@ const MUTATIONS = [
         file: 'src/main/handoff.ts',
         find: "    } catch (error) {\n      // 兜底按单捕获：这笔收场写不进去（存储异常等）只留日志继续对账其余子单，\n      // 门禁原样保留——绝不让单个子单的异常把整个启动对账炸掉\n      console.error('[startup-reconcile] dispatchHold 子单收场异常，跳过该单继续对账', stale.id, error)\n    }\n  }",
         replace: '    }\n  }'
-      },
+      }
+    ],
+    bundles: [{ src: 'src/main/persistence.ts', var: 'PERSISTENCE' }],
+    scenario: RED9_VERIFY
+  },
+  {
+    name: '红9②｜转投异常按单捕获：旧代码（转投异常直接炸穿对账）下「单领队转投异常不拖垮其余领队，两个死领队都被接管」断言必红',
+    mutations: [
+      {
+        file: 'src/main/handoff.ts',
+        find: "    if (stale.issueId && kids.length) {\n      // 转投失败只属于这一个领队的收场：按单捕获留日志，不拖垮整个启动对账\n      try { deps.relayInterruptedLeader?.(stale, kids) } catch (error) {\n        console.error('[startup-reconcile] 中断领队的队员报告转投失败', stale.id, error)\n      }\n    }",
+        replace: "    if (stale.issueId && kids.length) {\n      deps.relayInterruptedLeader?.(stale, kids)\n    }"
+      }
+    ],
+    bundles: [{ src: 'src/main/persistence.ts', var: 'PERSISTENCE' }],
+    scenario: RED9_RELAY
+  },
+  {
+    name: '红9③｜index 总兜底：旧代码（对账调用不包 try/catch）下「编译产物存在『启动对账失败』降级路径」断言必红',
+    mutations: [
       {
         file: 'src/main/index.ts',
         find: '  try {\n    await reconcileStartupTasks({',
@@ -768,11 +918,8 @@ const MUTATIONS = [
         replace: ''
       }
     ],
-    bundles: [
-      { src: 'src/main/persistence.ts', var: 'PERSISTENCE' },
-      { src: 'src/main/index.ts', var: 'INDEX' }
-    ],
-    scenario: RED9
+    bundles: [{ src: 'src/main/index.ts', var: 'INDEX' }],
+    scenario: RED9_INDEX
   },
   {
     name: '红10｜任务侧独立世代证据：旧代码（缺任务世代时退回磁盘元数据自证）下「同名删树重建后旧残单不翻面入队」断言必红',
@@ -797,13 +944,32 @@ const MUTATIONS = [
     scenario: RED10
   },
   {
-    name: '红11｜改绑完备条件：旧代码（只验世代，不验 owner/池状态/分支）下「池化复用给新任务后旧任务携原世代改绑被拒且新 owner 不被改写」断言必红',
+    name: '红11①世代｜改绑世代相等守卫：旧代码（sidecar 登记世代只验在场不验与任务证据相等）下「登记世代分叉仍改绑」断言必红',
     mutations: [
       {
         file: 'src/main/git.ts',
-        find: "    if (metadata.ownerTaskId === WORKTREE_POOL_OWNER || metadata.cleanupStatus === 'pooled') return false\n    if (worktreePoolByRepo.get(path.resolve(repoDir))?.has(path.resolve(wtDir))) return false\n    if (metadata.ownerTaskId !== expectedOwner && metadata.ownerTaskId !== ownerTaskId.trim()) return false",
+        find: '    if (!metadata.generationId || metadata.generationId !== generationId) return false',
+        replace: '    if (!metadata.generationId) return false'
+      }
+    ],
+    bundles: [{ src: 'src/main/git.ts', var: 'GIT' }],
+    scenario: RED11_GEN
+  },
+  {
+    name: '红11②owner｜改绑出生 owner 守卫：旧代码（不核对磁盘 owner 与出生/目标 owner）下「陌生调用方抢走他人树」断言必红',
+    mutations: [
+      {
+        file: 'src/main/git.ts',
+        find: '    if (metadata.ownerTaskId !== expectedOwner && metadata.ownerTaskId !== ownerTaskId.trim()) return false',
         replace: ''
-      },
+      }
+    ],
+    bundles: [{ src: 'src/main/git.ts', var: 'GIT' }],
+    scenario: RED11_OWNER
+  },
+  {
+    name: '红11③分支｜改绑出生分支守卫：旧代码（登记核实不比对出生分支）下「池化复用换分支后旧任务携原世代认领」断言必红',
+    mutations: [
       {
         file: 'src/main/git.ts',
         find: '    if (await verifyWorktreeGeneration(repoDir, wtDir, generationId, expectedBranch)) return false',
@@ -811,7 +977,19 @@ const MUTATIONS = [
       }
     ],
     bundles: [{ src: 'src/main/git.ts', var: 'GIT' }],
-    scenario: RED11
+    scenario: RED11_BRANCH
+  },
+  {
+    name: '红11④可绑定｜未归池未被占领守卫：旧代码（不核对池 owner/pooled 状态/进程内池登记）下「仍登记在池的树被改绑抢走」断言必红',
+    mutations: [
+      {
+        file: 'src/main/git.ts',
+        find: "    if (metadata.ownerTaskId === WORKTREE_POOL_OWNER || metadata.cleanupStatus === 'pooled') return false\n    if (worktreePoolByRepo.get(worktreePathKey(repoDir))?.has(worktreePathKey(wtDir))) return false",
+        replace: ''
+      }
+    ],
+    bundles: [{ src: 'src/main/git.ts', var: 'GIT' }],
+    scenario: RED11_POOL
   },
   {
     name: '红12｜残缺登记不免检：旧代码（无 worktree 记录即免检翻面）下「空 path 残单不进派发队列」断言必红',
@@ -841,6 +1019,10 @@ for (const item of MUTATIONS) {
     if (result.red) {
       const firstRed = result.output.split('\n').find((line) => line.includes('RED:')) ?? ''
       console.log('  ✓ 红证成立：旧代码下断言失败 — ' + firstRed.replace('RED:', '').trim())
+    } else if (result.asserted === false && result.output.trim()) {
+      console.error(result.output)
+      console.error('  ❌ 红证失败：场景退出码 3 但没有任何具名 RED: 断言命中（红证必须断言具体失败原因，意外崩溃不算红）')
+      failed++
     } else {
       console.error(result.output)
       console.error('  ❌ 红证失败：旧代码下断言竟然全绿（变异未触达该行为）')

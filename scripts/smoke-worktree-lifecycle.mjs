@@ -8,7 +8,7 @@ import path from 'node:path'
 const root = path.resolve(import.meta.dirname, '..')
 const outfile = path.join(root, 'out', 'smoke-worktree-lifecycle.cjs')
 await build({ entryPoints: [path.join(root, 'src/main/git.ts')], outfile, bundle: true, platform: 'node', format: 'cjs', target: 'node18' })
-const { createWorktree, createWorktreeAtBranch, listWorktreeMetadata, reclaimWorktree, pruneWorktrees, setWorktreeManualKeep, branchExists, worktreeAvailability, removeWorktree, clearWorktreePool, clearWorktreeFileCountCache, WORKTREE_POOL_MAX_PER_REPO, worktreePoolEntriesForTest } = await import(pathToFileURL(outfile).href)
+const { createWorktree, createWorktreeAtBranch, listWorktreeMetadata, reclaimWorktree, pruneWorktrees, setWorktreeManualKeep, setWorktreeOwner, branchExists, worktreeAvailability, removeWorktree, clearWorktreePool, clearWorktreeFileCountCache, WORKTREE_POOL_MAX_PER_REPO, WORKTREE_POOL_OWNER, worktreePoolEntriesForTest, setWorktreePathLockProbeForTest } = await import(pathToFileURL(outfile).href)
 
 const check = (condition, message) => {
   if (!condition) throw new Error(message)
@@ -419,6 +419,98 @@ try {
     expectedGenerationId: failReuse.metadata.generationId
   })
   check(failRepool.ok && failRepool.status === 'pooled', 'reuse cycle keeps repooling after a failure')
+
+  // ---- 大小写别名并发专项（fix：路径键统一规范化）：同一棵树按别名写法必须同锁、
+  // 同池登记、池成员检查别名命中。别名只翻仓库前缀段的字母大小写——保留
+  // .agentdeck-worktrees 标记段与树名原样（resolveManagedWorktree 的标记切分与
+  // Git 注册表键名按字面量大小写匹配，属于另一层守卫，不归本专项）。----
+  if (process.platform === 'win32') {
+    clearWorktreePool()
+    const aliasPrefix = (candidate) => {
+      const markerIndex = candidate.toLowerCase().indexOf(`${path.sep}.agentdeck-worktrees${path.sep}`)
+      return markerIndex > 0 ? candidate.slice(0, markerIndex).toUpperCase() + candidate.slice(markerIndex) : null
+    }
+    const aliasRepo = dir[0] === dir[0].toLowerCase() ? dir[0].toUpperCase() + dir.slice(1).toUpperCase() : dir[0].toLowerCase() + dir.slice(1).toUpperCase()
+    check(aliasRepo.toUpperCase() === dir.toUpperCase() && aliasRepo !== dir, 'alias repo spelling differs only in case')
+
+    // 夹具A｜别名路径的两个改绑调用方串行化：核验+写入临界区必须互斥（计数探针），
+    // 且两种写法算出同一把规范锁键
+    const aliasTree = await createWorktree(dir, 'alias_case_c1', 'main', 'alias_leader')
+    check(!!aliasTree, 'alias fixture tree created')
+    const aliasTreePath = aliasPrefix(aliasTree.path)
+    check(!!aliasTreePath && aliasTreePath !== aliasTree.path, 'alias tree spelling differs from the real path')
+    const lockProbe = () => {
+      const acquireKeys = new Set()
+      const liveByKey = new Map()
+      let maxLiveByKey = 0
+      setWorktreePathLockProbeForTest((event, key) => {
+        if (event === 'acquire') {
+          acquireKeys.add(key)
+          const live = (liveByKey.get(key) ?? 0) + 1
+          liveByKey.set(key, live)
+          maxLiveByKey = Math.max(maxLiveByKey, live)
+        } else {
+          liveByKey.set(key, (liveByKey.get(key) ?? 1) - 1)
+        }
+      })
+      return { acquireKeys, result: () => ({ acquireKeys, maxLiveByKey }) }
+    }
+    const probeA = lockProbe()
+    try {
+      const birth = { generationId: aliasTree.metadata.generationId, ownerTaskId: 'alias_leader', branch: aliasTree.metadata.branch }
+      const [bindReal, bindAlias] = await Promise.all([
+        setWorktreeOwner(aliasTree.path, 'alias_child_a', birth),
+        setWorktreeOwner(aliasTreePath, 'alias_child_b', birth)
+      ])
+      check(bindReal === true && bindAlias === false, 'first alias caller binds, the serialized second is refused (owner already handed over)')
+      const { acquireKeys, maxLiveByKey } = probeA.result()
+      check(acquireKeys.size === 1, `both alias spellings take the same canonical lock key (${acquireKeys.size} distinct)`)
+      check(maxLiveByKey === 1, `verify+write critical sections never overlap across alias spellings (max live = ${maxLiveByKey})`)
+    } finally {
+      setWorktreePathLockProbeForTest(undefined)
+    }
+
+    // 夹具B｜池复用临界区 与 核验+写入 互斥：树在池中，复用方（真实路径）与旧任务改绑
+    // 方（别名路径）并发——两把写法必须进同一把锁，复用给新任务不能插进核验与写入之间
+    const poolSource = await createWorktree(dir, 'alias_pool_c1', 'main', 'alias_pool_leader')
+    check(!!poolSource, 'pool alias fixture tree created')
+    const repooledOnce = await reclaimWorktree(poolSource.path, { repool: true, expectedOwnerTaskId: 'alias_pool_leader', expectedGenerationId: poolSource.metadata.generationId })
+    check(repooledOnce.ok && repooledOnce.status === 'pooled', 'pool alias fixture tree repooled')
+    check(worktreePoolEntriesForTest(aliasRepo).length === 1, 'pool lookup via alias repo spelling hits the same in-process pool')
+    const probeB = lockProbe()
+    let reuse
+    try {
+      const [reuseResult, staleBind] = await Promise.all([
+        createWorktree(dir, 'alias_pool_c2', 'main', 'alias_pool_leader'),
+        setWorktreeOwner(aliasPrefix(poolSource.path), 'alias_stale_child', {
+          generationId: poolSource.metadata.generationId,
+          ownerTaskId: 'alias_pool_leader',
+          branch: poolSource.metadata.branch
+        })
+      ])
+      reuse = reuseResult
+      check(!!reuse && reuse.pooled === true && reuse.path === poolSource.path, 'pooled tree is reused while a stale alias bind is in flight')
+      check(staleBind === false, 'stale birth-evidence bind via alias spelling is refused in every interleaving')
+      const { acquireKeys, maxLiveByKey } = probeB.result()
+      const pooledKey = path.resolve(poolSource.path).toLowerCase()
+      check(acquireKeys.has(pooledKey) && acquireKeys.size === 2, `reuse and alias bind serialize on one canonical pool-tree key (${acquireKeys.size} distinct)`)
+      check(maxLiveByKey === 1, `pool-reuse critical section and verify+write never overlap (max live = ${maxLiveByKey})`)
+    } finally {
+      setWorktreePathLockProbeForTest(undefined)
+    }
+
+    // 夹具C｜池成员检查用别名路径必须命中：在池的树绝不被别名回收，也绝不重复登记
+    const repoolAgain = await reclaimWorktree(poolSource.path, { repool: true, expectedOwnerTaskId: reuse.metadata.ownerTaskId, expectedGenerationId: reuse.metadata.generationId })
+    check(repoolAgain.ok && repoolAgain.status === 'pooled', 'alias fixture tree repooled again after the reuse race')
+    const aliasPooledPath = aliasPrefix(poolSource.path)
+    const aliasReclaim = await reclaimWorktree(aliasPooledPath, { repool: true, expectedOwnerTaskId: WORKTREE_POOL_OWNER, expectedGenerationId: poolSource.metadata.generationId })
+    check(aliasReclaim.ok === false && aliasReclaim.status === 'retained' && (aliasReclaim.reason ?? '').includes('active in the reuse pool'),
+      `pool member check hits via alias spelling (got ${aliasReclaim.status}: ${aliasReclaim.reason ?? ''})`)
+    check(worktreePoolEntriesForTest(dir).length === 1, 'alias reclaim attempt registers no duplicate pool entry')
+    check(fs.existsSync(poolSource.path), 'pooled tree survives the alias reclaim attempt')
+  } else {
+    console.log('  SKIP 大小写别名并发专项（非 win32 平台，路径等价判定退化为字面量比较）')
+  }
   console.log('\nWORKTREE LIFECYCLE SMOKE PASSED')
 } finally {
   fs.rmSync(dir, { recursive: true, force: true })
