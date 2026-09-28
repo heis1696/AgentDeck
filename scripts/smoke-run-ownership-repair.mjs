@@ -421,7 +421,7 @@ async function main() {
     }
 
     const enqueued = []
-    const result = reconcileStartupTasks({
+    const result = await reconcileStartupTasks({
       store,
       pushEvent: () => {},
       enqueue: (task) => enqueued.push(task.id),

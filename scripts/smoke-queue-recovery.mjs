@@ -1,7 +1,8 @@
 // 队列重启恢复冒烟：硬切(<continue>)后继任务以 queued 落库，排队启动依赖事件
 // （enqueue / 上一跑落幕触发 pump）。应用在窗口期重启后事件源全消失，任务永远滞留
 // 排队——且非 parked 的排队任务在 UI 没有任何启动入口。本冒烟复现缺口并验证
-// 启动对账恢复（与 src/main/index.ts 的启动对账循环保持同逻辑）。
+// 启动对账恢复：僵尸运行按既有镜像断言，queued/holding 收场直接调用
+// src/main/handoff.ts 的真实 reconcileStartupTasks（与 src/main/index.ts 同一实现，杜绝镜像漂移）。
 //
 // 重启后的 running 只有在**执行身份被证实已死**时才是僵尸：活跃或身份不可读的记录
 // 一律保留。接管统一走 store.recoverDeadRuns（锁外探活 + 锁内按捕获身份条件提交），
@@ -20,13 +21,17 @@ const root = path.resolve(import.meta.dirname, '..')
 for (const [src, out] of [
   ['src/main/runner.ts', 'out/sqr-runner.cjs'],
   ['src/main/store.ts', 'out/sqr-store.cjs'],
-  ['src/main/persistence.ts', 'out/sqr-persistence.cjs']
+  ['src/main/persistence.ts', 'out/sqr-persistence.cjs'],
+  ['src/main/git.ts', 'out/sqr-git.cjs'],
+  ['src/main/handoff.ts', 'out/sqr-handoff.cjs']
 ]) {
   await build({ entryPoints: [path.join(root, src)], outfile: path.join(root, out), bundle: true, platform: 'node', format: 'cjs', target: 'node18', external: ['electron'] })
 }
 const { TaskRunner } = await import(pathToFileURL(path.join(root, 'out/sqr-runner.cjs')).href)
 const { TaskStore } = await import(pathToFileURL(path.join(root, 'out/sqr-store.cjs')).href)
 const { probeProcess, processOwnerState, currentProcessIdentity } = await import(pathToFileURL(path.join(root, 'out/sqr-persistence.cjs')).href)
+const { setWorktreeOwner } = await import(pathToFileURL(path.join(root, 'out/sqr-git.cjs')).href)
+const { reconcileStartupTasks } = await import(pathToFileURL(path.join(root, 'out/sqr-handoff.cjs')).href)
 
 const assert = (cond, msg) => { if (!cond) { console.error('❌', msg); process.exit(1) } console.log('  ✓', msg) }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -88,6 +93,16 @@ const liveOwner = { ...currentProcessIdentity(), token: 'live-owner-token', leas
   store.create({ title: 'goal阶段', prompt: 'g', workdir: '', backend: 'fake', issueId: 'iss_g', goalId: 'goal_1' })
   store.create({ title: 'worker', prompt: 'w', workdir: '', backend: 'fake', parentTaskId: source.id })
   store.create({ title: 'parked', prompt: 'p', workdir: '', backend: 'fake', parked: true })
+  // 翻面前崩溃的 dispatchHold 子单（建单流程在翻面前被重启打断）：
+  // ① 无树 holding → 磁盘核实免检，翻面恢复派发并跑通；
+  // ② 带死路径 worktree 的 holding → 磁盘归属无法核实，转具名终态+处置提示；
+  // ③ 旧快照 parked+holding → 同样翻面恢复（parked 一并释放，不再「可启动却领不动」）
+  store.create({ title: 'holding子单', prompt: 'h', workdir: '', backend: 'fake', parentTaskId: source.id, dispatchHold: true })
+  store.create({
+    title: 'holding有树', prompt: 't', workdir: path.join(dir, 'repo'), backend: 'fake', parentTaskId: source.id, dispatchHold: true,
+    worktree: { ownerTaskId: 'lost-owner', repoDir: path.join(dir, 'repo'), path: path.join(dir, 'missing-worktree'), branch: 'agentdeck/missing', baseSha: 'deadbeef', createdAt: Date.now(), cleanupStatus: 'active' }
+  })
+  store.create({ title: 'holding挂起', prompt: 'q', workdir: '', backend: 'fake', parentTaskId: source.id, dispatchHold: true, parked: true })
   // 重启时正在执行的任务（①）：执行身份已死——日志尾部有 final（实际做完，状态没来得及
   // 落盘）/ 没有 final（真中断）/ 旧回合 final 后又有新回合事件（后继回合被打断）
   const finished = store.create({ title: '中断有final', prompt: 'f', workdir: '', backend: 'fake' })
@@ -153,19 +168,33 @@ assert(unknown?.status === 'running' && unknown.runId === 'run_unknown_identity'
 const live = byTitle('活跃运行中')
 assert(live?.status === 'running' && live.runId === 'run_live_owner', '租约已过期但进程仍活着的 running 不被接管')
 
-// ② queued 对账
-for (const stale of store.list().filter((task) => task.status === 'queued' && !task.parked)) {
-  const captured = { status: 'queued', runId: stale.runId, executionOwner: stale.executionOwner }
-  if (stale.goalId || stale.parentTaskId) {
-    const note = store.appendEvent(stale.id, { ts: Date.now(), kind: 'status', text: '启动对账：应用重启，排队任务挂起待确认（可手动启动）' }, captured)
-    store.updateIf(stale.id, captured, { parked: true })
-    if (note) runner.pushEvent(stale.id, note)
-  } else {
-    const note = store.appendEvent(stale.id, { ts: Date.now(), kind: 'status', text: '启动对账：恢复上次排队中的执行' }, captured)
-    if (note) runner.pushEvent(stale.id, note)
-    runner.enqueue(store.get(stale.id) ?? stale)
-  }
-}
+// ② queued/holding 对账：直接调用真实 reconcileStartupTasks（src/main/handoff.ts，
+//    与 index.ts 同一实现）——普通 queued 两路（恢复派发/挂起）与 dispatchHold 子单
+//    的磁盘归属核实收场全部走生产代码。上面的僵尸接管已被本镜像消费一次，
+//    recoverDeadRuns 只认领一次，这里的主接管段自然空转。
+const reconcileResult = await reconcileStartupTasks({
+  store,
+  pushEvent: (taskId, event) => runner.pushEvent(taskId, event),
+  enqueue: (task) => runner.enqueue(task),
+  notifyTaskChanged: () => {},
+  bindWorktreeOwner: (wtDir, ownerTaskId) => setWorktreeOwner(wtDir, ownerTaskId)
+})
+
+// —— 翻面前崩溃的 dispatchHold 子单：要么恢复派发跑通、要么具名终态可见，不允许静默悬挂 ——
+const holdingSub = byTitle('holding子单')
+const holdingTree = byTitle('holding有树')
+const holdingParked = byTitle('holding挂起')
+assert(holdingSub && holdingTree && holdingParked, '前置：三类 holding 子单夹具均已建单落盘')
+assert(reconcileResult.holdingResumed.length === 2 && reconcileResult.holdingTerminated.length === 1,
+  `holding 收场二分：恢复派发 ${reconcileResult.holdingResumed.length} 单、具名终态 ${reconcileResult.holdingTerminated.length} 单`)
+assert(await until(() => store.get(holdingSub.id)?.status === 'done'), '无树 holding 子单翻面恢复派发并跑通到 done')
+assert(store.get(holdingSub.id).dispatchHold === undefined, '恢复派发的 holding 子单门禁已释放（不再对调度器隐身）')
+assert(store.readEvents(holdingSub.id).some((e) => e.kind === 'status' && e.text?.includes('恢复派发')), '恢复派发动作在时间线留痕')
+assert(holdingTree.status === 'cancelled' && !!holdingTree.error, '磁盘归属无法核实的 holding 子单转具名终态（cancelled+错误说明）')
+assert(holdingTree.dispatchHold === true && !holdingTree.parked, '终态子单不挂起：不出现「可手动启动」却领不动的假入口')
+assert(store.readEvents(holdingTree.id).some((e) => e.kind === 'status' && e.text?.includes('启动对账') && e.text?.includes('现场保留')), '终态子单时间线留痕并给出现场处置提示')
+assert(await until(() => store.get(holdingParked.id)?.status === 'done') && store.get(holdingParked.id).parked === undefined, '旧快照 parked+holding 悬挂单同样翻面恢复（parked 一并释放）')
+assert(store.list().every((t) => !(t.dispatchHold === true && t.status === 'queued')), '不允许静默悬挂：场上不存在 queued 且持门禁的子单（parked 与否皆否）')
 
 assert(await until(() => store.get(succ.id)?.status === 'done'), '恢复入队后后继任务执行到 done')
 assert(store.readEvents(succ.id).some((e) => e.kind === 'status' && e.text?.includes('启动对账')), '时间线留有恢复说明事件')
@@ -177,5 +206,6 @@ await sleep(400)
 assert(byTitle('goal阶段')?.status === 'queued' && byTitle('goal阶段')?.parked, 'goal 绑定的排队任务被挂起，后续 pump 不再扫走')
 assert(byTitle('worker')?.status === 'queued' && byTitle('worker')?.parked, '委派 worker 排队任务被挂起（委派循环已死）')
 assert(byTitle('parked')?.status === 'queued' && byTitle('parked')?.parked, 'parked 任务保持待启动')
+assert(byTitle('holding有树')?.status === 'cancelled', '具名终态的 holding 子单不被后续 pump 复活或扫走')
 
 console.log('\n✅ 队列重启恢复冒烟通过')

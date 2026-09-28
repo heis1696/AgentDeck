@@ -16,6 +16,7 @@ import {
   buildRejectionFeedbackPrompt,
   CONTINUE_INSTRUCTION,
   CONTINUE_INSTRUCTION_WITH_REJECTS,
+  BUDGET_TAIL_INSTRUCTION,
   buildRejectNotice,
   REVIEW_INSTRUCTION,
   undeliveredReportComment,
@@ -138,9 +139,15 @@ export function parseDelegates(text: string): DelegateCall[] {
 
 /** 检出残缺的 delegate 开标记：带 to= 却未被任何完整匹配消费 = 没写闭合或闭合损坏。
  *  残缺标记的正文边界不可知、自身不构成派单，但必须被具名回执（走既有拒单通道），
- *  绝不允许领队按协议「只有已接单或具名拒单才能确认结果」等到永远。 */
-export function findUnmatchedDelegateOpens(text: string): Array<{ to: string; excerpt: string }> {
-  const out: Array<{ to: string; excerpt: string }> = []
+ *  绝不允许领队按协议「只有已接单或具名拒单才能确认结果」等到永远。
+ *  embedded=截断致残：该开标记与其后方某个完整匹配之间既没有有效闭合、也没有任何
+ *  闭合形态的字样（< /delegate 之类写坏的闭合也算闭合尝试）——它的正文撞上哨兵边界
+ *  （下一个 <delegate 开标记）被截断，后方的完整标记按字面独立解析受理。闭合写坏后
+ *  接独立有效单的形态（正文在自己写坏的闭合处结束）不属此类，不得误标内嵌。
+ *  契约（保守事实性文案）：只陈述「本单未建单 + 其后完整标记按字面独立受理」，不断言
+ *  内嵌单已执行——它按字面受理后仍可能被护栏具名拒单，执行与否以各自回执为准。 */
+export function findUnmatchedDelegateOpens(text: string): Array<{ to: string; excerpt: string; embedded: boolean }> {
+  const out: Array<{ to: string; excerpt: string; embedded: boolean }> = []
   const matched = matchDelegates(text)
   const reOpen = /<delegate\b(?=[^>]*\bto\s*=)([^>]*)>/g
   let m: RegExpExecArray | null
@@ -149,9 +156,20 @@ export function findUnmatchedDelegateOpens(text: string): Array<{ to: string; ex
     const to = tagAttr(m[1], 'to')
     if (!to) continue
     const bodyStart = m.index + m[0].length
-    out.push({ to, excerpt: text.slice(bodyStart, bodyStart + 80).trim() })
+    const embedded = matched.some((range) => range.start > m!.index && !/<\s*\/\s*delegate/i.test(text.slice(m!.index, range.start)))
+    out.push({ to, excerpt: text.slice(bodyStart, bodyStart + 80).trim(), embedded })
   }
   return out
+}
+
+/** 残缺开标记的具名拒单文案（bail 与循环扫尾共用同一文案源头）：
+ *  截断致残用事实性描述——本单未建单 + 其后完整派单标记按字面独立受理（不断言其
+ *  已执行，受理后的拒单/回执各自送达）；纯残缺维持缺闭合/闭合损坏的原文案。 */
+export function unmatchedDelegateOpenReason(broken: { to: string; excerpt: string; embedded?: boolean }, why?: string): string {
+  const base = broken.embedded
+    ? `to="${broken.to}"：标记残缺（缺 </delegate> 闭合或被其后完整派单标记截断），本单未建单；其后出现的完整派单标记按字面独立受理`
+    : `to="${broken.to}"：标记残缺（缺 </delegate> 闭合或闭合损坏），未建单`
+  return why ? `${base}——${why}` : base
 }
 
 /** 把 delegate 标记从对外展示文本中剥掉（同解析规则：只剥带 to 的真实派单，不吞裸字样后的正文；
@@ -692,12 +710,22 @@ export async function runDelegationLoop(
   const maxTotalRounds = ctx.opts().maxTotalRounds ?? MAX_TOTAL_ROUNDS
   const bail = async (why: string): Promise<DelegationOutcome> => {
     note(`⚠ ${why}，本任务不再下派`)
-    const queued = pendingRejections()
-    const calls = queued.length ? [] : parseDelegatesMerged(first.delegationText ?? '', first.response)
-    let rejects = queued
-    if (!rejects.length && calls.length) {
-      calls.forEach((call) => runner.recordDelegateRejection(taskId, `to="${call.to}"：${why}；不要原样重派`, { to: call.to, prompt: call.prompt }))
-      rejects = pendingRejections()
+    // 护栏早退即关闭流式建单通道：拒单回灌回复里再流式输出新标记不再建单（有效目标的
+    // 新标记否则会被嗅探建出孤儿单），全部走下方逐单对账具名拒单。
+    runner.suspendDelegateSpawns?.(taskId)
+    // 逐单对账（复核②）：本回合文本里每个派单标记要么已有子单（流式提前建单）、
+    // 要么已有具名拒单、要么此刻补具名拒单。拒单队列非空绝不代表整批已处理——
+    // 实测形态：X 在流式里被拒（队列已有 X）+ Y 只出现在终态文本，旧逻辑见队列非空
+    // 直接跳过解析，Y 既无子单也无拒单、整单无痕。
+    const early = await runner.takeEarlySpawns(taskId, runId)
+    if (!active()) return abandoned()
+    const acceptedKeys = new Set(early.entries.map((entry) => `${entry.call.to}\n${entry.call.prompt}`))
+    const calls = parseDelegatesMerged(first.delegationText ?? '', first.response)
+    for (const call of calls) {
+      const key = `${call.to}\n${call.prompt}`
+      if (acceptedKeys.has(key)) continue
+      if (runner.delegateRejectionRecorded?.(taskId, runId, key)) continue
+      runner.recordDelegateRejection(taskId, `to="${call.to}"：${why}；不要原样重派`, { to: call.to, prompt: call.prompt })
     }
     // 残缺开标记同样具名（解析不出派单≠可以无痕）：护栏触发时领队也要知道它们未建单
     const bailBrokenSeen = new Set<string>()
@@ -706,10 +734,10 @@ export async function runDelegationLoop(
         const key = `${broken.to}\n${broken.excerpt}`
         if (bailBrokenSeen.has(key)) continue
         bailBrokenSeen.add(key)
-        runner.recordDelegateRejection(taskId, `to="${broken.to}"：标记残缺（缺 </delegate> 闭合或闭合损坏），未建单——${why}`, { to: broken.to, prompt: broken.excerpt })
+        runner.recordDelegateRejection(taskId, unmatchedDelegateOpenReason(broken, why), { to: broken.to, prompt: broken.excerpt })
       }
     }
-    rejects = pendingRejections()
+    let rejects = pendingRejections()
     if (rejects.length) {
       try {
         const turn = await runner.sendTurn(taskId, session,
@@ -717,6 +745,33 @@ export async function runDelegationLoop(
         if (!active()) return abandoned()
         if (!turn.ok) throw new Error(turn.error || '拒单回灌失败')
         acknowledgeRejections(rejects.length)
+        // 拒单回灌回复若再出新标记，同样逐单对账（建议并入⑤）：已接单/已有具名拒单的
+        // 复述不误拒，真正的新标记此刻补具名拒单——护栏已触发绝不建单；残缺开标记同规。
+        // 此刻已无下一轮回灌通道，新拒单以时间线留痕 + Issue 评论兜底，不再追加回合
+        // （对拒单回灌再做回灌会无界循环）。
+        const bailReconciled = new Set(acceptedKeys)
+        const bailRejectsBefore = pendingRejections().length
+        for (const call of parseDelegatesMerged(turn.delegationText ?? '', turn.response)) {
+          const key = `${call.to}\n${call.prompt}`
+          if (bailReconciled.has(key)) continue
+          if (runner.delegateRejectionRecorded?.(taskId, runId, key)) { bailReconciled.add(key); continue }
+          runner.recordDelegateRejection(taskId, `to="${call.to}"：${why}；不要原样重派`, { to: call.to, prompt: call.prompt })
+          bailReconciled.add(key)
+        }
+        const bailBrokenSeen = new Set<string>()
+        for (const text of [turn.delegationText ?? '', turn.response]) {
+          for (const broken of findUnmatchedDelegateOpens(text)) {
+            const key = `${broken.to}\n${broken.excerpt}`
+            if (bailBrokenSeen.has(key)) continue
+            bailBrokenSeen.add(key)
+            runner.recordDelegateRejection(taskId, unmatchedDelegateOpenReason(broken, why), { to: broken.to, prompt: broken.excerpt })
+          }
+        }
+        const bailNewRejects = pendingRejections().length - bailRejectsBefore
+        if (bailNewRejects > 0) {
+          note(`⚠ 拒单回灌回复仍出现 ${bailNewRejects} 条未受理的新派单/残缺标记（护栏已触发不建单），已具名留痕`)
+          if (task.issueId) ctx.addIssueComment?.(task.issueId, leftoverRejectsComment(pendingRejections()))
+        }
         return { rounds: 0, children: [], finalText: stripDelegates(turn.response), scanTexts: [turn.delegationText ?? '', turn.response] }
       } catch (error) {
         note(`⚠ 政策拒单未送达领队：${error instanceof Error ? error.message : String(error)}`)
@@ -769,8 +824,158 @@ export async function runDelegationLoop(
     }
   }
 
-  while (round < budget) {
+  // ---- 预算收尾（复核④）：最后预算回合的报告回灌若已流式提前建单，循环退出前必须
+  // 收编该单——等待终态、计入集成候选、最后一轮报告回灌；未受理的新标记一律具名拒单。
+  // 循环顶部只在轮首收编提前建单，最后一轮回灌自身流式出来的新单没人收：不在此收口，
+  // 它们就悬空（建了单没人等、没回灌、不进集成），领队与看板都看不到其终局。
+  const collectBudgetTail = async (): Promise<void> => {
+    const tail = await runner.takeEarlySpawns(taskId, runId)
+    if (!active()) return
+    const tailChildren = new Map<string, DelegateCall>()
+    for (const entry of tail.entries) {
+      if (entry.childId && store.get(entry.childId)) tailChildren.set(entry.childId, entry.call)
+    }
+    // 未受理的新标记（最后轮文本里解析得出、既未建单也无具名拒单）：预算已尽，具名拒单。
+    // 对账以已接单键为准（seenKeys 含本会话全部已受理/已回执的派单 key）：领队在收尾
+    // 回复里复述已接单标记不得误发拒单；真正的新标记不绕过。
+    const budgetReject = (call: DelegateCall) => {
+      const key = `${call.to}\n${call.prompt}`
+      if (tail.seenKeys.has(key)) return
+      if (runner.delegateRejectionRecorded?.(taskId, runId, key)) return
+      runner.recordDelegateRejection(taskId, `to="${call.to}"：委派轮数预算已耗尽，未建单；不要原样重派`, { to: call.to, prompt: call.prompt })
+    }
+    // 残缺开标记同样不绕过（出口复用具名残缺拒单规则）：解析不出派单≠可以无痕
+    const budgetBrokenSeen = new Set<string>()
+    const budgetRejectBroken = (text: string) => {
+      for (const broken of findUnmatchedDelegateOpens(text)) {
+        const key = `${broken.to}\n${broken.excerpt}`
+        if (budgetBrokenSeen.has(key)) continue
+        budgetBrokenSeen.add(key)
+        runner.recordDelegateRejection(taskId, unmatchedDelegateOpenReason(broken, '委派轮数预算已耗尽'), { to: broken.to, prompt: broken.excerpt })
+      }
+    }
+    for (const call of parseDelegatesMerged(...scanTexts)) budgetReject(call)
+    for (const text of scanTexts) budgetRejectBroken(text)
+    if (!tailChildren.size) return
+    // 等待收编单全部终态（提前建的单可能早已完成，等待即刻通过）
+    await new Promise<void>((resolve) => {
+      const check = () => {
+        const states = [...tailChildren.keys()].map((id) => store.get(id)?.status)
+        if (!active() || states.every((s) => s === undefined || s === 'done' || s === 'failed' || s === 'cancelled')) resolve()
+        else setTimeout(check, 1500)
+      }
+      check()
+    })
+    if (!active()) return
+    // 队员改动落盘（multica「nothing silently discarded」，与主循环同规）
+    for (const id of tailChildren.keys()) {
+      const c = store.get(id)
+      if (!c?.worktree || !c.workdir || (c.status !== 'done' && c.status !== 'failed')) continue
+      await commitAll(c.workdir, `agentdeck: ${c.title}`)
+      if (!active()) return
+    }
+    // 全文双落 + 报告组装（与主循环同源文案）；单号顺延已报告子单之后。
+    // 收编单变 cancelled 保留终局回执：状态行进报告，不从回灌与 allChildren 静默消失。
+    const tailEntries: string[] = []
+    const tailSeq = new Map<string, number>()
+    let seq = allChildren.length
+    for (const [id, call] of tailChildren) {
+      const c = store.get(id)
+      if (!c || (c.status !== 'done' && c.status !== 'failed' && c.status !== 'cancelled')) continue
+      seq++
+      tailSeq.set(id, seq)
+      reportedChildren.set(id, c)
+      const fullBody = c.status === 'done' ? (c.result ?? '').trim() || '（无最终输出）' : `状态 ${c.status}${c.error ? ': ' + c.error : ''}`
+      let copyRel = ''
+      let issueOk = false
+      if (c.status !== 'cancelled' && task.workdir && hasRepo) {
+        const written = await writeReportCopy(task.workdir, id, reportCopyMarkdown({ childId: id, title: c.title, seq, status: c.status, runId: c.runId ?? '', finishedAt: Date.now(), body: fullBody }))
+        if (!active()) return
+        if (written) copyRel = reportCopyRelPath(task.workdir, written)
+        else note(`⚠ 收编单 #${seq} 的报告副本写入失败（领队工作区不可写），全文仅存 Issue 评论`)
+      }
+      if (c.status !== 'cancelled' && task.issueId) {
+        let commentText = workerFullReportComment(c.title, seq, c.status, c.runId ?? '', fullBody)
+        const clamped = clampIssueCommentBytes(commentText)
+        if (clamped.truncated) {
+          commentText = copyRel
+            ? `${clamped.text}\n\n…（评论超出 64KB 通道上限已截断，完整全文以报告副本为准：${copyRel}）`
+            : `${clamped.text}\n\n…（评论超出 64KB 通道上限已截断，且报告副本写入失败，全文未完整留存）`
+        }
+        issueOk = !!ctx.addIssueComment?.(task.issueId, commentText)
+        if (!issueOk) note(`⚠ 收编单 #${seq} 的全文评论未送达（Issue 不存在或已删除），全文以报告副本与任务时间线为准`)
+      }
+      let gitSection: string | null = null
+      if (c.status === 'done' && c.worktree && c.workdir) {
+        const digest = await worktreeChangeDigest(c.workdir, c.worktree, {
+          diffChars: 1200, statLines: GIT_REPORT_STAT_MAX_LINES, statChars: GIT_REPORT_STAT_MAX_CHARS, untrackedNames: GIT_REPORT_UNTRACKED_MAX
+        })
+        if (!active()) return
+        gitSection = buildGitReportSection(digest)
+      }
+      const body = buildChildReportBody({
+        status: c.status,
+        result: c.result,
+        error: c.error,
+        gitSection,
+        pointers: fullTextPointerLines(copyRel, issueOk, seq)
+      })
+      tailEntries.push(childReportEntry(call?.to ?? c.agentId ?? c.backend, c.status, seq, body))
+      allChildren.push(id)
+    }
+    if (!tailEntries.length) return
+    pushTask(taskId)
+    // 最后一轮回灌：拒单随报告捎带；指令明确「预算已尽、新派单不再受理」
+    const rideAlong = pendingRejections()
+    if (rideAlong.length) note(`⚠ ${rideAlong.length} 条派单被拒（未建单），原因随预算收尾报告回灌给领队`)
+    note(`预算收尾：${tailEntries.length} 个流式提前建单的子任务已收编，回灌最后一轮结果`)
+    // 收尾回合关闭流式建单通道（预算收尾护栏）：不守提示的领队在收尾回复里流式输出
+    // 新标记时不再建单——回合末按已接单键对账，新标记具名拒单、复述不误拒、无孤儿子单。
+    runner.suspendDelegateSpawns?.(taskId)
+    try {
+      const turn = await runner.sendTurn(taskId, session,
+        `${REPORT_PROMPT_HEADER}\n\n【预算收尾】委派轮数预算已尽；以下为循环退出前收编完成的队员结果，本回合后不再受理新派单。\n\n${tailEntries.join('\n\n')}${rideAlong.length ? buildRejectNotice(rideAlong, rosterText) : ''}\n\n${BUDGET_TAIL_INSTRUCTION}${REVIEW_INSTRUCTION}`, runId
+      )
+      if (!active()) return
+      if (!turn.ok) throw new Error(turn.error || '预算收尾回灌失败')
+      acknowledgeRejections(rideAlong.length)
+      runner.acknowledgeDelegateReceipts?.(taskId, runId, [...tailChildren.keys()])
+      for (const n of parseRoundNotes(turn.response)) {
+        note(`领队评估：${n.outcome}${n.reason ? ' — ' + n.reason : ''}`)
+      }
+      // 审核结论与普通轮同规：收编报告附审核协议，领队的 review 标记在此匹配生效
+      const reviews = parseReviews(turn.response)
+      for (const [id, seqNo] of tailSeq) {
+        const child = store.get(id)
+        if (!child || child.status !== 'done') continue
+        const call = tailChildren.get(id)
+        const review = reviews.find((r) => r.of === `#${seqNo}`)
+          ?? reviews.find((r) => r.of === call?.to || (child.title && child.title.includes(r.of)))
+        if (!review) {
+          note(`单 #${seqNo} 未出审核结论，保留人工审核`)
+          continue
+        }
+        ctx.applyReview?.(id, review.verdict, review.note)
+        note(`单 #${seqNo} 审核${review.verdict === 'pass' ? '通过' : '退回'}${review.note ? `：${review.note}` : ''}`)
+      }
+      // 收编回灌回合里出现的新标记：不会再受理（预算已尽、循环即将退出），按已接单键
+      // 对账具名拒单；残缺开标记同规不绕过；未送达部分由循环后的遗留拒单通道兜底
+      const tailTexts = [turn.delegationText ?? '', turn.response]
+      for (const call of parseDelegatesMerged(...tailTexts)) budgetReject(call)
+      for (const text of tailTexts) budgetRejectBroken(text)
+      scanTexts = tailTexts
+      finalResponse = turn.response
+    } catch (e) {
+      note(`⚠ 预算收尾回灌失败: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
+  for (;;) {
     if (!active()) return abandoned()
+    if (round >= budget) {
+      await collectBudgetTail()
+      break
+    }
     const calls = parseDelegatesMerged(...scanTexts)
     // 收编流式期间提前建的单（等待未决建单完成）。seenKeys 是本会话出现过的全部派单
     // key（含已交付的）：领队在回灌/评估回合里复述旧派单标记时，绝不能当成新派单再建。
@@ -787,7 +992,7 @@ export async function runDelegationLoop(
         const key = `${broken.to}\n${broken.excerpt}`
         if (brokenReported.has(key)) continue
         brokenReported.add(key)
-        runner.recordDelegateRejection(taskId, `to="${broken.to}"：标记残缺（缺 </delegate> 闭合或闭合损坏），未建单`, { to: broken.to, prompt: broken.excerpt })
+        runner.recordDelegateRejection(taskId, unmatchedDelegateOpenReason(broken), { to: broken.to, prompt: broken.excerpt })
       }
     }
     if (!fresh.length && !early.entries.length) {
@@ -881,7 +1086,7 @@ export async function runDelegationLoop(
     for (let idx = 0; idx < childIds.length; idx++) {
       const id = childIds[idx]
       const c = store.get(id)
-      if (!c || (c.status !== 'done' && c.status !== 'failed')) continue
+      if (!c || (c.status !== 'done' && c.status !== 'failed' && c.status !== 'cancelled')) continue
       const seq = idx + 1
       const fullBody = c.status === 'done'
         ? (c.result ?? '').trim() || '（无最终输出）'
@@ -1111,6 +1316,10 @@ export async function runDelegationLoop(
           idx++
           const c = reportedChildren.get(cid)
           if (!c || !c.workdir) continue
+          // cancelled 收编单只留终局回执：用户取消的半成品不进集成分支、现场不清理
+          //（恢复「cancelled 现场保持原样交人工」契约——不 merge、不 commitAll、不回收，
+          // 半成品改动以未提交状态留在其 worktree，交由保留判定与人工处理）。
+          if (c.status === 'cancelled') continue
           // Every child write is bound to the exact child record this pass read:
           // a child that was re-run cannot receive a stale worktree conclusion.
           const capturedChild: TaskExpectation = { ...childIdentity(c), gitOperationToken: operation.token }

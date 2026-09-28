@@ -439,6 +439,8 @@ export interface Task {
   continuesFrom?: string
   /** 暂不启动：创建后停放在队列外，等用户手动开始 */
   parked?: boolean
+  /** 委派子单建单门禁：true = 归属绑定+登记核实未完成，调度器不可领取（三步全过翻面后才入队） */
+  dispatchHold?: boolean
   /** Set only by an explicit start action; scoped to this task, not tool permissions. */
   manualStartConfirmedAt?: number
   /** Background work is still running; Goal evaluation must defer. */
