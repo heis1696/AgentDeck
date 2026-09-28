@@ -1302,7 +1302,24 @@ export class TaskRunner {
     }
     const dedupeKey = expectedRunId ? `delegate:${createHash('sha256').update(JSON.stringify([taskId, expectedRunId, call.to, call.prompt])).digest('hex')}` : undefined
     const alreadyCreated = dedupeKey && this.store.list().find((candidate) => candidate.dedupeKey === dedupeKey && candidate.parentTaskId === taskId)
-    if (alreadyCreated) return alreadyCreated
+    if (alreadyCreated) {
+      // 撤键重试命中已落盘的子单（复核③）：前次建单可能在落盘之后、入队之前抛错
+      // （创建器落盘后抛 / owner 绑定中断）——子单停在 queued 且永不入队，委派循环
+      // 会对着它干等到天荒地老。此处核实调度状态：仍 queued 且未被接手 → 补齐 owner
+      // 绑定并重新入队；在跑/已终态/被 git 操作锁定 → 原样返回。
+      const record = this.store.get(alreadyCreated.id) ?? alreadyCreated
+      if (record.status === 'queued' && !record.parked && record.gitOperation === undefined) {
+        if (record.worktree && record.worktree.ownerTaskId !== record.id) {
+          try {
+            await setWorktreeOwner(record.worktree.path, record.id)
+            this.store.updateIf(record.id, { status: 'queued', runId: record.runId, executionOwner: record.executionOwner }, { worktree: { ...record.worktree, ownerTaskId: record.id } })
+          } catch { /* owner 绑定恢复失败不阻断入队；回收期归属校验兜底 */ }
+        }
+        guardedNote(`↻ 重试命中已落盘未入队的子单，恢复调度：${record.title}`)
+        this.enqueue(this.store.get(record.id) ?? record)
+      }
+      return record
+    }
     const workerIndex = this.reserveWorkerIndex(taskId)
     let workdir = task.workdir
     let unavailableReason: string | undefined

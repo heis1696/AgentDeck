@@ -23,7 +23,7 @@ for (const [src, out] of [
 }
 const { TaskRunner } = await import(pathToFileURL(path.join(root, 'out/sd-runner.cjs')).href)
 const { TaskStore } = await import(pathToFileURL(path.join(root, 'out/sd-store.cjs')).href)
-const { parseDelegates, stripDelegates, parseReviews, stripReviews, parseConsults, parseInvestigates, parseRoundNotes, parseContinue, delegateChildBranch, buildGitReportSection, GIT_REPORT_SECTION_MAX_CHARS, buildChildReportBody, REPORT_INLINE_MAX, findUnmatchedDelegateOpens } = await import(pathToFileURL(path.join(root, 'out/sd-delegate.cjs')).href)
+const { parseDelegates, stripDelegates, parseReviews, stripReviews, parseConsults, parseInvestigates, parseRoundNotes, parseContinue, delegateChildBranch, buildGitReportSection, GIT_REPORT_SECTION_MAX_CHARS, buildChildReportBody, REPORT_INLINE_MAX, findUnmatchedDelegateOpens, unmatchedDelegateOpenReason } = await import(pathToFileURL(path.join(root, 'out/sd-delegate.cjs')).href)
 const { fullTextPointerLines } = await import(pathToFileURL(path.join(root, 'out/sd-delegation.cjs')).href)
 const { createWorktree, reclaimWorktree, replayLeaderBaseline, probeGitRepository, probeCurrentBranch, writeReportCopy, reportCopyRelPath, sweepReportCopies, REPORTS_DIR_NAME, REPLAY_MAX_FILES, REPLAY_MAX_BYTES, worktreeChangeDigest } = await import(pathToFileURL(path.join(root, 'out/sd-git.cjs')).href)
 const { clampIssueCommentBytes, ISSUE_COMMENT_MAX_BYTES } = await import(pathToFileURL(path.join(root, 'out/sd-issue-relay.cjs')).href)
@@ -231,6 +231,16 @@ assert(parseDelegates(cleanPair).length === 2, '吞单回归⑥：完整双标�
 assert(stripDelegates('前' + cleanPair + '后') === '前\n后', '吞单回归⑦：完整标记剥离照常')
 assert(parseDelegates('<delegate to="甲">指令里引用 <delegate to="乙">示例</delegate> 结束</delegate>')[0].to === '乙', '吞单回归⑧：体部出现内嵌标记时哨兵在下一个开标记处截断，内嵌标记成为独立匹配（不再并进外层）')
 assert(findUnmatchedDelegateOpens('<delegate to="甲">无 to 缺失</delegate>普通正文<delegate>裸标记不检出</delegate>').length === 0, '吞单回归⑨：无 to 的裸标记字样不进残缺检出（对齐解析器 lookahead 约定）')
+// 场景⑧补外层拒单文案断言（字面标记契约）：内嵌致残 vs 纯残缺，两套文案
+const nestedText8 = '<delegate to="甲">指令里引用 <delegate to="乙">示例</delegate> 结束</delegate>'
+const nestedBroken8 = findUnmatchedDelegateOpens(nestedText8)
+assert(nestedBroken8.length === 1 && nestedBroken8[0].to === '甲' && nestedBroken8[0].embedded === true, '场景⑧：外层开标记按「内嵌致残」检出（内嵌完整标记按字面成单、外层残缺）')
+const nestedReason8 = unmatchedDelegateOpenReason(nestedBroken8[0])
+assert(nestedReason8.includes('正文内嵌了完整派单标记') && nestedReason8.includes('内嵌单已按字面执行'), '场景⑧：外层拒单文案明确警示「正文内嵌了完整派单标记，内嵌单已按字面执行」')
+assert(nestedReason8.includes('未建单'), '场景⑧：外层拒单文案仍明确该单未建单')
+const plainBroken8 = findUnmatchedDelegateOpens('<delegate to="X" reason="示例">忘写闭合，后方再无任何标记')
+assert(plainBroken8.length === 1 && plainBroken8[0].embedded === false, '场景⑧对照：纯残缺（后方无完整标记）不误标内嵌致残')
+assert(unmatchedDelegateOpenReason(plainBroken8[0]).includes('标记残缺') && !unmatchedDelegateOpenReason(plainBroken8[0]).includes('按字面执行'), '场景⑧对照：纯残缺维持原文案，不误警示内嵌执行')
 
 // parseReviews 单测（v2 审核流）
 assert(parseReviews('<review of="#1" verdict="pass" note="ok"/>').length === 1, 'parseReviews 提取 review')
@@ -2398,6 +2408,106 @@ assert(execSync(`git show ${ibE}:f2.txt`, { cwd: repo5, encoding: 'utf8' }).incl
   // ④旧 send 收口：迟到响应恰好落进旧连接自己的槽，且未窜入新连接
   assert(conn1.state.settled.includes('总结请求（响应会迟到）'), '场景 M④：旧 send 收口——迟到响应由旧连接的槽裁决')
   assert(!startsM[1].state.settled.includes('总结请求（响应会迟到）'), '场景 M④：迟到响应未窜入新连接')
+}
+
+// 场景 N：预算收尾（复核④）——单轮预算模拟：最后一轮报告回灌自身流式提前建单的 B
+// 必须在循环退出前被收编（等待终态 + 计入集成 + 最后一轮报告回灌），绝不悬空；
+// 未受理的新标记（只在终态文本里出现的 C）必须具名拒单，不得静默消失。
+{
+  const repoN = fs.mkdtempSync(path.join(os.tmpdir(), 'dele-repoN-'))
+  fs.writeFileSync(path.join(repoN, 'alpha-n.txt'), 'alpha v1\n')
+  fs.writeFileSync(path.join(repoN, 'beta-n.txt'), 'beta v1\n')
+  execSync('git init -q -b main && git add -A && git -c user.email=t@t -c user.name=t commit -qm init', { cwd: repoN })
+  const teamN = [
+    { id: 'LN', name: 'BossN', backend: 'leadN', role: '领队', systemPrompt: '', subordinates: ['WN1', 'WN2'] },
+    { id: 'WN1', name: 'WorkerN1', backend: 'wn1', role: '工程师', systemPrompt: '' },
+    { id: 'WN2', name: 'WorkerN2', backend: 'wn2', role: '工程师', systemPrompt: '' }
+  ]
+  const sentToLeaderN = []
+  const markerB = '<delegate to="WorkerN2">把 beta-n.txt 升级到 v3</delegate>'
+  // C：合法队员 + 新 prompt，但只出现在终态文本（从不流式）→ 预算已尽，必须具名拒单而非建单
+  const markerC = '<delegate to="WorkerN1">顺手把 alpha-n.txt 压缩</delegate>'
+  const leaderN = {
+    id: 'leadN', label: 'leadN',
+    async probe() { return { ok: true, detail: '' } },
+    async start({ events: rawEvents, turn }) {
+      const scoped = scopedCallbacks(rawEvents, turn)
+      setTimeout(() => {
+        const text = '<delegate to="WorkerN1">把 alpha-n.txt 升级到 v2</delegate>'
+        scoped.events.onEvent({ ts: Date.now(), kind: 'text', text })
+        scoped.events.onTurnEnd({ response: '已派活，等结果。', delegationText: text, ok: true })
+      }, 30)
+      return {
+        sessionId: 's_leadN', turnScoped: true,
+        async send(content, nextTurn) {
+          scoped.setTurn(nextTurn)
+          sentToLeaderN.push(content)
+          setTimeout(() => {
+            if (content.includes('预算收尾')) {
+              // 预算收尾回灌：只许总结，绝不再派发（再派也不会被受理）
+              const text = '预算收尾确认：alpha-n.txt 与 beta-n.txt 均已升级，任务结束。'
+              scoped.events.onTurnEnd({ response: text, ok: true }, nextTurn)
+              return
+            }
+            if (content.includes('结果汇报')) {
+              // 最后预算回合的报告回灌：B 走流式（提前建单），C 只进终态文本
+              scoped.events.onEvent({ ts: Date.now(), kind: 'text', text: markerB })
+              const text = `第一轮完成。<round outcome="action" reason="加派一单"/>${markerB}${markerC}`
+              scoped.events.onTurnEnd({ response: text, delegationText: markerB, ok: true }, nextTurn)
+              return
+            }
+            scoped.events.onTurnEnd({ response: '继续等待', ok: true }, nextTurn)
+          }, 30)
+          await new Promise((r) => setTimeout(r, 50))
+        },
+        async stop() {}, async close() {}
+      }
+    }
+  }
+  const makeWorkerN = (tag, file, version) => ({
+    id: tag, label: tag,
+    async probe() { return { ok: true, detail: '' } },
+    async start({ prompt, workdir, events }) {
+      setTimeout(() => {
+        if (prompt.includes(file)) fs.writeFileSync(path.join(workdir, file), `${file.split('.')[0]} ${version} by ${tag}\n`)
+        events.onTurnEnd({ response: `done ${tag}`, ok: true })
+      }, 40)
+      return { sessionId: `s_${tag}`, async send() {}, async stop() {}, async close() {} }
+    }
+  })
+  const storeN = new TaskStore(fs.mkdtempSync(path.join(os.tmpdir(), 'dele-storeN-')))
+  const runnerN = new TaskRunner(storeN, new Map([
+    ['leadN', leaderN],
+    ['wn1', makeWorkerN('WorkerN1', 'alpha-n.txt', 'v2')],
+    ['wn2', makeWorkerN('WorkerN2', 'beta-n.txt', 'v3')]
+  ]), () => ({ concurrency: 1, mode: 'yolo', notify: false, workerConcurrency: 3, delegateMaxRounds: 1 }))
+  runnerN.attachTeam(() => teamN)
+  const leaderTaskN = storeN.create({ title: '单轮预算收尾', prompt: '升级两个文件', workdir: repoN, backend: 'leadN', agentId: 'LN' })
+  runnerN.enqueue(leaderTaskN)
+  const tN = Date.now()
+  while (Date.now() - tN < 30000) {
+    const t = storeN.get(leaderTaskN.id)
+    if (t.status === 'done' || t.status === 'failed') break
+    await new Promise((r) => setTimeout(r, 150))
+  }
+  const finN = storeN.get(leaderTaskN.id)
+  assert(finN.status === 'done', `场景 N：领队 done（${finN.status}${finN.error ? ' ' + finN.error : ''}）`)
+  const childrenN = storeN.list().filter((t) => t.parentTaskId === leaderTaskN.id)
+  assert(childrenN.length === 2, `场景 N：恰好两个子单（A 流式 + B 收编；C 未建单，实际 ${childrenN.length}）`)
+  assert(childrenN.every((t) => t.status === 'done'), '场景 N：两个子单全部跑到终态（B 不悬空）')
+  assert(!childrenN.some((t) => t.prompt.includes('压缩')), '场景 N：未受理的新标记 C 没有被建单')
+  assert(finN.roundsUsed === 1, `场景 N：单轮预算只计一轮（roundsUsed=${finN.roundsUsed}）`)
+  assert(sentToLeaderN.length === 2, `场景 N：恰好两轮回灌（首轮报告 + 预算收尾；实际 ${sentToLeaderN.length}）`)
+  const tailReportN = sentToLeaderN[1]
+  assert(tailReportN.includes('预算收尾') && tailReportN.includes('队员 WorkerN2 的结果'), '场景 N：B 被收编并回灌最后一轮报告')
+  assert(tailReportN.includes('委派轮数预算已耗尽') && tailReportN.includes('to="WorkerN1"'), '场景 N：未受理的新标记 C 具名拒单随报告捎带')
+  assert(tailReportN.includes('不要再输出派发标记'), '场景 N：收尾指令明确新派单不再受理')
+  const ibN = finN.integration?.branch
+  assert(!!ibN, `场景 N：集成分支 ${ibN ?? '无'}`)
+  assert(execSync(`git show ${ibN}:alpha-n.txt`, { cwd: repoN, encoding: 'utf8' }).includes('v2 by WorkerN1'), '场景 N：首轮 A 的改动照常合入')
+  assert(execSync(`git show ${ibN}:beta-n.txt`, { cwd: repoN, encoding: 'utf8' }).includes('v3 by WorkerN2'), '场景 N：收编单 B 的改动合入集成分支（不悬空、不丢弃）')
+  const receiptsN = finN.delegateRejections ?? []
+  assert(receiptsN.length === 1 && receiptsN[0].deliveredAt && receiptsN[0].reason.includes('委派轮数预算已耗尽'), '场景 N：C 的拒单恰好一条且已送达')
 }
 
 console.log('\n✅ DELEGATION SMOKE PASSED (v2 + review flow)')

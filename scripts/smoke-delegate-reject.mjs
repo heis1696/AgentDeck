@@ -1,6 +1,9 @@
 // 派单被拒回灌冒烟：领队派给名单外的目标（不存在的 / 队长）→ 拒单原因回灌 →
 // 场景A 改派成功交付；场景B 回合末解析被拒后自行收尾；场景C 顽固重派时有界终止；
 // 场景D 混合轮（好单坏单同回合）→ 拒单随报告捎带送达，不等「零新单」兜底。
+// 场景K 字面标记契约（外层正文内嵌完整标记：内嵌单按字面执行 + 外层残缺具名拒单带警示文案）；
+// 场景L bail 逐单对账（X 流式被拒 + Y 只在终态文本出现 → Y 同样具名拒单）；
+// 场景J3 建单通道落盘后抛错（撤键重试恢复调度，不悬空）。
 import { build } from 'esbuild'
 import { pathToFileURL } from 'node:url'
 import path from 'node:path'
@@ -77,11 +80,11 @@ function makeWorkerBackend(id, onStart) {
     }
   }
 }
-function harness(team, leaderBackend, onWorkerStart) {
+function harness(team, leaderBackend, onWorkerStart, optsExtra = {}) {
   const tmpStore = fs.mkdtempSync(path.join(os.tmpdir(), 'sdr-store-'))
   const store = new TaskStore(tmpStore)
   const backends = new Map(team.map((a) => [a.backend, a.backend === 'zcode' ? leaderBackend : makeWorkerBackend(a.backend, onWorkerStart)]))
-  const runner = new TaskRunner(store, backends, () => ({ concurrency: 1, mode: 'yolo', notify: false, workerConcurrency: 3 }))
+  const runner = new TaskRunner(store, backends, () => ({ concurrency: 1, mode: 'yolo', notify: false, workerConcurrency: 3, ...optsExtra }))
   runner.attachTeam(() => team)
   return { store, runner }
 }
@@ -583,6 +586,116 @@ console.log('\n✅ 派单被拒回灌冒烟全绿')
     const jReceipts = result.delegateRejections ?? []
     assert(jReceipts.length >= 1 && jReceipts.every((entry) => entry.deliveredAt), 'J2 拒单回执送达（不残留未送达回执）')
   }
+  // J3：创建器落盘子单后抛错（J1 只测了创建前抛错）——撤键重试命中已落盘但未入队的
+  // 子单时，spawnDelegateChild 的去重键短路必须核实并恢复其调度状态（重新入队），
+  // 不得让委派循环干等一个永不入队的 queued 子单。
+  {
+    const leader = makeLeaderBackend({
+      step(round, { events, content }) {
+        if (round === 0) emitIncidentTurn(events)
+        else if (content.includes('队员执行结果汇报')) emitTurn(events, '收到结果，最终总结：A 已完成。')
+        else emitTurn(events, '继续。')
+      }
+    })
+    const { store, runner } = harness(team, leader)
+    const realCreate = store.create.bind(store)
+    let injected = 0
+    runner.attachTaskCreator((input) => {
+      if (injected++ === 0) {
+        realCreate(input) // 落盘：子单已存在（queued），但入队永远不会发生
+        throw new Error('注入的落盘后异常')
+      }
+      return realCreate(input)
+    })
+    const task = store.create({ title: '落盘后抛错恢复', prompt: '处理 A', backend: 'zcode', agentId: 'L1' })
+    runner.enqueue(task)
+    const result = await settle(store, task.id, 30000)
+    const children = store.list().filter((child) => child.parentTaskId === task.id)
+
+    assert(result.status === 'done', `场景J3 领队 done（${result.status}${result.error ? ' ' + result.error : ''}）`)
+    assert(children.length === 1 && children[0].status === 'done', `J3 落盘后抛错的子单被恢复调度并跑到终态、不悬空（${children.map((c) => c.status).join(',') || '无'}）`)
+    assert(leader.sent.some((content) => content.includes('队员 Alpha 的结果')), 'J3 恢复的单照常回灌结果（有回执）')
+    assert(!leader.sent.some((content) => content.includes('没有被执行')), 'J3 恢复成功不产生误导性拒单回执')
+    assert(store.readEvents(task.id).some((event) => (event.text ?? '').includes('恢复调度')), 'J3 恢复动作在任务时间线留痕')
+  }
+}
+
+// ================= 场景 K：字面标记契约——外层正文内嵌完整派单标记 =================
+// 契约：内嵌的完整标记按字面成单执行；外层标记按残缺具名拒单，且拒单文案必须
+// 明确警示「正文内嵌了完整派单标记，内嵌单已按字面执行」——领队要知道内嵌单在跑，
+// 别当丢件原样重派。
+{
+  const team = [
+    { id: 'L1', name: 'Boss', backend: 'zcode', role: 'leader', systemPrompt: '', subordinates: ['W1', 'W2'] },
+    { id: 'W1', name: 'Alpha', backend: 'alpha', role: 'worker', systemPrompt: '' },
+    { id: 'W2', name: 'Beta', backend: 'beta', role: 'worker', systemPrompt: '' }
+  ]
+  const nested = '<delegate to="Alpha">外壳任务 <delegate to="Beta">内嵌任务</delegate> 外壳收尾</delegate>'
+  const leader = makeLeaderBackend({
+    step(round, { events, content }) {
+      if (round === 0) {
+        emitTurn(events, `分工如下：${nested}`, [nested])
+      } else if (content.includes('队员执行结果汇报')) {
+        emitTurn(events, '收到结果，最终总结：内嵌任务已完成。')
+      } else if (content.includes('没有被执行')) {
+        emitTurn(events, '外壳是笔误，不重派。最终总结：内嵌任务已完成。')
+      } else {
+        emitTurn(events, '继续。')
+      }
+    }
+  })
+  const { store, runner } = harness(team, leader)
+  const task = store.create({ title: '内嵌标记字面契约', prompt: '处理', backend: 'zcode', agentId: 'L1' })
+  runner.enqueue(task)
+  const result = await settle(store, task.id, 30000)
+  const children = store.list().filter((child) => child.parentTaskId === task.id)
+
+  assert(result.status === 'done', `场景K 领队 done（${result.status}${result.error ? ' ' + result.error : ''}）`)
+  assert(children.length === 1 && children[0].backend === 'beta' && children[0].status === 'done', `内嵌完整标记按字面成单（Beta 照常执行），外层未建单（${children.map((c) => c.backend).join(',') || '无'}）`)
+  assert(leader.sent.some((content) => content.includes('队员 Beta 的结果')), '内嵌单的结果照常回灌领队')
+  const kReceipts = result.delegateRejections ?? []
+  assert(kReceipts.length === 1 && kReceipts[0].deliveredAt, '外层残缺拒单恰好一条且送达')
+  assert(kReceipts[0].reason.includes('正文内嵌了完整派单标记') && kReceipts[0].reason.includes('内嵌单已按字面执行'), '外层拒单文案明确警示「正文内嵌了完整派单标记，内嵌单已按字面执行」')
+  const kNotice = leader.sent.find((content) => content.includes('没有被执行'))
+  assert(!!kNotice && kNotice.includes('to="Alpha"') && kNotice.includes('内嵌单已按字面执行'), '警示文案随报告捎带送达领队')
+}
+
+// ================= 场景 L：bail 逐单对账——X 流式被拒 + Y 只在终态文本出现 =================
+// 契约：护栏早退时对本回合文本里每个派单标记要么已有子单、要么具名拒单；
+// 拒单队列非空（X 已在队列）绝不代表整批已处理——Y 也必须具名拒单或建单。
+{
+  const team = [
+    { id: 'L1', name: 'Boss', backend: 'zcode', role: 'leader', systemPrompt: '', subordinates: ['W1'] },
+    { id: 'W1', name: 'Alpha', backend: 'alpha', role: 'worker', systemPrompt: '' }
+  ]
+  const streamOnly = '<delegate to="Ghost">做 X</delegate>'
+  const finalText = '已派两单。<delegate to="Ghost">做 X</delegate><delegate to="Alpha">做 Y</delegate>'
+  const leader = makeLeaderBackend({
+    step(round, { events, content }) {
+      if (round === 0) {
+        // X 走流式（嗅探即拒）；Y 只进终态文本，流式通道看不见它
+        emitTurn(events, finalText, [streamOnly])
+      } else if (content.includes('派单拒绝')) {
+        emitTurn(events, '确认预算已尽，不再派发。最终总结：到此为止。')
+      } else {
+        emitTurn(events, '继续。')
+      }
+    }
+  })
+  const { store, runner } = harness(team, leader, null, { delegateMaxTotalRounds: 0 })
+  const task = store.create({ title: '护栏逐单对账', prompt: '处理', backend: 'zcode', agentId: 'L1' })
+  runner.enqueue(task)
+  const result = await settle(store, task.id, 30000)
+  const children = store.list().filter((child) => child.parentTaskId === task.id)
+
+  assert(result.status === 'done', `场景L 领队 done（${result.status}${result.error ? ' ' + result.error : ''}）`)
+  assert(children.length === 0, '预算护栏触发：Y 没有建单')
+  const bailFeedback = leader.sent.find((content) => content.includes('派单拒绝'))
+  assert(!!bailFeedback, '护栏拒单回灌给领队')
+  assert(bailFeedback.includes('to="Ghost"'), 'X（流式被拒）的拒因在回灌里')
+  assert(bailFeedback.includes('to="Alpha"'), 'Y（只在终态文本出现）同样具名拒单——不得以拒单队列非空代表整批已处理')
+  const lReceipts = result.delegateRejections ?? []
+  assert(lReceipts.length === 2 && lReceipts.every((entry) => entry.deliveredAt), `X+Y 两条拒单均逐单送达（${lReceipts.length}）`)
 }
 
 process.exit(0)
