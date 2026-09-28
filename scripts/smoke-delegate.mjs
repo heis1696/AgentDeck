@@ -225,22 +225,27 @@ const strippedMixed = stripDelegates(mixedBatch)
 assert(strippedMixed.includes('这是语法示例') && !strippedMixed.includes('修复空指针') && !strippedMixed.includes('<delegate to="甲">'), '吞单回归③：剥离不越界——有效派单标记照常剥除、残缺标记正文保留展示')
 const garbledClose = '<delegate to="X">示例< /delegate>\n\n<delegate to="甲">修复空指针</delegate>'
 assert(parseDelegates(garbledClose).length === 1 && parseDelegates(garbledClose)[0].to === '甲', '吞单回归④：闭合写坏的标记同样不吞并有效派单')
-assert(findUnmatchedDelegateOpens(garbledClose).length === 1 && findUnmatchedDelegateOpens(garbledClose)[0].to === 'X', '吞单回归⑤：闭合写坏的开标记被检出')
+const garbledBroken = findUnmatchedDelegateOpens(garbledClose)
+assert(garbledBroken.length === 1 && garbledBroken[0].to === 'X', '吞单回归⑤：闭合写坏的开标记被检出')
+assert(garbledBroken[0].embedded === false, '吞单回归⑤对照：闭合写坏后接独立有效单不误标内嵌（正文有自己的闭合尝试）')
+assert(unmatchedDelegateOpenReason(garbledBroken[0]).includes('闭合损坏') && !unmatchedDelegateOpenReason(garbledBroken[0]).includes('按字面'), '吞单回归⑤对照：闭合写坏走纯残缺文案，不带截断致残描述')
 const cleanPair = '<delegate to="甲">A</delegate>\n<delegate to="乙">B</delegate>'
 assert(parseDelegates(cleanPair).length === 2, '吞单回归⑥：完整双标记照常各解析一单（哨兵化不伤既有行为）')
 assert(stripDelegates('前' + cleanPair + '后') === '前\n后', '吞单回归⑦：完整标记剥离照常')
 assert(parseDelegates('<delegate to="甲">指令里引用 <delegate to="乙">示例</delegate> 结束</delegate>')[0].to === '乙', '吞单回归⑧：体部出现内嵌标记时哨兵在下一个开标记处截断，内嵌标记成为独立匹配（不再并进外层）')
 assert(findUnmatchedDelegateOpens('<delegate to="甲">无 to 缺失</delegate>普通正文<delegate>裸标记不检出</delegate>').length === 0, '吞单回归⑨：无 to 的裸标记字样不进残缺检出（对齐解析器 lookahead 约定）')
-// 场景⑧补外层拒单文案断言（字面标记契约）：内嵌致残 vs 纯残缺，两套文案
+// 场景⑧补外层拒单文案断言（保守事实性契约）：内嵌致残只陈述「残缺未建单 + 其后完整
+// 标记按字面独立受理」，不断言内嵌单已执行——受理后仍可能被护栏具名拒单，执行与否以各自回执为准
 const nestedText8 = '<delegate to="甲">指令里引用 <delegate to="乙">示例</delegate> 结束</delegate>'
 const nestedBroken8 = findUnmatchedDelegateOpens(nestedText8)
-assert(nestedBroken8.length === 1 && nestedBroken8[0].to === '甲' && nestedBroken8[0].embedded === true, '场景⑧：外层开标记按「内嵌致残」检出（内嵌完整标记按字面成单、外层残缺）')
+assert(nestedBroken8.length === 1 && nestedBroken8[0].to === '甲' && nestedBroken8[0].embedded === true, '场景⑧：外层开标记按「截断致残」检出（内嵌完整标记按字面独立解析、外层残缺）')
 const nestedReason8 = unmatchedDelegateOpenReason(nestedBroken8[0])
-assert(nestedReason8.includes('正文内嵌了完整派单标记') && nestedReason8.includes('内嵌单已按字面执行'), '场景⑧：外层拒单文案明确警示「正文内嵌了完整派单标记，内嵌单已按字面执行」')
-assert(nestedReason8.includes('未建单'), '场景⑧：外层拒单文案仍明确该单未建单')
+assert(nestedReason8.includes('被其后完整派单标记截断') && nestedReason8.includes('本单未建单'), '场景⑧：外层拒单文案事实性描述——残缺未建单 + 被其后完整标记截断')
+assert(nestedReason8.includes('按字面独立受理'), '场景⑧：文案说明其后完整标记按字面独立受理')
+assert(!nestedReason8.includes('已按字面执行') && !nestedReason8.includes('内嵌单已'), '场景⑧：不再断言「内嵌单已执行」（保守事实性文案）')
 const plainBroken8 = findUnmatchedDelegateOpens('<delegate to="X" reason="示例">忘写闭合，后方再无任何标记')
 assert(plainBroken8.length === 1 && plainBroken8[0].embedded === false, '场景⑧对照：纯残缺（后方无完整标记）不误标内嵌致残')
-assert(unmatchedDelegateOpenReason(plainBroken8[0]).includes('标记残缺') && !unmatchedDelegateOpenReason(plainBroken8[0]).includes('按字面执行'), '场景⑧对照：纯残缺维持原文案，不误警示内嵌执行')
+assert(unmatchedDelegateOpenReason(plainBroken8[0]).includes('标记残缺') && !unmatchedDelegateOpenReason(plainBroken8[0]).includes('按字面'), '场景⑧对照：纯残缺维持原文案，不带字面受理描述')
 
 // parseReviews 单测（v2 审核流）
 assert(parseReviews('<review of="#1" verdict="pass" note="ok"/>').length === 1, 'parseReviews 提取 review')
