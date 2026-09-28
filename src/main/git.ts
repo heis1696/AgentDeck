@@ -875,7 +875,10 @@ async function verifyWorktreeGeneration(
   const attachedHead = !!registration.head && /^ref: refs\/heads\/.+/.test(registration.head) && !!registration.branch
   if (!detachedHead && !attachedHead) return 'current Git worktree registration is incomplete (missing HEAD)'
   if (attachedHead && !(await branchExists(repoDir, registration.branch!))) return 'current Git worktree registration is incomplete (missing HEAD target)'
-  if (hasMergeScaffoldMarker(path.basename(wtPath), MERGE_DETACH_SCAFFOLD_MARKER)) {
+  // 树名取自解析后的真实路径：同树别名写法（`x\..` 片段等）折叠到同一目录名后再判
+  // 标记——basename 吃原始写法时，别名拼写的 detach 守卫会落空，重挂的脚手架被连
+  // 目录强删；win32 大小写折叠仍由 hasMergeScaffoldMarker 按平台语义处理
+  if (hasMergeScaffoldMarker(path.basename(path.resolve(wtPath)), MERGE_DETACH_SCAFFOLD_MARKER)) {
     if (!detachedHead) return 'detached merge worktree is no longer detached'
   } else if (expectedBranch && registration.branch !== expectedBranch) {
     return 'current Git worktree branch does not match its metadata'

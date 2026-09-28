@@ -23,11 +23,15 @@ console.log('✓ non-zero exit, JSON parse failure and empty output')
 
 // 可执行路径等值判定两形态：大小写不敏感平台（win32）折叠——同一可执行文件的别名
 // 写法（大小写差异）判等，ELECTRON_RUN_AS_NODE 兜底不漏打；大小写敏感平台精确比较。
+// 别名构造按平台通用：POSIX 绝对路径的首段是空串（/usr/...），从根分隔符后的第一个
+// 非空段翻起——首段直接翻会让 head[0] 为 undefined 抛错（空-首段）
 const flipFirstSegment = (candidate) => {
-  const sepIndex = candidate.indexOf(path.sep)
-  const head = sepIndex === -1 ? candidate : candidate.slice(0, sepIndex)
-  const flipped = head[0] === head[0].toLowerCase() ? head[0].toUpperCase() + head.slice(1) : head[0].toLowerCase() + head.slice(1)
-  return sepIndex === -1 ? flipped : flipped + candidate.slice(sepIndex)
+  const segments = candidate.split(path.sep)
+  const index = segments.findIndex((segment) => segment !== '')
+  if (index === -1) return candidate
+  const segment = segments[index]
+  segments[index] = segment[0] === segment[0].toLowerCase() ? segment[0].toUpperCase() + segment.slice(1) : segment[0].toLowerCase() + segment.slice(1)
+  return segments.join(path.sep)
 }
 const aliasExecPath = flipFirstSegment(process.execPath)
 const platformAware = (platform, fn) => {

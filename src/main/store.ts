@@ -550,10 +550,14 @@ export class TaskStore {
    *  漏覆盖会在仓库仍有在跑任务时误发租约，清扫就能动到活任务的现场。 */
   claimWorktreeCleanup(repoDir: string, ownerTaskId: string, mergeWorktree = false): GitOperationClaim | undefined {
     const rootKey = worktreePathKey(repoDir)
+    // 根键自带分隔符（盘符根 C:\、文件系统根 /、UNC 根）不得再拼第二个 sep：根下
+    // 任务键（c:\ws）不以双分隔符前缀（c:\\）开头，无脑拼会把根下在跑任务漏出租约
+    // 覆盖面——与 acceptance-verifier 的根前缀规则同一套（根前缀只在缺分隔符时补）
+    const rootPrefix = rootKey.endsWith(path.sep) ? rootKey : `${rootKey}${path.sep}`
     const belongsToRepo = (task: Task) => [task.worktree?.repoDir, task.workdir].some((candidate) => {
       if (!candidate) return false
       const key = worktreePathKey(candidate)
-      return key === rootKey || key.startsWith(rootKey + path.sep)
+      return key === rootKey || key.startsWith(rootPrefix)
     })
     const operation: TaskGitOperation = { token: randomUUID(), owner: createExecutionOwner(), createdAt: Date.now() }
     return this.transaction((tx) => {
