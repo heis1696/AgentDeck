@@ -433,23 +433,29 @@ const initMain = async (): Promise<void> => {
   // 接管统一走 store.recoverDeadRuns：锁外探活、锁内按捕获身份条件提交，每个死运行
   // 只认领一次；日志尾部按捕获运行绑定，替换运行之前的旧日志不能决定它的结论。
   // dispatchHold 子单（建单在翻面前被打断）的磁盘归属核实接线 setWorktreeOwner。
-  await reconcileStartupTasks({
-    store,
-    pushEvent: (taskId, event) => runner.pushEvent(taskId, event),
-    enqueue: (task) => runner.enqueue(task),
-    notifyTaskChanged,
-    bindWorktreeOwner: (wtDir, ownerTaskId) => setWorktreeOwner(wtDir, ownerTaskId),
-    relayInterruptedLeader: (stale, kids) => {
-      if (!stale.issueId) return
-      const excerpts = kids.slice(0, 5).map((kid) => `- **${kid.title}**（${kid.status}）：${(kid.result ?? '').slice(0, 400) || '（无最终输出）'}`).join('\n')
-      relayIssueCommentOrEvent(issueRelay, {
-        issueId: stale.issueId,
-        taskId: stale.id,
-        comment: `⚠ 委派报告未送达：领队执行被应用重启打断。以下为队员报告摘要：\n${excerpts}`,
-        fallbackEventText: `⚠ Issue 评论未送达（Issue 不存在），队员报告摘要转投任务时间线：\n${excerpts}`
-      })
-    }
-  })
+  // 整体兜底：启动对账跑在窗口/IPC 建立之前，绝不允许它把启动炸掉——对账失败只
+  // 降级为遗留任务待手动处理（子单级异常已按单捕获走具名失败路径，这里是最后防线）。
+  try {
+    await reconcileStartupTasks({
+      store,
+      pushEvent: (taskId, event) => runner.pushEvent(taskId, event),
+      enqueue: (task) => runner.enqueue(task),
+      notifyTaskChanged,
+      bindWorktreeOwner: (wtDir, ownerTaskId, expected) => setWorktreeOwner(wtDir, ownerTaskId, expected),
+      relayInterruptedLeader: (stale, kids) => {
+        if (!stale.issueId) return
+        const excerpts = kids.slice(0, 5).map((kid) => `- **${kid.title}**（${kid.status}）：${(kid.result ?? '').slice(0, 400) || '（无最终输出）'}`).join('\n')
+        relayIssueCommentOrEvent(issueRelay, {
+          issueId: stale.issueId,
+          taskId: stale.id,
+          comment: `⚠ 委派报告未送达：领队执行被应用重启打断。以下为队员报告摘要：\n${excerpts}`,
+          fallbackEventText: `⚠ Issue 评论未送达（Issue 不存在），队员报告摘要转投任务时间线：\n${excerpts}`
+        })
+      }
+    })
+  } catch (error) {
+    console.error('[startup] 启动对账失败（应用继续启动，遗留任务保留可手动处理）', error)
+  }
   presets = loadPresets()
   runner.attachPresets(() => presets)
   runner.attachIssueOps({

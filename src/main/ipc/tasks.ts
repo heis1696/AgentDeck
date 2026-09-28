@@ -53,6 +53,8 @@ export function registerTaskIpc(ctx: IpcContext) {
     // parked 与非 parked 的 queued 都放行：非 parked 排队（如硬切后继）若因故滞留，
     // 这是用户唯一的手动解卡入口
     if (task.status !== 'queued') return { ok: false, error: '任务不在排队中' }
+    // 建单门禁未释放的子单对调度器不可见，▶ 启动也释放不了门禁——给可行动提示而不是假启动
+    if (task.dispatchHold === true) return { ok: false, error: '建单未完成的委派子单不可启动（磁盘归属未核实）；请删除本单后重新委派' }
     // 捕获身份后再条件改状态：并发改到别的状态（如已被接管/已启动）时不覆盖新运行
     const started = prepareManualTaskStart(ctx.store, taskId)
     if (!started) return { ok: false, error: '任务不在排队中' }
@@ -121,6 +123,9 @@ export function registerTaskIpc(ctx: IpcContext) {
     if (!task) return { ok: false, error: '任务不存在' }
     if (task.status === 'running') return { ok: false, error: '任务正在运行，如长时间无输出可先「停止」再重新运行' }
     if (task.status === 'queued') return { ok: false, error: '任务已在队列中等待并发槽位' }
+    // 重跑僵尸根断：持门禁的单（建单未完成，磁盘归属未核实）重跑回队即 queued+hold 僵尸
+    //（调度器永不可见）——拒绝原单重跑，给可行动提示；工作树核实后的重派由删单重派承担
+    if (task.dispatchHold === true) return { ok: false, error: '本单建单未完成（磁盘归属未核实），不能重新运行；请删除本单后重新委派' }
     const captured = taskIdentity(task)
     // Validate first, clean up second: the conditional requeue proves the
     // observed run still owns the record, so a rejected retry leaves the
@@ -202,6 +207,8 @@ export function registerTaskIpc(ctx: IpcContext) {
       if (!started) return { ok: false, error: '任务不在排队中' }
       ctx.runner.enqueue(started)
     } else if (parsedStatus === 'queued') {
+      // 持门禁的单移回排队 = queued+hold 僵尸（门禁不随移动释放）：同样拒绝并给可行动提示
+      if (task.dispatchHold === true) return { ok: false, error: '建单未完成的委派子单不能移回排队（磁盘归属未核实）；请删除本单后重新委派' }
       if (!ctx.store.updateIf(taskId, captured, { status: 'queued', parked: true, error: undefined, failure: undefined, result: undefined, endedAt: undefined })) return { ok: false, error: '任务状态已变化，请重试' }
       syncTask(taskId)
     } else {
