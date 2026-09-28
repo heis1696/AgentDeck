@@ -43,6 +43,7 @@
     "smoke:git-snapshot": "node scripts/smoke-git-snapshot.mjs",
     "smoke:delegate": "node scripts/smoke-delegate.mjs",
     "smoke:delegate-reject": "node scripts/smoke-delegate-reject.mjs",
+    "smoke:delegate-mutation": "node scripts/smoke-delegate-mutation.mjs",
     "e2e:delegate": "node scripts/e2e-delegate-real.mjs",
     "smoke:migration": "node scripts/smoke-migration.mjs",
     "smoke:failure": "node scripts/smoke-failure.mjs",

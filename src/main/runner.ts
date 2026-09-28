@@ -61,6 +61,7 @@ export interface ChildTaskCreator {
     workerIndex: number
     unavailableReason?: string
     worktree?: WorktreeInfo
+    dispatchHold?: boolean
     suppressIssue?: boolean
     trigger?: import('../shared/types').RunTrigger
   }): Task
@@ -1218,17 +1219,41 @@ export class TaskRunner {
       closeAt = found
       searchFrom = found + 1
     }
+    // Drop already-scanned prefix after it is no longer needed. The cursor is
+    // retained so an unfinished opening tag remains available for the next
+    // delta, without allowing long transcripts to grow without bound.
+    // 压缩必须覆盖全部早退路径（含「本轮无闭合标记」与「建单通道已关闭」两个早退）：
+    // 长收尾流的后续 delta 只会走这两条路，漏掉任何一条都会让整段领队全文持续占内存。
+    const compactBuffer = () => {
+      if (state.scanOffset > 128 * 1024 && state.scanOffset > state.buffer.length / 2) {
+        const cut = state.scanOffset
+        state.buffer = state.buffer.slice(cut)
+        state.scanOffset = 0
+        state.closeScanOffset = Math.max(0, state.closeScanOffset - cut)
+      }
+    }
+    // 建单通道已关闭（预算收尾护栏）：不再解析建单、不再登记 seenKeys——收尾回复里的
+    // 新标记由回合末按已接单键对账具名拒单，复述的已接单标记不会被误当新单。暂停期间
+    // 缓冲区没有任何未来读者（重开通道由 armDelegateSniffer 整体重置），任何早退路径都
+    // 释放已扫描文本：长收尾流不持续占内存。
+    const releaseSuspendedBuffer = () => {
+      state.buffer = ''
+      state.scanOffset = 0
+      state.closeScanOffset = 0
+    }
+    if (state.suspended) {
+      releaseSuspendedBuffer()
+      return
+    }
     if (closeAt < 0) {
       state.closeScanOffset = Math.max(state.closeScanOffset, state.buffer.length - closeTag.length + 1)
+      compactBuffer()
       return
     }
     const scanEnd = closeAt + closeTag.length
     const source = state.buffer.slice(state.scanOffset, scanEnd)
     state.scanOffset = scanEnd
     state.closeScanOffset = scanEnd
-    // 建单通道已关闭（预算收尾护栏）：游标照常推进、缓冲照常维护，但不再解析建单、
-    // 不再登记 seenKeys——收尾回复里的新标记由回合末按已接单键对账具名拒单。
-    if (state.suspended) return
     for (const call of parseDelegates(source)) {
       const key = `${call.to}\n${call.prompt}`
       // key 一经出现终身登记（spawned 在途 / seenKeys 已交付），会话内同一派单绝不重建
@@ -1251,14 +1276,12 @@ export class TaskRunner {
       })
       state.pending.push(p)
     }
-    // Drop already-scanned prefix after it is no longer needed. The cursor is
-    // retained so an unfinished opening tag remains available for the next
-    // delta, without allowing long transcripts to grow without bound.
-    if (state.scanOffset > 128 * 1024 && state.scanOffset > state.buffer.length / 2) {
-      state.buffer = state.buffer.slice(state.scanOffset)
-      state.scanOffset = 0
-      state.closeScanOffset = 0
-    }
+    compactBuffer()
+  }
+
+  /** 诊断面（冒烟用）：指定任务嗅探缓冲区的当前字符数——压缩行为断言的观测口。 */
+  sniffBufferChars(taskId: string): number {
+    return this.earlySpawns.get(taskId)?.buffer.length ?? 0
   }
 
   /**
@@ -1321,42 +1344,48 @@ export class TaskRunner {
     const dedupeKey = expectedRunId ? `delegate:${createHash('sha256').update(JSON.stringify([taskId, expectedRunId, call.to, call.prompt])).digest('hex')}` : undefined
     const alreadyCreated = dedupeKey && this.store.list().find((candidate) => candidate.dedupeKey === dedupeKey && candidate.parentTaskId === taskId)
     if (alreadyCreated) {
-      // 撤键重试命中已落盘的子单（复核③）：前次建单可能在落盘之后、入队之前抛错
-      // （创建器落盘后抛 / owner 绑定中断）——子单停在 queued 且永不入队，委派循环
-      // 会对着它干等到天荒地老。此处核实调度状态：仍 queued 且未被接手 → 补齐 owner
-      // 绑定并重新入队；在跑/已终态/被 git 操作锁定 → 原样返回。
+      // 撤键重试命中已落盘的子单（复核③）：前次建单可能在翻面之前中断（创建器落盘后抛 /
+      // 归属绑定中断），子单带着 dispatchHold 停在队列外永不执行。恢复路径不再「凭 queued
+      // 入队」，按最新登记三分支：
+      // ① 仍 holding → 重走归属绑定+登记核实三步（磁盘 owner 绑定 → 条件翻面 → 入队前复核），
+      //    全过才翻 queued 并入队；任一步失败为独立具名结果（拒单收口，不留僵尸）。
+      // ② 已翻面/被并发方接手 → 让位：在跑方驱动，绝不重复入队、不回收、不撤销。
+      // ③ 在跑/已终态 → 原样返回。
       let record = this.store.get(alreadyCreated.id) ?? alreadyCreated
-      if (record.status === 'queued' && !record.parked && record.gitOperation === undefined) {
+      if (record.dispatchHold === true && record.status === 'queued' && !record.parked && record.gitOperation === undefined) {
         let bindFailure = ''
         if (record.worktree && record.worktree.ownerTaskId !== record.id) {
-          // 归属交接三步核实（恢复路径）：setWorktreeOwner 以 false 报失败（git.ts 不抛错，
-          // try/catch 接不住），updateIf 结果与入队前登记同样核实。绑定失败不标元数据已绑定、
-          // 不记「恢复调度」成功——子单撤销为具名终态，不留永不入队的 queued 僵尸；现场不动
-          // （归属无法核实，进一步回收不安全，交由保留判定与人工清扫兜底）。
+          // 归属交接三步（恢复路径）①磁盘绑定：setWorktreeOwner 以 false 报失败（git.ts 不抛
+          // 错，try/catch 接不住）。绑定失败不标元数据已绑定、不记「恢复调度」成功。
           const bound = await setWorktreeOwner(record.worktree.path, record.id)
-          if (bound) {
-            const persisted = this.store.updateIf(record.id, { status: 'queued', runId: record.runId, executionOwner: record.executionOwner }, { worktree: { ...record.worktree, ownerTaskId: record.id } })
-            if (persisted) record = persisted
-            // updateIf 落空 = 登记已被并发领取/变更：不标已绑定、不重复入队，由在跑方驱动
-          } else {
-            bindFailure = 'worktree 归属绑定失败（目录或元数据不可达）'
+          if (!bound) bindFailure = 'worktree 归属绑定失败（目录或元数据不可达）'
+        }
+        if (!bindFailure) {
+          // ②登记核实+翻面：条件提交带出生身份与 holding——并发领取/变更一律落空
+          const persisted = this.store.updateIf(record.id, { status: 'queued', runId: record.runId, executionOwner: record.executionOwner, dispatchHold: true }, {
+            ...(record.worktree ? { worktree: { ...record.worktree, ownerTaskId: record.id } } : {}),
+            dispatchHold: undefined
+          })
+          if (!persisted) {
+            // ③落空 = 登记已被并发领取/变更：重读最新登记让位，绝不凭旧登记入队
+            const latest = this.store.get(record.id)
+            guardedNote(`⚠ 恢复调度让位：${record.title}（登记已被并发变更：${latest?.status ?? '已删除'}），不重复入队`)
+            return latest ?? record
           }
+          record = persisted
+          // 入队前复核（await 期间并发翻面不双跑）：仍持翻出的登记才入队
+          const queued = this.store.get(record.id)
+          if (!queued || queued.dispatchHold === true || queued.status !== 'queued') {
+            guardedNote(`⚠ 恢复调度让位：${record.title}（${queued ? `状态已到 ${queued.status}` : '登记已删除'}），不重复入队`)
+            return queued ?? record
+          }
+          guardedNote(`↻ 重试命中已落盘未入队的子单，恢复调度：${record.title}`)
+          this.enqueue(queued)
+          return record
         }
-        if (bindFailure) {
-          guardedNote(`⚠ 恢复调度失败：${record.title}——${bindFailure}，本单不再入队`)
-          await this.cancel(record.id)
-          this.recordDelegateRejection(taskId, `to="${call.to}"：恢复调度失败（${bindFailure}），本单未执行`, { to: call.to, prompt: call.prompt })
-          return null
-        }
-        // 入队前核实（await 期间并发领取不双跑）：仍 queued 才入队；已变化/已删除则让位——
-        // 在跑方继续驱动（不漏跑），此处绝不重复派发。
-        const queued = this.store.get(record.id)
-        if (!queued || queued.status !== 'queued' || queued.parked || queued.gitOperation !== undefined) {
-          guardedNote(`⚠ 恢复调度让位：${record.title}（${queued ? `状态已到 ${queued.status}` : '登记已删除'}），不重复入队`)
-          return queued ?? record
-        }
-        guardedNote(`↻ 重试命中已落盘未入队的子单，恢复调度：${record.title}`)
-        this.enqueue(queued)
+        // 登记核实失败 = 独立具名结果：重读最新归属再收口（已被领取→让位；仍 holding→拒单回收）
+        const closed = await this.closeSpawnedChild(taskId, record, call, expected, `恢复调度失败（${bindFailure}）`, taskId)
+        return closed
       }
       return record
     }
@@ -1498,7 +1527,9 @@ export class TaskRunner {
       workerIndex,
       ...(dedupeKey ? { dedupeKey, delegateSourceRunId: expectedRunId } : {}),
       ...(unavailableReason ? { unavailableReason } : {}),
-      ...(worktree ? { worktree } : {})
+      ...(worktree ? { worktree } : {}),
+      // 建单门禁：子单自创建起对调度器不可见（holding），归属绑定+登记核实三步全过才翻面入队
+      dispatchHold: true
     }
     const child = this.taskCreator
       ? (typeof this.taskCreator === 'function' ? this.taskCreator(childInput) : this.taskCreator.createChildTask(childInput))
@@ -1509,48 +1540,41 @@ export class TaskRunner {
         titleAuto: true
       })
     if (worktree) {
-      // 归属交接三步核实（原建单路径，与恢复路径同一修法）：setWorktreeOwner 以 false
-      // 报失败（git.ts 不抛错，try/catch 接不住）——绑定失败 fail-closed：撤销刚建的子单、
-      // 按领队归属尽力回收现场、具名拒单；绝不把无归属 worktree 交给队员跑，也不把
-      // 元数据标成已绑定。updateIf 落空 = 登记已被并发领取/撤销：不重复入队（不双跑），
-      // 交还调用方按当前登记等待终态（不漏跑）。
+      // 归属交接三步（原建单路径，与恢复路径同一修法）：①登记（已成立，含 holding）
+      // ②磁盘归属绑定 ③登记核实+翻面。setWorktreeOwner 以 false 报失败（git.ts 不抛错，
+      // try/catch 接不住）——绑定失败 fail-closed：重读归属后收口（仍 holding→撤销+按领队
+      // 归属尽力回收+具名拒单；已被并发方接手→让位），绝不把无归属 worktree 交给队员跑。
       const bound = await setWorktreeOwner(worktree.path, child.id)
-      if (!active()) {
-        await this.cancel(child.id)
-        return null
-      }
       if (!bound) {
-        let cleanupNote = ''
-        try {
-          const reclaimed = await reclaimWorktree(worktree.path, {
-            force: true, deleteBranch: true, expectedOwnerTaskId: taskId,
-            ...(worktree.generationId ? { expectedGenerationId: worktree.generationId } : {})
-          })
-          if (!reclaimed.ok) cleanupNote = `；worktree 回收未完成（${reclaimed.status}：${reclaimed.reason ?? '未知原因'}），现场保留并已记录`
-        } catch (error) {
-          cleanupNote = `；worktree 回收异常（${error instanceof Error ? error.message : String(error)}），现场保留`
-        }
-        if (cleanupNote && task.workdir) {
-          this.store.noteWorktreeCleanupFailure(task.workdir, { name: path.basename(worktree.path), reason: `归属绑定失败后回收：${cleanupNote}`, ownerTaskId: taskId })
-        }
-        await this.cancel(child.id)
-        const why = `worktree 归属绑定失败，本单未执行${cleanupNote}`
-        guardedNote(`⚠ 拒绝派给 ${call.to}：${why}`)
-        this.recordDelegateRejection(taskId, `to="${call.to}"：${why}`, { to: call.to, prompt: call.prompt })
-        return null
+        return this.closeSpawnedChild(taskId, child, call, expected, 'worktree 归属绑定失败', taskId)
+      }
+      if (!active()) {
+        // 仍 holding（无人能领取）：领队归属在绑定期间丢失 → 撤销 + 按子单归属尽力回收 + 具名拒单
+        return this.closeSpawnedChild(taskId, child, call, expected, '领队归属已变化', child.id)
       }
       worktree = { ...worktree, ownerTaskId: child.id }
-      // The child was just created and has not been dispatched yet; bind the
-      // metadata to the exact record so a concurrent claim cannot be rewritten.
-      const persisted = this.store.updateIf(child.id, { status: 'queued', runId: child.runId, executionOwner: child.executionOwner }, { worktree })
-      if (!persisted) {
-        guardedNote(`⚠ worktree 绑定登记未落盘（子单登记已被并发变更：${this.store.get(child.id)?.status ?? '已删除'}），不重复入队`)
-        return this.store.get(child.id) ?? child
-      }
+    } else if (!active()) {
+      // 无树子单同样尚在 holding：领队归属丢失 → 撤销 + 具名拒单（无现场可回收）
+      return this.closeSpawnedChild(taskId, child, call, expected, '领队归属已变化', child.id)
+    }
+    // ③登记核实+翻面：条件提交带出生身份与 holding——并发领取/变更一律落空（不双跑）；
+    // 翻面同时绑定 worktree 元数据与释放 holding（同一个原子提交，无中间可领取态）
+    const persisted = this.store.updateIf(child.id, { status: 'queued', runId: child.runId, executionOwner: child.executionOwner, dispatchHold: true }, {
+      ...(worktree ? { worktree } : {}),
+      dispatchHold: undefined
+    })
+    if (!persisted) {
+      // 落空 = 登记已被并发领取/变更：重读最新登记让位，绝不重复入队、不回收在用现场
+      const latest = this.store.get(child.id)
+      guardedNote(`⚠ 建单翻面落空（登记已被并发变更：${latest?.status ?? '已删除'}），让位交还当前登记，不重复入队`)
+      return latest ?? null
     }
     if (!active()) {
-      await this.cancel(child.id)
-      return null
+      // 翻面已提交、子单已可被任意调度方领取：让位交还当前记录——不回收在用树、
+      // 不 cancel、不宣称「未执行」（在跑方驱动，本回合对账按已接单处理）
+      const latest = this.store.get(child.id) ?? persisted
+      guardedNote(`⚠ 建单期间领队归属变化，子单「${latest.title}」让位交还当前执行`)
+      return latest
     }
     // 入队前核实登记仍在（与恢复路径同规）：消失即取消派发，不盲入队
     const dispatchable = this.store.get(child.id)
@@ -1561,6 +1585,43 @@ export class TaskRunner {
     guardedNote(`⚡ 已接单：${target.name} ← ${call.prompt.slice(0, 50).replace(/\n/g, ' ')}${call.prompt.length > 50 ? '…' : ''}`)
     this.enqueue(dispatchable)
     return child
+  }
+
+  /**
+   * 建单失败收口：处置前先重读子单最新归属与状态（第五轮门禁的收口语义）。
+   * 已被释放/领取（在跑）→ 让位交还当前记录：不回收在用树、不 cancel、不宣称「未执行」；
+   * 仍 holding → 从未被任何执行方领取，安全撤销 + 按归属尽力回收 + 具名拒单。
+   * 返回 null = 已按具名拒单收口；返回 Task = 让位（调用方原样交回，由在跑方驱动）。
+   */
+  private async closeSpawnedChild(taskId: string, child: Task, call: DelegateCall, expected: TaskExpectation, why: string, reclaimOwnerTaskId: string): Promise<Task | null> {
+    const latest = this.store.get(child.id)
+    if (!latest) return null
+    if (latest.dispatchHold !== true || latest.status !== 'queued') {
+      this.note(taskId, `⚠ ${why}，但子单「${latest.title}」已被领取（${latest.status}）——让位交还当前执行，不撤销不回收`, expected)
+      return latest
+    }
+    await this.cancel(child.id)
+    let cleanup = ''
+    if (latest.worktree && latest.workdir) {
+      try {
+        const reclaimed = await reclaimWorktree(latest.workdir, {
+          force: true, deleteBranch: true, expectedOwnerTaskId: reclaimOwnerTaskId,
+          ...(latest.worktree.generationId ? { expectedGenerationId: latest.worktree.generationId } : {})
+        })
+        if (!reclaimed.ok) cleanup = `；worktree 回收未完成（${reclaimed.status}：${reclaimed.reason ?? '未知原因'}），现场保留并已记录`
+      } catch (error) {
+        cleanup = `；worktree 回收异常（${error instanceof Error ? error.message : String(error)}），现场保留`
+      }
+      if (cleanup) {
+        const leaderDir = this.store.get(taskId)?.workdir ?? ''
+        if (leaderDir) {
+          this.store.noteWorktreeCleanupFailure(leaderDir, { name: path.basename(latest.worktree.path), reason: `${why}后回收：${cleanup}`, ownerTaskId: taskId })
+        }
+      }
+    }
+    this.note(taskId, `⚠ 拒绝派给（${call.to}）：${why}${cleanup}，本单未执行`, expected)
+    this.recordDelegateRejection(taskId, `to="${call.to}"：${why}${cleanup}，本单未执行`, { to: call.to, prompt: call.prompt })
+    return null
   }
 
   /** Create a read-only investigation child: no worktree, no integration, no Issue. */

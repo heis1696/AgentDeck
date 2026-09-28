@@ -1316,6 +1316,10 @@ export async function runDelegationLoop(
           idx++
           const c = reportedChildren.get(cid)
           if (!c || !c.workdir) continue
+          // cancelled 收编单只留终局回执：用户取消的半成品不进集成分支、现场不清理
+          //（恢复「cancelled 现场保持原样交人工」契约——不 merge、不 commitAll、不回收，
+          // 半成品改动以未提交状态留在其 worktree，交由保留判定与人工处理）。
+          if (c.status === 'cancelled') continue
           // Every child write is bound to the exact child record this pass read:
           // a child that was re-run cannot receive a stale worktree conclusion.
           const capturedChild: TaskExpectation = { ...childIdentity(c), gitOperationToken: operation.token }
