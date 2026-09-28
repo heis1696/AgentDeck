@@ -421,9 +421,9 @@ try {
   check(failRepool.ok && failRepool.status === 'pooled', 'reuse cycle keeps repooling after a failure')
 
   // ---- 大小写别名并发专项（fix：路径键统一规范化）：同一棵树按别名写法必须同锁、
-  // 同池登记、池成员检查别名命中。别名只翻仓库前缀段的字母大小写——保留
-  // .agentdeck-worktrees 标记段与树名原样（resolveManagedWorktree 的标记切分与
-  // Git 注册表键名按字面量大小写匹配，属于另一层守卫，不归本专项）。----
+  // 同池登记、池成员检查别名命中。夹具 A/B/C 翻仓库前缀段大小写；夹具 D 扩展到
+  // 全路径别名——托管目录标记段（.agentdeck-worktrees）与树名段一并变体，证明入口
+  // 切分、Git 注册表查找、锁、池、池成员检查、清扫命中对整条路径的别名写法全成立。----
   if (process.platform === 'win32') {
     clearWorktreePool()
     const aliasPrefix = (candidate) => {
@@ -508,6 +508,67 @@ try {
       `pool member check hits via alias spelling (got ${aliasReclaim.status}: ${aliasReclaim.reason ?? ''})`)
     check(worktreePoolEntriesForTest(dir).length === 1, 'alias reclaim attempt registers no duplicate pool entry')
     check(fs.existsSync(poolSource.path), 'pooled tree survives the alias reclaim attempt')
+
+    // 夹具D｜全路径别名（仓库前缀段+托管目录标记段+树名段三段全变体）：入口切分
+    // （resolveManagedWorktree 标记定位）、世代核验的 Git 注册表查找、路径锁、池登记、
+    // 池成员检查、清扫元数据配对与遍历去重，整链路对整条路径的别名写法成立
+    const fullAliasSpelling = (realPath) => {
+      const markerIndex = realPath.toLowerCase().indexOf(`${path.sep}.agentdeck-worktrees${path.sep}`)
+      if (markerIndex <= 0) return null
+      const markerEnd = markerIndex + `${path.sep}.agentdeck-worktrees${path.sep}`.length
+      const flip = (segment) => (segment !== segment.toLowerCase() ? segment.toLowerCase() : segment.toUpperCase())
+      return flip(realPath.slice(0, markerIndex)) + path.sep + flip('.agentdeck-worktrees') + path.sep + flip(realPath.slice(markerEnd))
+    }
+    const fullTree = await createWorktree(dir, 'alias_full_c1', 'main', 'alias_full_leader')
+    check(!!fullTree, 'full-alias fixture tree created')
+    const fullAliasPath = fullAliasSpelling(fullTree.path)
+    check(!!fullAliasPath && fullAliasPath !== fullTree.path && fullAliasPath.toLowerCase() === fullTree.path.toLowerCase(),
+      'full alias spelling differs in every managed segment only by case')
+
+    // D1｜干净树经全路径别名直接回收：入口切分+注册表折叠查找+世代核验+锁全链路命中
+    const fullAliasRemoved = await reclaimWorktree(fullAliasPath, { deleteBranch: true, expectedOwnerTaskId: fullTree.metadata.ownerTaskId })
+    check(fullAliasRemoved.ok && fullAliasRemoved.status === 'removed' && !fs.existsSync(fullTree.path),
+      `clean tree is reclaimed through its full alias spelling (got ${fullAliasRemoved.status}: ${fullAliasRemoved.reason ?? ''})`)
+    check(!await branchExists(dir, fullTree.branch), 'full alias reclamation deletes the managed branch')
+
+    // D2｜改绑核实+写入与归池都接受全路径别名；池成员检查对别名回收尝试照样命中
+    const poolFullTree = await createWorktree(dir, 'alias_full_pool_c1', 'main', 'alias_full_pool_leader')
+    check(!!poolFullTree, 'full-alias pool fixture tree created')
+    const poolFullAliasPath = fullAliasSpelling(poolFullTree.path)
+    const birthBindViaAlias = await setWorktreeOwner(poolFullAliasPath, 'alias_full_child', {
+      generationId: poolFullTree.metadata.generationId,
+      ownerTaskId: 'alias_full_pool_leader',
+      branch: poolFullTree.metadata.branch
+    })
+    check(birthBindViaAlias === true, 'verify+write succeeds through the full alias spelling (folded registration lookup)')
+    const repoolViaAlias = await reclaimWorktree(poolFullAliasPath, { repool: true, expectedOwnerTaskId: 'alias_full_child', expectedGenerationId: poolFullTree.metadata.generationId })
+    check(repoolViaAlias.ok && repoolViaAlias.status === 'pooled', 'tree repools through its full alias spelling')
+    const memberProbeViaAlias = await reclaimWorktree(poolFullAliasPath, { repool: true, expectedOwnerTaskId: WORKTREE_POOL_OWNER, expectedGenerationId: poolFullTree.metadata.generationId })
+    check(memberProbeViaAlias.ok === false && memberProbeViaAlias.status === 'retained' && (memberProbeViaAlias.reason ?? '').includes('active in the reuse pool'),
+      `pool membership check hits via full alias spelling (got ${memberProbeViaAlias.status}: ${memberProbeViaAlias.reason ?? ''})`)
+    check(worktreePoolEntriesForTest(dir).length === 1, 'full-alias reclaim attempt registers no duplicate pool entry')
+    check(fs.existsSync(poolFullTree.path), 'pooled tree survives the full-alias reclaim attempt')
+
+    // D3｜清扫命中：sidecar 按全路径别名写法落盘（repoDir/path 三段全变体）时，清扫
+    // 必须照样认定为可靠元数据并回收陈旧池条目；同树别名写法不重复扫描、不误报
+    clearWorktreePool()
+    const sweepTree = await createWorktree(dir, 'alias_full_sweep_c1', 'main', 'alias_full_sweep_leader')
+    check(!!sweepTree && sweepTree.pooled !== true, 'full-alias sweep fixture tree created (full build, not pool reuse)')
+    const sweepRepooled = await reclaimWorktree(sweepTree.path, { repool: true, expectedOwnerTaskId: 'alias_full_sweep_leader', expectedGenerationId: sweepTree.metadata.generationId })
+    check(sweepRepooled.ok && sweepRepooled.status === 'pooled', 'sweep fixture tree repooled')
+    // 池注册表清空 → 池条目成陈旧；sidecar 改写成别名落盘形态 + 陈旧池进程
+    clearWorktreePool()
+    const sweepSidecar = path.join(dir, '.agentdeck-worktrees', '.metadata', 'alias_full_sweep_c1.json')
+    const sweepMeta = JSON.parse(fs.readFileSync(sweepSidecar, 'utf8'))
+    sweepMeta.repoDir = aliasRepo
+    sweepMeta.path = fullAliasSpelling(sweepMeta.path)
+    sweepMeta.poolProcess = { ...sweepMeta.poolProcess, pid: 2147483647 }
+    fs.writeFileSync(sweepSidecar, JSON.stringify(sweepMeta))
+    const sweepAlias = await pruneWorktrees(aliasRepo, () => false, { maxAgeMs: 0, claimWorktree: () => undefined })
+    check(sweepAlias.removed.includes('alias_full_sweep_c1'), 'startup sweep honors alias-spelled sidecar metadata and reclaims the stale pooled tree')
+    check(sweepAlias.failed.every((item) => item.name !== 'alias_full_sweep_c1'), 'alias-spelled sidecar is not misreported as unowned residue')
+    check(!fs.existsSync(sweepTree.path), 'alias sidecar sweep removes the stale worktree directory')
+    check(listWorktreeMetadata(dir).every((item) => path.basename(item.path) !== 'alias_full_sweep_c1'), 'alias sidecar is consumed exactly once')
   } else {
     console.log('  SKIP 大小写别名并发专项（非 win32 平台，路径等价判定退化为字面量比较）')
   }

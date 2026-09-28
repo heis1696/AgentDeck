@@ -166,6 +166,21 @@ try {
   })
   assert.equal(poisoned, false, '根调用命中子目录调用播种的缓存（同键）')
   assert.equal(rootCached.addTimeoutMs, 540_000, '根调用复用整仓档位，不被子目录低值覆盖')
+  if (process.platform === 'win32') {
+    // ①c 缓存键别名收口：同一仓库按别名写法（大小写差异）调用必须命中同一份缓存，
+    // 绝不按别名写法重复计数、重复播种
+    const aliasRoot = nestedRoot[0] === nestedRoot[0].toLowerCase()
+      ? nestedRoot[0].toUpperCase() + nestedRoot.slice(1)
+      : nestedRoot[0].toLowerCase() + nestedRoot.slice(1)
+    assert.notEqual(aliasRoot, nestedRoot, '前置：仓库别名写法与真实写法不同')
+    assert.equal(aliasRoot.toLowerCase(), nestedRoot.toLowerCase(), '前置：别名写法仅大小写不同')
+    let aliasPoisoned = false
+    const aliasCached = await git.createWorktree(aliasRoot, 'task_nz_c3', 'main', 'task_nz', undefined, {
+      estimateFileCount: async () => { aliasPoisoned = true; return 0 }
+    })
+    assert.equal(aliasPoisoned, false, '别名写法调用命中真实写法播种的缓存（缓存键按别名折叠，不重复计数）')
+    assert.equal(aliasCached.addTimeoutMs, 540_000, '别名写法调用复用整仓档位')
+  }
   git.clearWorktreeFileCountCache()
   console.log('  OK ①b 计数归一：子目录与根同值同键，低值缓存回退面消除')
 

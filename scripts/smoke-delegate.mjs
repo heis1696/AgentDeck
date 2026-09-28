@@ -1313,6 +1313,23 @@ assert(fs.existsSync(integratedWt) && JSON.parse(fs.readFileSync(leadMetaFile, '
 team.find((agent) => agent.id === 'W1').sharedWorkspace = false
 sharedWorkspaceNoop = false
 
+// M2-别名（fix：会话重建判定路径别名收口）：task.workdir 记成同一目录的别名写法
+// （大小写差异）不得误判「换基线」——内存会话必须照常直续，不经 resume 重建
+//（别名触发重建 = 每次追问都白丢会话上下文）
+if (process.platform === 'win32') {
+  const aliasIntegratedWt = integratedWt[0] === integratedWt[0].toLowerCase()
+    ? integratedWt[0].toUpperCase() + integratedWt.slice(1)
+    : integratedWt[0].toLowerCase() + integratedWt.slice(1)
+  assert(aliasIntegratedWt !== integratedWt, '前置：workdir 别名写法与真实写法不同')
+  assert(aliasIntegratedWt.toLowerCase() === integratedWt.toLowerCase(), '前置：别名写法仅大小写不同')
+  store.update(leader.id, { workdir: aliasIntegratedWt })
+  const startsBeforeAliasFollow = leaderStarts.length
+  const followAlias = await runner.followUp(leader.id, '追问派工')
+  assert(followAlias.ok, '别名 workdir 追问回合成功')
+  assert(leaderStarts.length === startsBeforeAliasFollow, '别名 workdir 不触发 resume 重建：内存会话照常直续（liveWorkdir 与 task.workdir 同目录不同写法）')
+  store.update(leader.id, { workdir: integratedWt })
+}
+
 // ================= 场景 B：二层委派 + 防环 + 递归集成（0.7.0） =================
 const repo2 = fs.mkdtempSync(path.join(os.tmpdir(), 'dele2-repo-'))
 fs.writeFileSync(path.join(repo2, 'c.txt'), 'c v1\n')

@@ -1276,15 +1276,48 @@
     },
     {
       "source": "src/main/git.ts",
-      "dependencies": [],
+      "dependencies": [
+        {
+          "module": "./persistence",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/persistence.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        }
+      ],
       "dependents": [
         "src/main/delegate.ts",
+        "src/main/store.ts",
         "src/main/index.ts",
         "src/main/ipc/system.ts",
         "src/main/ipc/tasks.ts",
         "src/main/retention.ts",
         "src/main/runner.ts",
         "src/main/task-finalizer.ts"
+      ],
+      "orphan": false,
+      "valid": true
+    },
+    {
+      "source": "src/main/persistence.ts",
+      "dependencies": [],
+      "dependents": [
+        "src/main/git.ts",
+        "src/main/event-log.ts",
+        "src/main/store.ts",
+        "src/main/issue-store.ts",
+        "src/main/runner.ts",
+        "src/main/sidecar-server.ts"
       ],
       "orphan": false,
       "valid": true
@@ -1502,19 +1535,6 @@
         "src/main/goal-store.ts",
         "src/main/store.ts",
         "src/main/index.ts",
-        "src/main/sidecar-server.ts"
-      ],
-      "orphan": false,
-      "valid": true
-    },
-    {
-      "source": "src/main/persistence.ts",
-      "dependencies": [],
-      "dependents": [
-        "src/main/event-log.ts",
-        "src/main/store.ts",
-        "src/main/issue-store.ts",
-        "src/main/runner.ts",
         "src/main/sidecar-server.ts"
       ],
       "orphan": false,
@@ -1777,6 +1797,23 @@
             "import"
           ],
           "resolved": "src/main/event-log.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "./git",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/main/git.ts",
           "coreModule": false,
           "followable": true,
           "couldNotResolve": false,
@@ -9874,9 +9911,9 @@
     "ignore": 0,
     "advisedExitCode": 0,
     "totalCruised": 189,
-    "totalDependenciesCruised": 452,
+    "totalDependenciesCruised": 454,
     "optionsUsed": {
-      "baseDir": "D:\\agentdeck\\.agentdeck-worktrees\\t_mue3q415_b6658499a838_c17",
+      "baseDir": "D:\\agentdeck\\.agentdeck-worktrees\\t_muk3gcd6_1838995e71a2_c31",
       "combinedDependencies": false,
       "detectJSDocImports": false,
       "detectProcessBuiltinModuleCalls": false,
