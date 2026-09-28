@@ -1357,7 +1357,7 @@ export class TaskRunner {
         if (record.worktree && record.worktree.ownerTaskId !== record.id) {
           // 归属交接三步（恢复路径）①磁盘绑定：setWorktreeOwner 以 false 报失败（git.ts 不抛
           // 错，try/catch 接不住）。绑定失败不标元数据已绑定、不记「恢复调度」成功。
-          const bound = await setWorktreeOwner(record.worktree.path, record.id)
+          const bound = await setWorktreeOwner(record.worktree.path, record.id, record.worktree.generationId)
           if (!bound) bindFailure = 'worktree 归属绑定失败（目录或元数据不可达）'
         }
         if (!bindFailure) {
@@ -1544,7 +1544,7 @@ export class TaskRunner {
       // ②磁盘归属绑定 ③登记核实+翻面。setWorktreeOwner 以 false 报失败（git.ts 不抛错，
       // try/catch 接不住）——绑定失败 fail-closed：重读归属后收口（仍 holding→撤销+按领队
       // 归属尽力回收+具名拒单；已被并发方接手→让位），绝不把无归属 worktree 交给队员跑。
-      const bound = await setWorktreeOwner(worktree.path, child.id)
+      const bound = await setWorktreeOwner(worktree.path, child.id, worktree.generationId)
       if (!bound) {
         return this.closeSpawnedChild(taskId, child, call, expected, 'worktree 归属绑定失败', taskId)
       }

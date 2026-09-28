@@ -37,24 +37,27 @@ const backend = {
   label: 'Fake office',
   supportsResume: true, // 对齐真实适配器：恢复能力声明
   async probe() { return { ok: true, detail: 'fake' } },
-  async start({ events }) {
+  async start({ events, turn }) {
     starts++
     const sessionId = 'office-session'
-    const finish = (text) => {
-      events.onEvent({ ts: Date.now(), kind: 'final', text })
-      events.onTurnEnd({ ok: true, response: text })
+    // 复用门禁（hot.7/hot.8）要求会话声明 turnScoped 且回调带回合戳，
+    // 否则追问一律走 resume 重建而不是同连接 send——fixture 必须跟上契约。
+    const finish = (text, stamp) => {
+      events.onEvent({ ts: Date.now(), kind: 'final', text }, stamp)
+      events.onTurnEnd({ ok: true, response: text }, stamp)
     }
-    setTimeout(() => finish('office-ready'), 5)
+    setTimeout(() => finish('office-ready', turn), 5)
     return {
       sessionId,
-      async send() {
+      turnScoped: true,
+      async send(_content, nextTurn) {
         sends++
         activeSends++
         maxActiveSends = Math.max(maxActiveSends, activeSends)
         const n = ++serial
         await sleep(25)
         activeSends--
-        finish(`reply-${n}`)
+        finish(`reply-${n}`, nextTurn)
       },
       async stop() {},
       async close() {}

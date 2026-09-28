@@ -2041,12 +2041,27 @@ export async function setWorktreeManualKeep(wtDir: string, manualKeep = true): P
   return true
 }
 
-/** Rebind metadata after a TaskStore allocates the child task id. */
-export async function setWorktreeOwner(wtDir: string, ownerTaskId: string): Promise<boolean> {
+/**
+ * 磁盘归属核实+改绑（建单门禁翻面前的唯一绑定出口）。三步全过才允许改绑：
+ * ① 目录存在——被外力清掉的目录（崩溃竞态/手工删除）一律 false，不认「元数据还在」；
+ * ② 身份对应——sidecar 元数据的 repoDir/path 与目标路径一致（同名不同位的登记不认）；
+ * ③ Git 注册在案+世代一致——verifyWorktreeGeneration 盘 .git 指针、admin 目录、
+ *    Git 注册表与世代标记（expectedGenerationId 缺省退回元数据自带世代自证）。
+ * 任一步不满足返回 false（fail-closed）：调用方保持门禁走具名终态，绝不把子单
+ * 派发到不存在/不属于自己的树上。
+ */
+export async function setWorktreeOwner(wtDir: string, ownerTaskId: string, expectedGenerationId?: string): Promise<boolean> {
   if (!ownerTaskId.trim()) return false
+  if (!fs.existsSync(wtDir)) return false
   const resolved = await resolveManagedWorktree(wtDir)
   if (!resolved?.metadata) return false
-  try { updateMetadata(resolved.metadata, { ownerTaskId: ownerTaskId.trim() }) } catch { return false }
+  const { repoDir, metadata } = resolved
+  if (!sameWorktreePath(metadata.repoDir, repoDir) || !sameWorktreePath(metadata.path, wtDir)) return false
+  const generationId = expectedGenerationId ?? metadata.generationId
+  if (!generationId) return false
+  if (expectedGenerationId && metadata.generationId && metadata.generationId !== expectedGenerationId) return false
+  if (await verifyWorktreeGeneration(repoDir, wtDir, generationId, metadata.cleanupStatus === 'pooled' ? undefined : metadata.branch || undefined)) return false
+  try { updateMetadata(metadata, { ownerTaskId: ownerTaskId.trim() }) } catch { return false }
   return true
 }
 

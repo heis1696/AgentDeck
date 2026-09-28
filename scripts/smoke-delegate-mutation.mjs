@@ -29,18 +29,25 @@ async function bundle(tree, srcFile, outfile) {
 }
 
 /** 用变异产物跑场景脚本：exit 0 = 断言全绿（红证失败）；exit 3 = 断言变红（红证成立） */
-async function runScenario(tree, scenarioScript) {
+async function runScenario(tree, scenarioScript, extraBundles = []) {
   const runnerOut = path.join(tree, 'out-runner.cjs')
   const storeOut = path.join(tree, 'out-store.cjs')
   const handoffOut = path.join(tree, 'out-handoff.cjs')
   await bundle(tree, 'src/main/runner.ts', runnerOut)
   await bundle(tree, 'src/main/store.ts', storeOut)
   await bundle(tree, 'src/main/handoff.ts', handoffOut)
+  const replacements = [
+    ['__MUT_RUNNER__', runnerOut],
+    ['__MUT_STORE__', storeOut],
+    ['__MUT_HANDOFF__', handoffOut]
+  ]
+  for (const [index, extra] of extraBundles.entries()) {
+    const out = path.join(tree, `out-extra-${index}.cjs`)
+    await bundle(tree, extra.src, out)
+    replacements.push([`__MUT_${extra.var}__`, out])
+  }
   const scriptFile = path.join(tree, 'scenario.cjs')
-  fs.writeFileSync(scriptFile, scenarioScript
-    .replace('__MUT_RUNNER__', JSON.stringify(runnerOut))
-    .replace('__MUT_STORE__', JSON.stringify(storeOut))
-    .replace('__MUT_HANDOFF__', JSON.stringify(handoffOut)))
+  fs.writeFileSync(scriptFile, replacements.reduce((acc, [placeholder, value]) => acc.split(placeholder).join(JSON.stringify(value)), scenarioScript))
   try {
     const stdout = execFileSync('node', [scriptFile], { encoding: 'utf8', timeout: 180000, stdio: ['ignore', 'pipe', 'pipe'] })
     return { red: false, output: stdout }
@@ -310,7 +317,9 @@ async function main() {
           armed = false
           const flipped = realUpdateIf(child.id, { status: 'queued', runId: child.runId, executionOwner: child.executionOwner, dispatchHold: true }, { dispatchHold: undefined })
           assert(!!flipped, '前置：竞态注入的翻面成立')
-          setTimeout(() => runner.enqueue(child), 0)
+          runner.enqueue(flipped)
+          const claimed = store.get(child.id)
+          assert(claimed.status === 'running', '前置：撤销落库前已被领取（实际 ' + claimed.status + '）')
         }
         return realUpdateIf(id, expected, patch)
       }
@@ -369,6 +378,120 @@ async function main() {
 main().catch((e) => { console.error(e); process.exit(3) })
 `
 
+// 红7｜磁盘归属核实真化：旧代码（找到元数据就改绑）下「目录被清的残单不翻面派发」断言必红
+const RED7 = `
+${PRELUDE}
+const { createWorktree, setWorktreeOwner } = require(__MUT_GIT__)
+const { reconcileStartupTasks } = require(__MUT_HANDOFF__)
+async function main() {
+  const { repo, git } = makeRepo('mut-r7-')
+  const wt = await createWorktree(repo, 'mut-r7-wt', 'main', 'seed-owner')
+  assert(!!wt, '前置：真实托管 worktree 建成')
+  fs.rmSync(wt.path, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
+  const store = new TaskStore(fs.mkdtempSync(path.join(os.tmpdir(), 'mut-r7-store-')))
+  const source = store.create({ title: '阶段1', prompt: 'x', workdir: '', backend: 'fake' })
+  store.update(source.id, { status: 'done', endedAt: Date.now() })
+  const child = store.create({ title: '坏树残单', prompt: 'x', workdir: wt.path, backend: 'fake', parentTaskId: source.id, dispatchHold: true,
+    worktree: Object.assign({}, wt.metadata, { ownerTaskId: 'lost-owner' }) })
+  const enqueued = []
+  const result = await reconcileStartupTasks({
+    store,
+    pushEvent: () => {},
+    enqueue: (task) => enqueued.push(task.id),
+    notifyTaskChanged: () => {},
+    bindWorktreeOwner: (wtDir, ownerTaskId, expectedGenerationId) => setWorktreeOwner(wtDir, ownerTaskId, expectedGenerationId)
+  })
+  assert(result.holdingTerminated.length === 1 && result.holdingResumed.length === 0,
+    '目录被清的残单必须具名终态、不得翻面（实际 terminated=' + result.holdingTerminated.length + ', resumed=' + result.holdingResumed.length + '）')
+  assert(enqueued.length === 0, '绝不把子单派发到已消失的树上（实际入队 ' + enqueued.length + ' 单）')
+  const after = store.get(child.id)
+  assert(after.status === 'cancelled' && after.dispatchHold === true, '门禁保持 + 具名终态（实际 ' + after.status + '）')
+  assert(!!after.error && after.error.includes('磁盘归属无法核实'), '错误说明具名（实际：' + (after.error ?? '无') + '）')
+  console.log('SCENARIO-OK')
+  process.exit(0)
+}
+main().catch((e) => { console.error(e); process.exit(3) })
+`
+
+// 红8｜重跑僵尸根断：旧代码（无 retry 门禁拒绝、无 store 不变式）下「持门禁单重跑不产生 queued+hold」断言必红
+const RED8 = `
+const path = require('path')
+const fs = require('fs')
+const os = require('os')
+const electron = require('electron')
+const { TaskStore } = require(__MUT_STORE__)
+const { registerTaskIpc } = require(__MUT_TASKS__)
+const assert = (cond, msg) => { if (!cond) { console.error('RED:' + msg); process.exit(3) } }
+async function main() {
+  const store = new TaskStore(fs.mkdtempSync(path.join(os.tmpdir(), 'mut-r8-store-')))
+  const parent = store.create({ title: '领队', prompt: 'x', workdir: '', backend: 'fake' })
+  const gated = store.create({ title: '建单残单', prompt: 'x', workdir: '', backend: 'fake', parentTaskId: parent.id, dispatchHold: true })
+  store.update(gated.id, { status: 'cancelled', endedAt: Date.now(), error: '应用重启时建单未完成，启动对账转取消' })
+  const ctx = {
+    store,
+    issueStore: { sync: () => {} },
+    getWindow: () => null,
+    publishIssueUpdate: () => {},
+    runner: {
+      enqueue: () => {}, pushTask: () => {}, cancel: async () => ({ ok: true }),
+      closeSession: async () => {}, forget: async () => {},
+      followUp: async () => ({ ok: false }), resolvePermission: async () => ({ ok: false }),
+      pendingPermissions: async () => []
+    }
+  }
+  registerTaskIpc(ctx)
+  const retry = await electron.handlers['tasks:retry'](null, gated.id)
+  assert(retry.ok === false, '持门禁的单重跑被拒绝（实际 ' + JSON.stringify(retry) + '）')
+  assert(/删除本单/.test(retry.error ?? ''), '拒绝带可行动提示（实际：' + (retry.error ?? '') + '）')
+  const after = store.get(gated.id)
+  assert(after.status === 'cancelled' && after.dispatchHold === true, '拒绝后单据原样保留（cancelled+门禁，实际 ' + after.status + '）')
+  assert(store.updateIf(gated.id, { status: 'cancelled' }, { status: 'queued' }) === undefined, 'store 全库不变式：终态单更新回 queued 被落空拒绝')
+  assert(store.list().every((t) => !(t.status === 'queued' && t.dispatchHold === true)), '场上不存在 queued+hold 组合')
+  console.log('SCENARIO-OK')
+  process.exit(0)
+}
+main().catch((e) => { console.error(e); process.exit(3) })
+`
+
+// 红9｜启动韧性：旧代码（核实异常不按单捕获）下「单子单核实异常不中断整个对账」断言必红
+const RED9 = `
+const path = require('path')
+const fs = require('fs')
+const os = require('os')
+const { TaskStore } = require(__MUT_STORE__)
+const { reconcileStartupTasks } = require(__MUT_HANDOFF__)
+const assert = (cond, msg) => { if (!cond) { console.error('RED:' + msg); process.exit(3) } }
+async function main() {
+  const store = new TaskStore(fs.mkdtempSync(path.join(os.tmpdir(), 'mut-r9-store-')))
+  const source = store.create({ title: '阶段1', prompt: 'x', workdir: '', backend: 'fake' })
+  store.update(source.id, { status: 'done', endedAt: Date.now() })
+  const badChild = store.create({ title: '核实异常子单', prompt: 'x', workdir: 'wt-bad', backend: 'fake', parentTaskId: source.id, dispatchHold: true,
+    worktree: { ownerTaskId: 'lost', repoDir: 'repo', path: 'wt-bad', branch: 'b', baseSha: 's', createdAt: Date.now(), cleanupStatus: 'active' } })
+  const goodChild = store.create({ title: '无树子单', prompt: 'y', workdir: '', backend: 'fake', parentTaskId: source.id, dispatchHold: true })
+  const enqueued = []
+  const result = await reconcileStartupTasks({
+    store,
+    pushEvent: () => {},
+    enqueue: (task) => enqueued.push(task.id),
+    notifyTaskChanged: () => {},
+    bindWorktreeOwner: async (wtDir) => { if (wtDir === 'wt-bad') throw new Error('核实进程爆炸'); return true }
+  })
+  assert(result.holdingTerminated.length === 1 && result.holdingResumed.length === 1,
+    '对账整体走完：异常子单具名终态 1 单、无树子单照常翻面 1 单（实际 ' + result.holdingTerminated.length + '/' + result.holdingResumed.length + '）')
+  const bad = store.get(badChild.id)
+  assert(bad.status === 'cancelled' && bad.dispatchHold === true && (bad.error ?? '').includes('核实过程异常'),
+    '核实异常子单按单捕获走具名失败路径（实际 ' + bad.status + '，错误：' + (bad.error ?? '无') + '）')
+  assert(store.readEvents(badChild.id).some((e) => (e.text ?? '').includes('核实过程异常')), '核实异常在时间线具名留痕')
+  const good = store.get(goodChild.id)
+  assert(good.status === 'queued' && good.dispatchHold === undefined && enqueued.includes(goodChild.id),
+    '单个子单的核实异常不拖累其余子单：无树子单照常翻面恢复派发（实际 ' + good.status + '）')
+  assert(!store.list().some((t) => t.dispatchHold === true && t.status === 'queued'), '场上不存在 queued+hold 残留')
+  console.log('SCENARIO-OK')
+  process.exit(0)
+}
+main().catch((e) => { console.error(e); process.exit(3) })
+`
+
 const MUTATIONS = [
   {
     name: '红1｜建单门禁：旧代码（无 holding；绑定失败直接撤销）下「让位不撤销」断言必红',
@@ -385,8 +508,8 @@ const MUTATIONS = [
       },
       {
         file: 'src/main/runner.ts',
-        find: "      const bound = await setWorktreeOwner(worktree.path, child.id)\n      if (!bound) {\n        return this.closeSpawnedChild(taskId, child, call, expected, 'worktree 归属绑定失败', taskId)\n      }",
-        replace: "      const bound = await setWorktreeOwner(worktree.path, child.id)\n      if (!bound) {\n        await this.cancel(child.id)\n        return null\n      }"
+        find: "      const bound = await setWorktreeOwner(worktree.path, child.id, worktree.generationId)\n      if (!bound) {\n        return this.closeSpawnedChild(taskId, child, call, expected, 'worktree 归属绑定失败', taskId)\n      }",
+        replace: "      const bound = await setWorktreeOwner(worktree.path, child.id, worktree.generationId)\n      if (!bound) {\n        await this.cancel(child.id)\n        return null\n      }"
       }
     ],
     scenario: RED1
@@ -439,6 +562,59 @@ const MUTATIONS = [
       }
     ],
     scenario: RED6
+  },
+  {
+    name: '红7｜磁盘归属核实真化：旧代码（找到元数据就改绑，不验目录/注册/世代）下「目录被清的残单不翻面派发」断言必红',
+    mutations: [
+      {
+        file: 'src/main/git.ts',
+        find: "  if (!fs.existsSync(wtDir)) return false\n  const resolved = await resolveManagedWorktree(wtDir)\n  if (!resolved?.metadata) return false\n  const { repoDir, metadata } = resolved\n  if (!sameWorktreePath(metadata.repoDir, repoDir) || !sameWorktreePath(metadata.path, wtDir)) return false\n  const generationId = expectedGenerationId ?? metadata.generationId\n  if (!generationId) return false\n  if (expectedGenerationId && metadata.generationId && metadata.generationId !== expectedGenerationId) return false\n  if (await verifyWorktreeGeneration(repoDir, wtDir, generationId, metadata.cleanupStatus === 'pooled' ? undefined : metadata.branch || undefined)) return false",
+        replace: '  const resolved = await resolveManagedWorktree(wtDir)\n  if (!resolved?.metadata) return false\n  const { metadata } = resolved'
+      }
+    ],
+    bundles: [{ src: 'src/main/git.ts', var: 'GIT' }],
+    scenario: RED7
+  },
+  {
+    name: '红8｜重跑僵尸根断：旧代码（retry 无门禁拒绝 + store 无全库不变式）下「持门禁单重跑不产生 queued+hold」断言必红',
+    mutations: [
+      {
+        file: 'src/main/ipc/tasks.ts',
+        find: "    // 重跑僵尸根断：持门禁的单（建单未完成，磁盘归属未核实）重跑回队即 queued+hold 僵尸\n    //（调度器永不可见）——拒绝原单重跑，给可行动提示；工作树核实后的重派由删单重派承担\n    if (task.dispatchHold === true) return { ok: false, error: '本单建单未完成（磁盘归属未核实），不能重新运行；请删除本单后重新委派' }",
+        replace: ''
+      },
+      {
+        file: 'src/main/store.ts',
+        find: "          // 全库不变式：建单门禁（dispatchHold）只在建单时落一次（create 路径），此后任何\n          // 更新都不得把 queued+dispatchHold 组合「生产」出来——重跑/移动类补丁漏清门禁\n          // 造出的正是调度器永不可见、手动入口也领不动的僵尸。更新可以从该组合原样穿过\n          //（不触碰门禁的补丁），合成结果新出现该组合一律落空拒绝（与 updateIf 落空同规）。\n          const hasKey = (key: keyof Task) => Object.prototype.hasOwnProperty.call(patch, key)\n          const nextStatus = hasKey('status') ? patch.status : task.status\n          const nextHold = hasKey('dispatchHold') ? patch.dispatchHold : task.dispatchHold\n          if (nextStatus === 'queued' && nextHold === true && !(task.status === 'queued' && task.dispatchHold === true)) return undefined\n",
+        replace: ''
+      }
+    ],
+    bundles: [{ src: 'src/main/ipc/tasks.ts', var: 'TASKS' }],
+    files: [
+      ['node_modules/electron/index.js', "module.exports = {\n  handlers: {},\n  ipcMain: { handle: (channel, fn) => { module.exports.handlers[channel] = fn } },\n  BrowserWindow: { getAllWindows: () => [] }\n}\n"]
+    ],
+    scenario: RED8
+  },
+  {
+    name: '红9｜启动韧性：旧代码（绑定拒绝/子单异常不按单捕获）下「单子单核实异常不中断整个启动对账」断言必红',
+    mutations: [
+      {
+        file: 'src/main/handoff.ts',
+        find: "      let unverifiable = ''\n      if (stale.worktree?.path) {\n        try {\n          const bound = deps.bindWorktreeOwner\n            ? await deps.bindWorktreeOwner(stale.worktree.path, stale.id, stale.worktree.generationId)\n            : false\n          if (!bound) unverifiable = 'worktree 磁盘归属无法核实（目录缺失、Git 注册不在案或世代身份不符）'\n        } catch (error) {\n          unverifiable = `worktree 磁盘归属核实过程异常（${error instanceof Error ? error.message : String(error)}）`\n        }\n      }",
+        replace: "      let unverifiable = ''\n      if (stale.worktree?.path) {\n        const bound = deps.bindWorktreeOwner ? await deps.bindWorktreeOwner(stale.worktree.path, stale.id, stale.worktree.generationId) : false\n        if (!bound) unverifiable = 'worktree 磁盘归属无法核实（目录缺失、Git 注册不在案或世代身份不符）'\n      }"
+      },
+      {
+        file: 'src/main/handoff.ts',
+        find: '    try {\n      const captured: TaskExpectation = { ...taskIdentity(stale), parked: stale.parked, dispatchHold: true }',
+        replace: '    {\n      const captured: TaskExpectation = { ...taskIdentity(stale), parked: stale.parked, dispatchHold: true }'
+      },
+      {
+        file: 'src/main/handoff.ts',
+        find: "    } catch (error) {\n      // 兜底按单捕获：这笔收场写不进去（存储异常等）只留日志继续对账其余子单，\n      // 门禁原样保留——绝不让单个子单的异常把整个启动对账炸掉\n      console.error('[startup-reconcile] dispatchHold 子单收场异常，跳过该单继续对账', stale.id, error)\n    }\n  }",
+        replace: '    }\n  }'
+      }
+    ],
+    scenario: RED9
   }
 ]
 
@@ -448,7 +624,12 @@ for (const item of MUTATIONS) {
   console.log('== ' + item.name)
   try {
     const tree = mutatedTree(item.mutations)
-    const result = await runScenario(tree, item.scenario)
+    for (const [relPath, content] of item.files ?? []) {
+      const target = path.join(tree, relPath)
+      fs.mkdirSync(path.dirname(target), { recursive: true })
+      fs.writeFileSync(target, content)
+    }
+    const result = await runScenario(tree, item.scenario, item.bundles ?? [])
     if (result.red) {
       const firstRed = result.output.split('\n').find((line) => line.includes('RED:')) ?? ''
       console.log('  ✓ 红证成立：旧代码下断言失败 — ' + firstRed.replace('RED:', '').trim())
