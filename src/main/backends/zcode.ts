@@ -109,6 +109,9 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
   return {
     id: 'zcode',
     label: 'ZCode (GLM)',
+    // resumeSessionId 走 session/resume（startDshAcpSession 同名参数表之外唯一的服务器端
+    // 恢复入口）：对全新 app-server 连接请求恢复既有会话，跨进程生效
+    supportsResume: true,
     async probe() {
       const { zcodePath, nodePath } = getPaths()
       const bundle = findBundle(zcodePath || undefined)

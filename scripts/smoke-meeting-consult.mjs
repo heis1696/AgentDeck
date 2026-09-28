@@ -65,6 +65,7 @@ const makeSession = (agent, events) => ({
 const backend = {
   id: 'fake-consult',
   label: 'Fake consult',
+  supportsResume: true, // 对齐真实适配器：恢复能力声明
   async probe() { return { ok: true, detail: 'fake' } },
   async start({ prompt, events }) {
     const agent = prompt.includes('Beta') || prompt.includes('beta') ? 'beta' : 'alpha'

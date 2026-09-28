@@ -82,6 +82,7 @@ function makeFixtureBackend(id, options = {}) {
   const backend = {
     id,
     label: id,
+    supportsResume: true, // 重建类场景（legacy 重建/恢复重建）走 resume 通路
     async probe() { return { ok: true, detail: '' } },
     async start({ prompt, events, turn, resumeSessionId }) {
       const sessionId = `${id}_sess_${state.starts.length + 1}`

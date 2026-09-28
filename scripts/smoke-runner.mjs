@@ -209,6 +209,7 @@ const slowState = { stopped: false }
 const slowBackend = {
   id: 'slow',
   label: 'Slow',
+  supportsResume: true, // fu5 场景的失败后追问走 followUp 的 resume 重建通路
   async probe() { return { ok: true, detail: '' } },
   async start() {
     return {

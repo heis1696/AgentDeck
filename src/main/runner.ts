@@ -190,6 +190,12 @@ interface TurnRecord {
 export const TURN_ISOLATION_REQUIRED = 'session-turn-identity-unavailable'
 
 /**
+ * 追问重建路径的诚实降级：后端不支持跨进程恢复（supportsResume=false）而旧会话已退役时，
+ * 回合按失败收场并给出可行动出口——绝不静默开新会话冒充恢复成功。
+ */
+export const RESUME_UNSUPPORTED_MESSAGE = '该会话已退役且此后端不支持跨进程恢复，可基于报告全文/Issue 评论重新派单带上下文'
+
+/**
  * Correlates the callbacks of one `BackendSession` with the turn that produced
  * them. The session-level channel (created once, handed to the adapter at
  * start) forwards into this router; only the router decides which immutable
@@ -1774,6 +1780,9 @@ export class TaskRunner {
     const previous = this.sessions.get(taskId)
     const resumeSessionId = task.sessionId || previous?.sessionId
     if (!resumeSessionId) return { ok: false, response: '', error: TURN_ISOLATION_REQUIRED }
+    // 诚实降级：后端没有恢复通路时， resumeSessionId 只会被它静默忽略、开一个新会话
+    // 冒充恢复成功——在拆掉旧连接之前就拒绝，按可行动报错落败
+    if (!backend.supportsResume) return { ok: false, response: '', error: RESUME_UNSUPPORTED_MESSAGE }
     if (previous) {
       this.sessions.delete(taskId)
       this.sessionWorkdirs.delete(taskId)
@@ -2369,6 +2378,13 @@ export class TaskRunner {
         this.failTask(taskId, msg, claim)
         this.pushTask(taskId)
         return { ok: false, error: msg }
+      }
+      // 诚实降级：后端不支持跨进程恢复时不得重建（resumeSessionId 只会被静默忽略、
+      // 开新会话冒充恢复成功）——按可行动报错落败，任务显式 failed
+      if (!backend.supportsResume) {
+        this.failTask(taskId, RESUME_UNSUPPORTED_MESSAGE, claim)
+        this.pushTask(taskId)
+        return { ok: false, error: RESUME_UNSUPPORTED_MESSAGE }
       }
       // 续聊沿用 agent 钉死的模型（zcode resume 后用 session/setModel 补设；CLI --model 与 --resume 正交）
       let resumeSession: BackendSession

@@ -126,6 +126,8 @@ export function createCodexBackend(): AgentBackend {
   return {
     id: 'codex',
     label: 'Codex',
+    // resumeSessionId 走 `codex exec resume <id>`：每回合独立进程恢复 provider 会话
+    supportsResume: true,
     async probe() {
       const p = await probeCli('codex')
       return p.ok ? { ok: true, detail: `codex ${p.version}` } : { ok: false, detail: p.error ?? '未安装' }

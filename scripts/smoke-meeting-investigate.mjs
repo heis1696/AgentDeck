@@ -34,6 +34,7 @@ let childTask
 const backend = {
   id: 'fake-investigate',
   label: 'Fake investigate',
+  supportsResume: true, // 对齐真实适配器：恢复能力声明（追问/回灌经 turnScoped 连接直续）
   async probe() { return { ok: true, detail: 'fake' } },
   async start({ prompt, events }) {
     const investigation = prompt.includes('只读调查')

@@ -66,6 +66,16 @@ export interface BackendTurnResult {
 export interface AgentBackend {
   id: string
   label: string
+  /**
+   * 声明 `start` 的 resumeSessionId 通路会真实恢复该 provider 会话（跨进程续聊）。
+   *
+   * false = 没有恢复通路（提供 resumeSessionId 也只会开新会话）：runner 的追问重建
+   * 路径（startIsolatedTurn / followUp 的 resume 段）遇 false 必须按回合失败收场并
+   * 给出可行动报错，绝不静默新会话冒充恢复成功。逐适配器依据：
+   * zcode=session/resume、claude=--resume、codex=exec resume、opencode=run -s、
+   * opencode-server=会话 id 复用；dsh=false（ACP 固定 session/new，headless 无续聊）。
+   */
+  supportsResume: boolean
   /** 探测本机是否可用（找二进制/配置） */
   probe: () => Promise<{ ok: boolean; detail: string }>
   /**

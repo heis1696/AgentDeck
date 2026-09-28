@@ -80,6 +80,7 @@ function scriptedBackend(id, plan) {
   const backend = {
     id,
     label: id,
+    supportsResume: true, // Goal 委派续聊等场景的 followUp 走 resume 重建通路
     async probe() { return { ok: true, detail: '' } },
     start({ events, resumeSessionId, turn }) {
       let activeTurn = turn
@@ -380,6 +381,7 @@ async function scenarioEpipeFollowUpRunIdentity() {
   const epipe = {
     id: 'epipe-follow-up',
     label: 'EPIPE follow-up',
+    supportsResume: true, // EPIPE 后的 follow-up 走 resume 重建通路
     async probe() { return { ok: true, detail: '' } },
     start({ events, resumeSessionId, turn }) {
       let activeTurn = turn

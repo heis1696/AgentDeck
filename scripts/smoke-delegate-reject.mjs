@@ -39,6 +39,7 @@ function makeLeaderBackend(script) {
   return {
     sent,
     id: 'zcode', label: 'Boss',
+    supportsResume: true, // 重启对账场景的追问走 followUp 的 resume 重建通路
     async probe() { return { ok: true, detail: '' } },
     // 先让出一个微任务再发首回合事件：同步发会撞上 scheduler.pump 的重入闸
     // （launch(领队)→run→start 还在 pump 栈上，此时建单 enqueue 会被 pumping 闸吞掉，子任务永远 queued）
