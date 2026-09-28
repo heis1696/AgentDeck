@@ -61,10 +61,16 @@ export interface StartupReconcileDeps {
   relayInterruptedLeader?: (stale: Task, children: Task[]) => void
   /**
    * dispatchHold 子单的磁盘归属核实+绑定（生产接线 setWorktreeOwner，fail-closed）：
-   * 目录存在 + Git 注册在案 + 工作树身份与任务对应（路径/世代）三步全过才返回 true。
-   * 缺省且子单带 worktree = 无法核实 → 一律转具名终态，绝不凭登记翻面派发。
+   * 目录存在 + Git 注册在案 + 工作树身份与任务对应三项全过才返回 true；证据（世代/
+   * 出生 owner/出生分支）整体取自任务登记 worktree 记录，磁盘现场不做自证——任务侧
+   * 证据残缺（如旧快照无世代）即拒绝核实。缺省且子单带 worktree = 无法核实 →
+   * 一律转具名终态，绝不凭登记翻面派发。
    */
-  bindWorktreeOwner?: (wtDir: string, ownerTaskId: string, expectedGenerationId?: string) => Promise<boolean>
+  bindWorktreeOwner?: (wtDir: string, ownerTaskId: string, expected?: {
+    generationId?: string
+    ownerTaskId?: string
+    branch?: string
+  }) => Promise<boolean>
 }
 
 export interface StartupReconcileResult {
@@ -172,9 +178,9 @@ export async function reconcileStartupTasks(deps: StartupReconcileDeps): Promise
   // 不会把翻面后的子单误当遗留 worker 再 park）：建单流程（归属绑定→登记核实→翻面）
   // 在翻面前被重启打断，子单带着门禁停在队列外——调度器不可见、手动入口（▶ 启动/
   // 重跑/移回排队）对持门禁的单一律拒绝，按普通 worker 挂起等于留下「永远领不动」
-  // 的悬挂。单独按磁盘归属核实分两路：① 三步核实通过（目录在、Git 注册在案、
-  // 工作树身份与任务对应（路径/世代））→ 带出生身份+holding 条件翻面并恢复派发；
-  // ② 无法核实/核实过程异常 → 具名终态 + 时间线留痕 + 现场处置提示，门禁保持。
+  // 的悬挂。单独按磁盘归属核实分两路：① 核实通过（目录在、Git 注册在案、磁盘身份与
+  // 任务侧证据（世代/出生 owner/分支）全对）→ 带出生身份+holding 条件翻面并恢复派发；
+  // ② 无法核实/证据残缺/核实过程异常 → 具名终态 + 时间线留痕 + 现场处置提示，门禁保持。
   // 两路都不留 queued 持门禁的悬挂单（含旧快照的 parked+holding）。
   // 派发延后：对账期间只做条件提交，enqueue 统一攒到收尾一次性触发——pump 由 enqueue
   // 驱动且会顺带扫队列，若对账中途就入队，pump 会在本函数未完场时开跑（把还没 park 的
@@ -187,14 +193,20 @@ export async function reconcileStartupTasks(deps: StartupReconcileDeps): Promise
     try {
       const captured: TaskExpectation = { ...taskIdentity(stale), parked: stale.parked, dispatchHold: true }
       let unverifiable = ''
-      if (stale.worktree?.path) {
-        try {
-          const bound = deps.bindWorktreeOwner
-            ? await deps.bindWorktreeOwner(stale.worktree.path, stale.id, stale.worktree.generationId)
-            : false
-          if (!bound) unverifiable = 'worktree 磁盘归属无法核实（目录缺失、Git 注册不在案或世代身份不符）'
-        } catch (error) {
-          unverifiable = `worktree 磁盘归属核实过程异常（${error instanceof Error ? error.message : String(error)}）`
+      if (stale.worktree) {
+        // 残缺登记不免检：有 worktree 记录但 path 为空 = 身份证据残缺，归「无法核实」
+        // 具名终态——绝不因「看起来没有路径要核」就按无树子单翻面派发
+        if (!stale.worktree.path) {
+          unverifiable = 'worktree 登记残缺（路径为空），磁盘归属无法核实'
+        } else {
+          try {
+            const bound = deps.bindWorktreeOwner
+              ? await deps.bindWorktreeOwner(stale.worktree.path, stale.id, stale.worktree)
+              : false
+            if (!bound) unverifiable = 'worktree 磁盘归属无法核实（目录缺失、Git 注册不在案或任务侧世代/归属/分支证据不符）'
+          } catch (error) {
+            unverifiable = `worktree 磁盘归属核实过程异常（${error instanceof Error ? error.message : String(error)}）`
+          }
         }
       }
       const committed = store.transaction((tx) => {

@@ -441,7 +441,7 @@ const initMain = async (): Promise<void> => {
       pushEvent: (taskId, event) => runner.pushEvent(taskId, event),
       enqueue: (task) => runner.enqueue(task),
       notifyTaskChanged,
-      bindWorktreeOwner: (wtDir, ownerTaskId, expectedGenerationId) => setWorktreeOwner(wtDir, ownerTaskId, expectedGenerationId),
+      bindWorktreeOwner: (wtDir, ownerTaskId, expected) => setWorktreeOwner(wtDir, ownerTaskId, expected),
       relayInterruptedLeader: (stale, kids) => {
         if (!stale.issueId) return
         const excerpts = kids.slice(0, 5).map((kid) => `- **${kid.title}**（${kid.status}）：${(kid.result ?? '').slice(0, 400) || '（无最终输出）'}`).join('\n')

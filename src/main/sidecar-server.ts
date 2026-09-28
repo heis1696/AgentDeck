@@ -226,7 +226,9 @@ export function startSidecarServer(options: SidecarServerOptions): SidecarServer
         // proof the observed run still owns the record. Cleanup of a rejected
         // retry must not touch a replacement run's session.
         const requeued = runtime.store.updateIf(task.id, captured, { status: 'queued', error: undefined, failure: undefined, result: undefined, sessionId: undefined, attempt: undefined, runId: undefined, executionOwner: undefined })
-        if (!requeued) throw new Error('task state changed; retry aborted')
+        // Same actionable guidance as the desktop IPC tasks:retry — a bare
+        // "aborted" tells a CLI agent nothing it can act on.
+        if (!requeued) throw new Error('任务状态已变化，请重试')
         await runtime.runner.closeSession(task.id, { runId: task.runId, executionOwner: task.executionOwner })
         runtime.start()
         runtime.runner.enqueue(requeued)
