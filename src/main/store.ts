@@ -41,11 +41,32 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * 就地最小读取 userDataDir/agents.json，得到「注册名册里登记过哪些 agent id」。
+ * 不能 import ./agents（它直接 import electron），这里只按形状宽容解析（数组元素为
+ * 带非空字符串 id 的对象）；文件缺失/损坏/形状不符一律返回空集——fail-closed：
+ * 宁可让真实旧办公室单不被补写（收养降级为重新拉首回合），也不在无可信来源时误补写。
+ */
+function readTrustedOfficeAgentIds(userDataDir: string): ReadonlySet<string> {
+  try {
+    const raw: unknown = readJsonFile(path.join(userDataDir, 'agents.json'), undefined)
+    const ids = new Set<string>()
+    if (Array.isArray(raw)) {
+      for (const entry of raw) {
+        if (isRecord(entry) && typeof entry.id === 'string' && entry.id.trim()) ids.add(entry.id.trim())
+      }
+    }
+    return ids
+  } catch {
+    return new Set()
+  }
+}
+
+/**
  * Migrate one index entry. `sourceVersion` is explicit: legacy fields are
  * only interpreted for version 0, so future schema additions do not grow an
  * implicit compatibility branch.
  */
-export function migrateTaskRecord(raw: unknown, sourceVersion = 0, now = Date.now(), options: { recoverRunning?: boolean } = {}): Task | null {
+export function migrateTaskRecord(raw: unknown, sourceVersion = 0, now = Date.now(), options: { recoverRunning?: boolean; trustedOfficeAgentIds?: ReadonlySet<string> } = {}): Task | null {
   if (!isRecord(raw)) return null
   const old = raw as LegacyTask
   const out: Record<string, unknown> = {}
@@ -93,13 +114,29 @@ export function migrateTaskRecord(raw: unknown, sourceVersion = 0, now = Date.no
 
   // 办公室会话标记迁移（一次性）：officeAgentId 是本仓库新增字段，旧办公室单没有它。
   // 运行期判据只认该字段（键形可被用户冒用），所以这里给真正的旧办公室单补上。
-  // 三重键同时成立才认（键形 office_<agentId> + 标题以「·办公室」结尾 + suppressIssue），
-  // 单个用户可构造的字段（requestId 只能是其中一项）不足以伪造。
+  // 可信来源判定：旧判据「键形 office_<agentId> + 标题以「·办公室」结尾 + suppressIssue」
+  // 的每一项都来自任务记录自身，全部是建单入口可自由填写的字段（requestId/idempotencyKey
+  // 会成为 dedupeKey；sidecar 的 suppressIssue 不受白名单约束），照键形伪造即可全部满足。
+  // 因此额外要求 agentId ∈ trustedOfficeAgentIds——TaskStore 构造时从 userDataDir/agents.json
+  // 读出的注册名册。名册只由「用户在队伍设置里保存队伍」一条路径写入（saveAgents，仅本机
+  // IPC；sidecar 没有 agents 端点），任何建单入口都写不到它：伪造单的 agentId 无法被洗进
+  // 名册，只能冒用**已登记**的队长 id。为什么不选「同索引存在注册表创建痕迹」（另一张带
+  // officeAgentId 的单）：要迁移的人群是前 officeAgentId 时代的旧单，那个年代的整份索引里
+  // 不存在任何带该字段的记录，判据恒不成立——等于抛弃全部真实旧办公室单，恰是收养路径
+  // 要防的回归。
+  // 残留风险：① 冒用已登记 id 的伪造单仍能通过全部判据——名册只回答「这个 id 存在」，
+  // 回答不了「这张单是注册表建的」；其后由收养侧的键位次序兜底（真实办公室单的 office:v2:
+  // 键在 pickKey 里先于 legacyLookup 命中，伪造单只在真单不存在时才可能被收养）。② 名册
+  // 随时间变化：该 id 尚未入册时伪造单被拒，用户保存队伍后重开索引会补写。③ 名册缺失/
+  // 损坏按空集处理（fail-closed），真实旧单不被补写、收养降级为重新拉首回合。彻底关闭
+  // 需要把「注册表建单」事实以建单入口无法伪造的方式写在记录上（即 officeAgentId 本身），
+  // 迁移层只能做到来源收窄。
   if (out.officeAgentId === undefined) {
     const agentId = typeof out.agentId === 'string' ? out.agentId : ''
     const key = typeof out.dedupeKey === 'string' ? out.dedupeKey : ''
     const title = typeof out.title === 'string' ? out.title : ''
     const legacyOffice = agentId.length > 0 && key === `office_${agentId}` && title.endsWith('·办公室') && out.suppressIssue === true
+      && (options.trustedOfficeAgentIds?.has(agentId) ?? false)
     if (legacyOffice) out.officeAgentId = agentId
   }
 
@@ -128,7 +165,7 @@ export function migrateTaskRecord(raw: unknown, sourceVersion = 0, now = Date.no
  * document always uses the current shape; callers can compare it with the
  * source to decide whether an atomic rewrite is needed.
  */
-export function migrateTaskIndex(raw: unknown, now = Date.now(), options: { recoverRunning?: boolean } = {}): TaskIndexDocument {
+export function migrateTaskIndex(raw: unknown, now = Date.now(), options: { recoverRunning?: boolean; trustedOfficeAgentIds?: ReadonlySet<string> } = {}): TaskIndexDocument {
   let sourceVersion = 0
   let entries: unknown[] = []
   if (Array.isArray(raw)) {
@@ -153,7 +190,7 @@ export function migrateTaskIndex(raw: unknown, now = Date.now(), options: { reco
   return {
     schemaVersion: TASK_INDEX_SCHEMA_VERSION,
     ...(isRecord(raw) && Array.isArray(raw.deletedDedupeKeys) ? { deletedDedupeKeys: raw.deletedDedupeKeys.filter((key): key is string => typeof key === 'string') } : {}),
-    ...(isRecord(raw) && Array.isArray(raw.pendingIssueProjections) ? { pendingIssueProjections: raw.pendingIssueProjections.map((entry) => migrateTaskRecord(entry, sourceVersion, now, { recoverRunning: false })).filter((task): task is Task => task !== null) } : {}),
+    ...(isRecord(raw) && Array.isArray(raw.pendingIssueProjections) ? { pendingIssueProjections: raw.pendingIssueProjections.map((entry) => migrateTaskRecord(entry, sourceVersion, now, { recoverRunning: false, trustedOfficeAgentIds: options.trustedOfficeAgentIds })).filter((task): task is Task => task !== null) } : {}),
     ...(isRecord(raw) && Array.isArray(raw.pendingTaskSnapshots) ? { pendingTaskSnapshots: raw.pendingTaskSnapshots.filter((id): id is string => typeof id === 'string' && /^[A-Za-z0-9_-]{1,160}$/.test(id)) } : {}),
     ...(isRecord(raw) && Array.isArray(raw.pendingTaskDeletes) ? { pendingTaskDeletes: raw.pendingTaskDeletes.filter((id): id is string => typeof id === 'string' && /^[A-Za-z0-9_-]{1,160}$/.test(id)) } : {}),
     tasks: entries
@@ -216,6 +253,8 @@ export interface TaskTransaction {
 export class TaskStore {
   private readonly dir: string
   private readonly userDataDir: string
+  /** 办公室旧单迁移的可信来源（userDataDir/agents.json 注册名册），构造时读取一次 */
+  private readonly trustedOfficeAgentIds: ReadonlySet<string>
   private logs = new Map<string, EventLog>()
   private pendingSnapshots = new Set<string>()
   private pendingDeletes = new Set<string>()
@@ -228,6 +267,7 @@ export class TaskStore {
   constructor(userDataDir: string, options: { recoverRunning?: boolean } = {}) {
     this.userDataDir = userDataDir
     this.dir = path.join(userDataDir, 'tasks')
+    this.trustedOfficeAgentIds = readTrustedOfficeAgentIds(userDataDir)
     const document = this.readDocument()
     this.recoverPendingEventBatches(document.tasks)
     if (document.pendingTaskSnapshots?.length || document.pendingTaskDeletes?.length) this.scheduleFlush()
@@ -317,7 +357,7 @@ export class TaskStore {
 
   private readDocument(deriveCounts = true): TaskIndexDocument {
     const raw = readJsonFile<unknown>(this.indexFile(), undefined)
-    const document = raw === undefined ? { schemaVersion: TASK_INDEX_SCHEMA_VERSION, tasks: [] } : migrateTaskIndex(raw, Date.now(), { recoverRunning: false })
+    const document = raw === undefined ? { schemaVersion: TASK_INDEX_SCHEMA_VERSION, tasks: [] } : migrateTaskIndex(raw, Date.now(), { recoverRunning: false, trustedOfficeAgentIds: this.trustedOfficeAgentIds })
     if (deriveCounts) for (const task of document.tasks) {
       const count = this.eventLog(task.id).count()
       if (task.eventCount !== count) {

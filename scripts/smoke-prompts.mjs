@@ -240,6 +240,11 @@ check(meeting_mod.parseEnvelope(JSON.stringify({ decisions: ['x'], objections: [
 const continueExample = p.CONTINUE_BLOCK.match(/<continue start="auto">[\s\S]*?<\/continue>/)?.[0] ?? ''
 check(!!continueExample && delegate.parseContinue(continueExample).length === 0, '接力示例（带指纹）即使位于末尾也不触发')
 check(delegate.parseContinue('<continue start="auto">阶段2：按 docs/plan.md 实施 UI；阶段1 已完成数据层；验收：构建通过</continue>').length === 1, '真实接力简报仍可触发')
+// 遗留反例（parseContinue）：agent 正文先出现开标记、末尾才写真实标记。修复前末尾锚定
+// 从第一个开标记起算，简报会把「我会输出 <continue…> 标记」连同中间正文一起拼进去。
+const nestedContinue = '<continue start="auto">我会输出 <continue start="auto"> 标记</continue>\n中间的讨论正文。\n<continue start="auto">阶段2：按 docs/plan.md 实施 UI；阶段1 已完成数据层；验收：构建通过</continue>'
+const nestedParsed = delegate.parseContinue(nestedContinue)[0]
+check(!!nestedParsed && nestedParsed.start === 'auto' && nestedParsed.brief === '阶段2：按 docs/plan.md 实施 UI；阶段1 已完成数据层；验收：构建通过', '接力反例（正文先出现开标记）：简报只取末尾真实标记那段，不含中间正文')
 
 // ================= 办公室身份端到端 =================
 // P1 回归：公开建单入口允许自定义 requestId/idempotencyKey，它们会成为 dedupeKey。
@@ -291,9 +296,13 @@ console.log('办公室身份：')
   check(registry.get('ag_c')?.id === office.id, '对照组：身份匹配的办公室单被正常复用')
   check(office.id !== impersonator.id && office.id !== v2Collide.id, '办公室单与两张用户单都是不同记录')
 
-  // 旧键形的历史办公室单：迁移（store.ts 三重键判定）补过 officeAgentId，注册表应收养它而不是另建。
+  // 旧键形的历史办公室单：迁移（store.ts：旧键形 + 标题/suppressIssue + agentId ∈ 注册名册）
+  // 补过 officeAgentId，注册表应收养它而不是另建。
   // 收养失败会让线上已存在的办公室会话被抛弃、续聊历史留在旧单——这是改键形的最大回归面。
+  // 迁移的可信来源是 userDataDir/agents.json（TaskStore 构造时读）：测试环境显式落一份名册，
+  // ag_lead 才算「注册表可能写过键位」的队长。
   const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-office-legacy-'))
+  fs.writeFileSync(path.join(dir2, 'agents.json'), JSON.stringify(agents))
   const legacyStore = new TaskStore(dir2)
   const legacyService = new TaskService({ store: legacyStore })
   const legacyTask = legacyStore.create({ title: 'Lead·办公室', prompt: '引导', backend: 'zcode', agentId: 'ag_lead', suppressIssue: true, trigger: 'meeting' })
@@ -316,6 +325,14 @@ console.log('办公室身份：')
   await legacyRegistry.ensure('ag_lead')
   check(reopened.get(legacyTask.id)?.dedupeKey === sessions.OFFICE_TASK_KEY_V2_PREFIX + 'ag_lead', 'ensure() 收养后键被改写为新键形')
   check(reopened.list().filter((task) => task.officeAgentId === 'ag_lead').length === 1, '收养不会另建第二张办公室单')
+
+  // 遗留反例（迁移伪造）：三重键全部可由建单侧构造——requestId 会成为 dedupeKey、sidecar 的
+  // suppressIssue 不受白名单约束。修复前这张单重开即被补写 officeAgentId，进而被 legacyLookup
+  // 收养成队长的办公室会话。现在迁移还要求 agentId 在注册名册里：ag_peer 是队长，但不在
+  // dir2 的 agents.json 名册里，不得补写。
+  const forged = legacyService.createTask({ title: 'Peer·办公室', prompt: '引导', backend: 'claude', agentId: 'ag_peer', suppressIssue: true, requestId: sessions.OFFICE_TASK_KEY_PREFIX + 'ag_peer' })
+  const reforged = new TaskStore(dir2).list().find((task) => task.id === forged.id)
+  check(reforged?.officeAgentId === undefined, '迁移伪造反例：键形/标题/suppressIssue 齐备但 agentId 不在注册名册，不补写 officeAgentId')
   fs.rmSync(dir2, { recursive: true, force: true })
 
   // 咨询受理边界：发起人的直属队员即便顶着队长头衔也不可被咨询（与 buildDelegationBlock 同一名单）

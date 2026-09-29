@@ -325,8 +325,11 @@ export interface ContinueCall {
   loose?: boolean
 }
 
-/** 末尾锚定主通道：标记后只允许空白 */
-const CONTINUE_TAIL_RE = /<continue\b([^>]*)>([\s\S]*?)<\/continue>\s*$/
+/** 末尾锚定主通道：标记后只允许空白。起点取末尾闭合标签之前的**最后一个**开标记
+ *  （lookahead 断言其后全文不再有开标记字样）——agent 正文先出现开标记（讨论/复述里
+ *  引用「我会输出 <continue …> 标记」）、末尾才写真实标记时，简报从真实标记起算，
+ *  不再被拼进前文。 */
+const CONTINUE_TAIL_RE = /<continue\b(?![\s\S]*<continue\b)([^>]*)>([\s\S]*?)<\/continue>\s*$/
 /** 兜底扫描：全文任意位置的完整闭合标记（取最后一个） */
 const CONTINUE_ANY_RE = /<continue\b([^>]*)>([\s\S]*?)<\/continue>/g
 
@@ -342,6 +345,8 @@ function continueStart(attrs: string): { start: 'auto' | 'parked'; explicitAuto:
  * 解析 <continue start="auto|parked">简报</continue>。
  * 主通道末尾锚定：标记后只允许空白——协议即"在回复最后一行输出"，正文/示例/复述
  * 文档里出现标记字样不构成接力意图（防止讨论方案或引用本文档时被误切会话）。
+ * 锚定起点取末尾闭合标签之前的最后一个开标记：正文先出现开标记、末尾写真实标记时，
+ * 简报从真实标记起算，不把中间正文拼进简报。
  * start 属性解析容忍多属性/大小写；只有显式 "auto" 才立即执行，
  * 缺省/非法/无引号一律按 parked 备好待人工启动，防止复述协议时误切会话。
  * 兜底通道：主通道未命中时取全文最后一个完整闭合标记，仅当**显式** start="auto"

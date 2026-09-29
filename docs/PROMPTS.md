@@ -64,7 +64,7 @@ AgentDeck 的提示词不只是文案：它们是运行时解析器（`<delegate
 
 1. **建键隔离**（`officeTaskKeyCandidates`）：运行期键形带版本号，且是**候选序列**（`office:v2:<id>`、`office:v2:<id>#2`…）——单个固定键不够，键被占用时还得有备用键位可建。
 2. **复用与建单同源核验**（`pickKey`）：查询与建单走同一套候选序列，两处都要求 `officeAgentId` 与队长一致。键形**不是**安全边界——`requestId`/`idempotencyKey` 是用户可构造的自由串，所以这一层才是主闸。特别注意 `createTask` 是「键命中即复用」：建单路径若沿用被占用的键，它会直接返回那张用户单，核验形同虚设。所以键被占用时换下一个候选键位，`get()` 返回 null、`ensure()` 另建并在时间线留痕，建单结果**再核验一次身份**（防并发抢键）。
-3. **旧键收养**（`legacyLookup`）：键形改动前建的旧单（迁移按三重键判定补过 `officeAgentId`）在 `ensure()` 里被收养并改写键，否则线上已存在的办公室会话会被抛弃、续聊历史留在旧单。
+3. **旧键收养**（`legacyLookup`）：键形改动前建的旧单在 `ensure()` 里被收养并改写键，否则线上已存在的办公室会话会被抛弃、续聊历史留在旧单。收养的前提是迁移（`store.ts` 的 `migrateTaskRecord`）先为它补上 `officeAgentId`，补写判据 = 旧键形 `office_<agentId>` + 标题以「·办公室」结尾 + `suppressIssue` + **`agentId` 在注册名册里**（`TaskStore` 构造时从 `userDataDir/agents.json` 就地读出，`store.ts` 不 import `agents.ts` 以免引入 electron 依赖）。前三项都是建单入口可自由填写的字段（`requestId` 会成为 `dedupeKey`、sidecar 的 `suppressIssue` 不受白名单约束），名册是唯一建单侧写不进的可信来源（只由本机 IPC 的 `agents:save` 写入，sidecar 没有 agents 端点）。残留风险：冒用**已入册**队长 id 的伪造单仍能通过补写，其后由收养侧键位次序兜底——真实办公室单的 `office:v2:` 键在 `pickKey` 里先于 `legacyLookup` 命中；名册缺失/损坏按空集处理（fail-closed：宁可不补写让收养降级为重新拉首回合，也不误补写）。
 4. **外部入口白名单**（`sidecar-server.ts` 的 `assertNoInternalIdentity`）：`officeAgentId` 是「这是办公室会话」的唯一运行期判据，外部建单入口（`tasks.create`/`issues.create`）一律拒绝该字段——建单侧拿到它就能让普通任务跳过派发/咨询/接力协议。桌面 IPC 侧由 `parseTaskCreate` 的键白名单兜住。
 
 **只读调查的放行面按回合而非身份**：办公室会话同时承载「会议发言」与「咨询应答」，`completeTurn` 无从自证本回合是哪种，所以由发起侧显式标注 `followUp({ meetingTurn: true })`——目前只有 `meeting-controller.speak`（会议发言）带它。不带该标记的办公室回合（咨询应答、自由追问）里出现 `<investigate>` 只剥离展示并具名留痕，不发起调查；普通领队任务不受此闸约束（会议外的调查是既有能力）。
@@ -80,7 +80,7 @@ AgentDeck 的提示词不只是文案：它们是运行时解析器（`<delegate
 | `<review of="#单号" verdict="pass\|fail" note="…"/>` | `parseReviews` | 单号只在本条汇报内有效；verdict 只认 pass/fail |
 | `<consult to="队长名" …>问题</consult>` | `parseConsults` | 只能咨询队长（非 dsh）；受理名单与 `buildDelegationBlock` 的可咨询名单一致——排除发起人**与其直属队员**（队员顶着队长头衔也只能派活）；办公室会话深度 ≥1 不再转咨询 |
 | `<investigate to="队员名" …>指令</investigate>` | `parseInvestigates` | 只在会议发言里教，且只对名下有队员的发言人教；**运行时只在 `meetingTurn` 回合受理**（见 §2.3） |
-| `<continue start="auto\|parked">简报</continue>` | `parseContinue` | 末尾锚定为主；缺省/写错按 parked；与示例指纹同源的简报视为复述 |
+| `<continue start="auto\|parked">简报</continue>` | `parseContinue` | 末尾锚定为主（起点取末尾闭合标签之前的**最后一个**开标记，标记后只允许空白）；缺省/写错按 parked；与示例指纹同源的简报视为复述 |
 | `<stance verdict="agree\|disagree\|abstain" grounds="…"/>` | `parseStance` | 必须是整条回复最后一行；判定对象见 `STANCE_MEANING` |
 | `<objection ref="…" priority="high">…</objection>` | `parseObjections` | ref 必填；每轮最多 3 条；只认 priority="high" |
 | 纪要 JSON（`ENVELOPE_SCHEMA`） | `parseEnvelope` | 整段 / ```json 块 / 首尾花括号三路尝试。**实例必须是空数组骨架**（字段含义另由 `ENVELOPE_FIELDS` 文字说明）：属性位置给非空示例时模型会照抄，示例反对被 `mergeEnvelopeObjections` 登记成真反对、示例行动项被强制综合分支直接采用 |
@@ -89,7 +89,7 @@ AgentDeck 的提示词不只是文案：它们是运行时解析器（`<delegate
 **示例标记的红线**：提示词里写出的完整标记，agent 复述时就可能被解析。规则：
 
 - 派发协议全文只有语法行一张完整 `<delegate>`（to="队员名" 不在任何名单里，复述只会得到具名拒单）；summary 属性用文字教，不给第二个标记字样。
-- `CONTINUE_BLOCK` 全块只有带指纹的示例一处 `<continue` 开标记；`HANDOFF_CUE`、`GOAL_BLOCK` 不写标记字样。原因：`parseContinue` 的末尾锚定从**第一个**开标记起算，块里若另有开标记，整块复述会越过示例拼出真实接力。
+- `CONTINUE_BLOCK` 全块只有带指纹的示例一处 `<continue` 开标记；`HANDOFF_CUE`、`GOAL_BLOCK` 不写标记字样。原因：主通道取**最后一个**开标记、兜底通道取最后一个完整闭合标记，正文里的开标记字样都会参与锚定起点的选取——提示词侧少给一个开标记字样，解析器侧就少一类「示例被当成起点」的边界；示例简报的指纹拦截是第二层防线，不是替代。
 - 审核示例的 `verdict="pass|fail"` 是占位，解析器不认。
 
 ## 4. 术语表
@@ -139,7 +139,5 @@ v3→v4 曾漏第 2 步，未编辑的 v3 副本被误判为用户编辑过、�
 
 ## 8. 已知遗留（不在本次范围）
 
-- `parseContinue` 的末尾锚定从**第一个** `<continue` 开标记起算：agent 自己的正文里若先出现一个开标记（如「我会输出 `<continue start="auto">` 标记」）再在末尾写真实标记，简报会被拼进前文。提示词侧已不再提供这种开标记；解析器侧改为「取末尾闭合标签之前的最后一个开标记」待另行修复。
-- `store.ts` 的一次性迁移只凭「键形 + `·办公室` 结尾标题 + `suppressIssue`」三重条件补写 `officeAgentId`，三项都是建单侧可构造的（sidecar 的 `suppressIssue` 不受白名单约束）。`officeAgentId` 字段本身已被外部入口拒绝，所以仍走得通的只剩「冒充**旧键形**的历史单被 `legacyLookup` 收养」这一类；要彻底关掉需给迁移加可信来源判定（例如只认注册表写过的键位），本轮未做。
 - 咨询意见与调查报告回灌前没有走 `escapeProtocolLiterals`（委派报告走了）：对方文本里的协议字面量仍是活的。
 - 桌宠的人设与生图提示词（`src/main/pet/`）不在本目录，也不在本次重做范围。
