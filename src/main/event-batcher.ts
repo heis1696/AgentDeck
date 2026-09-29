@@ -47,11 +47,11 @@ export class BoundedEventBatcher<T> {
     const previousBytes = this.pendingBytes
 
     const last = this.pending.at(-1)
-    if (last && this.options.canMerge?.(last, event) && this.options.merge) {
-      this.pending[this.pending.length - 1] = this.options.merge(last, event)
-    } else {
-      this.pending.push(event)
-    }
+    // 合并进的片段不新增待保护集合（内容长在队尾元素上，其权威文本由不可合并的
+    // 终态事件重新陈述），是否增长决定正常路径要不要补一道恢复边界。
+    const grewPending = !(last && this.options.canMerge?.(last, event) && this.options.merge)
+    if (grewPending) this.pending.push(event)
+    else this.pending[this.pending.length - 1] = this.options.merge!(last!, event)
     // Thresholds count provider inputs, not the number left after coalescing.
     this.pendingItems += 1
     this.pendingBytes += eventBytes
@@ -70,6 +70,16 @@ export class BoundedEventBatcher<T> {
     } else if (this.pendingItems >= this.options.maxItems || this.pendingBytes >= this.options.maxBytes) {
       this.flush()
     } else {
+      // 接受即恢复边界（正常路径）：凡让批次集合增长的接受同步过一次 onPending，
+      // 批次定时器到期前的硬崩溃不再丢失已接受事件——原先这道保护只在 flush 失败
+      // 后（retryAttempt > 0）生效，接受与首次落盘之间存在最长 maxDelayMs 的纯内存
+      // 崩溃窗。合并进的流式片段不逐条落盘（见 grewPending），其暴露窗仍由批次周期
+      // 与 flush 前的 stagePending 兜住；这保住了「同步持久化不进每 token 热路径」的
+      // 既有设计。保护写入失败按 best-effort 处理不拒收：硬失败语义归 flush 路径
+      // （双写失败的具名终态文案契约在 onFlush 里，此处拒收会改写验收固化的行为）。
+      if (grewPending) {
+        try { this.options.onPending?.(this.pending) } catch { /* flush 路径统一报 */ }
+      }
       this.schedule(this.options.maxDelayMs)
     }
     return true

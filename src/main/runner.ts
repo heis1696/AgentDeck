@@ -88,6 +88,15 @@ function hasStableEventIdentity(event: RunnerEvent): boolean {
     || (typeof event.id === 'string' && event.id.length > 0)
 }
 
+/** 接受即恢复边界（onPending 正常路径）给无身份事件暂存的批身份前缀：崩溃重放/
+ * 重试幂等用它当稳定身份，但它不算「提供方身份」——合并判定必须放行，否则每个
+ * delta 在接受时被派 id 后即终结合并链（IPC 每 token 一包）。 */
+const STAGED_BATCH_ID_PREFIX = 'agentdeck:batch:'
+
+function hasStagedBatchIdentity(event: RunnerEvent): boolean {
+  return typeof event.eventId === 'string' && event.eventId.startsWith(STAGED_BATCH_ID_PREFIX)
+}
+
 function streamType(event: RunnerEvent): string {
   return event.type || 'text.delta'
 }
@@ -483,7 +492,7 @@ export class TaskRunner {
     const turnOpenedAt = Date.now()
     const stagePending = (events: readonly RunnerEvent[]) => {
       for (const event of events) {
-        if (!hasStableEventIdentity(event)) event.eventId = `agentdeck:batch:${stamp.id}:${++eventSequence}`
+        if (!hasStableEventIdentity(event)) event.eventId = `${STAGED_BATCH_ID_PREFIX}${stamp.id}:${++eventSequence}`
       }
       try {
         if (this.store.stagePendingEvents(taskId, stamp.id, claim.runId, events, runCondition(claim), turnOpenedAt)) return true
@@ -504,9 +513,12 @@ export class TaskRunner {
       maxPendingBytes: 1024 * 1024,
       onPending: stagePending,
       sizeOf: eventSize,
+      // 接受即恢复边界会给合并组领导暂存批身份（接受时同步写恢复副本需要稳定身份，
+      // 崩溃重放与重试幂等都靠它）——这类暂存身份不算稳定身份：合并链照常延续，
+      // 否则每个 delta 都因领导带 id 被拆成独立事件，IPC/UI 每 token 一包。
       canMerge: (previous, next) => isStreamDeltaEvent(previous)
         && isStreamDeltaEvent(next)
-        && !hasStableEventIdentity(previous)
+        && (!hasStableEventIdentity(previous) || hasStagedBatchIdentity(previous))
         && !hasStableEventIdentity(next)
         && streamType(previous) === streamType(next)
         && streamPersistence(previous) === streamPersistence(next),
