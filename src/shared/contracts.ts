@@ -211,7 +211,9 @@ export interface AgentDeckApi {
     get: (id: string) => Promise<Task | null>
     events: (id: string, afterSeq?: number) => Promise<TaskEvent[]>
     create: (input: TaskCreateInput) => Promise<Task>
-    cancel: (id: string) => Promise<IpcResult>
+    /** 取消任务；reason 契约：undefined = 系统取消不打标，string（含空串）= 用户主动打断
+     *  ——回执文案（「用户打断：<原因>」/「用户打断（未填写原因）」）落任务时间线与 error 字段，随委派报告回灌领队 */
+    cancel: (id: string, reason?: string) => Promise<IpcResult>
     followUp: (id: string, content: string, opts?: { relay?: boolean; collectFinal?: boolean; wait?: boolean }) => Promise<IpcResult>
     delete: (id: string) => Promise<IpcResult>
     retry: (id: string) => Promise<IpcResult>

@@ -43,7 +43,7 @@ preload 以 `contextBridge` 暴露，全部经 `ipcRenderer.invoke/on` 与主进
 | `events` | `(id, afterSeq = 0) => Promise<TaskEvent[]>` | 增量读执行日志（seq > afterSeq，上限 5000 条） |
 | `create` | `(input: TaskCreateInput) => Promise<Task>` | 创建并按 `startNow` 决定是否立即入队。`input: { title, prompt, workdir, backend?, agentId?, handoff?, startNow?, trigger? }`。`agentId` 优先于 `backend`；领队身份由该 agent 的 `subordinates` 决定；`startNow: false` 落为 parked（等 `start` 手动拉起）。相同 `dedupeKey` / `requestId` / `idempotencyKey` 的重放复用原任务，不解除停放；启动已有任务需显式调用 `start` |
 | `start` | `(id) => Promise<IpcResult>` | 启动 queued 任务（含 parked 和排队解卡）；接力任务记录本阶段人工启动确认并传入首回合，不代表工具权限或其他审批已获批准 |
-| `cancel` | `(id) => Promise<IpcResult>` | 取消排队/运行中任务；**级联取消其运行中子任务** |
+| `cancel` | `(id, reason?) => Promise<IpcResult>` | 取消排队/运行中任务；**级联取消其运行中子任务**（级联属系统取消，不打标）。`reason` 回执契约：`undefined` = 系统取消不打标；string（含空串）= 用户主动打断——非空 trim 后 ≤500 字符记「用户打断：\<原因\>」，空记「用户打断（未填写原因）」；文案写入任务 `error` 字段并落时间线 status 事件，cancelled 子单经委派报告正文「状态 cancelled: \<error\>」回灌领队 |
 | `followUp` | `(id, content, opts?: { relay?: boolean }) => Promise<IpcResult>` | 在已完成任务会话上追问（done/failed/cancelled 均可）；无活跃会话走 resume（dsh ACP 无跨进程 resume，重启后追问会新建会话）。`relay: true` 仅由「接力下一阶段」按钮传入；若已有非取消后继则复用，queued 后继按人工确认启动，不重复建单 |
 | `delete` | `(id) => Promise<IpcResult>` | 删除任务及日志（连带子任务），回收名下委派 worktree，并连带清理任务与子单在主仓库根 `.agentdeck-reports/` 的报告副本；运行中拒绝 |
 | `retry` | `(id) => Promise<IpcResult>` | 清空结果/会话/attempt 重置为 queued 重跑 |
