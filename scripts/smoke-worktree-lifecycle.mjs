@@ -371,6 +371,35 @@ try {
   check(sweepPooled.removed.includes('pool_task_a_c1'), 'startup sweep reclaims stale pool entries without a task claim')
   check(!fs.existsSync(reused.path), 'startup pool cleanup removes the stale worktree directory')
 
+  // —— 池损坏条目脱池留痕：代际校验失败不再静默出池 ——
+  // 元数据挂 failed+待人工处置、时间线出口即时通知派单方、目录保留现场（fail-closed），
+  // 重启清扫按处置记录识别；后续派单回落全量 add 不被损坏条目阻塞。
+  {
+    const corrupt = await createWorktree(dir, 'pool_corrupt_a_c1', 'main', 'pool_corrupt_a')
+    check(!!corrupt, 'corrupt fixture: full add builds the tree')
+    const releasedCorrupt = await reclaimWorktree(corrupt.path, { repool: true, expectedOwnerTaskId: corrupt.metadata.ownerTaskId })
+    check(releasedCorrupt.ok && releasedCorrupt.status === 'pooled', 'corrupt fixture: clean completion pools the tree')
+    fs.rmSync(path.join(corrupt.path, '.git')) // 注入损坏：.git 指针缺失 → 代际核验必败（同名删树重建/外部篡改形态）
+    let corruptionNote = null
+    const afterCorruption = await createWorktree(dir, 'pool_corrupt_b_c1', 'main', 'pool_corrupt_b', undefined, {
+      onCleanupResidue: (failure) => { corruptionNote = failure }
+    })
+    check(!!afterCorruption && afterCorruption.pooled !== true, 'corrupt pool entry does not block the dispatch (full add fallback)')
+    check(fs.existsSync(corrupt.path), 'corrupt pool entry directory is preserved (fail-closed, no forced removal)')
+    const corruptMetadata = listWorktreeMetadata(dir).find((item) => item.path === corrupt.path)
+    check(corruptMetadata?.cleanupStatus === 'failed' && (corruptMetadata?.cleanupReason ?? '').includes('待人工处置'),
+      'corrupt pool entry metadata is marked failed with a manual-disposal reason')
+    check(!!corruptionNote && corruptionNote.name === 'pool_corrupt_a_c1' && corruptionNote.reason.includes('待人工处置') && corruptionNote.ownerTaskId === 'pool_corrupt_b',
+      'timeline note fired for the dispatch that hit the corruption')
+    const corruptMetadataFile = path.join(dir, '.agentdeck-worktrees', '.metadata', `${path.basename(corrupt.path)}.json`)
+    const staleCorrupt = JSON.parse(fs.readFileSync(corruptMetadataFile, 'utf8'))
+    fs.writeFileSync(corruptMetadataFile, JSON.stringify({ ...staleCorrupt, poolProcess: { ...staleCorrupt.poolProcess, pid: 2147483647 } }))
+    const corruptSweep = await pruneWorktrees(dir, () => false, { maxAgeMs: 0, claimWorktree: () => undefined })
+    check(corruptSweep.failed.some((item) => item.name === 'pool_corrupt_a_c1' && item.reason.includes('处置记录') && item.reason.includes('待人工处置')),
+      'restart sweep identifies the evicted pool entry via its recorded disposal reason')
+    check(fs.existsSync(corrupt.path), 'restart sweep keeps the unverifiable scene (no forced removal)')
+  }
+
   for (const [name, timedOut] of [['raced_non_timeout_c1', false], ['raced_timeout_c1', true]]) {
     const branch = `agentdeck/${name}`
     const racedPath = path.join(dir, '.agentdeck-worktrees', name)

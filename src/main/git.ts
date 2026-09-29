@@ -1136,17 +1136,39 @@ async function releaseWorktreeToPool(repoDir: string, wtDir: string, branch: str
   })
 }
 
+/** 池损坏条目脱池留痕：代际校验失败（或元数据缺世代）的原目录不再静默出池——
+ *  sidecar 元数据改挂 failed + 待人工处置原因（重启清扫按既有 pooled-owner 流程
+ *  识别，failed 记录随 failed 清单上报并附处置记录），目录与注册一律不动
+ *  （fail-closed 保留现场，绝不代人工强删）；时间线出口即时通知派单方
+ *  （noteOwnerTaskId = 触发复用的请求方任务，损坏发生在它的派单路径上）。 */
+async function retainUnverifiablePoolEntry(
+  root: string,
+  wtPath: string,
+  metadata: WorktreeInfo | null,
+  problem: string,
+  noteOwnerTaskId: string | undefined,
+  notify?: (failure: { name: string; reason: string; ownerTaskId?: string }) => void
+): Promise<void> {
+  const reason = `池条目复用时代际校验失败脱池待人工处置：${problem}；目录与注册保留现场`
+  if (metadata) {
+    try { updateMetadata(metadata, { cleanupStatus: 'failed', cleanupReason: reason }) } catch { /* 标记失败不掩盖主失败，时间线照发 */ }
+  }
+  try { notify?.({ name: path.basename(wtPath), reason: `${reason}（仓库 ${root}）`, ownerTaskId: noteOwnerTaskId }) } catch { /* 出口失败不掩盖主流程 */ }
+}
+
 /** 从池里取一棵复用：clean -ffdx（保留系统目录）→ switch -c <新分支> <基线>（只重写差异文件）
  *  → status 自洽核验（脏则 reset --hard 兜底一次）。任何一步失败都逐出该条目并返回 null，
  *  调用方回落全量 worktree add——池永远是加速捷径而非正确性依赖，复用失败不改变派单语义。
- *  switch/reset 沿用建树的规模自适应超时与进程树击杀通道（病态大差异下同样受控）。 */
+ *  switch/reset 沿用建树的规模自适应超时与进程树击杀通道（病态大差异下同样受控）。
+ *  代际校验失败的条目走 retainUnverifiablePoolEntry 留痕后返回 null，不参与复用。 */
 async function acquirePooledWorktree(
   repoDir: string,
   name: string,
   branch: string,
   baseSha: string,
   ownerTaskId: string,
-  timeoutMs: number
+  timeoutMs: number,
+  notifyUnverifiable?: (failure: { name: string; reason: string; ownerTaskId?: string }) => void
 ): Promise<WorktreeCreateResult | null> {
   const root = path.resolve(repoDir)
   const pool = worktreePoolByRepo.get(worktreePathKey(root))
@@ -1157,7 +1179,15 @@ async function acquirePooledWorktree(
       pool.delete(worktreePathKey(wtPath))
       const poolMetadata = readMetadataFile(metadataFile(root, path.basename(wtPath)))
       const generationId = poolMetadata?.generationId
-      if (!generationId || await verifyWorktreeGeneration(root, wtPath, generationId)) return null
+      if (!generationId) {
+        await retainUnverifiablePoolEntry(root, wtPath, poolMetadata ?? null, '池条目元数据缺世代标记', ownerTaskId, notifyUnverifiable)
+        return null
+      }
+      const generationProblem = await verifyWorktreeGeneration(root, wtPath, generationId)
+      if (generationProblem) {
+        await retainUnverifiablePoolEntry(root, wtPath, poolMetadata ?? null, generationProblem, ownerTaskId, notifyUnverifiable)
+        return null
+      }
       const evict = async (deleteRequestedBranch = false) => {
         await reclaimWorktreeUnlocked(wtPath, { force: true, deleteBranch: true, expectedGenerationId: generationId }).catch(() => {})
         if (deleteRequestedBranch) await deleteBranchWithRetry(root, branch)
@@ -1235,7 +1265,7 @@ async function createWorktreeUnlocked(
     : await planWorktreeAddTimeout(root, repoDir, options.estimateFileCount)
   if (rejectOccupiedTarget(await branchExists(repoDir, branch), pathEntryExists(wtPath))) return null
   // 池化复用先行：同仓池里有空闲 worktree 就换基线复用（只重写差异文件），全量 add 兜底
-  const pooled = await acquirePooledWorktree(root, name, branch, baseSha, ownerTaskId, planned.timeoutMs)
+  const pooled = await acquirePooledWorktree(root, name, branch, baseSha, ownerTaskId, planned.timeoutMs, options.onCleanupResidue)
   if (pooled) return pooled
   if (rejectOccupiedTarget(await branchExists(repoDir, branch), pathEntryExists(wtPath))) return null
   const runAdd = () => runGit(repoDir, ['worktree', 'add', '-b', branch, wtPath, ...(baseBranch ? [baseBranch] : [])], planned.timeoutMs, undefined, true)
@@ -2311,7 +2341,12 @@ export async function pruneWorktrees(
       metadata.cleanupStatus === 'pooled' ? undefined : metadata.branch || undefined
     )
     if (generationMismatch) {
-      const reason = `${generationMismatch}${metadata.branch ? `; branch ${metadata.branch} retained` : ''}`
+      // 池损坏条目的脱池留痕（retainUnverifiablePoolEntry 标记的 failed 记录）随清扫
+      // 上报一并可见：重启清扫可凭处置记录识别「这是复用时代际校验失败脱池的现场」
+      const recordedDisposal = metadata.cleanupStatus === 'failed' && metadata.cleanupReason
+        ? `；处置记录：${metadata.cleanupReason}`
+        : ''
+      const reason = `${generationMismatch}${metadata.branch ? `; branch ${metadata.branch} retained` : ''}${recordedDisposal}`
       result.failed.push({ name, reason, ...(owner && owner !== name ? { ownerTaskId: owner } : {}) })
       continue
     }
