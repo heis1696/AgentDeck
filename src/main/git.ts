@@ -1361,7 +1361,7 @@ async function createWorktreeUnlocked(
     : await planWorktreeAddTimeout(root, repoDir, options.estimateFileCount)
   if (rejectOccupiedTarget(await branchExists(repoDir, branch), pathEntryExists(wtPath))) return null
   // 建树成功的收尾尾段（系统目录排除/代际/元数据/结果装配）：全量 add 与稀疏三步共用同一出口
-  const finalizeCreatedWorktree = async (extra: { sparse?: WorktreeSparseOutcome } = {}): Promise<WorktreeCreateResult | null> => {
+  const finalizeCreatedWorktree = async (extra: { sparse?: WorktreeSparseOutcome; sparseDirs?: string[] } = {}): Promise<WorktreeCreateResult | null> => {
     // 把 worktree 目录从主仓库状态里排除，避免污染主目录的 status
     appendGitExcludes(gitDir, SYSTEM_SIDECAR_DIRS)
     const generationId = writeWorktreeGeneration(wtPath, gitDir)
@@ -1379,7 +1379,9 @@ async function createWorktreeUnlocked(
       branch,
       baseSha,
       createdAt: Date.now(),
-      cleanupStatus: 'active'
+      cleanupStatus: 'active',
+      // 稀疏生效范围落进元数据（回落全量不记）：子单失败回灌的扩圈提示据此发射（§7.2）
+      ...(extra.sparseDirs?.length ? { sparseDirs: extra.sparseDirs } : {})
     }
     try { writeMetadata(metadata) } catch (e) {
       // Do not report a successful isolated worktree whose ownership metadata
@@ -1433,7 +1435,8 @@ async function createWorktreeUnlocked(
       }
       // 回落成功（recovered）时树已物化全量，语义等价全量 add；applied 时 cone 范围生效
       return finalizeCreatedWorktree({
-        sparse: sparseRun.ok ? { status: 'applied', dirs: check.dirs } : { status: 'fallback', reason: sparseRun.reason }
+        sparse: sparseRun.ok ? { status: 'applied', dirs: check.dirs } : { status: 'fallback', reason: sparseRun.reason },
+        ...(sparseRun.ok ? { sparseDirs: check.dirs } : {})
       })
     }
     sparseOutcome = { status: 'fallback', reason: check.reason }
@@ -1757,6 +1760,31 @@ export interface BaselineReplayTestHooks {
   postSoftResetStatusResult?: (result: GitCommandResult) => GitCommandResult
 }
 
+export interface BaselineReplayOptions {
+  /** 子单稀疏检出的生效范围（cone 目录前缀；调用方仅在建树侧 applied 时传入）：
+   *  §6.3 关键点——范围外路径在稀疏树里带 skip-worktree 位，回放增量触达时 cherry-pick
+   *  会留「index 已改、工作树未物化」暗坑；回放前把增量触达目录与范围取并集重设 cone。
+   *  缺省（全量单）不进并集路径，行为零变化。 */
+  sparseDirs?: string[]
+}
+
+/** §6.3 回放并集：增量触达路径里稀疏范围未覆盖的部分，取所在目录（cone 目录前缀）补进
+ *  范围——返回并集后的完整 cone 清单（sparse-checkout set 语义是整体替换，必须传全量）；
+ *  全部已覆盖时返回 undefined（不重设）。覆盖判定：根文件 cone 恒物化；路径在范围目录内、
+ *  或所在目录是某范围目录的祖先（cone 模式把祖先目录的直接文件恒物化）都算已覆盖。 */
+function sparseUnionDirs(changedRelPaths: Iterable<string>, sparseDirs: string[]): string[] | undefined {
+  const additions = new Set<string>()
+  for (const rel of changedRelPaths) {
+    const cut = rel.lastIndexOf('/')
+    if (cut < 0) continue
+    const dir = rel.slice(0, cut)
+    if (sparseDirs.some((d) => dir === d || dir.startsWith(`${d}/`) || d.startsWith(`${dir}/`))) continue
+    additions.add(dir)
+  }
+  if (!additions.size) return undefined
+  return [...new Set([...sparseDirs, ...additions])]
+}
+
 const replayRefused = (reason: string): BaselineReplayResult => ({ status: 'refused', commitSha: '', files: 0, bytes: 0, reason })
 const replaySkipped = (reason: string): BaselineReplayResult => ({ status: 'skipped', commitSha: '', files: 0, bytes: 0, reason })
 
@@ -1829,8 +1857,13 @@ function gitBlobSizes(workdir: string, objectIds: string[], env: NodeJS.ProcessE
  * 目录本就不在增量里；子单需要完整依赖时领队应先提交 lockfile——文档写明的边界）。
  * 未跟踪盘点（ls-files）超时即拒单：大仓盘点限时 15s（含锁退避重试），宁可拒建单
  * 回灌原因让领队改派，也不拿残缺增量当基线静默回放。
+ * 稀疏单（options.sparseDirs，§6.3 关键点）：回放清单与稀疏范围取并集——子树 cone 外
+ * 路径带 skip-worktree 位，cherry-pick 触达时留下「index 已改、工作树未物化」暗坑；
+ * 回放前把增量触达目录补进 cone 再应用，并集重设失败回落全量（加速捷径不是正确性
+ * 依赖），连回落都失败才拒单；回放后再逐路径核验物化，缺一件即拒单回滚，绝不交一棵
+ * 「index 有、文件无」的树给子 agent。
  */
-export async function replayLeaderBaseline(leaderWorkdir: string, childWorkdir: string, childBaseSha: string, testHooks?: BaselineReplayTestHooks): Promise<BaselineReplayResult> {
+export async function replayLeaderBaseline(leaderWorkdir: string, childWorkdir: string, childBaseSha: string, testHooks?: BaselineReplayTestHooks, options?: BaselineReplayOptions): Promise<BaselineReplayResult> {
   if (!leaderWorkdir || !childWorkdir || !childBaseSha) return replayRefused('回放前置缺失：workdir 或子基线为空')
   // 全程禁 opportunistic index 锁：只读盘点在领队侧 index.lock 存在时也照常执行
   const lockEnv: NodeJS.ProcessEnv = { ...repoProbeEnv(), GIT_OPTIONAL_LOCKS: '0' }
@@ -2030,6 +2063,26 @@ export async function replayLeaderBaseline(leaderWorkdir: string, childWorkdir: 
     const replaySha = committed.stdout.trim()
     if (!replaySha) return replayRefused('commit-tree 未产出提交')
 
+    // §6.3 回放并集（稀疏单）：回放前把增量触达目录补进 cone。树已全量（建树侧回落/
+    // 池化全量）时无 skip-worktree 暗坑，不进并集路径；重设失败回落全量（disable 恢复
+    // 全目录物化），连回落都失败才拒单——加速捷径不是正确性依赖。
+    let sparseReplayVerified = false
+    if (options?.sparseDirs?.length) {
+      const sparseProbe = await runGit(childWorkdir, ['config', '--bool', 'core.sparseCheckout'], 15000, lockEnv)
+      if (sparseProbe.ok && sparseProbe.stdout.trim() === 'true') {
+        sparseReplayVerified = true
+        const union = sparseUnionDirs(changedPaths.keys(), options.sparseDirs)
+        if (union) {
+          const set = await runGit(childWorkdir, ['sparse-checkout', 'set', '--cone', '--', ...union], 60000, lockEnv)
+          if (!set.ok) {
+            const disable = await runGit(childWorkdir, ['sparse-checkout', 'disable'], 60000, lockEnv)
+            if (!disable.ok) return replayRefused(`回放前稀疏范围并集重设失败且无法回落全量：${gitError(set)}`)
+            sparseReplayVerified = false
+          }
+        }
+      }
+    }
+
     // 子 worktree 应用：parent==子基线 ⇒ cherry-pick 就是精确增量；--quit 清理 sequencer 残留，
     // reset --soft 把子分支推进到回放提交（index/worktree 已与该树一致，status 归零）。
     // 三步走 runChildApplyGit：撞锁退避重试耗尽时子侧陈锁（mtime>5s）先删再加试一次
@@ -2052,6 +2105,18 @@ export async function replayLeaderBaseline(leaderWorkdir: string, childWorkdir: 
         : `回放后无法核验子 worktree 状态：${gitError(clean)}${lockConflictSuffix(clean)}`
       const rollback = await rollbackChildReplay(childWorkdir, childBaseSha, lockEnv)
       return replayRefused(`${cause}；${rollback.reason}`)
+    }
+    // 稀疏单回放后的物化核验（§6.3 暗坑的最后一道闸）：并集应让每个非删除路径真实落在
+    // 工作树里；git 版本行为差异若仍把路径按 skip-worktree 藏起来，宁可拒单回滚也不交
+    // 「index 有、文件无」的树给子 agent（status 因 skip-worktree 位看不出来，只能逐路径验）
+    if (sparseReplayVerified) {
+      for (const [rel, info] of changedPaths) {
+        if (info.status === 'D') continue
+        if (!pathEntryExists(path.join(childWorkdir, rel))) {
+          const rollback = await rollbackChildReplay(childWorkdir, childBaseSha, lockEnv)
+          return replayRefused(`回放后增量路径未物化（${rel}，稀疏范围并集未生效）；${rollback.reason}`)
+        }
+      }
     }
     // 子 worktree 元数据的 baseSha 同步改写：digest/集成的基线指向回放提交（防双算）
     const resolved = await resolveManagedWorktree(childWorkdir)

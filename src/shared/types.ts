@@ -343,6 +343,10 @@ export interface WorktreeInfo {
   /** 子单基线回放：领队未提交增量以一个提交（baseSha 即该提交）回放进子 worktree，
    *  digest/集成以它为基线——领队改动不算子产出。files 为回放增量文件数。 */
   replay?: { commitSha: string; files: number; at: number }
+  /** 稀疏检出的生效范围（cone 目录前缀，docs/WORKTREE-BIG-REPO-PERF.md §6.2）：仅建树侧
+   *  applied 时记录（回落全量/池化复用的全量树不记）。子单失败回灌据此附「本单稀疏检出
+   *  范围」扩圈提示（§7.2）；全量单无此字段，回灌零变化。 */
+  sparseDirs?: string[]
 }
 
 /** 任务累计用量（finalize 时从 events 聚合） */

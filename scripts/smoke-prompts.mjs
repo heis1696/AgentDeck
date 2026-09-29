@@ -82,6 +82,10 @@ check(block.includes(p.ROUND_MARK) && block.includes(p.ROUND_OUTCOMES), '派发�
 check(block.includes('去重') && block.includes('改写指令'), '派发协议：说明相同派单会被去重、重派必须改写')
 check(!block.includes('不含任何标记'), '派发协议：不再有「最终总结不含任何标记」与 round/review 的冲突说法')
 check(p.buildDelegationBlock({ ...leader, subordinates: [] }, team) === '', '无队员不注入派发协议')
+// 稀疏建树（可选）小节（WORKTREE-BIG-REPO-PERF §7.1）：sparse 属性只文字示范属性名与取值形态，
+// 不给第二个 <delegate 字样、不给带尖括号的完整标签（上方 parseDelegates/split 断言已覆盖该红线）
+check(block.includes('【稀疏建树（可选）】') && block.includes('sparse="目录1/子目录,目录2"'), '派发协议：稀疏建树小节存在（属性文字示范，缺省全量）')
+check(block.indexOf('【稀疏建树（可选）】') > block.indexOf('写派单：') && block.indexOf('【稀疏建树（可选）】') < block.indexOf('何时派单：'), '派发协议：稀疏建树小节位于「写派单」之后、「何时派单」之前')
 
 const shortChild = r(p.buildChildPrompt('改 src/a.ts', '领队任务原文'))
 check(shortChild.includes('【背景') && !shortChild.includes('原文共'), '子任务提示：短原文不带截断标注')
