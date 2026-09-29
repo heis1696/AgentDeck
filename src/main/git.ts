@@ -1193,8 +1193,16 @@ async function acquirePooledWorktree(
         if (deleteRequestedBranch) await deleteBranchWithRetry(root, branch)
       }
       if (!(await isGitRepo(wtPath))) { await evict(); return null }
-      const cleaned = await runGit(wtPath, ['clean', '-ffd', '-x', '--', ...pathspecExcludes()], 60000)
+      // 项5：清理豁免只保托管资产（managedAssetPathspecExcludes）——上一任务的
+      // .agentdeck-reports 内容随 clean -x 离场，不随树泄入新子单
+      const cleaned = await runGit(wtPath, ['clean', '-ffd', '-x', '--', ...managedAssetPathspecExcludes()], 60000)
       if (!cleaned.ok) { await evict(); return null }
+      // 报告目录本身清后重建保约定（目录在、内容空）；清建失败不阻塞复用——报告
+      // 写入侧按需建目录，路径上的旧内容已由 clean 带走
+      try {
+        fs.rmSync(path.join(wtPath, REPORTS_DIR_NAME), { recursive: true, force: true })
+        fs.mkdirSync(path.join(wtPath, REPORTS_DIR_NAME), { recursive: true })
+      } catch { /* 非阻塞：clean 已兜底带走旧内容 */ }
       const switched = await runGit(wtPath, ['switch', '-c', branch, baseSha], timeoutMs, undefined, true)
       if (!switched.ok) { await evict(); return null }
       let settled = await runGit(wtPath, ['status', '--porcelain'], 30000)
@@ -1637,6 +1645,14 @@ function pathspecExcludes(): string[] {
   // glob 形态：直接点名被忽略目录本身会触发 git 的 ignored-paths 报错（exit 1），
   // glob 深度形态不会——与 multica 的 snapshot excludes 同一写法
   return SYSTEM_SIDECAR_DIRS.flatMap((dir) => [`:(exclude,glob)**/${dir}/**`])
+}
+
+/** 池复用清理的 pathspec 豁免只保托管资产（.agentdeck-worktrees 嵌套托管树）——
+ *  报告目录（.agentdeck-reports）不豁免：换基线复用即换任务，上一任务的报告内容
+ *  必须随 clean -x 离场（目录本身由复用路径清后重建保约定），旧任务文件不得泄入
+ *  新子单目录。 */
+function managedAssetPathspecExcludes(): string[] {
+  return SYSTEM_SIDECAR_DIRS.filter((dir) => dir !== REPORTS_DIR_NAME).flatMap((dir) => [`:(exclude,glob)**/${dir}/**`])
 }
 
 function gitBlobSizes(workdir: string, objectIds: string[], env: NodeJS.ProcessEnv): Promise<GitCommandResult> {

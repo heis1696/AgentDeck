@@ -355,7 +355,10 @@ try {
   check(git('-C', reused.path, 'status', '--porcelain') === '', 'reused worktree is clean at the new baseline')
   check(fs.readFileSync(path.join(reused.path, 'feature.txt'), 'utf8').includes('advanced'), 'reused files reflect the advanced baseline')
   check(!fs.existsSync(path.join(reused.path, 'cross-task.ignored')), 'ignored files from the previous task are removed on reuse')
-  check(fs.readFileSync(path.join(reused.path, '.agentdeck-reports', 'retained.txt'), 'utf8').includes('system sidecar'), 'system sidecars survive ignored-file cleanup')
+  // 项5：报告目录不再豁免复用清理——旧任务报告文件不进新子单目录，目录本身保留（空）
+  check(!fs.existsSync(path.join(reused.path, '.agentdeck-reports', 'retained.txt')), 'previous task report files do not leak into the reused tree')
+  const reusedReportsDir = path.join(reused.path, '.agentdeck-reports')
+  check(fs.existsSync(reusedReportsDir) && fs.readdirSync(reusedReportsDir).length === 0, 'report directory itself is preserved empty for the new task')
   check(!await removeWorktree(reused.path, 'pool_task_a'), 'old task cannot delete a pooled tree after reassignment')
   check(fs.existsSync(reused.path) && await branchExists(dir, 'agentdeck/pool_task_b_c1'), 'new owner tree and branch survive stale cleanup')
 
