@@ -71,6 +71,39 @@ export interface DelegateCall {
   /** summary 属性（可选布尔）：领队自评该单回灌需要压缩结论时才加——
    *  结果超回灌界时向子单会话追加一轮总结，用总结（非全文）作回灌体 */
   summary?: boolean
+  /** sparse 属性（可选，原文保真）：子任务 worktree 的稀疏检出目录前缀列表（逗号分隔）。
+   *  缺省 = 全量检出，行为与无此属性时完全一致；值合法性（通配符/空值）由 parseSparseAttr
+   *  统一判定，建树侧据此生效或回落全量（docs/WORKTREE-BIG-REPO-PERF.md §6.1/§7.3） */
+  sparse?: string
+}
+
+/** sparse 属性解析结果（§7.3）：
+ *  - undeclared：缺省 / 空值 / 全空白 → 视为未声明，全量检出，行为与今天完全一致
+ *  - dirs：合法目录前缀列表（已归一为 `/` 分隔、去重保序）
+ *  - invalid：格式非法（含通配符 *?[] 或越界 .. 段）→ 建树侧整单回落全量并注记，绝不拒单 */
+export type SparseParseResult =
+  | { kind: 'undeclared' }
+  | { kind: 'dirs'; dirs: string[] }
+  | { kind: 'invalid'; reason: string }
+
+/** sparse 属性值解析：逗号分隔目录前缀；`/` 与 `\` 分隔符都收、统一归一为 `/`；
+ *  空段（含全空白值）视为未声明；值里出现通配符 `*?[]` 判格式非法（返回 invalid，
+ *  文案供时间线注记）；`..` 段同样按格式非法处理（越界目录在 cone 模式无意义）。
+ *  分段归一剥空段/`.` 段/首部 `/`（绝对路径按仓库相对收）与尾 `/` 后去重保序；
+ *  归一后为空（如 `sparse="."`，语义即全量）= 未声明。 */
+export function parseSparseAttr(value: string | undefined): SparseParseResult {
+  if (value === undefined) return { kind: 'undeclared' }
+  if (!value.trim()) return { kind: 'undeclared' }
+  if (/[*?[\]]/.test(value)) return { kind: 'invalid', reason: `含通配符（${value.trim()}）——稀疏范围只收目录前缀` }
+  const dirs: string[] = []
+  for (const raw of value.split(',')) {
+    const segments = raw.trim().replace(/\\/g, '/').split('/')
+    if (segments.includes('..')) return { kind: 'invalid', reason: `含越界路径段（${raw.trim()}）——稀疏范围必须是仓库内目录前缀` }
+    const dir = segments.filter((segment) => segment && segment !== '.').join('/')
+    if (!dir) continue
+    if (!dirs.includes(dir)) dirs.push(dir)
+  }
+  return dirs.length ? { kind: 'dirs', dirs } : { kind: 'undeclared' }
 }
 
 /** 属性扫描：name 必须是独立属性名（名称边界——data-summary 不撞 summary），
@@ -128,7 +161,8 @@ function matchDelegates(text: string): DelegateMatch[] {
     const prompt = m[2].trim()
     const to = tagAttr(m[1], 'to')
     const reason = tagAttr(m[1], 'reason')
-    if (prompt && to) entry.call = { to, prompt, ...(reason ? { reason } : {}), ...(summaryAttr(m[1]) ? { summary: true } : {}) }
+    const sparse = tagAttr(m[1], 'sparse')
+    if (prompt && to) entry.call = { to, prompt, ...(reason ? { reason } : {}), ...(summaryAttr(m[1]) ? { summary: true } : {}), ...(sparse !== undefined ? { sparse } : {}) }
     out.push(entry)
   }
   return out

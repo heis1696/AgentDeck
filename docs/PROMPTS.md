@@ -75,7 +75,7 @@ AgentDeck 的提示词不只是文案：它们是运行时解析器（`<delegate
 
 | 标记 | 解析器 | 要点 |
 |---|---|---|
-| `<delegate to="…" reason="…" summary>指令</delegate>` | `parseDelegates` | 开标签必须带 to；正文不跨下一个 `<delegate`（残缺标记具名拒单）；同会话同 to+指令去重——重派必须改写指令 |
+| `<delegate to="…" reason="…" summary sparse="目录1,目录2">指令</delegate>` | `parseDelegates` | 开标签必须带 to；正文不跨下一个 `<delegate`（残缺标记具名拒单）；同会话同 to+指令去重——重派必须改写指令；sparse（可选，缺省=全量）= 子单 worktree 稀疏检出的目录前缀列表：逗号分隔，`/` 与 `\` 都收、归一为 `/`；空值/全空白=未声明；含通配符 `*?[]` 或越界 `..`、或目录在基线中不存在 → 整单回落全量并注记，不拒单 |
 | `<round outcome="action\|no_action\|failed" reason="…"/>` | `parseRoundNotes` | outcome 定义 `ROUND_OUTCOMES`；只留痕、不影响流程 |
 | `<review of="#单号" verdict="pass\|fail" note="…"/>` | `parseReviews` | 单号只在本条汇报内有效；verdict 只认 pass/fail |
 | `<consult to="队长名" …>问题</consult>` | `parseConsults` | 只能咨询队长（非 dsh）；受理名单与 `buildDelegationBlock` 的可咨询名单一致——排除发起人**与其直属队员**（队员顶着队长头衔也只能派活）；办公室会话深度 ≥1 不再转咨询 |
