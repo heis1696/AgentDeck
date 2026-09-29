@@ -852,6 +852,9 @@ html.light .tab.active {
 .worker-overview-row > svg { color: var(--text-faint); }
 .worker-overview-row .worker-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .worker-overview-row .worker-state { max-width: 116px; overflow: hidden; text-overflow: ellipsis; }
+/* 行内打断按钮：行是 div[role=button]，嵌套 button 合法；默认弱化为灰，悬停显危险色 */
+.worker-overview-row .worker-row-stop { display: grid; place-items: center; flex: 0 0 auto; width: 22px; height: 22px; padding: 0; border: 1px solid transparent; border-radius: var(--radius-sm); background: transparent; color: var(--text-faint); font: inherit; cursor: pointer; }
+.worker-overview-row .worker-row-stop:hover { border-color: color-mix(in srgb, var(--err) 60%, transparent); background: color-mix(in srgb, var(--err) 10%, transparent); color: var(--err); }
 .worker-index { flex: 0 0 auto; color: var(--text-faint); font: var(--text-micro) var(--font-mono); }
 .worker-state { flex: 0 0 auto; color: var(--text-dim); white-space: nowrap; }
 .worker-card.status-running .worker-state { color: var(--status-running); }

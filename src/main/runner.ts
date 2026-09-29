@@ -2772,16 +2772,27 @@ export class TaskRunner {
     return runTurn()
   }
 
-  async cancel(taskId: string): Promise<{ ok: boolean; error?: string; warning?: string }> {
+  /** 用户打断回执文案：note 存在 = 用户主动打断（reason 非空带原因，空 = 未填写）；
+   *  undefined = 系统/级联取消，不打标。 */
+  private interruptText(note?: { reason?: string }): string | undefined {
+    if (!note) return undefined
+    const reason = (note.reason ?? '').trim()
+    return reason ? `用户打断：${reason}` : '用户打断（未填写原因）'
+  }
+
+  async cancel(taskId: string, note?: { reason?: string }): Promise<{ ok: boolean; error?: string; warning?: string }> {
     const task = this.store.get(taskId)
     if (!task) return { ok: false, error: '任务不存在' }
+    const interrupt = this.interruptText(note)
     // Cancel the execution this call observed. The condition is captured before
     // any teardown, so a Run that replaced the observed one keeps running.
     const observed: TaskExpectation = { status: task.status, runId: task.runId, executionOwner: task.executionOwner }
-    const cancelObserved = () => this.store.updateIf(taskId, observed, { status: 'cancelled', endedAt: Date.now() })
+    const cancelObserved = () => this.store.updateIf(taskId, observed, { status: 'cancelled', endedAt: Date.now(), ...(interrupt ? { error: interrupt } : {}) })
     const retryPending = this.retryTimers.has(taskId)
     if (task.status === 'failed' && retryPending) {
       if (!cancelObserved()) return { ok: false, error: '任务状态已变化，取消未生效' }
+      // 状态已翻转为 cancelled：事件期望身份必须匹配翻转后的库内状态，写错会静默不落
+      if (interrupt) this.note(taskId, interrupt, { ...observed, status: 'cancelled' })
       this.clearRetry(taskId)
       this.bumpTurnGen(taskId)
       this.claims.delete(taskId)
@@ -2792,6 +2803,7 @@ export class TaskRunner {
     }
     if (task.status === 'queued') {
       if (!cancelObserved()) return { ok: false, error: '任务状态已变化，取消未生效' }
+      if (interrupt) this.note(taskId, interrupt, { ...observed, status: 'cancelled' })
       this.clearRetry(taskId)
       this.bumpTurnGen(taskId)
       this.claims.delete(taskId)
@@ -2810,8 +2822,9 @@ export class TaskRunner {
       const launchHandle = this.launchHandles.get(taskId)
       const claim = this.claims.get(taskId)
       if (!claim || !this.isCurrentRun(claim)) return { ok: false, error: '执行归属不在当前运行器，未取消任务' }
-      const cancelled = this.store.updateIf(taskId, runCondition(claim), { status: 'cancelled', endedAt: Date.now(), ...(persistenceWarning ? { error: persistenceWarning } : {}) })
+      const cancelled = this.store.updateIf(taskId, runCondition(claim), { status: 'cancelled', endedAt: Date.now(), ...(interrupt || persistenceWarning ? { error: [interrupt, persistenceWarning].filter(Boolean).join('；') } : {}) })
       if (!cancelled) return { ok: false, error: '任务状态已变化，取消未生效' }
+      if (interrupt) this.note(taskId, interrupt, runIdentity(claim, { status: 'cancelled' }))
       this.clearRetry(taskId)
       this.claims.delete(taskId)
       // Resolve start/send races immediately. Waiting for the idle timeout would
