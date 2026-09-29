@@ -2058,7 +2058,13 @@ async function reclaimWorktreeUnlocked(
     return { ok: false, status: 'retained', path: wtDir, reason: 'worktree generation metadata changed' }
   }
   const expectedGenerationId = options.expectedGenerationId ?? metadata?.generationId
-  if (expectedGenerationId) {
+  // 项4：目录已被外力清掉（崩溃竞态/手工删除）时不因代际核验失败跳过分支处理——
+  // 核验盘的是目录内的 .git 指针/admin 标记，目录不在则必败，托管分支会因此永久
+  // 滞留（重派撞 already exists 连环的源头之一）。归属证据已由前置检查把门（元数据
+  // repoDir/path 严格一致 + expectedOwnerTaskId/expectedGenerationId 匹配 + 池活跃
+  // 拒收），盘面代际核验只对「目录还在的树」做；目录不在时走下方受检 prune +
+  // 调用方决策的分支删除（集成/非托管分支照旧不动），不强删、可核验、留审计。
+  if (expectedGenerationId && fs.existsSync(wtDir)) {
     const generationMismatch = await verifyWorktreeGeneration(
       repoDir,
       wtDir,
@@ -2079,20 +2085,22 @@ async function reclaimWorktreeUnlocked(
     try { updateMetadata(metadata, { cleanupStatus: 'retained', cleanupReason: 'manual keep requested' }) } catch {}
     return { ok: false, status: 'retained', path: wtDir, branch, reason: 'manual keep requested' }
   }
-  const cleanliness = await worktreeDirty(wtDir)
-  if (!options.force && !cleanliness.ok) {
-    try { if (metadata) updateMetadata(metadata, { cleanupStatus: 'failed', cleanupReason: 'could not determine worktree status' }) } catch {}
-    return { ok: false, status: 'failed', path: wtDir, branch, reason: 'could not determine worktree status' }
-  }
-  if (!options.force && cleanliness.dirty) {
-    try { if (metadata) updateMetadata(metadata, { cleanupStatus: 'retained', cleanupReason: 'uncommitted changes' }) } catch {}
-    return { ok: false, status: 'retained', path: wtDir, branch, reason: 'uncommitted changes' }
-  }
-  // 归池优先（仅限非 force 且干净的管理分支 worktree）：detach + 删分支 + 挂池标记，
-  // 目录与注册留给下一次派单换基线复用；归还失败回落常规移除路径，回收语义不变
-  if (options.repool && !options.force && cleanliness.ok && !cleanliness.dirty && branch.startsWith(MANAGED_BRANCH_PREFIX)) {
-    if (await releaseWorktreeToPool(repoDir, wtDir, branch, metadata)) {
-      return { ok: true, status: 'pooled', path: wtDir, branch, reason: 'returned to worktree pool for reuse' }
+  if (fs.existsSync(wtDir)) {
+    const cleanliness = await worktreeDirty(wtDir)
+    if (!options.force && !cleanliness.ok) {
+      try { if (metadata) updateMetadata(metadata, { cleanupStatus: 'failed', cleanupReason: 'could not determine worktree status' }) } catch {}
+      return { ok: false, status: 'failed', path: wtDir, branch, reason: 'could not determine worktree status' }
+    }
+    if (!options.force && cleanliness.dirty) {
+      try { if (metadata) updateMetadata(metadata, { cleanupStatus: 'retained', cleanupReason: 'uncommitted changes' }) } catch {}
+      return { ok: false, status: 'retained', path: wtDir, branch, reason: 'uncommitted changes' }
+    }
+    // 归池优先（仅限非 force 且干净的管理分支 worktree）：detach + 删分支 + 挂池标记，
+    // 目录与注册留给下一次派单换基线复用；归还失败回落常规移除路径，回收语义不变
+    if (options.repool && !options.force && cleanliness.ok && !cleanliness.dirty && branch.startsWith(MANAGED_BRANCH_PREFIX)) {
+      if (await releaseWorktreeToPool(repoDir, wtDir, branch, metadata)) {
+        return { ok: true, status: 'pooled', path: wtDir, branch, reason: 'returned to worktree pool for reuse' }
+      }
     }
   }
   if (!fs.existsSync(wtDir)) {
@@ -2340,7 +2348,11 @@ export async function pruneWorktrees(
       metadata.generationId,
       metadata.cleanupStatus === 'pooled' ? undefined : metadata.branch || undefined
     )
-    if (generationMismatch) {
+    // 项4：目录已消失的条目不再被盘面代际核验失败拦在 failed 清单外——核验依赖
+    // 目录内指针/标记，目录不在必败；放行到下游（removed 状态的既有收场流程 /
+    // reclaimWorktreeUnlocked 的受检 prune + 证据核验分支删除）。目录还在的树
+    // 照旧 fail-closed。
+    if (generationMismatch && fs.existsSync(wtPath)) {
       // 池损坏条目的脱池留痕（retainUnverifiablePoolEntry 标记的 failed 记录）随清扫
       // 上报一并可见：重启清扫可凭处置记录识别「这是复用时代际校验失败脱池的现场」
       const recordedDisposal = metadata.cleanupStatus === 'failed' && metadata.cleanupReason

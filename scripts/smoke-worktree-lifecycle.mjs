@@ -400,6 +400,30 @@ try {
     check(fs.existsSync(corrupt.path), 'restart sweep keeps the unverifiable scene (no forced removal)')
   }
 
+  // —— 缺目录分支补清：目录被外力清掉时代际核验必败（指针在目录里），托管分支不因此滞留 ——
+  // 归属证据齐备（可靠元数据 + 世代标记 + 托管分支）时核验补清：prune 注册 + 删托管分支；
+  // 集成分支绝不由清扫带走（只清注册侧），有主树（keepTask/租约/owner 证据）照旧把门。
+  {
+    const vanished = await createWorktree(dir, 'vanished_task_c1', 'main', 'vanished_owner')
+    check(!!vanished, 'vanished fixture: tree built')
+    const vanishedBranch = vanished.metadata.branch
+    fs.rmSync(vanished.path, { recursive: true, force: true })
+    check(!fs.existsSync(vanished.path) && await branchExists(dir, vanishedBranch), 'vanished fixture: directory gone, managed branch retained')
+    const vanishedSweep = await pruneWorktrees(dir, () => false, { maxAgeMs: 0, claimWorktree: testClaim })
+    check(vanishedSweep.removed.includes('vanished_task_c1'), 'missing-dir tree is sweepable via evidence-backed cleanup')
+    check(!await branchExists(dir, vanishedBranch), 'missing-dir managed branch is cleaned up (verified supplementary cleanup)')
+    const vanishedAudit = listWorktreeMetadata(dir).find((item) => item.path === vanished.path)
+    check(vanishedAudit?.cleanupStatus === 'removed', 'missing-dir cleanup leaves a removed audit record')
+    git('branch', 'agentdeck/task-integral')
+    const integral = await createWorktreeAtBranch(dir, 'integral_tree_c1', 'agentdeck/task-integral', 'integral_owner')
+    check(!!integral, 'integration fixture: tree built at existing branch')
+    fs.rmSync(integral.path, { recursive: true, force: true })
+    const integralSweep = await pruneWorktrees(dir, () => false, { maxAgeMs: 0, claimWorktree: testClaim })
+    check(await branchExists(dir, 'agentdeck/task-integral'), 'missing-dir integration branch is never deleted by the sweep')
+    check(integralSweep.removed.includes('integral_tree_c1'), 'missing-dir integration tree side is still reclaimed (registration pruned)')
+    git('branch', '-D', 'agentdeck/task-integral')
+  }
+
   for (const [name, timedOut] of [['raced_non_timeout_c1', false], ['raced_timeout_c1', true]]) {
     const branch = `agentdeck/${name}`
     const racedPath = path.join(dir, '.agentdeck-worktrees', name)
