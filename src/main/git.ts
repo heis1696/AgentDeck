@@ -899,8 +899,17 @@ async function verifyWorktreeGeneration(
   return null
 }
 
-async function registerWorktreeGeneration(repoDir: string, wtPath: string): Promise<string | null> {
+/** Git 注册在案判定（与 verifyWorktreeGeneration 同一折叠查找语义）：缺目录补清的
+ *  证据门槛用——注册已被 prune 移除的旧记录视为不可核验。 */
+async function managedWorktreeRegistrationPresent(repoDir: string, wtDir: string): Promise<boolean> {
   const common = await runGit(repoDir, ['rev-parse', '--git-common-dir'])
+  if (!common.ok || !common.stdout.trim()) return false
+  const commonDir = commonGitDir(repoDir, common.stdout.trim())
+  const registrations = listManagedWorktreeRegistrations(repoDir, commonDir)
+  return !!registeredWorktreeForPath(registrations, path.resolve(wtDir))
+}
+
+async function registerWorktreeGeneration(repoDir: string, wtPath: string): Promise<string | null> {  const common = await runGit(repoDir, ['rev-parse', '--git-common-dir'])
   if (!common.ok || !common.stdout.trim()) return null
   return writeWorktreeGeneration(wtPath, commonGitDir(repoDir, common.stdout.trim()))
 }
@@ -2101,6 +2110,15 @@ async function reclaimWorktreeUnlocked(
     try { updateMetadata(metadata, { cleanupStatus: 'retained', cleanupReason: 'manual keep requested' }) } catch {}
     return { ok: false, status: 'retained', path: wtDir, branch, reason: 'manual keep requested' }
   }
+  // 项4 证据门槛：目录不在时的补清以 Git 注册仍在案为界——sidecar 独证不足（注册
+  // 已被此前 prune 移除的旧记录无法核验树曾在案，同名分支可能是外置资产），保留
+  // 分支并按 failed 持续报告；注册在案（可核验）才走下方受检 prune + 分支补清。
+  if (expectedGenerationId && !fs.existsSync(wtDir)) {
+    const registrationPresent = await managedWorktreeRegistrationPresent(repoDir, wtDir)
+    if (!registrationPresent) {
+      return { ok: false, status: 'failed', path: wtDir, branch, reason: `current Git worktree registration could not be found${branch ? `; branch ${branch} retained` : ''}` }
+    }
+  }
   if (fs.existsSync(wtDir)) {
     const cleanliness = await worktreeDirty(wtDir)
     if (!options.force && !cleanliness.ok) {
@@ -2316,6 +2334,16 @@ export async function pruneWorktrees(
       && sameWorktreePath(metadata.path, wtPath)
       && !!metadata.ownerTaskId.trim()
     if (!metadata || !reliableMetadata) {
+      // 项8：无主空树残骸回收——三方归属证据全空（无 sidecar 元数据、无 Git 注册）
+      // 且目录本身为空：识别为建树中断残骸回收。rmdir 只接受空目录，天然不误删
+      // 有内容的树；有任何证据（注册/分支/元数据错位）的现场仍走下方 failed 清单
+      // 保留（证据清单可见），绝不凭「看起来没主」动有内容的树。
+      const ownerlessEmpty = !metadata && !registration && (() => {
+        try { return fs.existsSync(wtPath) && fs.readdirSync(wtPath).length === 0 } catch { return false }
+      })()
+      if (ownerlessEmpty) {
+        try { fs.rmdirSync(wtPath); result.removed.push(name); continue } catch { /* rmdir 失败（竞态占用等）落回 failed 清单 */ }
+      }
       const registeredBranchExists = registration?.branch ? await branchExists(root, registration.branch) : false
       const evidence = [
         fs.existsSync(wtPath) ? `目录 ${wtPath}` : '',

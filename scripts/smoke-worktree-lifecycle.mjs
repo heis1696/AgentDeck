@@ -427,6 +427,21 @@ try {
     git('branch', '-D', 'agentdeck/task-integral')
   }
 
+  // —— 无主空树残骸回收：三方证据全空 + 目录为空 → rmdir 级安全回收；有内容的无主树照旧 fail-closed ——
+  {
+    const emptyGhost = path.join(dir, '.agentdeck-worktrees', 'ghost_empty_c1')
+    fs.mkdirSync(emptyGhost, { recursive: true })
+    const ghostSweep = await pruneWorktrees(dir, () => false, { maxAgeMs: 0, claimWorktree: testClaim })
+    check(ghostSweep.removed.includes('ghost_empty_c1'), 'ownerless empty directory is recycled as build-interrupt debris')
+    check(!fs.existsSync(emptyGhost), 'ownerless empty directory is gone after sweep')
+    const contentGhost = path.join(dir, '.agentdeck-worktrees', 'ghost_content_c1')
+    fs.mkdirSync(contentGhost, { recursive: true })
+    fs.writeFileSync(path.join(contentGhost, 'someone.txt'), 'not ours\n')
+    const ghostSweep2 = await pruneWorktrees(dir, () => false, { maxAgeMs: 0, claimWorktree: testClaim })
+    check(ghostSweep2.failed.some((item) => item.name === 'ghost_content_c1'), 'ownerless non-empty tree stays fail-closed with evidence')
+    check(fs.existsSync(contentGhost), 'ownerless non-empty tree is preserved')
+  }
+
   for (const [name, timedOut] of [['raced_non_timeout_c1', false], ['raced_timeout_c1', true]]) {
     const branch = `agentdeck/${name}`
     const racedPath = path.join(dir, '.agentdeck-worktrees', name)
