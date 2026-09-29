@@ -6,7 +6,7 @@ import path from 'node:path'
 import { sameExecutionOwner, type TaskExpectation, type TaskStore } from './store'
 import { createExecutionOwner } from './persistence'
 import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnStamp, PermissionRequest, BackendTurnResult } from './backends/types'
-import { runDelegationLoop, parseContinueMerged, stripContinue, parseDelegates, parseConsultsMerged, stripConsults, parseInvestigatesMerged, stripInvestigates, ancestorBudget, sanitizeChildPrompt, escapeProtocolLiterals, MAX_DEPTH, MAX_TOTAL_ROUNDS, DELEGATE_REJECT_EXCERPT_MARK, type AgentLike, type DelegateCall, type ConsultCall, type InvestigateCall, type IssueCommentLike } from './delegate'
+import { runDelegationLoop, parseContinueMerged, stripContinue, parseDelegates, parseConsultsMerged, stripConsults, parseInvestigatesMerged, stripInvestigates, ancestorBudget, sanitizeChildPrompt, escapeProtocolLiterals, MAX_DEPTH, MAX_TOTAL_ROUNDS, DELEGATE_REJECT_EXCERPT_MARK, findUnmatchedConsultOpens, findUnmatchedInvestigateOpens, unmatchedConsultOpenReason, unmatchedInvestigateOpenReason, type AgentLike, type DelegateCall, type ConsultCall, type InvestigateCall, type IssueCommentLike } from './delegate'
 import { buildAgentPrompt, buildDelegationBlock, buildChildPrompt, CONTINUE_BLOCK, HANDOFF_CUE, HANDOFF_RECEIVE_CUE, HANDOFF_START_CONFIRMED_CUE, RETITLE_PROMPT } from './prompts'
 import { findHandoffSuccessor, prepareManualTaskStart, repeatsHandoffPhase } from './handoff'
 import { probeGitRepository, probeCurrentBranch, createWorktree, setWorktreeOwner, reclaimWorktree, replayLeaderBaseline, sameWorktreePath, worktreePathKey, type GitRepositoryProbeResult } from './git'
@@ -1820,6 +1820,19 @@ export class TaskRunner {
   ): Promise<{ finalText: string; scanTexts: string[] }> {
     let finalText = initialText
     let scanTexts = initialScanTexts
+    const expected = runCondition(claim)
+    // 残缺 investigate 开标记具名回执（与 delegate 同构）：解析不出调查≠可以无痕，
+    // 多源去重后逐条留痕（本单未应答 + 其后完整标记按字面独立受理，不断言内嵌已应答）
+    const notedBrokenInvestigates = new Set<string>()
+    const drainBrokenInvestigates = () => {
+      for (const broken of scanTexts.flatMap((text) => findUnmatchedInvestigateOpens(text))) {
+        const key = `${broken.to}\n${broken.excerpt}`
+        if (notedBrokenInvestigates.has(key)) continue
+        notedBrokenInvestigates.add(key)
+        this.note(taskId, `⚠ ${unmatchedInvestigateOpenReason(broken)}`, expected)
+      }
+    }
+    drainBrokenInvestigates()
     const seen = new Set<string>()
     const calls = parseInvestigatesMerged(...scanTexts).filter((call) => {
       const key = `${call.to}\n${call.prompt}`
@@ -1841,6 +1854,7 @@ export class TaskRunner {
     if (!turn.ok) throw new Error(turn.error || '调查结果回灌回合失败')
     finalText = turn.response
     scanTexts = [turn.delegationText ?? '', turn.response]
+    drainBrokenInvestigates()
     return { finalText: stripInvestigates(finalText), scanTexts }
   }
 
@@ -1860,6 +1874,19 @@ export class TaskRunner {
   ): Promise<{ finalText: string; scanTexts: string[] }> {
     let finalText = initialText
     let scanTexts = initialScanTexts
+    const expected = runCondition(claim)
+    // 残缺 consult 开标记具名回执（与 delegate 同构）：本单未应答也要具名留痕，
+    // 绝不允许领队按「已应答」契约等到永远；多源去重，回灌回合新见的一并补痕
+    const notedBrokenConsults = new Set<string>()
+    const drainBrokenConsults = () => {
+      for (const broken of scanTexts.flatMap((text) => findUnmatchedConsultOpens(text))) {
+        const key = `${broken.to}\n${broken.excerpt}`
+        if (notedBrokenConsults.has(key)) continue
+        notedBrokenConsults.add(key)
+        this.note(taskId, `⚠ ${unmatchedConsultOpenReason(broken)}`, expected)
+      }
+    }
+    drainBrokenConsults()
     const seen = new Set<string>()
     let rounds = 0
     for (;;) {
@@ -1885,6 +1912,7 @@ export class TaskRunner {
       if (!turn.ok) throw new Error(turn.error || '咨询回灌回合失败')
       finalText = turn.response
       scanTexts = [turn.delegationText ?? '', turn.response]
+      drainBrokenConsults()
     }
   }
 
