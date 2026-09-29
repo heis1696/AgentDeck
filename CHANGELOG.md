@@ -12,11 +12,16 @@
 
 ### 变更
 
+- **协作提示词去歧义重做（`src/main/prompts/` 全域 + 散落调用点归位）**：派发协议按「写派单 / 何时派单 / 派单之后 / 回复回灌消息」重排，写明背景只附前 2000 字、相同派单会被去重（重派必须改写）、`<round>` 三值定义（action/no_action/failed，与目标续轮同源）；回灌尾部统一为【下一步】（评估 → 审核 → 继续/收尾），预算收尾轮不再说「下一轮改派」；拒单按拒因给指引（预算/层级、防环、非队员、标记残缺、环境性失败各给对应做法，只列本批涉及的分类），修掉「被拒的目标不要再派发」与「请稍后重派」的冲突；全文入口逐条写明领队能否读到；长结果未走总结轮时正文注明原文为何不在。目标模式首次与兜底新会话同一构造器（兜底新会话此前丢协议块与完成/停止条件），续轮统一中文、每次推进都交 checkpoint、停止条件须照抄原文进 blockers。会议优先规则逐一点名禁用的日常标记，只对名下有队员的发言人教 `<investigate>` 并列出可调查的人，质疑轮允许零反对、priority 规则写全，答辩/综合/强制综合共用纪要 schema 并给出 owner 候选；强制综合补上会议优先（此前可能在收束回合真的派单）。阶段接力协议按「何时用 / 怎么写」重排。咨询请求不再误标「会议数据」。OpenCode 默认人设不再要求执行中追问。锻造师技能升到 v5（评测契约去掉 passRate、中英文计量口径分列）。9 处散落在 runner/delegate/index/agent-sessions 的提示词收进 `prompts/`；新增 `docs/PROMPTS.md`（注入地图、解析器契约、术语表、措辞约定、smoke 固化原文）与 `npm run smoke:prompts`（并入 stage6 与 all）
+- **办公室会话不再注入派发与接力协议**：会议发言/咨询应答的长期会话只带人设与会话引导（人设此前被注入两遍），runner 对办公室会话不武装派单嗅探、不跑委派循环，越界输出的派单标记只剥离并留痕
 - **建树超时档位校准 + 检出并行化（大仓建树提速）**：worker 建树档位从「每 1 万文件 +60s、封顶 15 分钟」校准为「+90s、封顶 30 分钟」——8.2 万文件 Unity 仓磁盘争用（并行建树/Unity 编辑器同跑）下 9 分钟档位仍会被击穿，git 被树杀成 `locked=initializing` + `index.lock` 残尸；建树与池化换基线的检出命令（worktree add / switch -c / reset --hard）统一注入 `git -c checkout.workers=<n>` 并行检出（海量小文件仓收益最明显），默认按 CPU 保守档（8 核→2、16 核→4 封顶，`AGENTDECK_CHECKOUT_WORKERS` 显式覆盖，≤1/非法值 = 关闭回退顺序检出）；checkout--worker 是 git 子进程，超时 taskkill /T 树杀照常可达，smoke 补 ①c 注入与开关断言。
 - **API 预设去平台绑定（全局连接档案）**：`ApiPreset` 删除 `backend` 字段——预设只存连接（baseURL/apiKey/协议），不再锁定所属平台，任何 agent 按平台能力引用（同一中转站可同时服务 zcode 与 claude，不必建两份）。IPC 校验、normalize 同步收窄；旧 presets.json 兼容（`backend` 字段加载即忽略、下次保存自然消失）；AgentsView 预设表单与引用芯片简化（-55 行）。
 
 ### 修复
 
+- **目标模式 checkpoint 解析取错代码块**：`parseCheckpoint` 此前只取回复里第一个代码块，最终回复先出现命令/diff 等代码块时 checkpoint 解析失败、退化成原文子串匹配；改为从后往前逐个尝试（协议要求 checkpoint 放在所有代码块之后）
+- **锻造师 v3 技能永不升级**：v3→v4 只升了版本号、没把 v3 正文加进历代比对表，用户机器上未编辑的 v3 副本被误判为「用户编辑过」；v5 一并补回 V3/V4，smoke 逐代验证升级链
+- **接力协议整块复述会触发真实接力**：`CONTINUE_BLOCK` 此前除示例外还有语法行与裸标记字样，agent 在回复末尾复述整块时末尾锚定从第一个开标记起算、越过带指纹的示例拼出一张 `start="auto"` 接力；现全块只保留带指纹的示例一处开标记，接力按钮指令与目标协议块不再写标记字样
 - **集成/合并链路建树超时自适应**：`createWorktreeAtBranch`/`mergeBranchInto`/`mergeIntoManagedWorktreeDetached` 的 worktree add 此前硬编码 60s——8 万文件级仓库完整检出至少 4-6 分钟，必被超时树杀成 initializing 残尸（集成/二次集成在大仓上从不可用，实测 `.agentdeck-merge-*` 残留现场）。现在与 worker 建树共用规模档位（60s 基线 + 每 1 万文件 +90s、封顶 30 分钟），小仓维持 60s 行为不变。
 - **建树失败清理按归属回收（e3ea8bf 回归修复）**：非超时 "already exists" 秒败路径此前无条件删同名分支/目录——外部预置/残留资产被误清后，内置重试反而"意外建树成功"、子任务被建出、领队卡 running 不落终态（smoke:delegate 锁专项③拦截）。现在建树前盘点分支/目录归属：秒败只清本次尝试自建的资产（既存分支原样存活），超时路径维持 hot.7 全清契约（托管命名空间残肢全清，重派不撞 already exists）；smoke-worktree-lifecycle 固化"既存分支秒败后原样存活"守卫，验证门补 smoke:delegate 全量。
 - **worktree add 非超时失败同样清残肢**：add 中途真实报错（长路径/磁盘/文件占用）此前不清残肢即返回，内置重试紧跟着撞 `branch already exists` 且拒单文案只见余波——现在与超时路径同一清理通道（`cleanupWorktreeAddResidue`），部分失败经 `onCleanupResidue` 记 owner 时间线，重派拿到干净现场。

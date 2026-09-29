@@ -6,8 +6,9 @@ import path from 'node:path'
 import { sameExecutionOwner, type TaskExpectation, type TaskStore } from './store'
 import { createExecutionOwner } from './persistence'
 import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnStamp, PermissionRequest, BackendTurnResult } from './backends/types'
-import { runDelegationLoop, parseContinueMerged, stripContinue, parseDelegates, parseConsultsMerged, stripConsults, parseInvestigatesMerged, stripInvestigates, ancestorBudget, sanitizeChildPrompt, escapeProtocolLiterals, MAX_DEPTH, MAX_TOTAL_ROUNDS, DELEGATE_REJECT_EXCERPT_MARK, findUnmatchedConsultOpens, findUnmatchedInvestigateOpens, unmatchedConsultOpenReason, unmatchedInvestigateOpenReason, type AgentLike, type DelegateCall, type ConsultCall, type InvestigateCall, type IssueCommentLike } from './delegate'
-import { buildAgentPrompt, buildDelegationBlock, buildChildPrompt, CONTINUE_BLOCK, HANDOFF_CUE, HANDOFF_RECEIVE_CUE, HANDOFF_START_CONFIRMED_CUE, RETITLE_PROMPT } from './prompts'
+import { runDelegationLoop, parseContinueMerged, stripContinue, parseDelegates, stripDelegates, stripRoundNotes, stripReviews, parseConsultsMerged, stripConsults, parseInvestigatesMerged, stripInvestigates, ancestorBudget, sanitizeChildPrompt, escapeProtocolLiterals, MAX_DEPTH, MAX_TOTAL_ROUNDS, DELEGATE_REJECT_EXCERPT_MARK, findUnmatchedConsultOpens, findUnmatchedInvestigateOpens, unmatchedConsultOpenReason, unmatchedInvestigateOpenReason, type AgentLike, type DelegateCall, type ConsultCall, type InvestigateCall, type IssueCommentLike } from './delegate'
+import { buildAgentPrompt, buildDelegationBlock, buildChildPrompt, sharedWorkspaceInstruction, handoffNoteBlock, delegateRecoveryNotice, consultReplyFeedback, investigationTaskPrompt, investigationFeedback, CONTINUE_BLOCK, HANDOFF_CUE, HANDOFF_RECEIVE_CUE, HANDOFF_START_CONFIRMED_CUE, RETITLE_PROMPT } from './prompts'
+import { isOfficeTask } from './agent-sessions'
 import { findHandoffSuccessor, prepareManualTaskStart, repeatsHandoffPhase } from './handoff'
 import { probeGitRepository, probeCurrentBranch, createWorktree, setWorktreeOwner, reclaimWorktree, replayLeaderBaseline, sameWorktreePath, worktreePathKey, type GitRepositoryProbeResult } from './git'
 
@@ -1543,9 +1544,7 @@ export class TaskRunner {
     }
     if (!active()) return null
     const childInstruction = sanitizeChildPrompt(call.prompt, task.workdir ?? '')
-    const scopedInstruction = target.sharedWorkspace
-      ? `【只读协作约定】此任务运行在领队共享工作区中。只检查并返回发现，不要修改、创建或删除文件，也不要执行会改变工作区或 Git 状态的操作。\n\n${childInstruction}`
-      : childInstruction
+    const scopedInstruction = target.sharedWorkspace ? sharedWorkspaceInstruction(childInstruction) : childInstruction
     const childPrompt = buildChildPrompt(scopedInstruction, task.prompt)
     // 标题取 prompt 前 40 字——多个派单共享同一开场白时（如"每人审查两份报告"）标题会一模一样，
     // 看板上无法区分；与兄弟任务撞标题时追加序号
@@ -1696,7 +1695,8 @@ export class TaskRunner {
     this.store.updateIf(taskId, expected, { roundsUsed: (task.roundsUsed ?? 0) + 1 })
     const childInput = {
       title: `${target.name}: 调查 ${call.prompt.slice(0, 40).replace(/\n/g, ' ')}`,
-      prompt: buildChildPrompt(`只读调查：${call.prompt}\n不要修改代码、不要创建提交，只返回可核验事实与引用。`, task.prompt),
+      // 背景块：办公室会话的 task.prompt 只是会话引导（不是任务原文），附给调查员只是噪音
+      prompt: buildChildPrompt(investigationTaskPrompt(call.prompt), isOfficeTask(task) ? '' : task.prompt),
       workdir: task.workdir,
       backend: target.backend,
       ...(target.id ? { agentId: target.id } : {}),
@@ -1765,7 +1765,13 @@ export class TaskRunner {
       let finalText = r.response
       /** <continue> 与 delegate 同源解析：领队用委派循环的全部回合文本，普通任务用首回合两源 */
       let scanTexts: string[] = [r.delegationText ?? '', r.response]
-      if ((me?.subordinates?.length || this.earlySpawns.get(taskId)?.seenKeys.size || (task.agentId && (!me || (me.role && /队长|领队|captain|leader/i.test(me.role)))
+      if (isOfficeTask(task)) {
+        // 办公室会话不受理派单（会议优先规则已禁用日常协议标记，首条消息也不注入派发协议）：
+        // 越界输出的派单/评估/审核标记只剥离展示并留痕，绝不建单
+        const ignored = [r.delegationText ?? '', r.response].reduce((max, text) => Math.max(max, parseDelegates(text).length), 0)
+        if (ignored) this.note(taskId, `⚠ 办公室会话不受理派单，已忽略 ${ignored} 个派单标记`, runCondition(claim))
+        finalText = stripReviews(stripRoundNotes(stripDelegates(finalText)))
+      } else if ((me?.subordinates?.length || this.earlySpawns.get(taskId)?.seenKeys.size || (task.agentId && (!me || (me.role && /队长|领队|captain|leader/i.test(me.role)))
         && [r.delegationText, r.response].some((text) => text && parseDelegates(text).length)))
         && task.backend !== 'dsh' && !isInvestigation) {
         // The loop receives this Run's full execution expectation explicitly:
@@ -1841,15 +1847,15 @@ export class TaskRunner {
       return true
     })
     if (!calls.length) return { finalText: stripInvestigates(finalText), scanTexts }
-    const reports: string[] = []
+    const reports: Array<{ to: string; text: string }> = []
     for (const call of calls) {
       if (!this.isCurrentRun(claim)) return { finalText, scanTexts }
       const report = await this.onInvestigate?.({ sourceTaskId: taskId, call, depth })
       if (!this.isCurrentRun(claim)) return { finalText, scanTexts }
-      if (report?.trim()) reports.push(`### 调查 ${call.to} 的结果\n${report.trim()}`)
+      if (report?.trim()) reports.push({ to: call.to, text: report.trim() })
     }
     if (!reports.length) return { finalText: stripInvestigates(finalText), scanTexts }
-    const turn = await this.sendTurn(taskId, session, `【系统·调查结果】\n${reports.join('\n\n')}\n\n请基于以上只读调查继续处理原任务。`, claim)
+    const turn = await this.sendTurn(taskId, session, investigationFeedback(reports), claim)
     if (!this.isCurrentRun(claim)) return { finalText, scanTexts }
     if (!turn.ok) throw new Error(turn.error || '调查结果回灌回合失败')
     finalText = turn.response
@@ -1899,15 +1905,15 @@ export class TaskRunner {
       if (!calls.length) return { finalText: stripConsults(finalText), scanTexts }
       if (rounds >= MAX_CONSULT_ROUNDS) return { finalText: stripConsults(finalText), scanTexts }
       rounds++
-      const answers: string[] = []
+      const answers: Array<{ from: string; text: string }> = []
       for (const call of calls) {
         if (!this.isCurrentRun(claim)) return { finalText, scanTexts }
         const answer = await this.onConsult?.({ sourceTaskId: taskId, call, depth: consultDepth })
         if (!this.isCurrentRun(claim)) return { finalText, scanTexts }
-        if (answer?.trim()) answers.push(`### 队长 ${call.to} 的意见\n${answer.trim()}`)
+        if (answer?.trim()) answers.push({ from: call.to, text: answer.trim() })
       }
       if (!answers.length) return { finalText: stripConsults(finalText), scanTexts }
-      const turn = await this.sendTurn(taskId, session, `【系统·咨询回复】\n${answers.join('\n\n')}\n\n请基于以上咨询继续处理原任务。`, claim)
+      const turn = await this.sendTurn(taskId, session, consultReplyFeedback(answers), claim)
       if (!this.isCurrentRun(claim)) return { finalText, scanTexts }
       if (!turn.ok) throw new Error(turn.error || '咨询回灌回合失败')
       finalText = turn.response
@@ -2284,28 +2290,25 @@ export class TaskRunner {
     })
     const firstTurn = this.openTurn(taskId, router, claim, runGen, undefined, (r) => firstTurnDone?.(r))
 
-    // agent 身份注入：人设 + （领队时）委派协议
+    // agent 身份注入：人设 + （领队时）委派协议。办公室会话（会议发言/咨询应答）只带人设与会话引导：
+    // 不注入派发协议与阶段接力——会议优先规则禁用这些标记，注入了只会在两套协议之间制造冲突
     const team = this.getTeam?.() ?? []
     const me = team.find((a) => a.id === task.agentId)
+    const office = isOfficeTask(task)
     let prompt = buildAgentPrompt(me, task.prompt, team)
-    if (task.handoff) {
-      prompt = `${prompt}
-
-【交接备注（指派者为本次执行划定的范围指令：优先按它收窄工作，但不要把它当作需要回复的评论）】
-> ${task.handoff}`
-    }
-    if (me?.subordinates?.length && task.backend !== 'dsh' && !(task.suppressIssue && task.parentTaskId)) {
+    if (task.handoff) prompt = `${prompt}\n\n${handoffNoteBlock(task.handoff)}`
+    if (!office && me?.subordinates?.length && task.backend !== 'dsh' && !(task.suppressIssue && task.parentTaskId)) {
       const block = buildDelegationBlock(me, team)
       if (block) prompt = `${prompt}\n\n${block}`
     }
     // 阶段接力协议（非委派子任务：worker 的生命周期归委派循环管）
-    if (!isWorker) prompt = `${prompt}\n\n${CONTINUE_BLOCK}`
+    if (!isWorker && !office) prompt = `${prompt}\n\n${CONTINUE_BLOCK}`
     if (!isWorker && task.continuesFrom) {
       prompt = `${prompt}\n\n${HANDOFF_RECEIVE_CUE}`
       if (task.manualStartConfirmedAt && Number.isFinite(task.manualStartConfirmedAt)) prompt = `${prompt}\n\n${HANDOFF_START_CONFIRMED_CUE}`
     }
     // 领队会话武装流式派单嗅探：闭合一个 <delegate> 即提前建单（回灌仍只在回合末）
-    const isLeader = (!!me?.subordinates?.length || (!!task.agentId && (!me || !!me.role && /队长|领队|captain|leader/i.test(me.role))))
+    const isLeader = !office && (!!me?.subordinates?.length || (!!task.agentId && (!me || !!me.role && /队长|领队|captain|leader/i.test(me.role))))
       && task.backend !== 'dsh' && !(task.suppressIssue && task.parentTaskId)
     if (isLeader) this.armDelegateSniffer(taskId)
 
@@ -2522,11 +2525,11 @@ export class TaskRunner {
       ...pendingChildren.map((child) => `- 已接单 ${child.id}（${child.status}）：${safeReceipt(child.title, 100)}${child.result ? `；结果：${safeReceipt(child.result, 400)}` : ''}`),
       ...pendingRejects.map((entry) => `- 未建单（运行 ${entry.runId}）：${safeReceipt(entry.reason, 600)}`)
     ].slice(0, 30)
-    const recoveryNotice = recoveryLines.length ? `\n\n【系统·历史派单对账】以下是上次未确认送达的派单结果，请先核对，不要将拒单视作在途或重复派已接单的工作：\n${recoveryLines.join('\n')}` : ''
+    const recoveryNotice = recoveryLines.length ? delegateRecoveryNotice(recoveryLines) : ''
     const turnContent = (wantsHandoff ? `${HANDOFF_CUE}\n（用户原话：${message}）` : message) + recoveryNotice
-    // 领队续聊同样武装流式派单嗅探（追问里派发 → 提前建单）
+    // 领队续聊同样武装流式派单嗅探（追问里派发 → 提前建单）；办公室会话不受理派单，不武装
     const me = (this.getTeam?.() ?? []).find((a) => a.id === task.agentId)
-    if ((me?.subordinates?.length || (task.agentId && (!me || !!me.role && /队长|领队|captain|leader/i.test(me.role))))
+    if (!isOfficeTask(task) && (me?.subordinates?.length || (task.agentId && (!me || !!me.role && /队长|领队|captain|leader/i.test(me.role))))
       && task.backend !== 'dsh' && !(task.suppressIssue && task.parentTaskId)) this.armDelegateSniffer(taskId)
 
     const runId = this.newRunId(taskId)

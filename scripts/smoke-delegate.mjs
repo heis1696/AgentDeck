@@ -36,6 +36,12 @@ const sixParsers = [
   ['review', parseReviews],
   ['continue', parseContinue]
 ]
+/** 回灌消息的队员可控段：截到尾部系统指令之前（【下一步】；兼容旧版「请…」起头的指令）。
+ *  找不到边界时整段返回——宁可让黑盒断言报错，也不静默少截一个字符 */
+const workerVisibleSegment = (report) => {
+  const cuts = ['\n\n【下一步】', '\n\n请'].map((mark) => report.indexOf(mark)).filter((at) => at >= 0)
+  return cuts.length ? report.slice(0, Math.min(...cuts)) : report
+}
 
 // 渲染层链路（GitSummary）单独构建：快照状态由渲染层消费
 globalThis.window = { agentdeck: {} }
@@ -1193,9 +1199,9 @@ const report1 = roundReports[0]
 // A1/A3 live：摘要为结构化形态（标题带单号+状态；体带全文入口指引；队员可控段过六解析器零命中）
 assert(report1.includes('— 全文入口 —') && report1.includes(`${REPORTS_DIR_NAME}/`), 'A3：live 摘要尾带报告副本相对路径指引')
 assert(!report1.includes('Issue 评论「队员报告全文'), 'A3：无 Issue 通道（评论未送达）时不虚标评论入口')
-// 六解析器零命中的口径=报告的队员可控段（条目+git 小节+指引）：尾部协议指令模板里的
+// 六解析器零命中的口径=报告的队员可控段（条目+git 小节+指引）：尾部【下一步】指令模板里的
 // <round>/<delegate>/<review> 字样是给领队看的语法示例，本就不该被转义
-const workerVisibleReport = report1.slice(0, report1.indexOf('\n\n请'))
+const workerVisibleReport = workerVisibleSegment(report1)
 for (const [name, parse] of sixParsers) {
   assert(parse(workerVisibleReport).length === 0, `A3 黑盒：live 报告队员可控段（含指引）过 ${name} 解析器零命中`)
 }
@@ -2080,7 +2086,7 @@ assert(execSync(`git show ${ibE}:f2.txt`, { cwd: repo5, encoding: 'utf8' }).incl
   assert(report9.includes('— 全文入口 —') && report9.includes(`${REPORTS_DIR_NAME}/${child9.id}.md`), '场景 H③：全文入口指引仍在')
   assert(report9.includes('【git 改动摘录】'), '场景 H③：git 小节仍在')
   for (const [name, parse] of sixParsers) {
-    assert(parse(report9.slice(0, report9.indexOf('\n\n请'))).length === 0, `场景 H 黑盒：回灌队员可控段过 ${name} 解析器零命中`)
+    assert(parse(workerVisibleSegment(report9)).length === 0, `场景 H 黑盒：回灌队员可控段过 ${name} 解析器零命中`)
   }
   // 独立通路红线：无存活会话的目标返回 null（不抛错、不写任何状态）
   assert(await runner9.sendChildSummaryTurn('no-such-task', 'x') === null, '场景 H：无存活会话 → 通路返回 null（回退由调用方裁决）')

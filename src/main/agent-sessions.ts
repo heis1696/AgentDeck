@@ -2,6 +2,15 @@ import type { RunTrigger, Task } from '../shared/types'
 import type { AgentLike } from './delegate'
 import type { TaskCreateInput, TaskService } from './task-service'
 import type { TaskStore } from './store'
+import { officeSessionPrompt } from './prompts/meeting'
+
+/** 办公室任务的去重键前缀（每位队长一个长期会话） */
+export const OFFICE_TASK_KEY_PREFIX = 'office_'
+
+/** 办公室会话任务（会议发言/咨询应答专用）：runner 据此不注入派发与接力协议、不受理派单 */
+export function isOfficeTask(task: Pick<Task, 'dedupeKey'>): boolean {
+  return !!task.dedupeKey && task.dedupeKey.startsWith(OFFICE_TASK_KEY_PREFIX)
+}
 
 export interface OfficeFollowUpResult {
   ok: boolean
@@ -51,12 +60,8 @@ export class AgentSessionRegistry {
     this.taskService = options.taskService
     this.runner = options.runner
     this.getAgents = options.getAgents
-    this.officePrompt = options.officePrompt ?? ((agent) => [
-      `【办公室会话】这是 ${agent.name} 的长期工作会话。`,
-      agent.role ? `你的定位：${agent.role}` : '',
-      agent.systemPrompt?.trim() ?? '',
-      '后续收到的任务消息请直接处理并给出最终答复。'
-    ].filter(Boolean).join('\n'))
+    // 身份（定位 + 人设）由 runner 的 buildAgentPrompt 统一注入，引导正文只说明会话用途，不重复拼人设
+    this.officePrompt = options.officePrompt ?? ((agent) => officeSessionPrompt(agent.name))
     this.waitPollMs = Math.max(5, options.waitPollMs ?? 100)
     this.waitTimeoutMs = Math.max(this.waitPollMs, options.waitTimeoutMs ?? 10 * 60 * 1000)
   }
@@ -143,7 +148,7 @@ export class AgentSessionRegistry {
   }
 
   private key(agentId: string) {
-    return `office_${agentId}`
+    return `${OFFICE_TASK_KEY_PREFIX}${agentId}`
   }
 
   private resolveAgent(agentId: string): AgentLike {
