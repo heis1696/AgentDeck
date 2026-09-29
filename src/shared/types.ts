@@ -441,6 +441,10 @@ export interface Task {
   parked?: boolean
   /** 委派子单建单门禁：true = 归属绑定+登记核实未完成，调度器不可领取（三步全过翻面后才入队） */
   dispatchHold?: boolean
+  /** 办公室会话标记：只由 AgentSessionRegistry 创建办公室任务时写入（会议发言/咨询应答专用）。
+   *  不能用 dedupeKey 前缀代替判断——公开建单入口的 requestId/idempotencyKey 会变成 dedupeKey，
+   *  用户任务因此可能自称 office_*，被误当办公室会话跳过派发协议、忽略派单 */
+  officeAgentId?: string
   /** Set only by an explicit start action; scoped to this task, not tool permissions. */
   manualStartConfirmedAt?: number
   /** Background work is still running; Goal evaluation must defer. */

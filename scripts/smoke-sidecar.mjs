@@ -174,6 +174,15 @@ const sidecarTask = await manager.rpc('tasks.create', { input: { title: 'sidecar
 if (!sidecarTask || sidecarTask.status !== 'queued') throw new Error('sidecar task creation RPC failed')
 if (!(await manager.rpc('tasks.list')).some((task) => task.id === sidecarTask.id)) throw new Error('sidecar task projection was not authoritative')
 
+// 内部身份字段不接受：外部建单拿到 officeAgentId 就能让普通任务跳过派发/咨询/接力协议
+for (const method of ['tasks.create', 'issues.create']) {
+  let rejected = false
+  try {
+    await manager.rpc(method, { input: { title: 'identity forge', prompt: 'x', workdir: tmp, backend: 'fake', officeAgentId: 'leader' } })
+  } catch { rejected = true }
+  if (!rejected) throw new Error(`${method} accepted the internal officeAgentId field`)
+}
+
 const originalFetch = globalThis.fetch
 let responseLost = false
 let creationKey = ''
