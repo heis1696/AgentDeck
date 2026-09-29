@@ -67,6 +67,13 @@ section('sharedPathKey：路径键规范化')
     ok(sharedPathKey('C:\\a\\x\\..\\b') === sharedPathKey('C:\\a\\b'), '`..` 段消解后同键')
     ok(sharedPathKey('C:\\') === 'c:\\', '盘符根保留分隔符（键恰为 c:\\）')
     ok(sharedPathKey('\\\\server\\share\\ws') === '\\\\server\\share\\ws', 'UNC 路径保留双分隔符前缀')
+    // `..` 弹出有根下界：UNC 的 server/share 两段属于根前缀，越过共享根的 `..` 不得弹出——
+    // 键必须与主进程 resolve 派生键（共享根自带尾分隔符）逐字节一致
+    ok(sharedPathKey('\\\\server\\share\\..') === '\\\\server\\share\\', 'UNC `..` 止步共享根（不弹出 share 段，键带尾分隔符）')
+    ok(sharedPathKey('\\\\server\\share\\..\\..') === '\\\\server\\share\\', 'UNC 连续 `..` 同样止步共享根')
+    ok(sharedPathKey('//server/share/../..') === '\\\\server\\share\\', 'UNC 混合别名形态（正斜杠 + `..`）同键')
+    ok(sharedPathKey('\\\\server\\share\\..\\ws') === '\\\\server\\share\\ws', 'UNC 共享根内的 `..` 消解后正常拼接子段')
+    ok(sharedPathKey('\\\\SERVER\\SHARE\\WS\\..') === '\\\\server\\share\\', 'UNC 大小写别名 + `..` 消解折叠为共享根同一键')
   } else {
     ok(sharedPathKey('/a/b') === '/a/b', 'posix 键保持精确拼写')
     ok(sharedPathKey('/a/x/../b') === '/a/b', '`..` 段消解后同键')
@@ -80,6 +87,9 @@ section('sharedPathKey：路径键规范化')
   const battery = [
     'C:\\a\\b', 'c:/a/b/', 'C:\\a\\x\\..\\b', 'C:\\', 'c:/',
     '\\\\server\\share\\ws', '//server/share/ws',
+    // 越过共享根的 `..` 弹出下界：主进程 resolve 停在 `\\server\share\`，键必须同源
+    '\\\\server\\share', '\\\\server\\share\\', '\\\\server\\share\\..',
+    '\\\\server\\share\\..\\..', '//server/share/../..', '\\\\server\\share\\..\\ws',
     path.join(root, 'src'), path.join(root, 'src') + path.sep, root.toUpperCase()
   ]
   for (const candidate of battery) {

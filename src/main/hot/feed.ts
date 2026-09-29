@@ -65,6 +65,8 @@ export async function fetchManifest(baseUrl: string, channel: string): Promise<F
  *    服务端不支持 Range（200 全量）时自动弃残件从头下（append 全量会拼出必过不了 sha256 的坏包）。
  *  - 停滞 30s 才中止（按块重置）；不设总时长帽——慢链路大包（实测 446MB 壳包 @ ~200KB/s ≈ 37min）
  *    会被 30min 总帽反复腰斩且残件即进度，删了等于每次归零（0.23.0 壳包 19 个半截 .part 的根因）。
+ *  - 单次 read 另有 45s 读守卫兜底（abort 传播失灵时 undici bodyTimeout 默认 300s 才醒来，
+ *    即现场「停滞 5 分钟」的签名），见 READ_STALL_GUARD_MS。
  *  - WriteStream 全程挂 error 监听，finally destroy 并等 close：abort/异常路径句柄若泄漏，
  *    重试的 open/unlink 在 Windows 上 EPERM → 未处理 error 事件以 uncaughtException 冒泡
  *    → 主进程弹 "A JavaScript error occurred"（现场实测弹窗根因，见 .part 残留 + pid 15380）。 */
@@ -94,6 +96,11 @@ export async function downloadArtifact(
 }
 
 const DOWNLOAD_IDLE_TIMEOUT_MS = 30_000
+// 读守卫 = 空闲帽 + 宽限：30s 空闲 abort 先行（正常路径到点即断）；它依赖 undici 把
+// signal 传播进挂起的 read()，传播失灵的极端竞态下 read 会一路挂到 undici 自身
+// bodyTimeout（默认 300s）——现场「场景 A 停滞 5 分钟」的签名。读守卫是第二道保险：
+// 单次 read 超过宽限期仍无解，cancel 流 + 显式拒绝，把 await 的等待上界钉在 ~45s。
+const READ_STALL_GUARD_MS = DOWNLOAD_IDLE_TIMEOUT_MS + 15_000
 
 async function downloadOnce(url: string, tmp: string, onProgress?: (progress: DownloadProgress) => void): Promise<void> {
   const controller = new AbortController()
@@ -126,12 +133,27 @@ async function downloadOnce(url: string, tmp: string, onProgress?: (progress: Do
     // 不挂 error 监听 = 写盘失败以 uncaughtException 冒泡（主进程弹窗），必须接管
     let streamError: Error | null = null
     file.on('error', (error) => { streamError = error })
+    const reader = response.body.getReader()
+    // 带读守卫的单次 read：race 输给守卫时 cancel 响应流并显式拒绝（race 对落选分支
+    // 的迟到 rejection 自带消化，不会冒成 unhandledRejection）
+    const readChunk = () => {
+      let guard: NodeJS.Timeout | undefined
+      return Promise.race([
+        reader.read().finally(() => clearTimeout(guard)),
+        new Promise<never>((_, reject) => {
+          guard = setTimeout(() => {
+            controller.abort(new FeedError('下载停滞超时（读守卫抢跑）'))
+            void reader.cancel().catch(() => {})
+            reject(new FeedError(`下载停滞超时（单次 read ${Math.round(READ_STALL_GUARD_MS / 1000)} 秒无数据，abort 传播失灵兜底）`))
+          }, READ_STALL_GUARD_MS)
+        })
+      ])
+    }
     let received = offset
     try {
-      const reader = response.body.getReader()
       for (;;) {
         if (streamError) throw streamError
-        const { done, value } = await reader.read()
+        const { done, value } = await readChunk()
         if (done) break
         clearTimeout(idle)
         idle = armIdle()

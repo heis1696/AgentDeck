@@ -854,9 +854,12 @@ async function main() {
 main().catch((e) => { console.error(e); process.exit(3) })
 `
 
-// 红13｜树名标记按平台折叠（detach 守卫）：旧代码（字面量 startsWith）下「重挂分支的
-// detach 脚手架按大写别名写法回收必须同样被拒、目录存活」断言必红——别名写法判不中
-// 树名标记会让 detach 守卫落空，重挂的树被连目录强删
+// 红13｜树名标记按平台折叠 + 登记查找前置规范化（detach 守卫可达性）：旧代码下
+// 「重挂分支的 detach 脚手架按别名写法回收必须同样被拒、目录存活」断言必红——
+//   字面量 startsWith 让大写别名判不中树名标记；登记查找 basename 吃原始串让
+//   `..` 段别名写法被算成伪树名「..」（注册表查不到 → 误判「注册不在案」而非走到守卫）。
+// 场景前置：真实 alias 目录（fs 层面存在）+ 物理同树对穿校验（别名写入、规范写法读出），
+// 证明别名不是仅 resolve 字符串相等，而是本机文件系统上的同一棵树。
 const RED13 = `
 ${PRELUDE}
 const { reclaimWorktree } = require(__MUT_GIT__)
@@ -867,9 +870,19 @@ async function main() {
   const scaffoldBranch = 'agentdeck/task-r13-integrated'
   const scaffoldPath = path.join(repo, '.agentdeck-worktrees', scaffoldName)
   const aliasSpelling = path.join(repo, '.agentdeck-worktrees', '.AGENTDECK-MERGE-DETACH-R13')
+  // \`..\` 段别名写法：取「树名 + sep + r13-probe + sep + 两点」的形态，resolve 后恰为树
+  // 本身，但原始串最后一段是 ".."，basename 吃原始串会把它算成伪树名
+  //（直接「树名 + sep + 两点」不行——resolve 会指到父目录 .agentdeck-worktrees）
+  const dotDotAlias = scaffoldPath + path.sep + 'r13-probe' + path.sep + '..'
   assert(aliasSpelling.toLowerCase() === scaffoldPath.toLowerCase() && aliasSpelling !== scaffoldPath, '前置：别名树名同目录不同拼写')
   git('branch', scaffoldBranch, 'main')
   execFileSync('git', ['-C', repo, 'worktree', 'add', '--detach', scaffoldPath, scaffoldBranch], { stdio: 'ignore' })
+  // 真实 alias 目录 + 物理同树校验：别名写法在本机文件系统上真实存在，且经它写入的
+  // 文件能从规范写法读出——物理同一棵树，不是仅字符串层面 resolve 相等
+  assert(fs.existsSync(aliasSpelling), '前置：大写别名写法指向真实存在的目录')
+  assert(fs.existsSync(dotDotAlias), '前置：\`..\` 段别名写法指向真实存在的目录')
+  fs.writeFileSync(path.join(aliasSpelling, 'r13-probe.txt'), 'same-tree')
+  assert(fs.readFileSync(path.join(scaffoldPath, 'r13-probe.txt'), 'utf8') === 'same-tree', '前置：别名写法与规范写法物理同树（别名写入、规范读出）')
   const pointer = fs.readFileSync(path.join(scaffoldPath, '.git'), 'utf8')
   const gitdir = path.resolve(scaffoldPath, /^gitdir:\\s*(.+?)\\s*$/im.exec(pointer)[1])
   const generation = 'mut-r13-generation'
@@ -889,6 +902,12 @@ async function main() {
   assert(aliasRefused.ok === false && aliasRefused.status === 'retained' && (aliasRefused.reason ?? '').includes('no longer detached'),
     '大写别名写法同样拒绝回收重挂分支的 detach 脚手架（实际 ' + aliasRefused.status + ': ' + (aliasRefused.reason ?? '') + '）')
   assert(fs.existsSync(scaffoldPath), '别名拒绝后目录必须存活（守卫落空会被连目录强删）')
+  // \`..\` 段别名写法必须走到 detach 守卫、按与标准路径同因（no longer detached）拒收：
+  // 旧代码（登记查找前置无规范化）把它算成伪树名「..」，会误判「注册不在案」而非守卫拒收
+  const dotDotRefused = await reclaimWorktree(dotDotAlias, { force: true, expectedOwnerTaskId: scaffoldName, expectedGenerationId: generation })
+  assert(dotDotRefused.ok === false && dotDotRefused.status === 'retained' && (dotDotRefused.reason ?? '').includes('no longer detached'),
+    '\`..\` 段别名写法同样按 no longer detached 拒收（与标准路径同因，实际 ' + dotDotRefused.status + ': ' + (dotDotRefused.reason ?? '') + '）')
+  assert(fs.existsSync(scaffoldPath), '\`..\` 段别名拒收后目录必须存活')
   console.log('SCENARIO-OK')
   process.exit(0)
 }
@@ -981,6 +1000,42 @@ async function main() {
 }
 main().catch((e) => { console.error(e); process.exit(3) })
 `
+
+// 红17｜UNC 段弹出下界：旧代码（`..` 无下界可弹光全部分段）下「越过共享根的 `..`
+// 不得弹出 share 段，键与主进程 path.win32.resolve 派生键同源」断言必红——
+// \\\\server\\share\\.. 弹成 \\\\server，与主进程键（共享根 \\\\server\\share\\）脱钩，
+// 最近工作区去重/当前项判定把同一共享按两份对待
+const RED17 = `
+const { sharedPathKey } = require(__MUT_PATHKEY__)
+const { worktreePathKey } = require(__MUT_GITKEY__)
+const assert = (cond, msg) => { if (!cond) { console.error('RED:' + msg); process.exit(3) } }
+const B = String.fromCharCode(92)
+async function main() {
+  if (process.platform !== 'win32') { console.log('SCENARIO-OK'); process.exit(0) }
+  const share = B + B + 'server' + B + 'share'
+  const cases = [
+    share, share + B,
+    share + B + '..', share + B + '..' + B + '..', share + B + '..' + B + 'ws',
+    '//server/share/../..'
+  ]
+  for (const candidate of cases) {
+    const renderer = sharedPathKey(candidate)
+    const main = worktreePathKey(candidate)
+    assert(renderer === main, 'UNC \`..\` 弹出下界：渲染层键与主进程 resolve 派生键必须同源（输入 ' + JSON.stringify(candidate) + '：渲染层 ' + JSON.stringify(renderer) + ' vs 主进程 ' + JSON.stringify(main) + '）')
+  }
+  // 非 UNC 基线不回退：盘符路径的 \`..\` 消解照旧同键
+  assert(sharedPathKey('C:' + B + 'a' + B + 'x' + B + '..' + B + 'b') === worktreePathKey('C:' + B + 'a' + B + 'x' + B + '..' + B + 'b'), '盘符路径 \`..\` 消解基线照旧同键')
+  console.log('SCENARIO-OK')
+  process.exit(0)
+}
+main().catch((e) => { console.error(e); process.exit(3) })
+`
+
+// 红18｜登记查找前置规范化（detach 守卫可达性）：旧代码（registeredWorktreeForPath /
+// verifyWorktreeGeneration 先吃原始串再 basename）下「\`..\` 段别名写法走到 detach 守卫、
+// 按与标准路径同因（no longer detached）拒收」断言必红——伪树名「..」在注册表查不到
+// 登记，世代核验误判「注册不在案」，别名路径走不到守卫（复用红13 场景的 \`..\` 段断言）
+const RED18 = RED13
 
 const MUTATIONS = [
   {
@@ -1260,6 +1315,7 @@ const MUTATIONS = [
   },
   {
     name: '红13｜树名标记按平台折叠（detach 守卫）：旧代码（字面量 startsWith）下「重挂分支的 detach 脚手架按大写别名写法回收同样被拒、目录存活」断言必红',
+    originalPass: true,
     mutations: [
       {
         file: 'src/main/git.ts',
@@ -1312,6 +1368,42 @@ const MUTATIONS = [
     bundles: [{ src: 'src/main/backends/cli-common.ts', var: 'CLICOMMON' }],
     scenario: RED16,
     expectedRed: 'win32 下可执行路径别名写法必须判等'
+  },
+  {
+    name: '红17｜UNC 段弹出下界：旧代码（`..` 无下界可弹光全部分段）下「越过共享根的键与主进程 resolve 派生键同源」断言必红',
+    originalPass: true,
+    mutations: [
+      {
+        file: 'src/shared/path-key.ts',
+        find: "      if (unc && segments.length < 2) {\n        segments.push('..')\n      } else if (segments.length > (unc ? 2 : 0)) {\n        segments.pop()\n      }",
+        replace: '      segments.pop()'
+      }
+    ],
+    bundles: [
+      { src: 'src/shared/path-key.ts', var: 'PATHKEY' },
+      { src: 'src/main/git.ts', var: 'GITKEY' }
+    ],
+    scenario: RED17,
+    expectedRed: '渲染层键与主进程 resolve 派生键必须同源'
+  },
+  {
+    name: '红18｜登记查找前置规范化（detach 守卫可达性）：旧代码（登记查找/核验入口先吃原始串再 basename）下「`..` 段别名写法走到 detach 守卫按 no longer detached 拒收」断言必红',
+    originalPass: true,
+    mutations: [
+      {
+        file: 'src/main/git.ts',
+        find: '  const name = path.basename(path.resolve(wtPath))',
+        replace: '  const name = path.basename(wtPath)'
+      },
+      {
+        file: 'src/main/git.ts',
+        find: '  wtPath = path.resolve(wtPath)',
+        replace: ''
+      }
+    ],
+    bundles: [{ src: 'src/main/git.ts', var: 'GIT' }],
+    scenario: RED18,
+    expectedRed: '段别名写法同样按 no longer detached 拒收'
   }
 ]
 
@@ -1320,6 +1412,19 @@ let failed = 0
 for (const item of MUTATIONS) {
   console.log('== ' + item.name)
   try {
+    // 原版通过前提：未变异代码下场景必须全绿（SCENARIO-OK）——红证只在「修复后能过、
+    // 变异后变红」时才证明修复真实生效；场景在原版下就红的，红证无效
+    if (item.originalPass) {
+      const pristine = mutatedTree([])
+      const pre = await runScenario(pristine, item.scenario, item.bundles ?? [])
+      if (!pre.output.includes('SCENARIO-OK')) {
+        console.error(pre.output)
+        console.error('  ❌ 原版通过前提不成立：未变异代码下场景未全绿（无 SCENARIO-OK）——红证无效，先修场景')
+        failed++
+        continue
+      }
+      console.log('  ✓ 原版通过前提：未变异代码下场景全绿')
+    }
     const tree = mutatedTree(item.mutations)
     for (const [relPath, content] of item.files ?? []) {
       const target = path.join(tree, relPath)

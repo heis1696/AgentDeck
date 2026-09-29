@@ -712,9 +712,13 @@ function listManagedWorktreeRegistrations(repoDir: string, gitDir: string): Map<
 }
 
 /** 按 worktree 路径查 Git 注册表：键名匹配与路径键同一套别名折叠（win32），
- *  别名写法的树名段在注册表按字面量键查不到会让世代核验误判「注册不在案」。 */
+ *  别名写法的树名段在注册表按字面量键查不到会让世代核验误判「注册不在案」。
+ *  登记查找前置规范化：basename 先吃原始串会把 `..`/`.` 段别名写法算成「..」之类
+ *  的伪树名（注册表按伪树名查不到登记，世代核验误判「注册不在案」，别名路径走不到
+ *  detach 守卫，「no longer detached」拒收落空）——先按路径键同款 resolve 折叠别名
+ *  再取树名，别名写法与标准路径同因走到同一条拒收路径。 */
 function registeredWorktreeForPath(registrations: Map<string, RegisteredWorktree>, wtPath: string): RegisteredWorktree | undefined {
-  const name = path.basename(wtPath)
+  const name = path.basename(path.resolve(wtPath))
   if (process.platform !== 'win32') return registrations.get(name)
   const folded = name.toLowerCase()
   for (const [key, value] of registrations) if (key.toLowerCase() === folded) return value
@@ -851,6 +855,10 @@ async function verifyWorktreeGeneration(
   generationId: string,
   expectedBranch?: string
 ): Promise<string | null> {
+  // 入口前置规范化：`..`/`.` 段别名写法不先 resolve，.git 指针会指去错误层级、树名
+  // 标记判定（detach 守卫）会拿到伪树名——先折叠成规范写法，登记查找/守卫/指针核验
+  // 全吃同一份（与 registeredWorktreeForPath 的自规范化互为两道防线）
+  wtPath = path.resolve(wtPath)
   const common = await runGit(repoDir, ['rev-parse', '--git-common-dir'])
   if (!common.ok || !common.stdout.trim()) return 'Git worktree registration could not be verified'
   const commonDir = commonGitDir(repoDir, common.stdout.trim())
