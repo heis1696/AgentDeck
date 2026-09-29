@@ -373,6 +373,12 @@ const digestBase = {
   const failed = buildChildReportBody({ status: 'failed', error: 'e'.repeat(2000) })
   assert(failed.startsWith('状态 failed') && failed.includes('e'.repeat(2000)), '去截断：failed 单 error 不再 slice(0,300)')
 
+  // 稀疏单失败回灌附扩圈提示（WORKTREE-BIG-REPO-PERF §7.2）：仅 failed 且带范围；全量单零变化
+  const sparseFailed = buildChildReportBody({ status: 'failed', error: '找不到 src/app.ts', sparseDirs: ['client', 'excel-tool'] })
+  assert(sparseFailed.includes('本单稀疏检出范围：client、excel-tool——若子任务报告文件缺失，请扩圈或去掉 sparse 属性重派'), '§7.2：稀疏单失败说明附本单稀疏范围与扩圈指引')
+  assert(!buildChildReportBody({ status: 'failed', error: 'x' }).includes('稀疏检出范围'), '§7.2：全量单失败回灌不附稀疏提示（零变化）')
+  assert(!buildChildReportBody({ status: 'cancelled', sparseDirs: ['client'] }).includes('稀疏检出范围'), '§7.2：cancelled 单不附稀疏提示（只有失败形态才教扩圈）')
+
   // 路径③④（单元面）：总结采纳 → 前置标注 + 总结体；回退 → 注记 + 入口
   const summaryBody = buildChildReportBody({
     status: 'done', result: longResult, summary: '总结结论：改动完成',

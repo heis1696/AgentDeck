@@ -1513,7 +1513,10 @@ export class TaskRunner {
         // 用私有 index 把增量采集成一个提交回放进子 worktree（不修改领队工作区与用户 index；
         // 失败后的子侧回滚需核验，拒单回收失败需留痕）。回放提交随即成为子分支起始提交（B2 防双算：digest/集成以它为基线，
         // 领队改动不算子产出）；无增量零开销跳过；采集/应用失败具名拒建单回灌原因。
-        const replay = await replayLeaderBaseline(task.workdir, wt.path, wt.metadata.baseSha)
+        // 稀疏生效的单带范围（§6.3 回放并集）：回落全量/池化全量树整树物化，无并集必要（零变化）
+        const replay = await replayLeaderBaseline(task.workdir, wt.path, wt.metadata.baseSha, undefined, {
+          ...(wt.sparse?.status === 'applied' && wt.sparse.dirs?.length ? { sparseDirs: wt.sparse.dirs } : {})
+        })
         if (!active()) {
           await reclaimCancelledWorktree(wt, '基线回放后')
           return null

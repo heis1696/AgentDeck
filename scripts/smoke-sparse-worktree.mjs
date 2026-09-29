@@ -9,6 +9,9 @@
 //    逐出回落全量 add；带稀疏范围的派单不进池复用（宁建新树，不复用出错误范围）
 // ⑥ runner 端到端：派单 sparse 属性 → 时间线注记可见（生效/回落含被拒目录/格式非法含通配符），
 //    四单全部建成（不拒单），子单工作树物化范围与声明一致
+// ⑦ 回放并集（§6.3 关键点，第二批）：稀疏范围外有未提交改动也被回放——增量触达目录补进
+//    cone 后 cherry-pick，范围外改动在工作树真实物化、子分支推进到回放提交、status 自洽；
+//    无关目录照常不物化；全量树（未带范围）回放行为零变化
 import assert from 'node:assert/strict'
 import { build } from 'esbuild'
 import { execFileSync } from 'node:child_process'
@@ -31,7 +34,7 @@ const [git, delegate, { TaskRunner }, { TaskStore }] = await Promise.all([
   load('src/main/store.ts', 'store')
 ])
 const { parseSparseAttr, parseDelegates } = delegate
-const { createWorktree, reclaimWorktree, clearWorktreePool, clearWorktreeFileCountCache, worktreePoolEntriesForTest } = git
+const { createWorktree, reclaimWorktree, clearWorktreePool, clearWorktreeFileCountCache, worktreePoolEntriesForTest, replayLeaderBaseline } = git
 
 const makeRepo = (name) => {
   const dir = path.join(temp, name, 'repo')
@@ -263,6 +266,44 @@ try {
   const fin = store.get(leader.id)
   assert.equal(fin.status, 'done', `领队 done（${fin.status}${fin.error ? ' ' + fin.error : ''}）`)
   console.log('  OK ⑥ runner 端到端：四单全建成、子树范围与声明一致、生效/回落/格式非法注记全部落时间线')
+
+  // ---- ⑦ 回放并集（§6.3 关键点）：稀疏范围外有未提交改动也被回放 ----
+  // 领队在范围外改已跟踪文件 + 在新目录塞未跟踪文件 + 在范围内也改一份 → 回放前把增量
+  // 触达目录补进 cone：三处改动全部落进子树工作树（内容逐字对照），无关目录照常不物化，
+  // 子分支推进到回放提交、status 自洽。对照：不带范围的回放（全量树）行为零变化。
+  const replayUnion = makeRepo('replay-union')
+  const replayWt = await createWorktree(replayUnion.dir, 'task_replay_c1', 'main', 'task_replay', undefined, { sparseDirs: ['client/Assets/GameMain'] })
+  assert.equal(replayWt.sparse?.status, 'applied', '⑦ 前置：稀疏树建成')
+  const replayBase = JSON.parse(fs.readFileSync(path.join(replayUnion.dir, '.agentdeck-worktrees', '.metadata', 'task_replay_c1.json'), 'utf8')).baseSha
+  fs.writeFileSync(path.join(replayUnion.dir, 'docs', 'd.txt'), 'd v2 领队未提交\n')
+  fs.mkdirSync(path.join(replayUnion.dir, 'notes'), { recursive: true })
+  fs.writeFileSync(path.join(replayUnion.dir, 'notes', 'new.txt'), '范围外新目录的未跟踪文件\n')
+  fs.writeFileSync(path.join(replayUnion.dir, 'client', 'Assets', 'GameMain', 'a.txt'), 'a v2 领队未提交\n')
+  const replayed = await replayLeaderBaseline(replayUnion.dir, replayWt.path, replayBase, undefined, { sparseDirs: ['client/Assets/GameMain'] })
+  assert.equal(replayed.status, 'applied', `⑦ 范围外增量回放成功（${replayed.status}: ${replayed.reason}）`)
+  assert.equal(replayed.files, 3, `⑦ 回放文件数含范围外改动（${replayed.files}）`)
+  const replayList = listTree(replayWt.path)
+  assert.ok(hasAll(replayList, ['docs/', 'notes/', 'notes/new.txt', 'client/Assets/GameMain/a.txt']), `⑦ 增量触达目录已补进 cone：${JSON.stringify(replayList)}`)
+  assert.ok(hasNone(replayList, ['server/', 'excel-tool/']), '⑦ 并集不扩大到无关目录')
+  // 内容对照按 LF 归一：全局 core.autocrlf=true 的机器上检出会把 LF 转成 CRLF（环境差异，非本批语义）
+  const lf = (rel) => fs.readFileSync(path.join(replayWt.path, ...rel.split('/')), 'utf8').replace(/\r\n/g, '\n')
+  assert.equal(lf('docs/d.txt'), 'd v2 领队未提交\n', '⑦ 范围外已跟踪改动内容落树')
+  assert.equal(lf('notes/new.txt'), '范围外新目录的未跟踪文件\n', '⑦ 范围外新目录未跟踪文件落树')
+  assert.equal(lf('client/Assets/GameMain/a.txt'), 'a v2 领队未提交\n', '⑦ 范围内改动照常回放')
+  const inChild = (...args) => execFileSync('git', ['-C', replayWt.path, ...args], { encoding: 'utf8', windowsHide: true }).trim()
+  assert.equal(inChild('status', '--porcelain'), '', '⑦ 回放后 status 自洽（无 skip-worktree 暗坑）')
+  assert.equal(inChild('rev-list', '--count', `${replayBase}..HEAD`), '1', '⑦ 子分支推进到回放提交')
+  assert.equal(replayed.commitSha, inChild('rev-parse', 'HEAD'), '⑦ 回放提交即子分支 tip')
+  // 对照组：同样的范围外增量，回放调用不带范围（全量树/回落树形态）→ 行为零变化照常 applied
+  const plainReplay = makeRepo('replay-plain')
+  const plainWt2 = await createWorktree(plainReplay.dir, 'task_replay_p1', 'main', 'task_replay_p')
+  assert.ok(plainWt2 && plainWt2.sparse === undefined, '⑦ 对照组前置：全量树无 sparse 字段')
+  const plainBase = JSON.parse(fs.readFileSync(path.join(plainReplay.dir, '.agentdeck-worktrees', '.metadata', 'task_replay_p1.json'), 'utf8')).baseSha
+  fs.writeFileSync(path.join(plainReplay.dir, 'docs', 'd.txt'), 'd v2 领队未提交\n')
+  const plainApplied = await replayLeaderBaseline(plainReplay.dir, plainWt2.path, plainBase)
+  assert.equal(plainApplied.status, 'applied', `⑦ 不带范围的回放照常 applied（${plainApplied.reason}）`)
+  assert.equal(fs.readFileSync(path.join(plainWt2.path, 'docs', 'd.txt'), 'utf8').replace(/\r\n/g, '\n'), 'd v2 领队未提交\n', '⑦ 不带范围的回放行为零变化')
+  console.log('  OK ⑦ 回放并集：范围外未提交改动也被回放且真实物化（含新目录），无关目录不物化，全量对照零变化')
 
   console.log('\nSPARSE WORKTREE SMOKE PASSED')
 } finally {

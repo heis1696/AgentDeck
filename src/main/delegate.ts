@@ -14,6 +14,7 @@ import {
   buildReportFeedback,
   budgetTailFeedback,
   policyRejectionPrompt,
+  sparseScopeFailureNote,
   summaryFallbackNote,
   longResultOmittedNote,
   undeliveredReportComment,
@@ -706,6 +707,9 @@ export interface ChildReportBodyInput {
   summary?: string
   /** 总结轮回退注记（系统文案原样进正文；如「总结轮未产出」「总结仍超长」） */
   summaryFallbackNote?: string
+  /** 子单稀疏检出的生效范围（WorktreeInfo.sparseDirs）：failed 单的失败说明据此附
+   *  「本单稀疏检出范围」扩圈提示（§7.2，sparseScopeFailureNote 单一发射点）；全量单不传 */
+  sparseDirs?: string[]
 }
 
 /** 回灌正文：done 单 = 队员总结（已采纳时，前置非全文标注）或原文整段（≤回灌界，码点级）；
@@ -729,6 +733,8 @@ export function buildChildReportBody(input: ChildReportBodyInput): string {
   } else {
     // failed/error 路径与 result/总结同源转义：队员可控的 error 文本不得携带可解析的活标记
     parts.push(`状态 ${input.status}${input.error ? ': ' + escapeProtocolLiterals(input.error) : ''}`)
+    // 稀疏单失败附扩圈提示（§7.2）：仅 failed——cancelled/error 不是「缺文件」可自愈的失败形态
+    if (input.status === 'failed' && input.sparseDirs?.length) parts.push(sparseScopeFailureNote(input.sparseDirs))
   }
   if (input.gitSection) parts.push(input.gitSection)
   if (input.pointers?.length) parts.push(input.pointers.map((line) => escapeProtocolLiterals(line)).join('\n'))
@@ -1018,7 +1024,8 @@ export async function runDelegationLoop(
         result: c.result,
         error: c.error,
         gitSection,
-        pointers: fullTextPointerLines(copyRel, issueOk, seq)
+        pointers: fullTextPointerLines(copyRel, issueOk, seq),
+        sparseDirs: c.worktree?.sparseDirs
       })
       tailEntries.push(childReportEntry(call?.to ?? c.agentId ?? c.backend, c.status, seq, body))
       allChildren.push(id)
@@ -1285,7 +1292,8 @@ export async function runDelegationLoop(
         gitSection,
         pointers: full ? fullTextPointerLines(full.copyPath, full.issueOk, full.seq) : [],
         summary: summaryBodies.get(id),
-        summaryFallbackNote: summaryFallbackNotes.get(id)
+        summaryFallbackNote: summaryFallbackNotes.get(id),
+        sparseDirs: c.worktree?.sparseDirs
       })
       reportEntries.push(childReportEntry(call?.to ?? c.agentId ?? c.backend, c.status, seq, body))
     }
