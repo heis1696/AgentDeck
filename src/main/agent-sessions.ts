@@ -2,6 +2,19 @@ import type { RunTrigger, Task } from '../shared/types'
 import type { AgentLike } from './delegate'
 import type { TaskCreateInput, TaskService } from './task-service'
 import type { TaskStore } from './store'
+import { officeSessionPrompt } from './prompts/meeting'
+
+/** 办公室任务的去重键前缀（每位队长一个长期会话） */
+export const OFFICE_TASK_KEY_PREFIX = 'office_'
+
+/** 办公室会话任务（会议发言/咨询应答专用）：runner 据此不注入派发与接力协议、不受理派单。
+ *  判据只认创建侧写入的 officeAgentId——不用 dedupeKey 前缀，因为公开建单入口的
+ *  requestId/idempotencyKey 会成为 dedupeKey，用户任务可以自称 office_* 而劫持这条分支。
+ *  （旧记录没有该字段时退回前缀判断：那是本功能落地前建的单，只可能是办公室会话。） */
+export function isOfficeTask(task: Pick<Task, 'officeAgentId'> & Partial<Pick<Task, 'dedupeKey'>>): boolean {
+  if (typeof task.officeAgentId === 'string' && task.officeAgentId) return true
+  return !!task.dedupeKey && task.dedupeKey.startsWith(OFFICE_TASK_KEY_PREFIX)
+}
 
 export interface OfficeFollowUpResult {
   ok: boolean
@@ -51,12 +64,8 @@ export class AgentSessionRegistry {
     this.taskService = options.taskService
     this.runner = options.runner
     this.getAgents = options.getAgents
-    this.officePrompt = options.officePrompt ?? ((agent) => [
-      `【办公室会话】这是 ${agent.name} 的长期工作会话。`,
-      agent.role ? `你的定位：${agent.role}` : '',
-      agent.systemPrompt?.trim() ?? '',
-      '后续收到的任务消息请直接处理并给出最终答复。'
-    ].filter(Boolean).join('\n'))
+    // 身份（定位 + 人设）由 runner 的 buildAgentPrompt 统一注入，引导正文只说明会话用途，不重复拼人设
+    this.officePrompt = options.officePrompt ?? ((agent) => officeSessionPrompt(agent.name))
     this.waitPollMs = Math.max(5, options.waitPollMs ?? 100)
     this.waitTimeoutMs = Math.max(this.waitPollMs, options.waitTimeoutMs ?? 10 * 60 * 1000)
   }
@@ -82,6 +91,7 @@ export class AgentSessionRegistry {
         trigger: 'meeting' as RunTrigger,
         suppressIssue: true,
         titleAuto: false,
+        officeAgentId: agent.id,
         dedupeKey: this.key(agent.id)
       }
       task = this.taskService.createTask(input, 'meeting')
@@ -143,7 +153,7 @@ export class AgentSessionRegistry {
   }
 
   private key(agentId: string) {
-    return `office_${agentId}`
+    return `${OFFICE_TASK_KEY_PREFIX}${agentId}`
   }
 
   private resolveAgent(agentId: string): AgentLike {
