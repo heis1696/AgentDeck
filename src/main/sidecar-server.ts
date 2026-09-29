@@ -13,6 +13,13 @@ import { SidecarRuntime } from './sidecar-runtime'
 
 type JsonRecord = Record<string, unknown>
 function record(value: unknown): JsonRecord { return value && typeof value === 'object' && !Array.isArray(value) ? value as JsonRecord : {} }
+/** 外部建单入口不接受内部身份字段：`officeAgentId` 是「这是办公室会话」的唯一运行期判据，
+ *  建单侧拿到它就能让一张普通任务跳过派发/咨询/接力协议。与桌面 IPC 的 parseTaskCreate 白名单同一口径。 */
+const INTERNAL_TASK_FIELDS = ['officeAgentId'] as const
+function assertNoInternalIdentity(input: JsonRecord): void {
+  const found = INTERNAL_TASK_FIELDS.filter((field) => input[field] !== undefined)
+  if (found.length) throw new Error(`任务参数不接受内部字段：${found.join('、')}`)
+}
 function processAlive(pid: unknown) {
   if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return false
   try { process.kill(pid, 0); return true } catch { return false }
@@ -188,11 +195,13 @@ export function startSidecarServer(options: SidecarServerOptions): SidecarServer
       } else if (method === 'tasks.create') {
         runtime.refreshIfIdle()
         const input = record(params.input)
+        assertNoInternalIdentity(input)
         const trigger = typeof params.trigger === 'string' ? params.trigger : undefined
         result = runtime.taskService.createTask(input as never, trigger as never)
       } else if (method === 'issues.create') {
         runtime.refreshIfIdle()
         const rawInput = record(params.input)
+        assertNoInternalIdentity(rawInput)
         const input = {
           ...rawInput,
           // The Issue API calls this field description; TaskService keeps the
