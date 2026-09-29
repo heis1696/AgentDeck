@@ -32,6 +32,8 @@ export interface TaskCreateInput {
   worktree?: WorktreeInfo
   /** 委派子单建单门禁：创建即持有，归属绑定+登记核实三步全过才翻面入队 */
   dispatchHold?: boolean
+  /** 办公室会话标记：只由 AgentSessionRegistry 写入（不暴露在公开建单 IPC 白名单里） */
+  officeAgentId?: string
   /** Durable idempotency key for replayed creation requests. */
   dedupeKey?: string
   /** Public request id accepted by the Task IPC boundary. */
@@ -204,6 +206,7 @@ export class TaskService {
         ...(input.unavailableReason ? { unavailableReason: input.unavailableReason } : {}),
         ...(input.worktree ? { worktree: input.worktree } : {}),
         ...(input.dispatchHold ? { dispatchHold: true } : {}),
+        ...(input.officeAgentId ? { officeAgentId: input.officeAgentId } : {}),
         ...(input.titleAuto ? { titleAuto: true } : {}),
         ...(dedupeKey ? { dedupeKey } : {}),
         ...(delegateSourceRunId ? { delegateSourceRunId } : {})
