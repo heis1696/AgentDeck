@@ -28,6 +28,9 @@ import type { AgentDeckApi, AgentInfo, AgentModelCatalog, FileDiffResult, GoalCh
 import type { PackAssets, PetDragPosition, PetGenDone, PetGenProgress, PetGenStartInput, PetSayPayload, PetStateSnapshot, PetThrowVelocity, PetWindowEvent } from '../shared/pet'
 
 const api: AgentDeckApi = {
+  // 平台白名单注入：只交平台字面量，不暴露 process 对象——渲染层路径语义
+  // （sharedPathKey 的 win32 折叠/posix 精确分支）据此选择，渲染页里没有 process
+  platform: process.platform,
   worktrees: {
     prune: () => ipcRenderer.invoke('worktrees:prune')
   },

@@ -293,6 +293,10 @@ export interface AgentDeckApi {
   pickDir: () => Promise<string>
   openPath: (target: string) => Promise<void>
   notify: (title: string, body: string) => void
+  /** 主进程平台（preload 白名单注入的只读字面量）：渲染层据此选 sharedPathKey 的
+   *  平台语义分支——渲染页没有 process，平台信息只能经这条通道显式进入。
+   *  Optional for compatibility with an older preload during renderer hot updates. */
+  platform?: string
   agents: {
     list: () => Promise<AgentInfo[]>
     save: (list: AgentInfo[]) => Promise<AgentInfo[]>
