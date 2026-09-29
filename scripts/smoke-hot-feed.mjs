@@ -266,12 +266,15 @@ const partOf = (n) => dest + '.part'
   // 因果链①：空闲中止先发生——每次尝试恰一次「30 秒无数据」abort 到达连接层
   const idleAborts = abortEvents.filter((e) => e.why.includes('30 秒无数据'))
   ok(idleAborts.length === 3, `空闲中止三次都先发生：连接层各收到一次「30 秒无数据」abort（实际 ${idleAborts.length} 次）`)
-  // 因果链①②③逐尝试时序：空闲中止时刻早于守卫拒绝时刻（以守卫的流 cancel 回调记），
-  // 且两次到点之间尝试未被终结（下一次尝试/最终拒绝在守卫剩余时长之后才发生）——
-  // read() 仍待决，守卫是唯一出口
+  // 因果链①②③逐尝试时序（全部以尝试起点为同一时钟原点，免跨定时器墙钟差抖动——
+  // Windows 定时器合并会让空闲中止晚到 ~10ms，跨事件相减会把 150ms 名义余量吃穿）：
+  // 空闲中止落在守卫窗口内且早于守卫 cancel；尝试终点（下一次 fetch/最终拒绝）不早于
+  // 守卫全时长——尝试活着撑到守卫时刻 = 未被空闲中止终结，read() 仍待决，守卫是唯一出口
   for (let i = 0; i < 3; i++) {
-    const nextAttemptAt = i < 2 ? fetchCalls[i + 1] : rejectedAt
-    ok(idleAborts[i].at < cancelCalls[i] && nextAttemptAt - idleAborts[i].at >= GUARD_MS - IDLE_MS,
+    const attemptEndAt = i < 2 ? fetchCalls[i + 1] : rejectedAt
+    ok(idleAborts[i].at < cancelCalls[i]
+      && idleAborts[i].at - fetchCalls[i] < GUARD_MS
+      && attemptEndAt - fetchCalls[i] >= GUARD_MS,
       `第 ${i + 1} 次尝试因果链：空闲中止（起点+${idleAborts[i].at - fetchCalls[i]}ms）早于守卫拒绝并 cancel（起点+${cancelCalls[i] - fetchCalls[i]}ms），期间尝试未被空闲中止终结——read() 仍待决（传播失灵），守卫是唯一出口`)
   }
   ok(readsStarted >= 3, `每次尝试都发起了挂起的 read()（实际 pull ${readsStarted} 次；同步 pull 完成后流按填充语义再拉属正常，read 全程待决由上一条「空闲中止后尝试未被终结」直证）`)
