@@ -2,7 +2,7 @@
 
 > 从 [`INVENTORY.md`](./INVENTORY.md)（原始盘点）提炼的手绘式导读图谱。数据基线：commit `6b2f038`（0.22.0-hot.19 后的 main 侧最新提交），主检出当时的 WIP（7 个已修改文件 + 未跟踪 `src/main/prompts/`）**不含在内**——见 [`README.md`](./README.md) 的「WIP 后处理清单」。
 >
-> 机读全量图（143 模块 / 292 条已解析依赖边）在 [`deps.mmd`](./deps.mmd) / [`deps.json`](./deps.json)；再生成命令见 README。本文 6 张图是那份数据的**可读投影**，节点数刻意裁剪到每组/每域一层。
+> 旧机读全量图（`deps.mmd` / `deps.json`，143 模块 / 292 条已解析依赖边）已于 2026-09 随 dependency-cruiser 管线退役删除；现行机读图为 CodeGraph 语义索引（`npm run graph:index`，接法见 [README.md](./README.md)）。本文 6 张图是历史基线数据的**可读投影**，节点数刻意裁剪到每组/每域一层，不随索引自动刷新。
 
 ## 图例（节点 / 边约定）
 
@@ -14,7 +14,7 @@
 | 虚线箭头 `-.->` | 非运行时依赖：type-only 导入（编译期擦除）、进程/HTTP 关系、发布脚本关系 |
 | 粗箭头 `==>` | 跨层强边：动态 `require` 或进程 spawn |
 | 分组框 `subgraph` | 目录组 / **进程边界** / 发布侧与运行侧 |
-| 节点标签第一行 | 仓库相对路径（可作 `deps.json` 里 `modules[].source` 的检索键） |
+| 节点标签第一行 | 仓库相对路径（可作 CodeGraph 索引的文件检索键） |
 
 > INVENTORY 建议的全量图谱还有四类本文未画的节点：`symbol`（如 `src/main/runner.ts#TaskRunner`）、`ipc-domain`（20 个域，本文第 3 图按 handler 分组呈现）、`npm-script`（65 个）、`doc`（32 篇）；以及关键边 `bundles`（smoke 脚本 esbuild 直连 src——区分死代码与测试面的依据，见 INVENTORY 附录 A）。
 

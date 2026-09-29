@@ -2,7 +2,7 @@ import { BrowserWindow, ipcMain } from 'electron'
 import { validateMove } from '../../shared/taskflow'
 import { aggregateUsage } from '../usage'
 import { deleteReportCopies, fileDiff, fileDiffFailure, removeWorktree, resolveRepositoryRoot, worktreePathKey } from '../git'
-import { parseContent, parseFollowUpOptions, parseId, parseNonNegativeInteger, parsePermissionDecision, parseRepoRelativePath, parseTaskCreate, parseTaskStatus } from '../ipc-validation'
+import { parseCancelReason, parseContent, parseFollowUpOptions, parseId, parseNonNegativeInteger, parsePermissionDecision, parseRepoRelativePath, parseTaskCreate, parseTaskStatus } from '../ipc-validation'
 import type { IpcContext } from './context'
 import type { Task } from '../../shared/types'
 import { sameExecutionOwner } from '../store'
@@ -77,8 +77,10 @@ export function registerTaskIpc(ctx: IpcContext) {
     projectTasks()
     return { ok: true }
   })
-  ipcMain.handle('tasks:cancel', async (_e, id: unknown) => {
-    const result = await ctx.runner.cancel(parseId(id))
+  ipcMain.handle('tasks:cancel', async (_e, id: unknown, reason: unknown) => {
+    // 契约：undefined = 系统取消不打标；string（含空串）= 用户打断（trim + 500 字符钳制）
+    const note = reason === undefined ? undefined : { reason: parseCancelReason(reason) ?? '' }
+    const result = await ctx.runner.cancel(parseId(id), note)
     projectTasks()
     return result
   })

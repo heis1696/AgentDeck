@@ -17,7 +17,7 @@
 | 3 | pet-store「设置」并入现有设置体系 | 设置不进 `AppSettings`，独立持久化到 `userData/pet.json` | `AppSettings` 每次更新全量广播给所有窗口（`src/main/ipc/system.ts:58`-`63`），改动需在 `src/shared/types.ts:537`（AppSettings）与 `src/main/ipc-validation.ts:295`（parseSettingsPatch 白名单）各加一份；对话环形缓冲（KB 级历史）混进 settings.json 会让每次切主题都重写对话史。pet-store 按 `src/main/automation-store.ts:6`-`28` 的「ctor(userDataDir) + try/catch 读 + tmp+rename 原子写」惯例独立成 store。 |
 | 4 | 「App.tsx 按 hash 路由（现有机制）」 | 定性修正：App 无路由机制，hash 分支是**新增**的最小路由 | `src/renderer/src/App.tsx:22`（`type View` 联合）、`:30`（`useState<View>`）、`:159`（三元链条件渲染）——无 router 库。方案不变（hash 分支 + 早返回），实现约为一个 `hashchange` 监听 + 组件树早返回，≈15 行。 |
 | 5 | 「走 presets 调 LLM（复用现成函数）」 | 主进程**没有**现成 chat 调用可复用；新增 `pet-llm.ts`（≈60 行），鉴权/协议推断/超时惯例照抄先例 | 主进程唯一的 LLM 相关 HTTP 是拉模型目录的 `fetchPresetModels`（`src/main/presets.ts:85`-`110`，GET /models），没有 chat/completions 或 /messages 的 POST 先例（grep 证实）。全局 `fetch` 在主进程已被热更链路使用（`src/main/hot/feed.ts:27`、`:48`、`:100`），零依赖可用，只是要新写调用面。 |
-| 6 | 「热更有无入口清单要登记」（存疑项） | 结论：**无模块清单要登记**；要登记的是文档面（smoke 映射 + 依赖图） | 载荷 zip 按目录整体收集构建产物（`scripts/release-hot.mjs:214`-`224`），新模块只要从三个构建入口（`electron.vite.config.ts:8`-`12`：`index.ts`/`bootstrap.ts`/`sidecar-server.ts`）经 import 链可达，就自动进 `out/main/index.js` 进 zip。渲染层同理（入口 `src/renderer/index.html`）。需要登记的只有：`docs/graph/INVENTORY.md:491` 附录 A 补 smoke→src 映射（AGENTS.md 铁律）、`npm run graph:deps` 刷新。详见 §3.4。 |
+| 6 | 「热更有无入口清单要登记」（存疑项） | 结论：**无模块清单要登记**；要登记的是文档面（smoke 映射 + 依赖图） | 载荷 zip 按目录整体收集构建产物（`scripts/release-hot.mjs:214`-`224`），新模块只要从三个构建入口（`electron.vite.config.ts:8`-`12`：`index.ts`/`bootstrap.ts`/`sidecar-server.ts`）经 import 链可达，就自动进 `out/main/index.js` 进 zip。渲染层同理（入口 `src/renderer/index.html`）。需要登记的只有：`docs/graph/INVENTORY.md:491` 附录 A 补 smoke→src 映射（AGENTS.md 铁律）、`npm run graph:index` 刷新。详见 §3.4。 |
 
 另有一条对「验收」的落点修正：草案提到的 `docs/features` 目录不存在，`docs/README.md` 是现行文档导航（现行参考表 + archive 分区）。C 期的文档动作 = 本文档随实现更新 + `docs/README.md` 导航行 + `docs/API.md` 补 pet 域 IPC 表。
 
@@ -188,7 +188,7 @@
 ### 3.4 热更登记结论（修正 #6 展开版）
 
 - **不需要**任何新增入口/模块清单：payload zip 收 `out/**` 目录整体（`scripts/release-hot.mjs:214`-`224`），模块经 import 链进 bundle 即随包。桌宠上线按仓库现行节奏跑 `node scripts/release-hot.mjs`（payload+renderer 双通道）即可。
-- **需要**登记的是三处文档/脚本面：① 新 smoke 直连写进 `docs/graph/INVENTORY.md:491` 附录 A；② `src/` 结构变化后 `npm run graph:deps`（AGENTS.md 约定）；③ `docs/API.md` 补 pet 域 IPC 表、`docs/README.md` 导航行。
+- **需要**登记的是三处文档/脚本面：① 新 smoke 直连写进 `docs/graph/INVENTORY.md:491` 附录 A；② `src/` 结构变化后 `npm run graph:index`（AGENTS.md 约定，CodeGraph 语义索引）；③ `docs/API.md` 补 pet 域 IPC 表、`docs/README.md` 导航行。
 - 未来若真要加「非 bundle 静态资源目录」（本设计已规避），才需要动 `collectChannelFiles` + `electron-builder.yml` 两处——在那时再评估。
 
 ---
@@ -262,7 +262,7 @@ smoke：`scripts/smoke-pet-brain.mjs` → 纯逻辑抽层（prompt 组装含宏�
 
 - 右键原生菜单；`userData/pets/` 扫描（`src/main/pet/pet-pack-scan.ts`，包切换热生效）；点击穿透优化（`setIgnoreMouseEvents(true,{forward:true})` + `elementFromPoint`）；桌宠窗 `did-fail-load` 兜底关窗（对齐主窗自愈语义，`src/main/index.ts:184`-`196`）。
 - 文档：本文档随实现校正；`docs/API.md` 补 pet 域表；`docs/README.md` 导航行。
-- `npm run graph:deps` 刷新机读依赖图；`npm run smoke:all` 全量 + `typecheck`/`build` 三关。
+- `npm run graph:index` 刷新语义索引；`npm run smoke:all` 全量 + `typecheck`/`build` 三关。
 
 ---
 

@@ -305,6 +305,12 @@ html.light .code-token { color: var(--shiki-light); font-style: var(--shiki-ligh
 .worker-pane-item { color: var(--text-dim); white-space: nowrap; }
 .worker-pane-progress { display: block; height: 2px; margin: 9px -12px -10px; background: var(--status-running); opacity: 0.5; animation: pulse 1.2s infinite; }
 
+/* 打断队员单（唯一运行操作）：标题行危险停止按钮——危险配色由全局 .btn.danger 提供，
+ * 这里只管嵌进标题行的排布（压过 .worker-pane-title button 的 grid 排布与中性悬停） */
+.worker-pane-title .worker-pane-stop { flex-shrink: 0; display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; font-size: var(--text-micro); }
+.worker-pane-title .worker-pane-stop:hover { border-color: var(--err); color: var(--err); background: color-mix(in srgb, var(--err) 10%, transparent); }
+.worker-pane-title .worker-pane-stop:disabled { opacity: 0.6; cursor: default; }
+
 /* Worker 面板保持只读：回退控件一律不出现（含回合页眉里的常显回退） */
 .worker-pane .turn-rewind-inline { display: none !important; }
 .worker-pane .chat-latest { right: 12px; bottom: 10px; }

@@ -1,7 +1,8 @@
 /**
- * R3 契约：<WorkerPane taskId={id} tasks={tasks} onOpen={onSelect} /> 为 Dock 内紧凑只读详情。
+ * R3 契约：<WorkerPane taskId={id} tasks={tasks} onOpen={onSelect} /> 为 Dock 内紧凑详情。
  * tasks 由宿主持续传入最新列表；内部按 taskId 订阅 useTaskEvents/useTurnModel，切换任务重建订阅。
- * onOpen(id) 仅在「打开完整详情」按钮触发；无运行/追问/回退操作，待审批工具请求就地处理。最终回复
+ * onOpen(id) 仅在「打开完整详情」按钮触发；唯一运行操作是「停止」打断（running/queued 可用，
+ * 经 InterruptDialog 收集可空回执，回灌领队）；无追问/回退操作，待审批工具请求就地处理。最终回复
  * 本身就在时间线末尾，不再额外挂底部执行结果区（反馈二轮7）。
  * 样式依赖 polish/dock.css；独立使用时回退按钮由 CSS 隐藏且回调为空操作。
  *
@@ -9,15 +10,18 @@
  * 执行中显示不定量进度檐与实时用时；回合数/tokens/最近事件时间一次看全。
  */
 import { useEffect, useRef, useState } from 'react'
-import { ExternalLink, RefreshCw } from 'lucide-react'
+import { ExternalLink, RefreshCw, Square } from 'lucide-react'
 import type { Task } from '../../../../shared/types'
 import { fmtDuration, fmtTime, fmtTokens } from '../../api'
+import { ui } from '../../ui/interaction-center'
+import { taskService } from '../../task-service'
 import { PARKED_QUEUED_LABEL, TASK_STATUS_LABELS, isParkedQueued } from '../../labels'
 import { useTaskEvents } from '../../hooks/useTaskEvents'
 import { useTurnModel } from '../../hooks/turnModel'
 import { scrollElementTo } from '../../ui/motion'
 import { FOLLOW_EPSILON, TurnTimeline } from './TurnTimeline'
 import { PermissionPrompt } from './PermissionPrompt'
+import { InterruptDialog } from './InterruptDialog'
 
 export interface WorkerPaneProps {
   taskId: string
@@ -40,6 +44,23 @@ function WorkerDetail({ task, onOpen }: { task: Task; onOpen: (id: string) => vo
   const [following, setFollowing] = useState(true)
   const [activeNav, setActiveNav] = useState(0)
   const [now, setNow] = useState(Date.now)
+  // 打断（唯一运行操作）：回执对话框 + 提交 busy；失败走既有 toast 通道
+  const [interrupting, setInterrupting] = useState(false)
+  const [stopBusy, setStopBusy] = useState(false)
+  const confirmInterrupt = async (reason: string) => {
+    setStopBusy(true)
+    try {
+      // 空串也按用户打断提交（主进程记「未填写原因」）；undefined 才是系统取消不打标
+      const result = await taskService.cancel(task.id, reason.trim() ? reason : '')
+      if (!result.ok && result.error) ui.toast.error(result.error)
+      else if (result.warning) ui.toast.error(result.warning)
+    } catch (e) {
+      ui.toast.error(e instanceof Error ? e.message : String(e))
+    } finally {
+      setStopBusy(false)
+      setInterrupting(false)
+    }
+  }
   useEffect(() => {
     if (task.status !== 'running') return
     setNow(Date.now())
@@ -88,10 +109,12 @@ function WorkerDetail({ task, onOpen }: { task: Task; onOpen: (id: string) => vo
   const lastEventAt = events.length ? events[events.length - 1].ts : 0
   const state = isParkedQueued(task) ? PARKED_QUEUED_LABEL : TASK_STATUS_LABELS[task.status]
   const running = task.status === 'running'
+  const stoppable = running || task.status === 'queued'
   return <section className={`worker-pane status-${task.status}${running ? ' is-live' : ''}`} aria-label="子任务详情">
     <header className="worker-pane-header">
       <div className="worker-pane-title">
         <h2 title={task.title}>{task.title}</h2>
+        {stoppable && <button type="button" className="btn danger worker-pane-stop" disabled={stopBusy} onClick={() => setInterrupting(true)} title="打断该队员任务（可附回执）"><Square size={12} aria-hidden="true" /><span className="worker-pane-stop-text">停止</span></button>}
         <button type="button" onClick={() => onOpen(task.id)} title="打开完整详情" aria-label="打开子任务完整详情"><ExternalLink size={14} aria-hidden="true" /><span className="worker-pane-open-text">完整详情</span></button>
       </div>
       <div className="worker-pane-meta">
@@ -110,5 +133,6 @@ function WorkerDetail({ task, onOpen }: { task: Task; onOpen: (id: string) => vo
     {permissionError && <div className="data-state-banner" role="alert"><span>{permissionError}</span><button type="button" className="btn" onClick={() => void refreshPermissions()}><RefreshCw size={13} /> 刷新审批</button></div>}
     {permissionNotice && <div className="data-state-banner" role="status">{permissionNotice}</div>}
     <div className="worker-pane-timeline"><TurnTimeline task={task} turns={turns} activeNav={activeNav} following={following} onFollowLatest={followLatest} onNavigate={navigate} onRewind={noRewind} logRef={logRef} onScroll={onScroll} /></div>
+    {interrupting && <InterruptDialog title={task.title} busy={stopBusy} onConfirm={(reason) => void confirmInterrupt(reason)} onClose={() => setInterrupting(false)} />}
   </section>
 }

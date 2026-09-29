@@ -20,7 +20,7 @@
 | [DESIGN-SYSTEM-V2.md](DESIGN-SYSTEM-V2.md) | v2 视觉规范参考；本轮统一调整以 UI-UNIFICATION.md 为准 | A · 已注明后续替代项 |
 | [HOT-UPDATE-IMPL-DESIGN.md](HOT-UPDATE-IMPL-DESIGN.md) | 免安装热更机制设计基准：三层（渲染/载荷/壳）指针模型、验签、自愈回退 | A · 0.19–0.21 已全量落地 |
 | [HOT-FEED-DEPLOY.md](HOT-FEED-DEPLOY.md) | 热更 feed 运维手册：nginx 部署、两条发版命令、回滚、域名迁移 | A · 现行操作手册 |
-| `graph/`（INVENTORY.md · deps.json · README） | 领域图谱：IPC 面 141 调用点/20 域清单、模块依赖图及读图指南 | 随并行工作合入本目录后即为现行参考 |
+| `graph/`（INVENTORY.md · CodeGraph 索引 · README） | 领域图谱：IPC 面 141 调用点/20 域清单、CodeGraph 语义索引（`npm run graph:index`）及读图指南 | 随并行工作合入本目录后即为现行参考 |
 
 ---
 

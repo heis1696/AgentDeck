@@ -106,12 +106,12 @@
     "release:hot": "node scripts/release-hot.mjs",
     "smoke:hot-shell": "node scripts/smoke-hot-shell.mjs",
     "deploy:hot": "node scripts/deploy-feed.mjs",
-    "graph:deps": "npm install --no-save --no-audit --no-fund dependency-cruiser@18 3d-force-graph && depcruise src --include-only \"^src\" --output-type mermaid --no-config > docs/graph/deps.mmd && depcruise src --include-only \"^src\" --output-type json --no-config > docs/graph/deps.json && node -e \"const j=require('./docs/graph/deps.json');if(j.modules.length<140)throw new Error('deps graph too small: '+j.modules.length);console.log('deps graph ok: '+j.modules.length+' modules')\"",
-    "graph:view": "node scripts/view-graph.mjs",
+    "graph:index": "node scripts/graph-index.mjs",
     "ship": "node scripts/ship.mjs",
     "smoke:hot-feed": "node scripts/smoke-hot-feed.mjs"
   },
   "devDependencies": {
+    "@astudioplus/codegraph-mcp": "^0.20.1",
     "@types/node": "^22.10.0",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",

@@ -70,6 +70,14 @@ export function parseId(value: unknown, label = 'id') {
   return stringValue(value, label)!
 }
 
+/** tasks:cancel 的打断回执：undefined = 系统取消不打标；string（含空串）= 用户打断，
+ *  非空 trim 后钳制 500 字符（空串/纯空白归空 = 「未填写原因」） */
+export function parseCancelReason(value: unknown): string | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string') throw new Error('reason 必须是字符串')
+  return value.trim().slice(0, 500)
+}
+
 export function parseContent(value: unknown, label = '内容') {
   return stringValue(value, label)!
 }
