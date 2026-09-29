@@ -422,7 +422,7 @@ APIs remain outside this request's implementation.
 - Run `npm run typecheck`, `npm run build`, `npm run smoke:stage6`, and
   `npm run smoke:ui`; add focused behavioral checks where the risk warrants it.
 - Run relevant specialist suites if execution, delegation, sidecar, or
-  worktree behavior changes. Refresh `npm run graph:deps` after source
+  worktree behavior changes. Refresh `npm run graph:index` after source
   structure changes. Complete `git diff --check`.
 - Use the existing isolated visual fixture in `scripts/smoke-ui-visual.mjs`
   where suitable. Report actual GUI coverage and any limitations accurately.

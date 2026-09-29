@@ -1,70 +1,108 @@
-# docs/graph — 代码地图集（知识图谱枢纽）
+# docs/graph — CodeGraph 语义索引（代码图枢纽）
 
-本目录是 AgentDeck 的代码地图入口：给 agent 与人共用的仓库结构事实源。四份产物分工如下。
+本目录是 AgentDeck 的代码图入口：给 agent 与人共用的仓库结构事实源。代码图由 [CodeGraph](https://github.com/codegraph-ai/CodeGraph) 驱动——基于 tree-sitter 的语义图（函数/类/导入/调用链，42 个查询工具、38 种语言），引擎经 devDependency `@astudioplus/codegraph-mcp` 的 postinstall 从 GitHub release 下载本平台二进制（win32-x64 落在包内 `bin/`）。⚠️ 同名裸包 `codegraph` 是 469 字节占位空包，不要装。
 
-## 索引：四份产物怎么用
+> 旧 dependency-cruiser 管线（`deps.mmd` / `deps.json` / `deps.md`、`npm run graph:deps` / `graph:view` 3D 星图）已于 2026-09 退役删除。其中的历史口径（143/292 基线、模块邻接表、死代码三档判定）仍以 [`INVENTORY.md`](./INVENTORY.md) 为准。
+
+## 索引：本目录有什么
 
 | 文件 | 性质 | 什么时候看它 |
 | --- | --- | --- |
-| [`INVENTORY.md`](./INVENTORY.md) | **原始盘点**（只读快照）：全量文件职责表、邻接表、循环依赖判定、死代码候选三档、smoke 直连清单（附录 A/B） | 要**证据与全量清单**时：查某个符号谁在用、某文件干什么、死代码判定依据 |
-| [`ARCHITECTURE-GRAPH.md`](./ARCHITECTURE-GRAPH.md) | **人读主图**：6 张 Mermaid 图（四层总览 / 编排主干 / IPC 域地图 / sidecar 双腿 / hot 链路 / renderer 分层），每图配人话导读 | 想**快速理解架构**时：新人入职、动手前定位改动面 |
-| [`deps.mmd`](./deps.mmd) / [`deps.json`](./deps.json) | **机读全量图**：dependency-cruiser 输出，143 模块（133 个 .ts/.tsx + 10 个 css）/ 292 条已解析依赖边 | 要**机器可计算的依赖事实**时：agent 检索引用关系、脚本化分析、画自定义视图 |
-| `docs/ARCHITECTURE.md` / `docs/API.md` | 既有**人工叙事文档**：ARCHITECTURE 讲设计决策与领域概念，API 是 IPC 面参考手册 | 图谱回答「**是什么、谁连谁**」；这两篇回答「**为什么这么设计、每个 API 怎么用**」。三者互补不互替 |
+| **CodeGraph 语义索引** | 机读语义图：当前快照 190 个 src 文件 / 6206 节点 / 13401 边（随提交漂移，以 `npm run graph:index` 输出为准） | 要**机器可计算的代码事实**时：符号检索、谁调用它、循环依赖、死导入、影响面 |
+| [`ARCHITECTURE-GRAPH.md`](./ARCHITECTURE-GRAPH.md) | **人读主图**：6 张 Mermaid 图 + 人话导读（**人工维护**，不随索引自动更新） | 想**快速理解架构**时：新人入职、动手前定位改动面 |
+| [`INVENTORY.md`](./INVENTORY.md) | **原始盘点**（只读快照）：全量文件职责表、死代码候选三档、smoke 直连清单（附录 A/B） | 要**证据与全量清单**时；判死代码前必查（见 `AGENTS.md` 铁律） |
+| `docs/ARCHITECTURE.md` / `docs/API.md` | 既有**人工叙事文档** | 图谱回答「是什么、谁连谁」；这两篇回答「为什么这么设计、每个 API 怎么用」 |
 
-## 怎么看图（渲染方式）
+## 刷新索引
 
-| 想看什么 | 怎么打开 |
+```bash
+npm run graph:index
+```
+
+等价展开（`scripts/graph-index.mjs`，spawn args 数组直调引擎、不经 shell，规避 Windows 引号地狱）：
+
+```bash
+npx codegraph-mcp --workspace src --exclude .agentdeck-worktrees --exclude .agentdeck-reports \
+  --exclude out --exclude dist --exclude release --exclude teardown \
+  --embedding-model static --run-tool codegraph_find_entry_points --tool-args '{}'
+```
+
+- **口径**：`--workspace src` 与旧管线 `depcruise src` 同语义——索引计数即 src 文件数；目录聚合摘要 `get_module_summary` 在本版引擎返回全 0，脚本改以索引器日志行为护栏数据源（引擎版本随 package-lock 固定，日志格式稳定）。
+- **护栏**（继承旧管线教训：空图静默 exit 0）：src 文件数 < 150 或符号数为 0 → 非零退出并报数；通过则打印 文件数/符号数/节点/边/模式/耗时 与 MCP 查询入口。
+- **降级**：默认 `--embedding-model static`（免 ONNX 免 1.5GB 内存门禁）；启动失败或报内存门禁时自动降级重跑一次 `--graph-only`（纯结构兜底），输出注明当前模式。
+
+## 查询四条路
+
+### ① MCP 常驻接入（日常查询首选）
+
+Claude Code 在 `~/.claude.json` 加：
+
+```json
+{
+  "mcpServers": {
+    "codegraph": {
+      "command": "npx",
+      "args": ["-y", "@astudioplus/codegraph-mcp", "--workspace", "<仓库根路径>"]
+    }
+  }
+}
+```
+
+- **DSH 用户**：装 `@hyzyn/dsh-codegraph` 插件即可，无需手写配置。
+- **VS Code / JetBrains**：marketplace 装 CodeGraph 官方扩展/插件，装完自带图面板（引擎复用同一份 `~/.codegraph` 安装）。
+
+### ② one-shot（脚本 / CI：先索引 → 跑一次查询 → 退出）
+
+以下三条均在本仓库实测通过（`--graph-only` 纯结构模式，免模型加载）：
+
+```bash
+# 符号检索（名字/文本匹配；返回 node_id / 位置 / 签名）
+npx codegraph-mcp --workspace src --graph-only --run-tool codegraph_symbol_search \
+  --tool-args '{"query":"TaskRunner","limit":10}'
+
+# 谁调用了我（nodeId 来自上一步 symbol_search 的 node_id，注意是字符串）
+npx codegraph-mcp --workspace src --graph-only --run-tool codegraph_get_callers \
+  --tool-args '{"nodeId":"464"}'
+
+# 循环依赖（文件级环，含自环）
+npx codegraph-mcp --workspace src --graph-only --run-tool codegraph_find_circular_deps \
+  --tool-args '{}'
+```
+
+`codegraph_analyze_impact`（影响面）本版 one-shot 的 uri+line 形态不可用（见「已知坑」），待引擎修复后补入实测示例。
+
+配套还有 `codegraph_find_by_imports`（按导入名反查引用方，实测可用）、`codegraph_find_dead_imports`（死导入候选，实测当前 144 条）、`codegraph_get_dependency_graph` / `codegraph_get_callees` / `codegraph_traverse_graph` 等 42 个工具，全部带 `codegraph_` 前缀。
+
+### ③ IDE 图面板（可视化）
+
+VS Code / JetBrains 插件内置图视图，查看文件/符号依赖关系——替代退役的 3D 星图（`deps-3d.html`）。
+
+### ④ 人读文档
+
+[`ARCHITECTURE-GRAPH.md`](./ARCHITECTURE-GRAPH.md) 人读主图**保留人工维护**（机器图是结构口径，不替代人话导读）；`codegraph_generate_architecture_doc` 可基于索引生成架构文档草稿，供人修订。
+
+## 旧 → 新能力映射
+
+| 旧管线（dependency-cruiser，已退役） | CodeGraph 对应 |
 | --- | --- |
-| **3D 力导向星图**（节点悬浮空间网状，可拖拽旋转缩放） | **`npm run graph:view`** — 生成 `deps-3d.html`（3d-force-graph，库+数据全内联、离线可开）并自动开浏览器；面板可搜索聚焦、点节点高亮其依赖；`-- --no-open` 只生成不打开 |
-| 6 张人读架构图 | GitHub 上直接渲染 `ARCHITECTURE-GRAPH.md`；本地 VS Code 装「Markdown Preview Mermaid Support」扩展后预览 |
-| 平面交互依赖图（depcruise 官方页） | `npm run graph:view -- --flat` — 生成并打开 `deps.html` |
-| 全量图（GitHub 页内渲染） | [`deps.md`](./deps.md)（mermaid 壳，随 `graph:view` 再生成）；节点数接近 GitHub 页内 mermaid 上限，渲染失败就改用上面的 3D 星图 |
-| 单文件 `deps.mmd` | 粘贴到 https://mermaid.live 即时渲染 |
+| `deps.json` 依赖查询（脚本解析 modules/dependencies） | `codegraph_get_dependency_graph`（本版 one-shot 报 Invalid URI，见已知坑）/ `codegraph_find_by_imports`（实测可用） |
+| 循环依赖判定 | `codegraph_find_circular_deps`（实测可用，文件级环） |
+| 死代码候选（INVENTORY §4 三档） | `codegraph_find_dead_imports` 只覆盖死**导入**；死**符号**判定仍走 INVENTORY 附录 A + smoke 直连清单（`AGENTS.md` 铁律不变） |
+| 3D 星图 `npm run graph:view`（`deps-3d.html`） | VS Code / JetBrains 插件的图面板 |
+| `ARCHITECTURE-GRAPH.md` 人读主图 | 保留，**人工维护** |
+| ——（旧管线没有） | `codegraph_generate_architecture_doc` 架构文档草稿；`codegraph_analyze_impact` 影响面 |
 
-`deps.html` / `deps-3d.html` 是按需产物（自包含页面），已 gitignore 不入库；入库的是 `deps.mmd` / `deps.json` / `deps.md`。
+## 已知坑
 
-## 再生成
-
-```bash
-npm run graph:deps
-```
-
-等价展开（`package.json` 的 `graph:deps`，一条命令含产物校验）：
-
-```bash
-npm install --no-save --no-audit --no-fund dependency-cruiser@18
-npx dependency-cruiser src --include-only "^src" --output-type mermaid --no-config > docs/graph/deps.mmd
-npx dependency-cruiser src --include-only "^src" --output-type json  --no-config > docs/graph/deps.json
-# 内置护栏：JSON 里模块数 < 140 则报错退出
-```
-
-**已知坑（本次踩过）**：用 `npx -y dependency-cruiser@18`（纯 npx 缓存实例）时，depcruise 从自身安装目录 `require('typescript')`，解析不到项目的 typescript 包 → TS 解析器不激活 → **静默输出空图且 exit 0**（`deps.mmd` 只剩一行 `flowchart LR`）。对策就是上面脚本里的先 `npm install --no-save dependency-cruiser@18`（装进项目 node_modules，不改 package.json / package-lock.json），再本地 `npx` 解析。生成后务必核对 `deps.json` 的 `modules.length ≥ 140`（`graph:deps` 已内置该校验，不达标即失败退出）。
-
-**口径说明**：dependency-cruiser 默认**不含纯 `import type` 的边**（编译期擦除），故边数比 INVENTORY §2.7 邻接表（含 type-only）少；查 type-only 依赖以 INVENTORY §2.7 为准。
-
-## 数据基线
-
-- **详情反馈修复刷新（2026-09-21）**：机读图已纳入 `WorkerOverview` 和 `workerRounds`，当前为 183 个模块；详情页复用现有 `FloatWindow`，未新增编排或后端依赖。
-
-- **工作流体验优化刷新（2026-09-20）**：`deps.mmd` / `deps.json` 已重新生成，为 181 个模块，包含 `AgentPicker`、`usePermissions`、共享权限选项及当前任务隔离实现。`npm run graph:deps` 使用 `ELECTRON_SKIP_BINARY_DOWNLOAD=1` 跳过无关 Electron 二进制下载；图谱生成及规模校验通过。
-
-- **UI 统一改造刷新（2026-09-20）**：当前 `deps.mmd` / `deps.json` 已经 `npm run graph:deps` 刷新，为 173 个模块；`interaction-center`、`interaction-layer` 与订阅/焦点 hook 已纳入。下方数字及 INVENTORY 主体仍保留原始盘点时的历史口径，当前依赖以机器图为准。
-
-- **commit `6b2f038`**（`chore(ship): 热更发布 0.22.0-hot.19 …`，生成图谱时 main 侧最新提交），快照取自检自该提交的干净 worktree。
-- **机读图刷新注记（2026-09-19）**：`deps.mmd` / `deps.json` / `deps.md` / `deps-3d` 系列后经 `npm run graph:view` 在主检出重生成，因 `src/main/prompts/` WIP 当时已在工作区，机读图现为 **151 模块 / 305 边**（多了 prompts 组 8 文件）；INVENTORY 与 ARCHITECTURE-GRAPH 仍为基线口径 **143/292**，两套数字之差即该 WIP。WIP 合入后重跑 `npm run graph:deps` 即自然归一。
-- 主检出当时存在未提交 WIP：7 个已修改文件（`scripts/smoke-meeting-consult.mjs`、`src/main/{agent-forge,agents,delegate,goal-controller,meeting-controller,runner}.ts`）+ 未跟踪目录 `src/main/prompts/`。**这批 WIP 不在本图谱内**——图谱描述的是已提交基线。
-- 因此 INVENTORY 中「`src/main/prompts/` 不存在、提示词逻辑内嵌于 delegate/agent-forge/goal-controller/meeting-controller」等表述只对基线成立；WIP 落地后需重跑 `npm run graph:deps` 并复核相关章节。
-- 口径备注：`deps.json` 的 143 模块 = 133 个 .ts/.tsx **+ 10 个 css**（`main.tsx` 引入的样式被 dependency-cruiser 计入）；INVENTORY 的「src 总量 136」单指 .ts/.tsx，两者并不矛盾（136 → 133 的差值是本轮删除的三个 sidecar 垫片）。
-
-## WIP 后处理清单
-
-以下事项因落在主检出**禁改 WIP 文件**里（本轮动了会冲突毁两边），只登记不动刀。WIP 合入后处理：
-
-1. **WIP 文件内的死符号**：`src/main/goal-controller.ts:44-48` 的 `computeGoalProgressKey` / `stableProgressKey` / `computeProgressKey`——三个都是 `progressKeyForOutput` 的历史迭代别名，全仓零引用（INVENTORY §4.A 高置信档）。注意 `progressKeyForOutput` 本身被 `smoke-goal-guards` 消费，**不可删**（§4.C）。其余 WIP 文件（delegate/runner/agents/agent-forge/meeting-controller/smoke-meeting-consult/prompts）合入后建议重跑一轮 INVENTORY 的符号扫描再定。
-2. **renderer 三角环已解耦（2026-09-20）**：`TurnTimeline` 已改依赖 `ui/interaction-center.ts`，不再反向导入 `SideDock`。UI 中心与 `interaction-layer` 共用类型明确的状态/命令接口；`npm run smoke:ui` 包含导入环检查及真实 React DOM 焦点回归。
-3. **45/46 文件数差异**：任务书口径「src/main 46 个顶层 .ts」，基线快照实为 **45 个**。差异来源即 WIP 的 `src/main/prompts/`——该目录合入后顶层计数会再次变化，届时以 `npm run graph:deps` 产物为准（另：`src/main/sidecar/` 下三个零引用垫片已在本轮删除，`src/main/sidecar/` 目录仅存 `protocol.ts`）。
+- **引擎下载**：postinstall 从 GitHub release 拉 ~101MB 引擎 + `onnxruntime.dll` sidecar，直连可能极慢/超时；**下载失败不炸安装**，重试 `npx codegraph-mcp-fetch-engine`。注意 Node 下载器不读 `HTTP(S)_PROXY`——代理环境要么开 TUN/系统代理，要么手工下载落位到 `node_modules/@astudioplus/codegraph-mcp/bin/`（官方 URL + `.sha256` 校验和，落位后写 `.engine-version` 文件内容为引擎版本号）。
+- **内存门禁**：嵌入模式（bge-small 等默认模型需 ONNX）要求 ~1.5GB 可用内存，不足时引擎自动降 graph-only；`CODEGRAPH_SKIP_MEMORY_CHECK=1` 可强开（慎用，可能被 OOM 杀）。本仓库脚本默认 `--embedding-model static` 避开此门禁。
+- **static 模型位置**：`~/.codegraph/static_models/jina-code-static-256/`（postinstall best-effort 下载；缺失时索引与结构查询照常，仅语义搜索不可用，脚本不报错）。
+- **索引库不入库**：`.codegraph/`（工程本地产物，已 gitignore）；全局图库与命名空间在 `~/.codegraph/`（`graph.db`，按 workspace 派生命名空间）。
+- **one-shot 位置解析不可靠（0.20.1）**：`codegraph_analyze_impact` / `codegraph_get_callers` 的 uri+line 形态报 "Could not find symbol at location"，`codegraph_get_dependency_graph` 的 uri 正反斜杠都报 "Invalid URI"（MCP 模式同样）。用 `nodeId`（先 `codegraph_symbol_search` 取 `node_id`）与 `codegraph_find_by_imports` 兜底，等引擎升级后复核。
+- **tree-sitter 解析告警**：`src/preload/index.ts:135` 的 `import('../shared/meeting').Meeting` 会打一条 parse WARN（引擎已知噪音，符号照常提取，不影响护栏）。
 
 ## 维护约定
 
-- 改动 `src/` 结构（新增目录组、新构建入口、新 IPC 域）后：跑 `npm run graph:deps` 刷新机读图；若分组/主干变了，同步修订 `ARCHITECTURE-GRAPH.md` 对应图与 `INVENTORY.md`（或注明「以 deps.json 为准」）。
-- 图谱描述**已提交基线**；WIP 一律进上方清单，不提前画进图里。
+- 改动 `src/` 结构后跑 `npm run graph:index`；护栏不过（<150 文件或 0 符号）说明索引坏了，先修再提交。
+- 图谱描述**已提交基线**；WIP 不画进图（与旧约定一致）。
+- `INVENTORY.md` 是只读快照，不随索引刷新；死代码判定以它 + smoke 直连清单为准。
