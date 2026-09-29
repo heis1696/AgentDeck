@@ -7,8 +7,12 @@ import { officeSessionPrompt } from './prompts/meeting'
 /** 办公室任务的去重键前缀（每位队长一个长期会话） */
 export const OFFICE_TASK_KEY_PREFIX = 'office_'
 
-/** 办公室会话任务（会议发言/咨询应答专用）：runner 据此不注入派发与接力协议、不受理派单 */
-export function isOfficeTask(task: Pick<Task, 'dedupeKey'>): boolean {
+/** 办公室会话任务（会议发言/咨询应答专用）：runner 据此不注入派发与接力协议、不受理派单。
+ *  判据只认创建侧写入的 officeAgentId——不用 dedupeKey 前缀，因为公开建单入口的
+ *  requestId/idempotencyKey 会成为 dedupeKey，用户任务可以自称 office_* 而劫持这条分支。
+ *  （旧记录没有该字段时退回前缀判断：那是本功能落地前建的单，只可能是办公室会话。） */
+export function isOfficeTask(task: Pick<Task, 'officeAgentId'> & Partial<Pick<Task, 'dedupeKey'>>): boolean {
+  if (typeof task.officeAgentId === 'string' && task.officeAgentId) return true
   return !!task.dedupeKey && task.dedupeKey.startsWith(OFFICE_TASK_KEY_PREFIX)
 }
 
@@ -87,6 +91,7 @@ export class AgentSessionRegistry {
         trigger: 'meeting' as RunTrigger,
         suppressIssue: true,
         titleAuto: false,
+        officeAgentId: agent.id,
         dedupeKey: this.key(agent.id)
       }
       task = this.taskService.createTask(input, 'meeting')

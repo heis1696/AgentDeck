@@ -33,7 +33,7 @@ const TASK_INDEX_FIELDS = [
   'createdAt', 'startedAt', 'endedAt', 'result', 'error', 'failure', 'attempt',
   'roundsUsed', 'handoff', 'continuesFrom', 'parked', 'dispatchHold', 'manualStartConfirmedAt', 'backgroundRunning', 'titleAuto', 'sessionId',
   'gitDiff', 'gitStat', 'gitSnapshot', 'usage', 'eventCount', 'unavailableReason', 'worktree', 'workVersion', 'dedupeKey',
-  'delegateSourceRunId', 'delegateDeliveredAt', 'delegateRejections'
+  'delegateSourceRunId', 'delegateDeliveredAt', 'delegateRejections', 'officeAgentId'
 ] as const
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -153,7 +153,7 @@ export function migrateTaskIndex(raw: unknown, now = Date.now(), options: { reco
 export type TaskCreateRecord = Pick<Task, 'title' | 'prompt' | 'workdir' | 'backend'> & Partial<Pick<Task,
   'parentTaskId' | 'workerIndex' | 'integration' | 'agentId' | 'handoff' | 'continuesFrom' | 'parked' |
   'backgroundRunning' | 'suppressIssue' | 'trigger' | 'issueId' | 'goalId' | 'phaseIndex' | 'titleAuto' |
-  'unavailableReason' | 'worktree' | 'workVersion' | 'dedupeKey' | 'delegateSourceRunId' | 'dispatchHold'>>
+  'unavailableReason' | 'worktree' | 'workVersion' | 'dedupeKey' | 'delegateSourceRunId' | 'dispatchHold' | 'officeAgentId'>>
 
 export interface TaskExpectation {
   status?: TaskStatus | readonly TaskStatus[]

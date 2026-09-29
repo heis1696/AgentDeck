@@ -62,7 +62,7 @@ export function goalRoundRecap(input: {
   ]
   if (nextPlan) lines.push(`- 上次定下的计划：${nextPlan}`)
   if (blockers?.length) lines.push(`- 阻塞：${blockers.join('；')}`)
-  if (failures > 0) lines.push(`- 上一次推进失败：${taskError || '（原因未知）'}（自动续轮 ${failures}/2）`)
+  if (failures > 0) lines.push(`- 上一次推进失败：${taskError || '（原因未知）'}（自动续轮 ${failures}/2——连续失败到 2 次就终止本目标，不再自动续轮）`)
   lines.push(
     '请开始下一次推进：',
     `1. 第一行输出本次评估 ${ROUND_MARK}（${ROUND_OUTCOMES}）`,

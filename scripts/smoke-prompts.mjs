@@ -163,6 +163,52 @@ check(r(p.investigationTaskPrompt('查 a.ts 的调用方')).startsWith('只读�
 check(r(p.investigationFeedback([{ to: 'Gamma', text: 'fact' }])).includes('调查结果') && p.investigationFeedback([{ to: 'Gamma', text: 'x' }]).includes('表态标记'), '调查回灌：提醒原回合格式要求仍然有效')
 check(r(p.actionItemTaskPrompt('补测试', ['覆盖率 80%', 'CI 绿'])).includes('验收条件：\n- 覆盖率 80%\n- CI 绿'), '行动项任务：验收条件逐条列出')
 
+// ================= 示例回灌真实解析器 =================
+// 只断言「文案包含常量」是同源恒真检查。这里把 prompt 里实际渲染出的标记抠出来喂给真实解析器——
+// 解析器认不认，才是这条契约的验收口径（属性值写成 agree|disagree 这类占位符会在这里露馅）。
+console.log('示例回灌解析器：')
+const meetingModule = await bundle('src/main/meeting-controller.ts', 'meeting-controller.cjs')
+const lastLine = (text) => text.trim().split('\n').pop() ?? ''
+
+const reviewExample = normal.match(/<review of="#1"[^>]*\/>/)?.[0] ?? ''
+check(!!reviewExample && delegate.parseReviews(reviewExample).length === 1, `审核示例标记可被解析：${reviewExample}`)
+check(delegate.parseReviews(reviewExample)[0]?.verdict === 'pass', '审核示例 verdict 是合法取值')
+check(delegate.parseReviews('<review of="#单号" verdict="pass|fail" note="x"/>').length === 0, '对照：占位符写法的审核标记确实解析不通过（所以示例必须给实例）')
+
+for (const [name, text] of [['汇报轮', report], ['质疑轮', challenge], ['答辩轮', defense], ['综合轮', r(p.synthPrompt('', 1, '议题', p.meetingData('x'), [], ['Alpha']))]]) {
+  const stance = meetingModule.parseStance(text)
+  check(!!stance && lastLine(text).startsWith('<stance'), `${name}：渲染出的末行表态可被解析（${stance?.verdict ?? 'null'}）`)
+}
+
+const objectionExample = challenge.match(/<objection [^>]*>[^<]*<\/objection>/)?.[0] ?? ''
+check(!!objectionExample && meetingModule.parseObjections(objectionExample, 'critic').length === 1, `反对示例标记可被解析：${objectionExample}`)
+
+check(meetingModule.parseEnvelope(p.ENVELOPE_SCHEMA) !== null, '纪要 schema 的字段形状可被 parseEnvelope 接受')
+check(meetingModule.parseEnvelope(JSON.stringify({ decisions: ['x'], objections: [{ text: 't', ref: 'r', resolved: true }], actionItems: [{ title: 'a', owner: 'Alpha', acceptance: ['ok'] }], openQuestions: [] })) !== null, '纪要最小合法实例可被接受')
+
+const continueExample = p.CONTINUE_BLOCK.match(/<continue start="auto">[\s\S]*?<\/continue>/)?.[0] ?? ''
+check(!!continueExample && delegate.parseContinue(continueExample).length === 0, '接力示例（带指纹）位于回复末尾也不触发')
+check(delegate.parseContinue('<continue start="auto">阶段2：按 docs/plan.md 实施 UI；阶段1 已完成数据层；验收：构建通过</continue>').length === 1, '真实接力简报仍可触发')
+
+// ================= 办公室身份端到端 =================
+// 公开建单入口允许自定义 requestId/idempotencyKey，它们会成为 dedupeKey；用户任务因此可以自称
+// office_*——那不该让它被当成办公室会话（跳过派发协议、忽略派单）。
+console.log('办公室身份：')
+{
+  const [{ TaskStore }, { TaskService }] = await Promise.all([
+    bundle('src/main/store.ts', 'store.cjs'),
+    bundle('src/main/task-service.ts', 'task-service.cjs')
+  ])
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-office-identity-'))
+  const service = new TaskService({ store: new TaskStore(dir) })
+  const impersonator = service.createTask({ title: '用户任务', prompt: '干活', backend: 'zcode', agentId: 'ag_lead', requestId: 'office_ag_lead' })
+  check(!sessions.isOfficeTask(impersonator), '用户任务用 requestId 自称 office_* 也不会被误判为办公室会话')
+  const real = service.createTask({ title: '队长·办公室', prompt: '引导', backend: 'zcode', agentId: 'ag_lead', suppressIssue: true, officeAgentId: 'ag_lead', dedupeKey: 'office_ag_lead' })
+  check(sessions.isOfficeTask(real) && real.officeAgentId === 'ag_lead', '注册表创建的真实办公室任务带 officeAgentId 并被识别')
+  check(impersonator.id !== real.id, '两者是不同的任务记录（用户任务没有被办公室会话顶掉）')
+  fs.rmSync(dir, { recursive: true, force: true })
+}
+
 // ================= 锻造 =================
 console.log('锻造：')
 const prev = p.FORGE_SKILL_BODIES_PREVIOUS
@@ -196,6 +242,9 @@ rendered.push(p.LEAD_PERSONA, p.CLAUDE_PERSONA, p.CODEX_PERSONA, p.OPENCODE_PERS
 const dirty = rendered.filter((text) => /undefined|\[object Object\]|NaN|\$\{/.test(text))
 check(dirty.length === 0, `渲染卫生：${rendered.length} 段渲染文本无 undefined/[object Object]/NaN/未展开的 \${}`)
 check(rendered.every((text) => !/\n{3,}/.test(text)), '渲染卫生：没有连续空两行以上的拼接缝')
+const scanAttrs = [...rendered, p.FORGE_SKILL_BODY]
+const badAttrs = scanAttrs.flatMap((text) => [...text.matchAll(/<[a-z][^>]*?=[^>]*?\|[^>]*?\/?>/g)].map((m) => m[0]))
+check(badAttrs.length === 0, `标记属性里没有 | 占位符（会被照抄成解析器不认的值）：${badAttrs.slice(0, 3).join(' / ') || '无'}`)
 
 if (failures) {
   console.log(`\n❌ PROMPTS SMOKE FAILED（${failures} 项）`)
