@@ -4,7 +4,9 @@
  *
  * 只驱动真实组件与真实 shared 助手（jsdom + react-dom/client），不改写组件内部判定：
  *   shared/path-key      —— 与主进程 worktreePathKey 同语义的路径键（win32 折叠/分隔符
- *                           混用/尾随分隔符/`.` `..` 段；跨实现对拍锁死同语义）；
+ *                           混用/尾随分隔符/`.` `..` 段/UNC 根；跨实现对拍锁死同语义）；
+ *                           平台分支不读渲染页 process：preload 白名单注入
+ *                           （setSharedPathKeyPlatform）驱动的等价渲染环境另行专测；
  *                           最近工作区上浮/并入按路径键去重（别名写法不重复展示/持久化）；
  *   WorkspaceSwitcher    —— 当前项判定按路径键折叠：别名写法指向当前目录照样高亮
  *                           current + aria-current，非当前项不得误亮。
@@ -12,13 +14,14 @@
  * 运行：node scripts/smoke-ui-workspace-path.mjs（已接入 package.json smoke:ui 链）
  */
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { build } from 'esbuild'
 import { JSDOM } from 'jsdom'
 
 const root = path.resolve(import.meta.dirname, '..')
-const dom = new JSDOM('<!doctype html><div id="app"></div>', { url: 'http://localhost', pretendToBeVisual: true })
+const dom = new JSDOM('<!doctype html><div id="app"></div>', { url: 'http://localhost', pretendToBeVisual: true, runScripts: 'outside-only' })
 const { window } = dom
 for (const key of ['document', 'HTMLElement', 'Node', 'Element', 'Event', 'MouseEvent', 'FocusEvent']) globalThis[key] = window[key]
 globalThis.window = window
@@ -33,7 +36,7 @@ await build({
       "export { act, createElement } from 'react'",
       "export { createRoot } from 'react-dom/client'",
       "export { WorkspaceSwitcher } from './src/renderer/src/components/WorkspaceSwitcher'",
-      "export { sharedPathKey, pushRecentWorkspace, extendRecentWorkspaces } from './src/shared/path-key'"
+      "export { sharedPathKey, pushRecentWorkspace, extendRecentWorkspaces, setSharedPathKeyPlatform } from './src/shared/path-key'"
     ].join('\n'),
     resolveDir: root,
     loader: 'tsx'
@@ -47,7 +50,7 @@ await build({
   logLevel: 'silent'
 })
 
-const { act, createElement, createRoot, WorkspaceSwitcher, sharedPathKey, pushRecentWorkspace, extendRecentWorkspaces } = await import(pathToFileURL(outfile).href)
+const { act, createElement, createRoot, WorkspaceSwitcher, sharedPathKey, pushRecentWorkspace, extendRecentWorkspaces, setSharedPathKeyPlatform } = await import(pathToFileURL(outfile).href)
 
 let failures = 0
 const ok = (condition, label) => {
@@ -74,26 +77,106 @@ section('sharedPathKey：路径键规范化')
     ok(sharedPathKey('//server/share/../..') === '\\\\server\\share\\', 'UNC 混合别名形态（正斜杠 + `..`）同键')
     ok(sharedPathKey('\\\\server\\share\\..\\ws') === '\\\\server\\share\\ws', 'UNC 共享根内的 `..` 消解后正常拼接子段')
     ok(sharedPathKey('\\\\SERVER\\SHARE\\WS\\..') === '\\\\server\\share\\', 'UNC 大小写别名 + `..` 消解折叠为共享根同一键')
+    ok(sharedPathKey('\\\\server\\share') === '\\\\server\\share\\', 'UNC 根自带尾分隔符（与主进程 resolve 派生键一致）')
+    ok(sharedPathKey('\\\\server\\share\\') === sharedPathKey('\\\\server\\share'), 'UNC 根尾随分隔符可省（同键）')
+    ok(sharedPathKey('\\\\SERVER\\SHARE\\WS\\..') === sharedPathKey('\\\\server\\share'), 'UNC 段消解到根：键回到根形态')
   } else {
     ok(sharedPathKey('/a/b') === '/a/b', 'posix 键保持精确拼写')
     ok(sharedPathKey('/a/x/../b') === '/a/b', '`..` 段消解后同键')
     ok(sharedPathKey('/') === '/', '文件系统根保留分隔符')
     ok(sharedPathKey('/A/b') !== sharedPathKey('/a/b'), 'posix 大小写敏感：不同拼写不同键')
   }
-  // 与主进程实现对拍（win32 别名语义锁死）：git.ts 的 worktreePathKey 打包后逐一对照
+  // 与主进程实现对拍（路径键别名语义锁死）：git.ts 的 worktreePathKey 打包后逐一对照。
+  // 对拍键必须取宿主平台的绝对形态——共享键规则是平台语义，跨平台形态不构成契约
+  //（win32 裸 `/` 依赖 CWD 盘符、posix 的 `C:\` 是相对段，两侧纯字符串规范化无从对齐）
   const gitOut = path.join(root, 'out', 'smoke-ui-workspace-path-git.cjs')
   await build({ entryPoints: [path.join(root, 'src/main/git.ts')], outfile: gitOut, bundle: true, platform: 'node', format: 'cjs', target: 'node18' })
   const { worktreePathKey } = await import(pathToFileURL(gitOut).href)
-  const battery = [
+  const win32Battery = [
     'C:\\a\\b', 'c:/a/b/', 'C:\\a\\x\\..\\b', 'C:\\', 'c:/',
     '\\\\server\\share\\ws', '//server/share/ws',
     // 越过共享根的 `..` 弹出下界：主进程 resolve 停在 `\\server\share\`，键必须同源
     '\\\\server\\share', '\\\\server\\share\\', '\\\\server\\share\\..',
     '\\\\server\\share\\..\\..', '//server/share/../..', '\\\\server\\share\\..\\ws',
+    '\\\\server\\share\\WS\\..', '//server/share',
     path.join(root, 'src'), path.join(root, 'src') + path.sep, root.toUpperCase()
   ]
+  const posixBattery = [
+    '/a/b', '/a/b/', '/a/x/../b', '/', '/SERVER/share', '//server/share',
+    path.join(root, 'src'), path.join(root, 'src') + path.sep, root.toUpperCase()
+  ]
+  const battery = process.platform === 'win32' ? win32Battery : posixBattery
   for (const candidate of battery) {
     ok(sharedPathKey(candidate) === worktreePathKey(candidate), `与主进程键对拍一致：${candidate}`)
+  }
+}
+
+/* ------------------------------- 平台注入分支（preload 白名单通道驱动的语义选择） */
+
+section('平台注入：win32 折叠 / posix 精确两分支各自对应用例（不依赖宿主平台）')
+{
+  // win32 注入：别名折叠生效——任何宿主平台上注入 win32 后都必须走折叠语义
+  setSharedPathKeyPlatform('win32')
+  ok(sharedPathKey('C:\\REPOS\\Alpha') === sharedPathKey('c:/repos/alpha'), '注入 win32：大小写/分隔符别名折叠同键')
+  ok(sharedPathKey('\\\\Server\\Share') === '\\\\server\\share\\', '注入 win32：UNC 根折叠大小写并自带尾分隔符')
+  ok(sharedPathKey('//server/share/ws') === '\\\\server\\share\\ws', '注入 win32：正斜杠 UNC 折叠为反斜杠双分隔符形态')
+  // posix 注入：精确拼写——别名写法即不同键，任何宿主平台上都不得折叠
+  setSharedPathKeyPlatform('linux')
+  ok(sharedPathKey('/A/b') !== sharedPathKey('/a/b'), '注入 posix：大小写精确（别名拼写是不同键）')
+  ok(sharedPathKey('/a/b/') === '/a/b' && sharedPathKey('/a/x/../b') === '/a/b', '注入 posix：尾随分隔符剥离与 `..` 段消解照常')
+  ok(sharedPathKey('\\\\server\\share') === '\\\\server\\share', '注入 posix：反斜杠按普通字符参与段名（不产生 UNC 语义）')
+  // 空注入 = 未注入：回退宿主 process.platform（主进程/Node 冒烟环境），行为与回退分支一致
+  setSharedPathKeyPlatform(undefined)
+  ok(sharedPathKey(process.platform === 'win32' ? 'C:\\A' : '/a/b') === sharedPathKey(process.platform === 'win32' ? 'c:\\a' : '/a/b'), '空注入回退宿主平台分支')
+  // 还原为宿主平台等价注入：后续段落在确定语义下运行
+  setSharedPathKeyPlatform(process.platform)
+}
+
+/* ----------------------- 渲染层真实环境等价：无 process + preload 通道注入 + 对拍 */
+
+section('渲染层平台感知：无 process 环境经注入通道取得正确平台（preload 等价路径）')
+{
+  // preload 白名单通道静态证据：preload 显式交出平台字面量（而非暴露 process）
+  const preloadSource = fs.readFileSync(path.join(root, 'src/preload/index.ts'), 'utf8')
+  ok(/^\s*platform: process\.platform,/m.test(preloadSource), 'preload 白名单通道注入平台字面量（platform: process.platform）')
+  const entrySource = fs.readFileSync(path.join(root, 'src/renderer/src/main.tsx'), 'utf8')
+  ok(entrySource.includes('setSharedPathKeyPlatform(bridge?.platform)'), '渲染层入口在首次渲染前落位注入平台')
+  // shared/path-key 源头不读渲染页全局 process 之外的宿主痕迹：平台分支只有注入点
+  // 与 process 回退两条路（bundle 进渲染层后回退不可达，分支选择完全由注入决定）
+  const keySource = fs.readFileSync(path.join(root, 'src/shared/path-key.ts'), 'utf8')
+  ok(keySource.includes('typeof process !== \'undefined\' && process.platform === \'win32\''), '平台回退只认 process.platform（渲染页无 process 时依赖注入）')
+  // 真实渲染环境等价：platform:'browser' 打包 + jsdom 上下文执行——该上下文没有
+  // Node 的 process（先证环境确实无 process，防用例退化为 Node 回退分支虚过），
+  // 平台信息只经注入函数进入，键值与主进程实现对拍
+  const browserOut = path.join(root, 'out', 'smoke-ui-workspace-path-browser.cjs')
+  await build({ entryPoints: [path.join(root, 'src/shared/path-key.ts')], outfile: browserOut, bundle: true, platform: 'browser', format: 'cjs', logLevel: 'silent' })
+  const browserCode = fs.readFileSync(browserOut, 'utf8')
+  window.eval(`var __pathKeyModule = { exports: {} };\n(function (module, exports) {\n${browserCode}\n})(__pathKeyModule, __pathKeyModule.exports);`)
+  const rendererApi = window.__pathKeyModule.exports
+  ok(window.eval('typeof process') === 'undefined', '渲染等价环境确实没有 process（jsdom 上下文）')
+  ok(rendererApi.sharedPathKey(process.platform === 'win32' ? 'C:\\A\\b' : '/a/b') !== '', '无注入时渲染层键规范化不抛（回退分支）')
+  const win32Expected = [
+    ['C:\\a\\b', 'c:\\a\\b'], ['c:/a/b/', 'c:\\a\\b'], ['C:\\', 'c:\\'],
+    ['\\\\server\\share', '\\\\server\\share\\'], ['\\\\server\\share\\ws', '\\\\server\\share\\ws']
+  ]
+  const posixExpected = [['/a/b', '/a/b'], ['/a/b/', '/a/b'], ['/', '/'], ['/A/b', '/A/b']]
+  if (process.platform === 'win32') {
+    rendererApi.setSharedPathKeyPlatform('win32')
+    const gitOut = path.join(root, 'out', 'smoke-ui-workspace-path-git.cjs')
+    const { worktreePathKey } = await import(pathToFileURL(gitOut).href)
+    for (const [candidate] of win32Expected) {
+      ok(rendererApi.sharedPathKey(candidate) === worktreePathKey(candidate), `渲染层（无 process+注入 win32）与主进程键对拍一致：${candidate}`)
+    }
+    ok(rendererApi.sharedPathKey('C:\\REPOS\\Alpha') === 'c:\\repos\\alpha', '渲染层注入 win32 后别名折叠生效（不依赖 process）')
+    rendererApi.setSharedPathKeyPlatform('linux')
+    ok(rendererApi.sharedPathKey('C:\\A') !== rendererApi.sharedPathKey('c:\\a'), '渲染层注入 posix 后恢复精确拼写（分支随注入切换）')
+  } else {
+    rendererApi.setSharedPathKeyPlatform('linux')
+    for (const [candidate, expected] of posixExpected) {
+      ok(rendererApi.sharedPathKey(candidate) === expected, `渲染层（无 process+注入 posix）键正确：${candidate}`)
+    }
+    rendererApi.setSharedPathKeyPlatform('win32')
+    ok(rendererApi.sharedPathKey('C:\\REPOS\\Alpha') === 'c:\\repos\\alpha', '渲染层注入 win32 后折叠生效（分支随注入切换）')
   }
 }
 
@@ -157,7 +240,7 @@ if (process.platform === 'win32') {
     host.innerHTML = ''
   }
 } else {
-  console.log('  SKIP WorkspaceSwitcher 当前项折叠用例（非 win32 平台，路径等价判定退化为字面量比较）')
+  console.log('  SKIP WorkspaceSwitcher 当前项折叠用例（非 win32 平台，路径等价判定退化为字面量比较；注入分支语义已在上方专测）')
 }
 
 if (failures) {

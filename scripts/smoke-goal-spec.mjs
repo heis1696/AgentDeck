@@ -15,7 +15,7 @@ const bundle = async (entry, name) => {
 const { GoalController } = await import(await bundle('src/main/goal-controller.ts', 'goal-controller.cjs'))
 const { GoalStore } = await import(await bundle('src/main/goal-store.ts', 'goal-store.cjs'))
 const { parseGoalEvolve } = await import(await bundle('src/main/ipc-validation.ts', 'ipc-validation.cjs'))
-const { verifyAcceptance } = await import(await bundle('src/main/acceptance-verifier.ts', 'acceptance-verifier.cjs'))
+const { verifyAcceptance, isInsidePathKey } = await import(await bundle('src/main/acceptance-verifier.ts', 'acceptance-verifier.cjs'))
 
 let failed = 0
 const ok = (condition, label) => {
@@ -70,15 +70,26 @@ ok(prefixTrapOutside?.[0]?.passed === false, 'directory boundary holds: a prefix
     )
     : rootInside
   ok(rootAliasInside?.[0]?.passed === true, 'drive/filesystem root workdir: an alias-spelled target inside the root is still inside')
-  // 界外判定：另一块真实存在的盘（界外且存在 → passed=false 只能是边界判定所为）；
-  // 找不到第二块盘时退化为不存在的盘符路径（守卫归属判定不得越出根）
-  const candidateDrive = 'DEFGHIJKLMNOPQRSTUVWXYZ'.split('').map((letter) => `${letter}:\\`).find((driveRoot) => driveRoot.toUpperCase() !== rootWorkdir.toUpperCase() && fs.existsSync(driveRoot))
-  const rootOutsideTarget = candidateDrive ?? (rootWorkdir.toUpperCase() === 'C:\\' ? 'Q:\\agentdeck-out-of-root' : 'C:\\agentdeck-out-of-root')
-  const rootOutside = verifyAcceptance(
-    { workdir: rootWorkdir, acceptanceCriteria: [{ id: 'file_root_outside', text: `path exists: ${path.join(rootOutsideTarget, 'probe')}`, status: 'pending' }] },
-    { workdir: rootWorkdir, gitDiff: '' }
-  )
-  ok(rootOutside?.[0]?.passed === false, 'drive/filesystem root workdir: a target on another root stays outside')
+  // 界外判定用可观测夹具：归属判定函数输出直断（isInsidePathKey 纯键逻辑，界外路径
+  // 不必真实存在）——不依赖第二块盘；恰有另一块真实存在的盘时再补端到端案（界外且
+  // 存在 → passed=false 只能是边界判定所为）。win32 折叠 / posix 精确两分支各有对应用例
+  if (process.platform === 'win32') {
+    ok(isInsidePathKey('C:\\ws\\a.txt', rootWorkdir) === true, 'root workdir: containment folds case/disk spellings (win32 fold branch)')
+    ok(isInsidePathKey('C:\\wspace', 'C:\\ws') === false, 'boundary on a non-root directory: prefix-trap sibling stays outside (win32 fold branch)')
+    ok(isInsidePathKey('Q:\\probe', rootWorkdir) === false, 'root workdir: a target on another root is outside (decision only, no second disk needed)')
+    const otherRealDrive = 'DEFGHIJKLMNOPQRSTUVWXYZ'.split('').map((letter) => `${letter}:\\`).find((driveRoot) => driveRoot.toUpperCase() !== rootWorkdir.toUpperCase() && fs.existsSync(driveRoot))
+    if (otherRealDrive) {
+      const rootOutside = verifyAcceptance(
+        { workdir: rootWorkdir, acceptanceCriteria: [{ id: 'file_root_outside', text: `path exists: ${path.join(otherRealDrive, 'probe')}`, status: 'pending' }] },
+        { workdir: rootWorkdir, gitDiff: '' }
+      )
+      ok(rootOutside?.[0]?.passed === false, 'root workdir: a target on another real drive stays outside end to end')
+    }
+  } else {
+    ok(isInsidePathKey('/ws/a.txt', '/') === true, 'filesystem root workdir: every absolute target is inside (posix exact branch)')
+    ok(isInsidePathKey('/wspace', '/ws') === false, 'boundary on a non-root directory: prefix-trap sibling stays outside (posix exact branch)')
+    ok(isInsidePathKey('/WS/a.txt', '/ws') === false, 'posix is case-exact: an alias spelling is a different directory outside the boundary')
+  }
 }
 
 // diff 验收证据必须绑定「当前执行 + available 快照」：其他 Run / 其他阶段 / 无来源旧数据

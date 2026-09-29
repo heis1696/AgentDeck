@@ -860,6 +860,8 @@ main().catch((e) => { console.error(e); process.exit(3) })
 //   `..` 段别名写法被算成伪树名「..」（注册表查不到 → 误判「注册不在案」而非走到守卫）。
 // 场景前置：真实 alias 目录（fs 层面存在）+ 物理同树对穿校验（别名写入、规范写法读出），
 // 证明别名不是仅 resolve 字符串相等，而是本机文件系统上的同一棵树。
+// 大小写别名形态仅 win32 文件系统语义成立（POSIX 大小写敏感即另一棵树）；`..` 段别名
+// 形态两平台通用，红18 复用本场景以「段别名写法按 no longer detached 拒收」为锚点。
 const RED13 = `
 ${PRELUDE}
 const { reclaimWorktree } = require(__MUT_GIT__)
@@ -896,11 +898,11 @@ async function main() {
   git('-C', scaffoldPath, 'switch', scaffoldBranch)
   const canonicalRefused = await reclaimWorktree(scaffoldPath, { force: true, expectedOwnerTaskId: scaffoldName, expectedGenerationId: generation })
   assert(canonicalRefused.ok === false && canonicalRefused.status === 'retained' && (canonicalRefused.reason ?? '').includes('no longer detached'),
-    '小写写法拒绝重挂分支的 detach 脚手架（实际 ' + canonicalRefused.status + ': ' + (canonicalRefused.reason ?? '') + '）')
-  assert(fs.existsSync(scaffoldPath), '小写拒绝后目录存活')
+    '字面量写法拒绝重挂分支的 detach 脚手架（实际 ' + canonicalRefused.status + ': ' + (canonicalRefused.reason ?? '') + '）')
+  assert(fs.existsSync(scaffoldPath), '字面量拒绝后目录存活')
   const aliasRefused = await reclaimWorktree(aliasSpelling, { force: true, expectedOwnerTaskId: scaffoldName, expectedGenerationId: generation })
   assert(aliasRefused.ok === false && aliasRefused.status === 'retained' && (aliasRefused.reason ?? '').includes('no longer detached'),
-    '大写别名写法同样拒绝回收重挂分支的 detach 脚手架（实际 ' + aliasRefused.status + ': ' + (aliasRefused.reason ?? '') + '）')
+    '同树别名写法同样拒绝回收重挂分支的 detach 脚手架（实际 ' + aliasRefused.status + ': ' + (aliasRefused.reason ?? '') + '）')
   assert(fs.existsSync(scaffoldPath), '别名拒绝后目录必须存活（守卫落空会被连目录强删）')
   // \`..\` 段别名写法必须走到 detach 守卫、按与标准路径同因（no longer detached）拒收：
   // 旧代码（登记查找前置无规范化）把它算成伪树名「..」，会误判「注册不在案」而非守卫拒收
@@ -920,7 +922,7 @@ const RED14 = `
 const path = require('path')
 const fs = require('fs')
 const os = require('os')
-const { verifyAcceptance } = require(__MUT_VERIFY__)
+const { verifyAcceptance, isInsidePathKey } = require(__MUT_VERIFY__)
 const assert = (cond, msg) => { if (!cond) { console.error('RED:' + msg); process.exit(3) } }
 async function main() {
   const boundary = fs.mkdtempSync(path.join(os.tmpdir(), 'mut-r14-'))
@@ -930,13 +932,21 @@ async function main() {
     { workdir: rootWorkdir, gitDiff: '' }
   )
   assert(inside[0].passed === true, '盘符根 workdir 下界内目标必须判界内且存在（实际 passed=' + inside[0].passed + '）')
+  // 界外：判定函数输出直断（可观测夹具，不依赖第二块盘——界外路径不必真实存在）。
+  // 盘符根本就自带分隔符，变异（无脑拼第二个 sep）对该断言无感，红证由界内断言承担，
+  // 界外断言守「归属判定不得越出根」的语义不被改坏；POSIX 文件系统根只有一个，无界外
+  if (path.parse(rootWorkdir).root !== path.sep) {
+    const otherRootProbe = rootWorkdir.toUpperCase() === 'C:\\\\' ? 'Q:\\\\mut-r14-out\\\\probe' : 'C:\\\\mut-r14-out\\\\probe'
+    assert(isInsidePathKey(otherRootProbe, rootWorkdir) === false, '盘符根 workdir 下另一根的目标判定函数必须判界外（不依赖该路径真实存在）')
+  }
   const otherDrive = 'DEFGHIJKLMNOPQRSTUVWXYZ'.split('').map((letter) => letter + ':\\\\').find((driveRoot) => driveRoot.toUpperCase() !== rootWorkdir.toUpperCase() && fs.existsSync(driveRoot))
-  const outsideTarget = otherDrive ?? (rootWorkdir.toUpperCase() === 'C:\\\\' ? 'Q:\\\\mut-r14-out' : 'C:\\\\mut-r14-out')
-  const outside = verifyAcceptance(
-    { workdir: rootWorkdir, acceptanceCriteria: [{ id: 'outside', text: 'path exists: ' + path.join(outsideTarget, 'probe'), status: 'pending' }] },
-    { workdir: rootWorkdir, gitDiff: '' }
-  )
-  assert(outside[0].passed === false, '盘符根 workdir 下另一根的目标必须判界外（不得越界放行）')
+  if (otherDrive) {
+    const outside = verifyAcceptance(
+      { workdir: rootWorkdir, acceptanceCriteria: [{ id: 'outside', text: 'path exists: ' + path.join(otherDrive, 'probe'), status: 'pending' }] },
+      { workdir: rootWorkdir, gitDiff: '' }
+    )
+    assert(outside[0].passed === false, '盘符根 workdir 下另一块真实存在的盘必须判界外（不得越界放行）')
+  }
   console.log('SCENARIO-OK')
   process.exit(0)
 }
@@ -1314,26 +1324,26 @@ const MUTATIONS = [
     expectedRed: '空路径残缺登记归具名终态'
   },
   {
-    name: '红13｜树名标记按平台折叠（detach 守卫）：旧代码（字面量 startsWith）下「重挂分支的 detach 脚手架按大写别名写法回收同样被拒、目录存活」断言必红',
+    name: '红13｜树名标记按平台折叠 + 登记查找前置规范化（detach 守卫可达性）：旧代码（字面量 startsWith / 登记查找 basename 吃原始串）下「重挂分支的 detach 脚手架按别名写法回收同样被拒、目录存活」断言必红',
     originalPass: true,
     mutations: [
       {
         file: 'src/main/git.ts',
-        find: "  if (hasMergeScaffoldMarker(path.basename(wtPath), MERGE_DETACH_SCAFFOLD_MARKER)) {",
+        find: "  if (hasMergeScaffoldMarker(path.basename(path.resolve(wtPath)), MERGE_DETACH_SCAFFOLD_MARKER)) {",
         replace: "  if (path.basename(wtPath).startsWith('.agentdeck-merge-detach-')) {"
       }
     ],
     bundles: [{ src: 'src/main/git.ts', var: 'GIT' }],
     scenario: RED13,
-    expectedRed: '大写别名写法同样拒绝回收'
+    expectedRed: '同树别名写法同样拒绝回收'
   },
   {
     name: '红14｜验收器盘符根：旧代码（根键无脑再拼第二个 sep）下「盘符根 workdir 界内目标判界内且存在」断言必红',
     mutations: [
       {
         file: 'src/main/acceptance-verifier.ts',
-        find: "      const rootPrefix = rootKey.endsWith(path.sep) ? rootKey : `${rootKey}${path.sep}`",
-        replace: "      const rootPrefix = `${rootKey}${path.sep}`"
+        find: "  const rootPrefix = rootKey.endsWith(path.sep) ? rootKey : `${rootKey}${path.sep}`",
+        replace: "  const rootPrefix = `${rootKey}${path.sep}`"
       }
     ],
     bundles: [{ src: 'src/main/acceptance-verifier.ts', var: 'VERIFY' }],
@@ -1354,7 +1364,10 @@ const MUTATIONS = [
       ['node_modules/electron/index.js', "module.exports = {\n  handlers: {},\n  ipcMain: { handle: (channel, fn) => { module.exports.handlers[channel] = fn } },\n  BrowserWindow: { getAllWindows: () => [] }\n}\n"]
     ],
     scenario: RED15,
-    expectedRed: '只回收一次'
+    expectedRed: '只回收一次',
+    // 平台不适配不构成红证：别名折叠去重仅 win32 适用，POSIX 字面量精确比较即正确行为
+    platforms: ['win32'],
+    skipReason: '别名折叠去重仅 win32 适用；POSIX 目录名大小写敏感，字面量键去重即正确行为'
   },
   {
     name: '红16｜可执行路径比较按平台：旧代码（不分平台精确比较）下「win32 别名写法判等」断言必红',
@@ -1367,7 +1380,10 @@ const MUTATIONS = [
     ],
     bundles: [{ src: 'src/main/backends/cli-common.ts', var: 'CLICOMMON' }],
     scenario: RED16,
-    expectedRed: 'win32 下可执行路径别名写法必须判等'
+    expectedRed: 'win32 下可执行路径别名写法必须判等',
+    // 平台不适配不构成红证：可执行路径别名折叠仅 win32 适用，POSIX 精确比较即正确行为
+    platforms: ['win32'],
+    skipReason: '可执行路径别名折叠仅 win32 适用；POSIX 文件系统大小写敏感，精确比较即正确行为'
   },
   {
     name: '红17｜UNC 段弹出下界：旧代码（`..` 无下界可弹光全部分段）下「越过共享根的键与主进程 resolve 派生键同源」断言必红',
@@ -1410,6 +1426,12 @@ const MUTATIONS = [
 console.log('变异红测：每项修复回退为旧行为后，同一行为断言必须变红\n')
 let failed = 0
 for (const item of MUTATIONS) {
+  // 平台不适配的红证显式跳过（带理由）：该平台语义上不存在旧病（如 POSIX 目录名
+  // 大小写敏感，别名折叠本就不适用），不计入 expectedRed 要求
+  if (item.platforms && !item.platforms.includes(process.platform)) {
+    console.log(`== ${item.name}\n   SKIP（平台不适配：${item.skipReason}）——不计入红证`)
+    continue
+  }
   console.log('== ' + item.name)
   try {
     // 原版通过前提：未变异代码下场景必须全绿（SCENARIO-OK）——红证只在「修复后能过、

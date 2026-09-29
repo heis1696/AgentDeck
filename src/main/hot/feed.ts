@@ -102,6 +102,13 @@ const DOWNLOAD_IDLE_TIMEOUT_MS = 30_000
 // 单次 read 超过宽限期仍无解，cancel 流 + 显式拒绝，把 await 的等待上界钉在 ~45s。
 const READ_STALL_GUARD_MS = DOWNLOAD_IDLE_TIMEOUT_MS + 15_000
 
+// 读守卫时限的测试钩子：smoke 直证兜底路径用（缩短到毫秒级即可重复跑完整三重试），
+// 传 undefined 复位为默认 45s。生产代码不得调用。
+let readStallGuardMs = READ_STALL_GUARD_MS
+export function setReadStallGuardForTest(ms: number | undefined): void {
+  readStallGuardMs = ms ?? READ_STALL_GUARD_MS
+}
+
 async function downloadOnce(url: string, tmp: string, onProgress?: (progress: DownloadProgress) => void): Promise<void> {
   const controller = new AbortController()
   const armIdle = () => setTimeout(() => controller.abort(new FeedError('下载停滞超时（30 秒无数据）')), DOWNLOAD_IDLE_TIMEOUT_MS)
@@ -144,8 +151,8 @@ async function downloadOnce(url: string, tmp: string, onProgress?: (progress: Do
           guard = setTimeout(() => {
             controller.abort(new FeedError('下载停滞超时（读守卫抢跑）'))
             void reader.cancel().catch(() => {})
-            reject(new FeedError(`下载停滞超时（单次 read ${Math.round(READ_STALL_GUARD_MS / 1000)} 秒无数据，abort 传播失灵兜底）`))
-          }, READ_STALL_GUARD_MS)
+            reject(new FeedError(`下载停滞超时（单次 read ${Math.round(readStallGuardMs / 1000)} 秒无数据，abort 传播失灵兜底）`))
+          }, readStallGuardMs)
         })
       ])
     }

@@ -44,10 +44,29 @@ const load = async (file, name, plugins = []) => {
   await build({ entryPoints: [path.join(root, file)], outfile, bundle: true, platform: 'node', format: 'cjs', plugins, external: plugins.includes(electronStub) ? [] : ['electron'], logLevel: 'silent' })
   return import(pathToFileURL(outfile).href)
 }
+// 回收调用计数插件：tasks:delete 处理器 bundle 内嵌自己的 git 副本，路径锁探针跨
+// bundle 不可见——但 globalThis 计数可见。包装 removeWorktree 直接数「删单对同一棵树
+// 发起了几次回收调用」，恰好一次的语义由端到端直接计数钉死
+const reclaimCountPlugin = {
+  name: 'count-remove-worktree',
+  setup(builder) {
+    builder.onResolve({ filter: /^(\.\/|\.\.\/)git$/ }, () => ({ path: 'git-count', namespace: 'git-count' }))
+    builder.onResolve({ filter: /.*/, namespace: 'git-count' }, () => ({ path: gitSource, namespace: 'file' }))
+    builder.onLoad({ filter: /.*/, namespace: 'git-count' }, () => ({
+      loader: 'js',
+      contents: `import * as real from ${JSON.stringify(gitSource)};
+        export * from ${JSON.stringify(gitSource)};
+        export async function removeWorktree(...args) {
+          globalThis.__removeWorktreeCalls = (globalThis.__removeWorktreeCalls ?? 0) + 1
+          return real.removeWorktree(...args)
+        }`
+    }))
+  }
+}
 const [{ TaskStore }, { createExecutionOwner, currentProcessIdentity }, git, { runDelegationLoop }, ipcTasks, { registerSystemIpc }] = await Promise.all([
   load('src/main/store.ts', 'store'), load('src/main/persistence.ts', 'persistence'),
   load('src/main/git.ts', 'git'), load('src/main/delegate.ts', 'delegate', [gatePlugin]),
-  load('src/main/ipc/tasks.ts', 'ipc-tasks', [electronStub]),
+  load('src/main/ipc/tasks.ts', 'ipc-tasks', [electronStub, reclaimCountPlugin]),
   load('src/main/ipc/system.ts', 'ipc-system', [electronStub])
 ])
 const { registerTaskIpc, collectWorktreeReclaims } = ipcTasks
@@ -271,6 +290,34 @@ try {
     aliasLease.store.flush()
     aliasLease.peer.flush()
     console.log('PASS alias lease coverage: running tasks recorded under alias spellings are covered by the cleanup lease')
+  }
+
+  // 根键租约覆盖面（fix：租约盘符根）：仓库根为盘符根/文件系统根时根键自带分隔符，
+  // rootKey+sep 双分隔符前缀（c:\\）匹配不到根下任务键（c:\ws）——根下在跑任务漏出
+  // 覆盖面会在仓库仍有在跑任务时误发租约，清扫就能动到活任务的现场。根前缀只在缺
+  // 分隔符时补（与 acceptance-verifier 的根前缀规则同一套）
+  {
+    const rootLease = await fixture('root-lease')
+    const driveRoot = path.parse(rootLease.repo).root
+    const rootLeaseParent = rootLease.peer.get(rootLease.parent.id)
+    rootLease.peer.updateIf(rootLeaseParent.id, identity(rootLeaseParent), { status: 'done', endedAt: Date.now() })
+    // 在跑任务登记在根下子目录（非根等值，考验 startsWith 包含分支）；夹具仓库本身
+    // 也在根下，其终态领队/子单照常被覆盖进目标集
+    const underRoot = path.join(driveRoot, 'root_lease_ws_c1')
+    const runningUnderRoot = rootLease.store.create({ title: 'running under root', prompt: 'work', workdir: underRoot, backend: 'fake', agentId: 'runner_under_root' })
+    rootLease.store.claimRun(runningUnderRoot.id, { status: 'queued' }, 'run_under_root', createExecutionOwner())
+    rootLease.store.update(runningUnderRoot.id, { status: 'running', startedAt: Date.now() })
+    const leaseDuringRootRunning = rootLease.peer.claimWorktreeCleanup(driveRoot, '.agentdeck-root-lease', true)
+    assert.equal(leaseDuringRootRunning, undefined, '根键租约覆盖：盘符根/文件系统根下在跑任务必须被租约覆盖（拒发）')
+    assert.equal(rootLease.peer.get(rootLease.parent.id).gitOperation, undefined, '租约拒发是整体落空：终态任务也不残留 Git 预约')
+    // 对照组：根下在跑任务终态后租约恢复发放——拒发确因根下在跑任务被覆盖
+    rootLease.peer.update(runningUnderRoot.id, { status: 'done', endedAt: Date.now() })
+    const leaseAfterRootDone = rootLease.peer.claimWorktreeCleanup(driveRoot, '.agentdeck-root-lease', true)
+    assert.ok(leaseAfterRootDone, '根下在跑任务终态后租约恢复发放（对照：拒发不是夹具坏了）')
+    rootLease.peer.releaseGitOperation(leaseAfterRootDone)
+    rootLease.store.flush()
+    rootLease.peer.flush()
+    console.log('PASS root-key lease coverage: running tasks directly under the drive/filesystem root are covered by the cleanup lease')
   }
 
   // cancelled 子单的现场原样保留：终态即落盘对 cancelled 例外，清扫不得代替删任务的
@@ -589,6 +636,9 @@ try {
     // 子单的 workdir 改写成同一棵集成树的别名写法（无 worktree 登记，走 workdir 通道）
     e2eTree.peer.update(e2eChild.id, { workdir: flipCase(e2eWtPath), worktree: undefined })
     registerTaskIpc({ store: e2eTree.peer, runner: { pushTask() {} }, issueStore: { sync() {}, syncEventually() {} }, getWindow: () => null })
+    // 恰好一次直接计数：处理器 bundle 的 removeWorktree 经计数插件包装（globalThis
+    // 跨 bundle 可见），折叠去重失效会对同一棵树发起两次并发回收，计数翻倍即红
+    globalThis.__removeWorktreeCalls = 0
     const e2eDelete = await globalThis.__worktreeHandlers.get('tasks:delete')(null, e2eTree.parent.id)
     assert.ok(e2eDelete.ok, '端到端：双别名删单成功')
     const deadline = Date.now() + 8000
@@ -597,6 +647,7 @@ try {
     }
     assert.ok(!fs.existsSync(e2eWtPath), '端到端：双别名删单把同一棵树收场')
     assert.equal(await git.branchExists(e2eTree.repo, e2eBranch), false, '端到端：托管分支一并删除')
+    assert.equal(globalThis.__removeWorktreeCalls, 1, `端到端：同一棵树恰好发起一次回收调用（实际 ${globalThis.__removeWorktreeCalls} 次，双别名去重失效会翻倍）`)
     e2eTree.store.flush()
     e2eTree.peer.flush()
     console.log('PASS tasks:delete reclaims an alias-referenced tree end to end')
