@@ -56,6 +56,12 @@ const exampleCalls = delegate.parseDelegates(block)
 check(exampleCalls.length === 1 && exampleCalls[0].to === '队员名', '派发协议：全文只有语法行一张完整示例标记（复述协议不会冒出别的派单）')
 check(delegate.findUnmatchedDelegateOpens(block).length === 0, '派发协议：没有半截标记示例（复述不会产生残缺拒单）')
 check(block.split('<delegate').length - 1 === 1, '派发协议：summary 用文字教（不再给第二个标记字样）')
+// 机制说明（防把 CLI 自带 subagent/Task 的先验套到派单上）：位置在语法行之后、「写派单」之前，
+// 五条边界逐条可查；回灌细则不在此复述（单一发射点仍在「写派单」的回灌规则行）
+const mechAt = block.indexOf('不是你的子例程')
+check(block.indexOf('</delegate>') < mechAt && mechAt < block.indexOf('写派单：'), '派发协议：机制说明位于派单语法行之后、「写派单」之前')
+check(['不是你的子例程', '单向一次性', '回灌有界', '另一个 agent', '同一份上下文里的临时代劳'].every((s) => block.includes(s)), '派发协议：机制说明五条边界齐备（独立任务/单向一次/回灌有界/另一 agent/取舍）')
+check(block.split('git 改动摘录').length - 1 === 1, '单一发射点：回灌细则全文只讲一次（机制说明只指路不复述）')
 check(p.REPORT_INLINE_MAX === delegate.REPORT_INLINE_MAX && block.includes(`${p.REPORT_INLINE_MAX} 字（回灌界）`), '单一发射点：协议里的回灌界 = 回灌组装用的 REPORT_INLINE_MAX')
 check(block.includes(`只附前 ${p.CHILD_BACKGROUND_MAX} 字`), '单一发射点：背景截断上限写进协议（不再承诺「原文会附上」却静默截断）')
 check(block.includes(p.ROUND_MARK) && block.includes(p.ROUND_OUTCOMES), '派发协议：round 标记与 outcome 三值定义同源')
