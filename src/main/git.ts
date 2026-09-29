@@ -29,6 +29,18 @@ export interface WorktreeCreateResult {
   fileCount?: number
   /** true = 从复用池换基线获得（秒级，未走全量 worktree add）——观测出口，语义无差别 */
   pooled?: boolean
+  /** 稀疏检出结果观测面（调用方落时间线注记用）；无此字段 = 未声明稀疏，全量原行为 */
+  sparse?: WorktreeSparseOutcome
+}
+
+/** 稀疏检出（docs/WORKTREE-BIG-REPO-PERF.md §6）：applied = cone 范围生效；
+ *  fallback = 回落全量（reason 供时间线注记——含被拒目录/失败原因，不静默、不拒单） */
+export interface WorktreeSparseOutcome {
+  status: 'applied' | 'fallback'
+  /** applied 时：生效的目录前缀列表 */
+  dirs?: string[]
+  /** fallback 时：回落原因 */
+  reason?: string
 }
 
 export interface WorktreeCleanupResult {
@@ -1000,6 +1012,10 @@ export interface WorktreeCreateOptions {
   /** 无法核验归属的失败现场时间线出口（runner 接 store.noteWorktreeCleanupFailure） */
   onCleanupResidue?: (failure: { name: string; reason: string; ownerTaskId?: string }) => void
   runAddForTest?: (run: () => Promise<GitCommandResult>) => Promise<GitCommandResult>
+  /** 稀疏检出的目录前缀列表（cone 模式，`/` 分隔）：§6.2 三步建树（add --no-checkout →
+   *  set --cone → checkout）。任一目录在基线中不存在、或设置/检出失败 → 回落全量并在结果
+   *  sparse 字段附原因（调用方落注记），绝不因稀疏问题拒单；缺省 = 全量，行为零变化 */
+  sparseDirs?: string[]
 }
 
 /** Residue inventory observed after a failed worktree add. */
@@ -1138,6 +1154,9 @@ export function worktreePoolEntriesForTest(repoDir: string): string[] {
 async function releaseWorktreeToPool(repoDir: string, wtDir: string, branch: string, metadata?: WorktreeInfo | null): Promise<boolean> {
   const root = path.resolve(repoDir)
   return withRepoRepoolLock(root, async () => {
+    // 稀疏树不入池（一期）：换基线会沿用旧稀疏范围物化出新基线的子集，复用即错误范围——
+    // 宁可放弃池化走常规回收（删树，后续派单全量重建），二期再做池条目稀疏范围记录与匹配
+    if (await isSparseWorktree(wtDir)) return false
     const pool = poolFor(root)
     if (pool.size >= WORKTREE_POOL_MAX_PER_REPO || pool.has(worktreePathKey(wtDir)) || !metadata?.generationId) return false
     const detached = await runGit(wtDir, ['switch', '--detach'], 30000)
@@ -1218,6 +1237,9 @@ async function acquirePooledWorktree(
         if (deleteRequestedBranch) await deleteBranchWithRetry(root, branch)
       }
       if (!(await isGitRepo(wtPath))) { await evict(); return null }
+      // 带稀疏配置的池条目（外部遗留/异常路径入池）一律逐出回落全量 add：本单需要的物化
+      // 范围未知，绝不沿用旧稀疏范围——宁可整树回收重建，不复用出错误范围
+      if (await isSparseWorktree(wtPath)) { await evict(); return null }
       // 项5：清理豁免只保托管资产（managedAssetPathspecExcludes）——上一任务的
       // .agentdeck-reports 内容随 clean -x 离场，不随树泄入新子单
       const cleaned = await runGit(wtPath, ['clean', '-ffd', '-x', '--', ...managedAssetPathspecExcludes()], 60000)
@@ -1252,6 +1274,47 @@ async function acquirePooledWorktree(
     if (reused) return reused
   }
   return null
+}
+
+// ---- worktree 稀疏检出（大仓建树提速：范围交队长界定，§6.2 三步） ----
+
+/** 稀疏目录存在性校验：cone 模式对不存在的目录**静默接受**（实测 exit 0），圈错目录会被
+ *  吞掉只建出半棵树——设稀疏范围前必须对基线树逐个核验。只认目录（tree 对象），路径
+ *  指到文件同样拒。任一目录不存在 → 整单回落全量（§6.1），由调用方落注记，绝不拒单。 */
+async function validateSparseDirs(repoDir: string, baseSha: string, dirs: string[]): Promise<{ ok: true; dirs: string[] } | { ok: false; reason: string }> {
+  const rejected: string[] = []
+  for (const dir of dirs) {
+    const probe = await runGit(repoDir, ['cat-file', '-t', `${baseSha}:${dir}`], 30000)
+    if (!probe.ok || probe.stdout.trim() !== 'tree') rejected.push(dir)
+  }
+  if (!rejected.length) return { ok: true, dirs }
+  return { ok: false, reason: `稀疏检出目录在基线中不存在或不是目录（${rejected.join('、')}）` }
+}
+
+/** worktree 是否启用了稀疏检出：core.sparseCheckout 按 worktree 隔离存于 config.worktree，
+ *  config 读取即探测、不碰 index。池化复用的安全闸——稀疏树换基线（switch/reset）会沿用
+ *  旧稀疏配置物化出新基线的子集，交给全量单=缺文件、交给异范围稀疏单=错误范围。 */
+async function isSparseWorktree(wtPath: string): Promise<boolean> {
+  const probe = await runGit(wtPath, ['config', '--bool', 'core.sparseCheckout'], 15000)
+  return probe.ok && probe.stdout.trim() === 'true'
+}
+
+/** §6.2 三步的后两步：cone 模式设稀疏范围 → 正常检出（照常注入 checkout.workers）。
+ *  任一步失败 → 回落全量：sparse-checkout disable 恢复全目录物化，reset --hard 兜底；
+ *  回落也失败时 recovered=false，调用方按建树失败清残肢。 */
+async function runSparseCheckoutSteps(wtPath: string, dirs: string[], checkoutTimeoutMs: number): Promise<{ ok: true } | { ok: false; recovered: boolean; reason: string }> {
+  const set = await runGit(wtPath, ['sparse-checkout', 'set', '--cone', '--', ...dirs], 60000)
+  let checkout: GitCommandResult | null = null
+  if (set.ok) {
+    checkout = await runGit(wtPath, [...checkoutWorkersArgs(), 'checkout'], checkoutTimeoutMs, undefined, true)
+    if (!checkout.timedOut && checkout.ok) return { ok: true }
+  }
+  const reason = !set.ok
+    ? `git sparse-checkout set 失败：${(set.stderr || set.stdout).trim().slice(0, 300) || `exit ${set.code}`}`
+    : `稀疏检出${checkout!.timedOut ? `超时（${Math.round(checkoutTimeoutMs / 1000)}s）` : '失败'}：${(checkout!.stderr || checkout!.stdout).trim().slice(0, 300) || `exit ${checkout!.code}`}`
+  await runGit(wtPath, ['sparse-checkout', 'disable'], 60000)
+  const recoveredRun = await runGit(wtPath, [...checkoutWorkersArgs(), 'reset', '--hard'], checkoutTimeoutMs, undefined, true)
+  return { ok: false, recovered: !recoveredRun.timedOut && recoveredRun.ok, reason }
 }
 
 /** 为 worker 创建隔离 worktree（含独立分支）；失败返回 null（调用方 fail-closed 拒单，
@@ -1297,9 +1360,87 @@ async function createWorktreeUnlocked(
     ? { timeoutMs: options.addTimeoutMs, fileCount: undefined as number | undefined }
     : await planWorktreeAddTimeout(root, repoDir, options.estimateFileCount)
   if (rejectOccupiedTarget(await branchExists(repoDir, branch), pathEntryExists(wtPath))) return null
+  // 建树成功的收尾尾段（系统目录排除/代际/元数据/结果装配）：全量 add 与稀疏三步共用同一出口
+  const finalizeCreatedWorktree = async (extra: { sparse?: WorktreeSparseOutcome } = {}): Promise<WorktreeCreateResult | null> => {
+    // 把 worktree 目录从主仓库状态里排除，避免污染主目录的 status
+    appendGitExcludes(gitDir, SYSTEM_SIDECAR_DIRS)
+    const generationId = writeWorktreeGeneration(wtPath, gitDir)
+    if (!generationId) {
+      fail('worktree Git 注册代际标记写入失败')
+      await runGit(root, ['worktree', 'remove', '--force', wtPath], 30000)
+      await deleteBranch(root, branch)
+      return null
+    }
+    const metadata: WorktreeInfo = {
+      ownerTaskId,
+      generationId,
+      repoDir: root,
+      path: wtPath,
+      branch,
+      baseSha,
+      createdAt: Date.now(),
+      cleanupStatus: 'active'
+    }
+    try { writeMetadata(metadata) } catch (e) {
+      // Do not report a successful isolated worktree whose ownership metadata
+      // could not be persisted. Best-effort rollback prevents an untracked
+      // managed branch from leaking into the repository.
+      fail(`worktree 元数据写入失败: ${e instanceof Error ? e.message : String(e)}`)
+      await runGit(root, ['worktree', 'remove', '--force', wtPath], 30000)
+      await deleteBranch(root, branch)
+      return null
+    }
+    return {
+      path: wtPath,
+      branch,
+      metadata,
+      addTimeoutMs: planned.timeoutMs,
+      ...(planned.fileCount !== undefined ? { fileCount: planned.fileCount } : {}),
+      ...(extra.sparse ? { sparse: extra.sparse } : {})
+    }
+  }
+  // 稀疏检出一批（§6.2 三步）：目录校验失败即整单回落全量——照常走下方池化+全量 add 原路径，
+  // 只多一条结果观测面；校验通过则不进池（一期无池化稀疏范围匹配，宁建新树不复用旧范围），
+  // 走 add --no-checkout → set --cone → checkout，与全量 add 同超时档位、同残肢清理通道
+  let sparseOutcome: WorktreeSparseOutcome | undefined
+  if (options.sparseDirs?.length) {
+    const check = await validateSparseDirs(repoDir, baseSha, options.sparseDirs)
+    if (check.ok) {
+      const runSparseAdd = () => runGit(repoDir, [...checkoutWorkersArgs(), 'worktree', 'add', '--no-checkout', '-b', branch, wtPath, ...(baseBranch ? [baseBranch] : [])], planned.timeoutMs, undefined, true)
+      const sparseAdded = options.runAddForTest ? await options.runAddForTest(runSparseAdd) : await runSparseAdd()
+      if (sparseAdded.timedOut || !sparseAdded.ok) {
+        // 超时绝不当成功 / 失败按归属清残肢：与全量 add 同一盘点与上报通道（--no-checkout
+        // 只建元数据，但失败现场仍可能留下目录/注册/分支）
+        const cleaned = await inspectWorktreeAddResidue(repoDir, gitDir, wtPath, branch, !branchPreexisting, !dirPreexisting)
+        if (cleaned.residue.length) {
+          try { options.onCleanupResidue?.({ name, reason: `稀疏建树${sparseAdded.timedOut ? '超时' : '失败'}后归属无法核验，保留现场：${cleaned.residue.join('、')}`, ownerTaskId }) } catch { /* 时间线出口失败不掩盖主失败 */ }
+        }
+        const detail = (sparseAdded.stderr || sparseAdded.stdout).trim().slice(0, 300) || `git worktree add --no-checkout exit ${sparseAdded.code}`
+        fail(sparseAdded.timedOut
+          ? `git worktree add --no-checkout 超时（${Math.round(planned.timeoutMs / 1000)}s）${cleaned.residue.length ? `；归属无法核验，现场保留：${cleaned.residue.join('、')}` : '；未发现可确认归属的残留，未执行清理'}；请重派`
+          : `${detail}${cleaned.residue.length ? `；归属无法核验，现场保留：${cleaned.residue.join('、')}` : ''}`)
+        return null
+      }
+      const sparseRun = await runSparseCheckoutSteps(wtPath, check.dirs, planned.timeoutMs)
+      if (!sparseRun.ok && !sparseRun.recovered) {
+        // 三步连回落全量都不成：add 已成功，目录/分支/注册确属本次尝试，按归属清残肢
+        const cleaned = await inspectWorktreeAddResidue(repoDir, gitDir, wtPath, branch, !branchPreexisting, !dirPreexisting)
+        if (cleaned.residue.length) {
+          try { options.onCleanupResidue?.({ name, reason: `稀疏检出失败且回落全量失败，保留现场：${cleaned.residue.join('、')}`, ownerTaskId }) } catch { /* 时间线出口失败不掩盖主失败 */ }
+        }
+        fail(`稀疏检出失败且回落全量失败：${sparseRun.reason}${cleaned.residue.length ? `；归属无法核验，现场保留：${cleaned.residue.join('、')}` : ''}`)
+        return null
+      }
+      // 回落成功（recovered）时树已物化全量，语义等价全量 add；applied 时 cone 范围生效
+      return finalizeCreatedWorktree({
+        sparse: sparseRun.ok ? { status: 'applied', dirs: check.dirs } : { status: 'fallback', reason: sparseRun.reason }
+      })
+    }
+    sparseOutcome = { status: 'fallback', reason: check.reason }
+  }
   // 池化复用先行：同仓池里有空闲 worktree 就换基线复用（只重写差异文件），全量 add 兜底
   const pooled = await acquirePooledWorktree(root, name, branch, baseSha, ownerTaskId, planned.timeoutMs, options.onCleanupResidue)
-  if (pooled) return pooled
+  if (pooled) return sparseOutcome ? { ...pooled, sparse: sparseOutcome } : pooled
   if (rejectOccupiedTarget(await branchExists(repoDir, branch), pathEntryExists(wtPath))) return null
   const runAdd = () => runGit(repoDir, [...checkoutWorkersArgs(), 'worktree', 'add', '-b', branch, wtPath, ...(baseBranch ? [baseBranch] : [])], planned.timeoutMs, undefined, true)
   const out = options.runAddForTest ? await options.runAddForTest(runAdd) : await runAdd()
@@ -1331,35 +1472,7 @@ async function createWorktreeUnlocked(
     fail(`${detail}${cleaned.residue.length ? `；归属无法核验，现场保留：${cleaned.residue.join('、')}` : ''}`)
     return null
   }
-  // 把 worktree 目录从主仓库状态里排除，避免污染主目录的 status
-  appendGitExcludes(gitDir, SYSTEM_SIDECAR_DIRS)
-  const generationId = writeWorktreeGeneration(wtPath, gitDir)
-  if (!generationId) {
-    fail('worktree Git 注册代际标记写入失败')
-    await runGit(root, ['worktree', 'remove', '--force', wtPath], 30000)
-    await deleteBranch(root, branch)
-    return null
-  }
-  const metadata: WorktreeInfo = {
-    ownerTaskId,
-    generationId,
-    repoDir: root,
-    path: wtPath,
-    branch,
-    baseSha,
-    createdAt: Date.now(),
-    cleanupStatus: 'active'
-  }
-  try { writeMetadata(metadata) } catch (e) {
-    // Do not report a successful isolated worktree whose ownership metadata
-    // could not be persisted. Best-effort rollback prevents an untracked
-    // managed branch from leaking into the repository.
-    fail(`worktree 元数据写入失败: ${e instanceof Error ? e.message : String(e)}`)
-    await runGit(root, ['worktree', 'remove', '--force', wtPath], 30000)
-    await deleteBranch(root, branch)
-    return null
-  }
-  return { path: wtPath, branch, metadata, addTimeoutMs: planned.timeoutMs, ...(planned.fileCount !== undefined ? { fileCount: planned.fileCount } : {}) }
+  return finalizeCreatedWorktree(sparseOutcome ? { sparse: sparseOutcome } : {})
 }
 
 export async function createWorktree(

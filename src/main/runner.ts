@@ -6,11 +6,11 @@ import path from 'node:path'
 import { sameExecutionOwner, type TaskExpectation, type TaskStore } from './store'
 import { createExecutionOwner } from './persistence'
 import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnStamp, PermissionRequest, BackendTurnResult } from './backends/types'
-import { runDelegationLoop, parseContinueMerged, stripContinue, parseDelegates, stripDelegates, stripRoundNotes, stripReviews, parseConsultsMerged, stripConsults, parseInvestigatesMerged, stripInvestigates, ancestorBudget, sanitizeChildPrompt, escapeProtocolLiterals, MAX_DEPTH, MAX_TOTAL_ROUNDS, DELEGATE_REJECT_EXCERPT_MARK, findUnmatchedConsultOpens, findUnmatchedInvestigateOpens, unmatchedConsultOpenReason, unmatchedInvestigateOpenReason, type AgentLike, type DelegateCall, type ConsultCall, type InvestigateCall, type IssueCommentLike } from './delegate'
+import { runDelegationLoop, parseContinueMerged, stripContinue, parseDelegates, stripDelegates, stripRoundNotes, stripReviews, parseConsultsMerged, stripConsults, parseInvestigatesMerged, stripInvestigates, ancestorBudget, sanitizeChildPrompt, escapeProtocolLiterals, MAX_DEPTH, MAX_TOTAL_ROUNDS, DELEGATE_REJECT_EXCERPT_MARK, findUnmatchedConsultOpens, findUnmatchedInvestigateOpens, unmatchedConsultOpenReason, unmatchedInvestigateOpenReason, parseSparseAttr, type AgentLike, type DelegateCall, type ConsultCall, type InvestigateCall, type IssueCommentLike } from './delegate'
 import { buildAgentPrompt, buildDelegationBlock, buildChildPrompt, sharedWorkspaceInstruction, handoffNoteBlock, delegateRecoveryNotice, consultReplyFeedback, investigationTaskPrompt, investigationFeedback, CONTINUE_BLOCK, HANDOFF_CUE, HANDOFF_RECEIVE_CUE, HANDOFF_START_CONFIRMED_CUE, RETITLE_PROMPT } from './prompts'
 import { isOfficeTask } from './agent-sessions'
 import { findHandoffSuccessor, prepareManualTaskStart, repeatsHandoffPhase } from './handoff'
-import { probeGitRepository, probeCurrentBranch, createWorktree, setWorktreeOwner, reclaimWorktree, replayLeaderBaseline, sameWorktreePath, worktreePathKey, type GitRepositoryProbeResult } from './git'
+import { probeGitRepository, probeCurrentBranch, createWorktree, setWorktreeOwner, reclaimWorktree, replayLeaderBaseline, sameWorktreePath, worktreePathKey, type GitRepositoryProbeResult, type WorktreeSparseOutcome } from './git'
 
 /** API 预设（主进程 presets.ts 的 ApiPreset 的运行时子集，避免环依赖） */
 interface PresetLike {
@@ -1431,6 +1431,14 @@ export class TaskRunner {
     let workdir = task.workdir
     let unavailableReason: string | undefined
     let worktree: WorktreeInfo | undefined
+    // 稀疏检出属性（docs/WORKTREE-BIG-REPO-PERF.md §6.1/§7.3）：缺省=未声明，全量行为零变化；
+    // 格式非法回落全量只注记；共享工作区队员不建 worktree，sparse 无处生效同样注记——协议
+    // 层错误容忍与既有约定一致：不拒单、不静默
+    const sparseSpec = parseSparseAttr(call.sparse)
+    if (sparseSpec.kind === 'invalid') {
+      guardedNote(`⚠ sparse 属性格式非法（${sparseSpec.reason}），本单回落全量检出`)
+    }
+    const sparseDirs = sparseSpec.kind === 'dirs' ? sparseSpec.dirs : []
     const gitProbe = !target.sharedWorkspace && task.workdir ? await this.gitRepositoryProbe(task.workdir) : undefined
     if (gitProbe && !active()) return null
     if (gitProbe?.status === 'error') {
@@ -1442,6 +1450,7 @@ export class TaskRunner {
     if (target.sharedWorkspace) {
       // 只读协作队员（审码/咨询类）显式声明共享工作区：零建树开销，直接用领队现场——
       // 与 meeting 调查模式同一约定；写代码的队员仍一律走隔离 worktree
+      if (sparseDirs.length) guardedNote(`⚠ sparse 属性被忽略（${sparseDirs.join('、')}）：共享工作区队员不建 worktree，直接使用领队全量现场`)
       unavailableReason = 'Agent 标记共享工作区（只读协作）：直接使用领队工作区，不建 worktree'
     } else if (task.workdir && gitProbe?.status === 'repo') {
       if (!active()) return null
@@ -1459,7 +1468,7 @@ export class TaskRunner {
       // worktree 创建与领队/其他子任务的 git 操作可能撞 index.lock：重试两次再放弃。
       // lastWtError 只记首次失败——后续重试撞上的是首次失败留下的残肢（branch already
       // exists 等），属余波而非原因；报余波会掩盖真凶（如 Filename too long 被顶掉）
-      let wt: { path: string; metadata: WorktreeInfo } | null = null
+      let wt: { path: string; metadata: WorktreeInfo; sparse?: WorktreeSparseOutcome } | null = null
       let lastWtError = ''
       const leaderDir = task.workdir
       const reclaimCancelledWorktree = async (candidate: { path: string; metadata: WorktreeInfo }, phase: string) => {
@@ -1481,8 +1490,11 @@ export class TaskRunner {
         if (!active()) return null
         wt = await createWorktree(leaderDir, `${taskId}_c${workerIndex}`, base, taskId, (m) => { if (!lastWtError) lastWtError = m }, {
           // 超时残肢清理部分失败（分支/注册残留）→ owner 时间线可见，重派撞
-          // already exists 时现场与原因都查得到，不再静默复发
-          onCleanupResidue: (failure) => { this.store.noteWorktreeCleanupFailure(leaderDir, failure) }
+          // already exists 时现场与原因都查得到，不再静默
+          onCleanupResidue: (failure) => { this.store.noteWorktreeCleanupFailure(leaderDir, failure) },
+          // 稀疏检出（声明 sparse 属性时）：建树侧目录校验/设置失败自行回落全量，
+          // 结果带 sparse 观测面——成功/回落都在下方落时间线注记
+          ...(sparseDirs.length ? { sparseDirs } : {})
         })
         if (!active()) {
           if (wt) await reclaimCancelledWorktree(wt, '建树后')
@@ -1490,6 +1502,10 @@ export class TaskRunner {
         }
       }
       if (wt) {
+        if (wt.sparse) {
+          if (wt.sparse.status === 'applied') guardedNote(`↘ 稀疏检出生效（${wt.sparse.dirs?.join('、')}），子单工作树只物化声明目录`)
+          else guardedNote(`⚠ 稀疏检出回落全量：${wt.sparse.reason}；本单按全量建树继续，不拒单`)
+        }
         workdir = wt.path
         worktree = wt.metadata
         // 子单基线回放（multica「工作区即状态」不变量）：领队的未提交增量此刻只存在于
