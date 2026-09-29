@@ -1757,7 +1757,7 @@ export class TaskRunner {
   }
 
   /** Finish one successful turn, including any delegation emitted before the final message. */
-  private async completeTurn(taskId: string, session: BackendSession, r: BackendTurnResult, claim: RunClaim, consultDepth = 0): Promise<string> {
+  private async completeTurn(taskId: string, session: BackendSession, r: BackendTurnResult, claim: RunClaim, consultDepth = 0, meetingTurn = false): Promise<string> {
     const task = this.store.get(taskId)!
       const isInvestigation = !!task.suppressIssue && !!task.parentTaskId
       const team = this.getTeam?.() ?? []
@@ -1766,11 +1766,18 @@ export class TaskRunner {
       /** <continue> 与 delegate 同源解析：领队用委派循环的全部回合文本，普通任务用首回合两源 */
       let scanTexts: string[] = [r.delegationText ?? '', r.response]
       if (isOfficeTask(task)) {
-        // 办公室会话不受理派单（会议优先规则已禁用日常协议标记，首条消息也不注入派发协议）：
-        // 越界输出的派单/评估/审核标记只剥离展示并留痕，绝不建单
-        const ignored = [r.delegationText ?? '', r.response].reduce((max, text) => Math.max(max, parseDelegates(text).length), 0)
-        if (ignored) this.note(taskId, `⚠ 办公室会话不受理派单，已忽略 ${ignored} 个派单标记`, runCondition(claim))
-        finalText = stripReviews(stripRoundNotes(stripDelegates(finalText)))
+        // 办公室会话不受理派单与咨询（会议优先规则已禁用这些日常协议标记，首条消息也不注入派发协议）：
+        // 越界输出的派单/评估/审核/咨询/接力标记一律只剥离展示并留痕，绝不建单、绝不发起咨询或接力。
+        // 会议允许的 investigate 不在此列，走下方 completeInvestigates。
+        const texts = [r.delegationText ?? '', r.response]
+        const ignoredDelegates = texts.reduce((max, text) => Math.max(max, parseDelegates(text).length), 0)
+        const ignoredConsults = texts.reduce((max, text) => Math.max(max, parseConsultsMerged(text).length), 0)
+        if (ignoredDelegates || ignoredConsults) {
+          const parts = [ignoredDelegates ? `派单 ${ignoredDelegates} 个` : '', ignoredConsults ? `咨询 ${ignoredConsults} 个` : ''].filter(Boolean)
+          this.note(taskId, `⚠ 办公室会话不受理${ignoredDelegates ? '派单' : ''}${ignoredDelegates && ignoredConsults ? '与' : ''}${ignoredConsults ? '咨询' : ''}标记（已忽略 ${parts.join('、')}）`, runCondition(claim))
+        }
+        // 接力标记一并剥掉（办公室任务没有 Issue，handleContinue 会原样返回标记、污染展示结果）
+        finalText = stripContinue(stripConsults(stripReviews(stripRoundNotes(stripDelegates(finalText)))))
       } else if ((me?.subordinates?.length || this.earlySpawns.get(taskId)?.seenKeys.size || (task.agentId && (!me || (me.role && /队长|领队|captain|leader/i.test(me.role)))
         && [r.delegationText, r.response].some((text) => text && parseDelegates(text).length)))
         && task.backend !== 'dsh' && !isInvestigation) {
@@ -1799,13 +1806,28 @@ export class TaskRunner {
         scanTexts = outcome.scanTexts
       }
       if (!this.isCurrentRun(claim)) return finalText
-      if (this.onInvestigate) {
+      // 只读调查的放行面：办公室会话只在自己的会议发言回合放行（发起侧显式标注，见
+      // meeting-controller 的 speak）——办公室身份同时承载「会议发言」与「咨询应答」，
+      // 拿身份当放行条件会让顾问把咨询当会议、真的发出调查。普通领队任务照旧（会议外的
+      // 调查是既有能力，有独立 smoke 与预算记账），不受此闸约束。
+      const investigateAllowed = !isOfficeTask(task) || meetingTurn
+      if (this.onInvestigate && investigateAllowed) {
         const investigation = await this.completeInvestigates(taskId, session, finalText, scanTexts, task.parentTaskId ? 1 : 0, claim)
         finalText = investigation.finalText
         scanTexts = investigation.scanTexts
+      } else if (this.onInvestigate) {
+        // 办公室会话的非会议回合（咨询应答/自由追问）：标记只剥离展示、不发起调查，
+        // 并具名留痕——静默丢弃与「模型没输出」无从区分，正是这类边界失效的盲区。
+        const dropped = scanTexts.flatMap((text) => parseInvestigatesMerged(text)).length
+        if (dropped) {
+          this.note(taskId, `⚠ 办公室会话只在会议发言回合受理只读调查；本回合是咨询应答，已忽略 ${dropped} 个调查标记`, runCondition(claim))
+          finalText = stripInvestigates(finalText)
+          scanTexts = scanTexts.map((text) => stripInvestigates(text))
+        }
       }
       if (!this.isCurrentRun(claim)) return finalText
-      if (this.onConsult) {
+      // 办公室会话不发起咨询（会议优先只在提示词层禁用；运行时闸门同上，避免会议中途拉进另一条办公室会话）
+      if (this.onConsult && !isOfficeTask(task)) {
         const consultation = await this.completeConsults(taskId, session, finalText, scanTexts, consultDepth, claim)
         finalText = consultation.finalText
         scanTexts = consultation.scanTexts
@@ -2488,7 +2510,7 @@ export class TaskRunner {
 
   /** 续聊：在已完成任务的会话上追加消息，任务回到 running。
    *  opts.relay 仅由「⇥ 接力下一阶段」按钮传入（显式人工入口）；自由追问不再按关键词猜测接力意图。 */
-  async followUp(taskId: string, content: string, opts?: { relay?: boolean; collectFinal?: boolean; consultDepth?: number; wait?: boolean }): Promise<{ ok: boolean; error?: string; finalText?: string }> {
+  async followUp(taskId: string, content: string, opts?: { relay?: boolean; collectFinal?: boolean; consultDepth?: number; wait?: boolean; meetingTurn?: boolean }): Promise<{ ok: boolean; error?: string; finalText?: string }> {
     const task = this.store.get(taskId)
     if (!task) return { ok: false, error: '任务不存在' }
     const message = content.trim()
@@ -2620,7 +2642,7 @@ export class TaskRunner {
           if (!this.isCurrentRun(claim)) return { ok: false, error: '回合已失效' }
           if (!r.ok) throw new Error(r.error || '续聊回合失败')
           acknowledgeRecovery()
-          const finalText = await this.completeTurn(taskId, liveSession, r, claim, opts?.consultDepth ?? 0)
+          const finalText = await this.completeTurn(taskId, liveSession, r, claim, opts?.consultDepth ?? 0, opts?.meetingTurn === true)
           if (!this.store.matches(taskId, runIdentity(claim, { status: 'done' }))) return { ok: false, error: '回合已失效' }
           if (this.opts().notify) this.notify(task, '完成', finalText)
           return opts?.collectFinal ? { ok: true, finalText } : { ok: true }
@@ -2719,7 +2741,7 @@ export class TaskRunner {
           if (!this.isCurrentRun(claim)) return { ok: false, error: '回合已失效' }
           if (!r?.ok) throw new Error(r?.error || '续聊回合失败')
           acknowledgeRecovery()
-          const finalText = await this.completeTurn(taskId, resumeSession, r, claim, opts?.consultDepth ?? 0)
+          const finalText = await this.completeTurn(taskId, resumeSession, r, claim, opts?.consultDepth ?? 0, opts?.meetingTurn === true)
           if (!this.store.matches(taskId, runIdentity(claim, { status: 'done' }))) return { ok: false, error: '回合已失效' }
           if (this.opts().notify) this.notify(task, '完成', finalText)
           return opts?.collectFinal ? { ok: true, finalText } : { ok: true }

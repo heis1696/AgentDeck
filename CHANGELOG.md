@@ -19,6 +19,13 @@
 
 ### 修复
 
+- **办公室会话键碰撞致闸门失效（P1）**：`AgentSessionRegistry` 的 `get()`/`ensure()` 只按 `dedupeKey` 复用任务、不核验身份——用户先以 `requestId=office_<队长ID>` 建一张普通任务，办公室会话就会复用这张用户单，办公室闸门（不派单/不咨询/不接力）随之整条失效。现在四层收口：① 运行期键换入注册表私有的版本化**候选序列**（`office:v2:<id>`、`office:v2:<id>#2`…）；② **查询与建单同源核验 `officeAgentId`**（键形不是安全边界——`requestId`/`idempotencyKey` 是用户可构造的自由串，核验才是主闸）；③ 键被占用时**换用备用键位另建**并在时间线具名留痕——注意 `createTask` 是「键命中即复用」，建单路径若沿用被占用的键会直接返回那张用户单、使核验形同虚设（第一轮复审查出），建单结果再核验一次身份防并发抢键；④ 旧键形的历史办公室单在 `ensure()` 里被收养并改写键，线上已存在的会话不被抛弃、续聊历史不丢
+- **外部建单入口可伪造办公室身份（P1）**：`officeAgentId` 是「这是办公室会话」的唯一运行期判据，而 sidecar 的 `tasks.create`/`issues.create` 透传任意字段、无白名单——外部建单方可给普通任务带上它，使其跳过派发/咨询/接力协议。入口补 `assertNoInternalIdentity` 统一拒绝（桌面 IPC 侧由 `parseTaskCreate` 的键白名单兜住）
+- **强制综合回合仍可发起调查（P2）**：强制综合提示词写明「不要发起调查」，但该回合经 `speak()` 一律标为 `meetingTurn`、运行时照常放行 `<investigate>`。`speak()` 增 `opts.investigate`（默认放行常规发言轮，强制综合显式传 `false`），提示词与运行时同口径
+- **咨询受理名单与展示名单判据两处各写一份（P2）**：`resolve()` 的队长判据只认中文「队长/领队」，`buildDelegationBlock` 还认 `captain/leader`——定位写作 `captain` 的队长会被提示词列为可咨询对象、却被受理层拒绝，咨询静默失败。抽出共享 `isCaptainLike()`，受理层与展示层共用同一判据，smoke 加「展示名单里的队长一个都不能被拒」的同源断言
+- **办公室回答咨询时仍会真的发起只读调查（P2）**：`completeTurn` 只看 `onInvestigate` 是否挂接、不看回合性质，办公室会话在咨询应答回合输出 `<investigate>` 会真派调查子任务。放行面改为**按回合而非身份**——由发起侧显式标注 `followUp({ meetingTurn: true })`（目前只有 `meeting-controller.speak` 的会议发言带它），不带标记的办公室回合同样只剥离展示并具名留痕；普通领队任务照旧（会议外调查是既有能力，有独立 smoke 与预算记账）。smoke-meeting-consult 补「咨询回合不发调查 + 会议回合照常受理」对照用例
+- **咨询受理边界与提示词名单不一致（P2）**：`resolve()` 只排除发起人本人、不排除其直属队员，而 `buildDelegationBlock` 的可咨询名单明确排除二者——队员即便顶着队长头衔，提示词说不许咨询、运行时却照发。受理条件改为与提示词同一份名单（排除发起人 + 其 `subordinates`），同一条规则不再有两处判据
+- **纪要示例 JSON 会被照抄成假条目（P2）**：共享 `ENVELOPE_SCHEMA` 含非空 `objections`/`actionItems`，却被综合轮与强制综合轮引用、同时要求「objections 给空数组」——模型照抄这份合法 JSON 就会把示例反对与示例行动项写进纪要（`mergeEnvelopeObjections` 按 ref/text 找不到匹配即新登记；强制综合分支直接采用 `synthesis.objections`）。三轮改用**空骨架实例** + `ENVELOPE_FIELDS` 文字说明字段形状，示例照抄只产生空；smoke-prompts 改为从各回合**实际渲染文本**抽取 JSON 实例喂 `parseEnvelope`（此前直接 `JSON.parse` 常量，是同源恒真检查），并补 round 三值与渲染层 `ROUND_LABEL` 的对齐校验
 - **目标模式 checkpoint 解析取错代码块**：`parseCheckpoint` 此前只取回复里第一个代码块，最终回复先出现命令/diff 等代码块时 checkpoint 解析失败、退化成原文子串匹配；改为从后往前逐个尝试（协议要求 checkpoint 放在所有代码块之后）
 - **锻造师 v3 技能永不升级**：v3→v4 只升了版本号、没把 v3 正文加进历代比对表，用户机器上未编辑的 v3 副本被误判为「用户编辑过」；v5 一并补回 V3/V4，smoke 逐代验证升级链
 - **接力协议整块复述会触发真实接力**：`CONTINUE_BLOCK` 此前除示例外还有语法行与裸标记字样，agent 在回复末尾复述整块时末尾锚定从第一个开标记起算、越过带指纹的示例拼出一张 `start="auto"` 接力；现全块只保留带指纹的示例一处开标记，接力按钮指令与目标协议块不再写标记字样

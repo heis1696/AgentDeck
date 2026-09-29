@@ -91,6 +91,18 @@ export function migrateTaskRecord(raw: unknown, sourceVersion = 0, now = Date.no
         ...(typeof entry.deliveredAt === 'number' && Number.isFinite(entry.deliveredAt) && entry.deliveredAt > 0 ? { deliveredAt: entry.deliveredAt } : {}) }))
   } else delete out.delegateRejections
 
+  // 办公室会话标记迁移（一次性）：officeAgentId 是本仓库新增字段，旧办公室单没有它。
+  // 运行期判据只认该字段（键形可被用户冒用），所以这里给真正的旧办公室单补上。
+  // 三重键同时成立才认（键形 office_<agentId> + 标题以「·办公室」结尾 + suppressIssue），
+  // 单个用户可构造的字段（requestId 只能是其中一项）不足以伪造。
+  if (out.officeAgentId === undefined) {
+    const agentId = typeof out.agentId === 'string' ? out.agentId : ''
+    const key = typeof out.dedupeKey === 'string' ? out.dedupeKey : ''
+    const title = typeof out.title === 'string' ? out.title : ''
+    const legacyOffice = agentId.length > 0 && key === `office_${agentId}` && title.endsWith('·办公室') && out.suppressIssue === true
+    if (legacyOffice) out.officeAgentId = agentId
+  }
+
   // A running task cannot survive an application restart. This recovery is
   // deliberately idempotent: the persisted result is terminal on next load.
   if (out.status === 'running' && options.recoverRunning !== false) {
@@ -398,7 +410,8 @@ export class TaskStore {
           }
           const fields = ['parentTaskId', 'workerIndex', 'integration', 'agentId', 'handoff', 'continuesFrom', 'parked',
             'backgroundRunning', 'suppressIssue', 'trigger', 'issueId', 'goalId', 'phaseIndex', 'titleAuto',
-            'unavailableReason', 'worktree', 'workVersion', 'dedupeKey', 'delegateSourceRunId', 'dispatchHold'] as const
+            'unavailableReason', 'worktree', 'workVersion', 'dedupeKey', 'delegateSourceRunId', 'dispatchHold',
+            'officeAgentId'] as const
           for (const field of fields) {
             const value = input[field]
             if (value || typeof value === 'number') Object.assign(task, { [field]: value })

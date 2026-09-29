@@ -67,9 +67,10 @@ export function goalRoundRecap(input: {
     '请开始下一次推进：',
     `1. 第一行输出本次评估 ${ROUND_MARK}（${ROUND_OUTCOMES}）`,
     '2. 继续执行；你有可派发的队员时也可以派单。',
-    '3. 本次推进结束时，照常按【目标模式】协议在最后一条回复末尾输出 checkpoint；全部完成条件都达成时按协议收尾。'
+    '3. 本次推进结束时，在最后一条回复末尾输出 checkpoint 代码块（完整定义见本会话首条消息的【目标模式】协议块）：至少要有 "summary" 这轮做了什么，并逐条照抄完成条件原文填 "completedConditions" / "incompleteConditions"；全部完成条件都达成时按协议收尾。',
+    failures > 0 ? '4. 上一次已经失败过一次：这次先把阻塞原因写进 "blockers"（需要人决定的事就如实写），不要在没有进展的情况下再交一轮空计划。' : ''
   )
-  return lines.join('\n')
+  return lines.filter(Boolean).join('\n')
 }
 
 /** 验收标准仍含歧义时的逐条澄清问题（goals:evolve 返回给调用方，面向用户） */

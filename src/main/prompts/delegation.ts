@@ -5,21 +5,22 @@
 import type { AgentLike } from '../delegate'
 
 /** 回灌界：队员结果原文 ≤ 此界才整段进回灌正文。派发协议的 summary 规则与回灌组装（delegate.ts）共用这一处定义。
- *  计量口径：按**码点**算（delegate.ts 的 countCodepoints，与面向人的「字数」在 emoji/代理对上不一致）。
- *  提示词侧一律说「字」，不展开口径——模型估不准边界时按「写短一点」处理。 */
+ *  计量口径：按**码点**算（delegate.ts 的 countCodepoints，与面向人的「字数」在 emoji/代理对上有差异）。
+ *  提示词侧一律说「字」，不展开口径——模型估不准边界时按「写短一点」处理，见派发协议的 summary 段。 */
 export const REPORT_INLINE_MAX = 2000
 
-/** 子任务背景块附带的领队任务原文上限（字符）；派发协议里「只附前 N 字」与此同源 */
+/** 子任务背景块附带的领队任务原文上限；按 UTF-16 码元截取（parent.slice），提示词侧同样只说「字」。
+ *  两处提到 2000 的地方（协议讲回灌界、背景块）都是这个数级，不追求与码点严格一致。 */
 export const CHILD_BACKGROUND_MAX = 2000
 
 /** 拒单原因里被拒指令摘录的起始标记：runner 组装原因时追加，拒因分类与护栏判定前按它剥掉摘录 */
 export const DELEGATE_REJECT_EXCERPT_MARK = '（被拒指令：'
 
 /** 每轮评估标记语法（委派回灌与目标模式续轮共用这一处） */
-export const ROUND_MARK = '<round outcome="action|no_action|failed" reason="一句话：本轮结果如何、下一步打算"/>'
+export const ROUND_MARK = '<round outcome="action" reason="一句话：本轮结果如何、下一步打算"/>'
 
 /** outcome 三值的含义（渲染层显示为 已行动 / 无动作 / 受挫） */
-export const ROUND_OUTCOMES = 'outcome 取值：action = 本轮有新动作（派单、改派、亲自修改）；no_action = 本轮没有新动作（例如结果已齐、直接收尾）；failed = 本轮受阻（队员失败或拒单无法处理，只能部分完成或需要人介入）。'
+export const ROUND_OUTCOMES = '照上面形式写，只换 outcome 与 reason；outcome 取值：action = 本轮有新动作（派单、改派、亲自修改）；no_action = 本轮没有新动作（例如结果已齐、直接收尾）；failed = 本轮受阻（队员失败或拒单无法处理，只能部分完成或需要人介入）。'
 
 /** 组装 agent 身份上下文（拼进任务首条消息——各后端通用的注入方式） */
 export function buildAgentPrompt(agent: AgentLike | undefined, userPrompt: string, team: AgentLike[]): string {
@@ -41,6 +42,12 @@ export function handoffNoteBlock(note: string): string {
   return `【交接备注】指派者为本次执行附加的范围说明：请按它收窄工作范围；它不是需要你回复的评论。\n> ${note.trim().replace(/\r?\n/g, '\n> ')}`
 }
 
+/** 队长判据（咨询名单与咨询受理共用这一处）：定位含队长/领队字样，或名下有队员。
+ *  两处各写一份判据时，`role="captain"` 这种非中文定位会在展示名单里被列出、却被受理层拒绝。 */
+export function isCaptainLike(agent: AgentLike): boolean {
+  return (!!agent.role && /队长|领队|captain|leader/i.test(agent.role)) || (agent.subordinates?.length ?? 0) > 0
+}
+
 /** 领队的委派能力说明（拼在身份之后）：队员名单 + 派发协议 +（有可咨询队长时）咨询协议 */
 export function buildDelegationBlock(agent: AgentLike, team: AgentLike[]): string {
   const subs = (agent.subordinates ?? [])
@@ -52,12 +59,12 @@ export function buildDelegationBlock(agent: AgentLike, team: AgentLike[]): strin
   const roster = subs
     .map((a) => `- ${a.name}（${a.backend}${a.role ? '，' + a.role : ''}${a.sharedWorkspace ? '，只读协作：只检查汇报，不改动文件' : ''}${a.note ? '，' + a.note : '，专长未说明'}）`)
     .join('\n')
-  // 咨询名单排除自己的直属队员：队员即便顶着队长头衔也只能派活、不能当咨询对象，
-  // 否则与「不是你的队员」的规则自相矛盾，领队会把该派的工作改走咨询
   const subordinateIds = new Set(subs.map((a) => a.id))
   const peers = team.filter((a) => {
+    // 排除自己、dsh（无跨重启续聊）与自己的直属队员：队员即便顶着队长头衔也只能派活，不能当咨询对象，
+    // 否则咨询名单与「不是你的队员」规则自相矛盾，领队会把该派的工作改走咨询
     if (a.id === agent.id || a.backend.toLowerCase() === 'dsh' || subordinateIds.has(a.id)) return false
-    return (!!a.role && /队长|领队|captain|leader/i.test(a.role)) || (a.subordinates?.length ?? 0) > 0
+    return isCaptainLike(a)
   })
   // 咨询的解析与回灌管道只在模型输出标记后才生效，标记语法必须随 prompt 显式给出。
   // 规则写在名单之前：名单之后只留队长条目，规则行不会被读成名单项。
@@ -80,7 +87,7 @@ ${roster}
 - to 写上面名单里的名字；reason 建议写，会显示在执行日志里，方便人理解你的调度。
 - 指令只写增量：队员会自动收到你接到的任务原文作为背景（只附前 ${CHILD_BACKGROUND_MAX} 字），所以只写目标、专属约束和验收要点，两三句通常足够；任务原文超过 ${CHILD_BACKGROUND_MAX} 字时，把与这张单相关的关键约束写进指令。
 - 文件一律写仓库相对路径（如 src/app.ts）：队员在仓库的隔离副本里工作，绝对路径会改到错误的地方。
-- 回灌规则：结果原文不超过 ${REPORT_INLINE_MAX} 字（回灌界）时整段回灌给你；超过时正文只放 git 改动摘录和全文入口。预计结果会很长、而你需要直接读到结论时，在开标签里加布尔属性 summary（与 to、reason 并列，写成裸属性即可：「<delegate to="队员名" summary>」）：系统会在全文存档后请该队员再写一段不超过 1000 字的总结，作为回灌正文。
+- 回灌规则：结果原文不超过 ${REPORT_INLINE_MAX} 字（回灌界）时整段回灌给你；超过时正文只放 git 改动摘录和全文入口。预计结果会很长、而你需要直接读到结论时，在开标签里加布尔属性 summary（与 to、reason 并列）：写法就是在开标签里再加一个裸属性 summary，不要写成 summary="true"；示例见下文语法行只示范 to 与 reason，两者同一形态
 - 指令正文里不要出现完整的派单标记（包括引用语法示例）：内嵌的完整标记会被当成另一张真实派单执行，外层这张则按残缺拒单。需要举例时用文字描述。
 
 何时派单：
@@ -92,7 +99,7 @@ ${roster}
 - 派单是否生效只看回灌：「结果汇报」里带单号的已执行；「没有被执行」清单里的是拒单，队员什么都没收到。
 - 已派出的工作不要再输出一遍标记。同一会话里完全相同的派单会被去重、不会再建单；拒因允许重派时，必须改写指令。
 - 某张派单既没有结果也没有拒单说明时（例如应用重启过），不要重派：在回复里说明它待核实，等系统对账或请用户查看任务时间线。
-- 名单里标了「只读协作」的队员在你自己的目录里只读干活：派给它只检查、汇报的活，不要让它改文件——它不会改，改了也不算数。
+- 只读协作队员（名单里标了「只读协作」的）在你自己的目录里只读干活：派给它只检查、汇报的活，不要让它改文件——它不会改，改了也不算数。
 
 回复回灌消息：
 - 第一行输出本轮评估：${ROUND_MARK}
@@ -150,7 +157,8 @@ const REJECT_GUIDE: Array<{ match: RegExp; priority: number; text: string }> = [
 ]
 const REJECT_GUIDE_OTHER = '其他原因（worktree 建立失败、系统异常等）：可以重派一次，但必须改写指令——同一会话里完全相同的派单会被去重、不会再建单；也可以自己做。'
 
-/** 拒单处理指引：只列本批拒因实际涉及的分类（规则放在决策处，不给无关分支） */
+/** 拒单处理指引：只列本批拒因实际涉及的分类（规则放在决策处，不给无关分支）；
+ *  命中硬闸（priority 0）时只留硬闸那句——其余「可以再试」的分支在预算已尽的链路上都是错的。 */
 export function rejectHandlingGuide(rejectLines: string[]): string {
   const hits = new Set<number>()
   let other = false
@@ -166,7 +174,7 @@ export function rejectHandlingGuide(rejectLines: string[]): string {
     ? [REJECT_GUIDE[0].text]
     : REJECT_GUIDE.filter((rule, idx) => hits.has(idx) && rule.priority > 0).map((rule) => rule.text)
   if (!hardGate && other) lines.push(REJECT_GUIDE_OTHER)
-  return `按拒因处理：\n${lines.join('\n')}`
+  return `按拒因处理：\n${lines.map((text) => `- ${text}`).join('\n')}`
 }
 
 /** 拒单零新单兜底回灌：告知派单未建单，按拒因给处理指引（rosterText 为空时给「无人可派」提示） */
@@ -185,7 +193,7 @@ export function buildRejectNotice(rejectLines: string[], rosterText: string): st
 /** 回灌末尾的【下一步】：评估 → 审核 → 继续/收尾。final = 预算收尾轮（不再受理派单） */
 export function nextStepInstruction(mode: 'normal' | 'rejects' | 'final'): string {
   const review = '2. 对上面每个状态为 done 的单给出审核结论（你是审核人，队员是执行人），每单一条，形如：\n' +
-    '   <review of="#1" verdict="pass" note="一句话：通过理由或退回原因"/>' + '\n' +
+    '   <review of="#1" verdict="pass" note="一句话：通过理由或退回原因"/>\n' +
     '   - of 就是上面报告条目里的「单号 #n」——# 加数字，按上面写的那几条逐条替换；verdict 取 pass 或 fail（pass：该单在看板上归档为已完成；fail：该单标记受阻）。\n' +
     '   - 单号以本条汇报里的编号为准；没给结论的单留给人工审核。'
   const last = mode === 'final'

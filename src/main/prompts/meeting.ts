@@ -2,16 +2,26 @@
 // 办公室会话引导、只读调查的派单与回灌。
 // 纯文案模块：不 import electron、不依赖运行时状态；解析器（parseStance/parseObjections/parseEnvelope）仍在 meeting-controller.ts。
 // 措辞约定与注入地图见 docs/PROMPTS.md。
+//
+// 硬约束：属性值位置一律给【合法实例】（如 verdict="agree"），其余取值用文字列举。
+// 写成 verdict="agree|disagree|abstain" 这类占位符时，模型会照抄，解析器（只认字面值）直接丢弃该标记，
+// 且没有任何回执——会议静默不收敛、审核结论静默失效。smoke-prompts 有「示例里不得出现 |」的通用断言兜底。
 
-/** 表态标记语法（parseStance 只认整条回复的最后一行） */
+/** 表态标记实例（parseStance 只认 agree/disagree/abstain，且必须是整条回复的最后一行） */
 export const STANCE_MARK = '<stance verdict="agree" grounds="一句话依据"/>'
 
-/** 表态的判定对象：会议收敛门要求全员 agree 且反对全部解决，表态因此针对「汇报人的方案能否作为会议结论」 */
-/** 表态的三值。属性位置只示范 agree：其余取值在此文字列举，避免占位符被照抄（解析器只认字面值） */
+/** 表态的三值。取值在属性位置只示范 agree：其余两个在此列举，避免占位符被照抄 */
 export const STANCE_MEANING = `表态针对「汇报人的方案能否作为本次会议结论」：verdict 取 agree（能）／disagree（不能，应有已提出、仍未解决的反对）／abstain（信息不足、无法判断）；grounds 写一句话依据。`
 
-/** 纪要 JSON 字段（答辩/综合/强制综合共用这一处；parseEnvelope 校验同一形状） */
-export const ENVELOPE_SCHEMA = '{"decisions":["已达成的共识，每条一句话"],"objections":[{"text":"反对原文","ref":"反对的 ref","resolved":true,"resolution":"如何解决的"}],"actionItems":[{"title":"行动项标题","owner":"队长名","acceptance":["可验证的验收条件"]}],"openQuestions":["未决问题"]}'
+/** 纪要 JSON 实例（答辩/综合/强制综合共用这一处；parseEnvelope 校验同一形状）。
+ *  **必须是空数组实例**：属性位置给非空示例时，模型会把示例内容当真实条目照抄进纪要——
+ *  示例反对会变成一条假反对（mergeEnvelopeObjections 按 ref/text 找不到匹配就新登记），
+ *  示例行动项会被强制综合分支直接采用（meeting-controller 的 synthesis.actionItems）。
+ *  字段含义另用 ENVELOPE_FIELDS 文字说明，不靠示例内容教学。 */
+export const ENVELOPE_SCHEMA = '{"decisions":[],"objections":[],"actionItems":[],"openQuestions":[]}'
+
+/** 纪要各字段的形状说明（与 parseEnvelope 的校验一致；三轮共用，避免形状定义漂移） */
+export const ENVELOPE_FIELDS = '字段形状：decisions 是字符串数组（每条一句话的已成立共识）；objections 是对象数组，每项含 text（反对原文）、ref（反对出处）、resolved（布尔，是否已解决）、可选 resolution（怎么解决的）；actionItems 是对象数组，每项含 title、owner（队长名）、acceptance（字符串数组，可验证的验收条件）；openQuestions 是字符串数组。没有内容的字段给空数组。'
 
 /**
  * 会议优先（与会队长同时持有日常协议与会议协议，回合结束方式必须显式仲裁，否则日常协议会劫持收尾——
@@ -23,7 +33,7 @@ export function meetingPriority(investigators: string[] | null): string {
   const evidence = investigators === null
     ? '- 本回合是收束整理：不要发起调查，直接基于已有材料输出纪要。'
     : investigators.length
-      ? `- 需要补充证据时，可以让自己的队员做只读调查：<investigate to="队员名" reason="一句话">调查指令（自包含：要查什么、为什么查、查到什么程度）</investigate>。可调查的队员：${investigators.join('、')}。系统会派该队员调查并把报告回灌给你，你收到后继续本回合发言。`
+      ? `- 需要补充证据时，可以让自己的队员做只读调查：<investigate to="队员名" reason="一句话">调查指令（自包含：要查什么、为什么查、查到什么程度）</investigate>。可调查的队员：${investigators.join('、')}。只读调查不算派发工作，系统会派该队员调查并把报告回灌给你，你收到后继续本回合发言。`
       : '- 你名下没有可调查的队员，直接基于已有材料发言。'
   return `【会议优先】本回合是结构化会议发言，会议规则优先于你平时的协议：
 - 日常协议标记 <delegate>、<consult>、<round>、<review>、<continue> 本回合一律不要输出。
@@ -44,8 +54,11 @@ export function renderChairNotes(notes: string[]): string {
 }
 
 const ownerRule = (owners: string[]) => owners.length ? `- actionItems 的 owner 必须是与会队长之一：${owners.join('、')}。\n` : ''
-/** 末行表态：示例 + 取值说明（照示例形式写，只替换 verdict 与 grounds） */
-const stanceTail = `整条回复的最后一行必须是表态标记 ${STANCE_MARK}——照这个形式写，只把 verdict 与 grounds 换成本回合的实际情况（verdict 的取值见下）。\n（${STANCE_MEANING}）`
+/** 末行表态：语法行 + 取值说明 */
+// 表态说明必须在标记之前：parseStance 要求表态标记是整条回复的最后一行
+// 表态要求写在标记之前、并让标记收尾：parseStance 只认整条回复的最后一行（含标记本身）。
+// 注意别把「取值说明」放到标记之后，否则最后一行变成说明文字、表态解析不到。
+const stanceTail = `表态说明（仅供理解，不要照抄这一行）：${STANCE_MEANING}\n照下面这个形式写，只把 verdict 与 grounds 换成本回合的实际情况：\n${STANCE_MARK}`
 
 /** 汇报轮：汇报人对议题给出判断、依据与建议 */
 export function reportPrompt(chairNotesPrefix: string, round: number, topic: string, investigators: string[]): string {
@@ -59,25 +72,23 @@ export function challengePrompt(chairNotesPrefix: string, round: number, topic: 
   return `${chairNotesPrefix}${meetingPriority(investigators)}【系统·会议·第 ${round} 轮/质疑轮】议题：${topic}
 ${reportData}
 你是质疑人，只针对上面汇报里的具体内容提反对：
-- 每轮最多 3 条；没有实质问题就不提，直接表态 agree。被登记入库的只有前 3 条，多余的会静默丢弃——要提 4 条以上时，把最贴近的并进前 3 条。
+- 每轮最多 3 条；没有实质问题就不提，直接表态 agree。被接受登记的只有前 3 条，多余的会静默丢弃——要提 4 条以上时，把最贴近的并进前 3 条。
 - 反对写法：<objection ref="实际出处" priority="high">缺陷与修正方向</objection>。上例只示范格式，不要把它抄进你的回复——解析器认的是你写的真实 ref。
 - ref 必填且要真实：指向代码写「文件:行号」，指向汇报论点写「汇报·第 N 点」或论点里的关键短语。
 - 最关键的 1 条加 priority="high"，其余不写 priority 属性；多条标 high 时只有第一条保留为 high，其余会被记为普通反对。
-- 每轮最多 3 条；没有实质问题就不提，直接表态 agree。
-- 每条写成 <objection ref="出处" priority="high">缺陷与修正方向</objection>。ref 必填：指向代码写「文件:行号」，指向汇报论点写「汇报·第 N 点」或论点里的关键短语。
-- 最关键的 1 条加 priority="high"，其余不写 priority 属性。
 ${stanceTail}`
 }
 
-/** 答辩轮：汇报人逐条回应反对，产出纪要 JSON（ref/text 照抄以便系统对应原反对）+ 末行表态 */
+/** 答辩轮：汇报人逐条回应反对，产出纪要 JSON（ref/text 照抄，但方括号只是分隔符不属于值）+ 末行表态 */
 export function defensePrompt(chairNotesPrefix: string, round: number, topic: string, objectionData: string, investigators: string[], owners: string[]): string {
   return `${chairNotesPrefix}${meetingPriority(investigators)}【系统·会议·第 ${round} 轮/答辩轮】议题：${topic}
 ${objectionData}
 你是汇报人，请逐条回应上面的反对：接受的，在纪要里标 resolved=true 并在 resolution 写明具体改法；不接受的，标 resolved=false 并给出反驳依据。
-然后输出纪要 JSON（用 \`\`\`json 代码块包裹）：
+然后输出纪要 JSON（用 \`\`\`json 代码块包裹）。下面是空骨架，只示范字段与形状，**不要照抄它的内容**；按本回合的实际情况逐字段填写：
 ${ENVELOPE_SCHEMA}
-- objections 每条的 ref 和 text 照抄上面每行里方括号内的 ref 与方括号后的反对原文：ref 是方括号里面的字符串本身，不要带上方括号；也不要写行首的 obj_ 编号（系统按 ref 或 text 原文匹配，抄错就对应不上、该反对永远算未解决）。
-${ownerRule(owners)}- 没有内容的字段给空数组。
+${ENVELOPE_FIELDS}
+- objections 每条的 ref 和 text 照抄上面每行里方括号内的 ref 与方括号后的反对原文：ref 是方括号里面的字符串本身，**不要带上方括号**；也不要写行首的 obj_ 编号（系统按 ref 或 text 原文匹配，抄错就对应不上、该反对永远算未解决）。
+${ownerRule(owners)}
 ${stanceTail}`
 }
 
@@ -87,7 +98,8 @@ export function synthPrompt(chairNotesPrefix: string, round: number, topic: stri
 ${resolutionData}
 反对已经全部解决（或本来就没有）。你是设计人，请把本轮共识固化为最终纪要 JSON（用 \`\`\`json 代码块包裹）：decisions 收录已成立的共识；actionItems 写标题、owner 和可验证的验收条件；没解决的问题放进 openQuestions；objections 给空数组。
 ${ENVELOPE_SCHEMA}
-${ownerRule(owners)}- 没有内容的字段给空数组。
+${ENVELOPE_FIELDS}
+${ownerRule(owners)}
 ${stanceTail}`
 }
 
@@ -95,12 +107,13 @@ ${stanceTail}`
 export function forcedSynthesisPrompt(chairNotesPrefix: string, message: string, minutesData: string, owners: string[]): string {
   return `${chairNotesPrefix}${meetingPriority(null)}【系统·会议·强制综合】${message}
 ${minutesData}
-会议在这里强制收束。请把目前的进度整理成纪要 JSON（用 \`\`\`json 代码块包裹）：
+会议在这里强制收束。请把目前的进度整理成纪要 JSON（用 \`\`\`json 代码块包裹）。下面是空骨架，只示范字段与形状，**不要照抄它的内容**：
 ${ENVELOPE_SCHEMA}
+${ENVELOPE_FIELDS}
 - decisions 只收录目前仍然成立的共识。
 - objections 逐条列出所有未解决的反对，ref 和 text 照抄上面材料里的原文，全部标 resolved=false；上面材料是空的（例如只有 {}）或没有反对时，objections 给空数组——不要凭空补写。
 - actionItems 只列已经明确、可以直接执行的行动项；没有就给空数组。
-${ownerRule(owners)}- 悬而未决的问题放进 openQuestions；没有内容的字段给空数组。
+${ownerRule(owners)}- 悬而未决的问题放进 openQuestions。
 本回合不需要表态标记。`
 }
 
@@ -111,12 +124,14 @@ export function actionItemTaskPrompt(title: string, acceptance: string[]): strin
 
 // ---- 办公室会话与只读调查 ----
 
-/** 办公室会话引导（首回合任务正文）：身份由 buildAgentPrompt 注入，这里只说明会话用途与边界 */
+/** 办公室会话引导（首回合任务正文）：身份由 buildAgentPrompt 注入，这里只说明会话用途与边界。
+ *  与会议块的边界：会议发言与只读调查是本会话的正常内容，不算「派发工作」。 */
 export function officeSessionPrompt(agentName: string): string {
-  return `【办公室会话】这是 ${agentName} 的长期会话，用来参加会议发言和回答其他队长的咨询。之后每条消息都是一个独立的请求，按那条消息自己的要求答复；本会话不派发工作、不做阶段接力：不要派单给队员，也不要交接阶段；唯一例外是会议发言里可以让自己的队员做只读调查。现在只需回复"已就绪"。`
+  return `【办公室会话】这是 ${agentName} 的长期会话，用来参加会议发言和回答其他队长的咨询。之后每条消息都是一个独立的请求，按那条消息自己的要求答复。本会话不派发工作、不做阶段接力：不要派单给队员，也不要交接阶段；唯一例外是会议发言里可以让自己的队员做只读调查。现在只需回复"已就绪"。`
 }
 
-/** 只读调查子任务的指令正文（smoke-meeting-investigate 以「只读调查」子串识别调查子任务） */
+/** 只读调查子任务的指令正文（smoke-meeting-investigate 以「只读调查」子串识别调查子任务）。
+ *  调查一并遵守共享工作区那份更严的只读协作约定（runner 会前置），这里只写调查自身的口径。 */
 export function investigationTaskPrompt(question: string): string {
   return `只读调查：${question}\n\n只查证、读代码或资料：可以读文件、读仓库状态（如 git status），但不要修改、创建或删除任何文件，不要创建提交，也不要运行会写文件或改变工作区状态的命令。返回可核验的事实和引用（文件:行号、命令输出或文档出处）。`
 }

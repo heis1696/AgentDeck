@@ -400,10 +400,15 @@ export class MeetingController {
     return { reportText, stances, objections, envelope, turns }
   }
 
-  private async speak(meeting: Meeting, participant: MeetingParticipant, phase: MeetingTurnPhase, prompt: string, turns: MeetingTurn[]): Promise<string> {
+  /** opts.investigate 默认放行（会议发言的常规能力）；强制综合的提示词明令「不要发起调查」，
+   *  那里必须显式传 false——否则模型越界输出 <investigate> 会被当成合法回合照发调查。 */
+  private async speak(meeting: Meeting, participant: MeetingParticipant, phase: MeetingTurnPhase, prompt: string, turns: MeetingTurn[], opts?: { investigate?: boolean }): Promise<string> {
     // 发言级实时进度：一回合真实可达 5-15 分钟，轮末才落盘会让 UI 整场"看起来卡死"
     this.save(meeting.id, { currentTurn: { agentId: participant.agentId, role: participant.role, phase, startedAt: this.now() } })
-    const result = await this.offices.followUp(participant.agentId, prompt, { collectFinal: true })
+    // meetingTurn：本回合是结构化会议发言。同一张办公室会话回答咨询（index.ts 的 attachConsult）
+    // 不带此标记，调查随之关闭。会议内部的强制收束回合另用 investigate:false 二次收口。
+    const meetingTurn = opts?.investigate !== false
+    const result = await this.offices.followUp(participant.agentId, prompt, { collectFinal: true, meetingTurn })
     const office = this.offices.get(participant.agentId)
     if (office) participant.officeTaskId = office.id
     if (!result.ok) throw new Error(result.error || `${participant.agentId} 发言失败`)
@@ -496,7 +501,8 @@ export class MeetingController {
     const designer = meeting.participants.find((participant) => participant.role === 'designer')
     if (designer) {
       try {
-        const text = await this.speak(meeting, designer, 'synthesis', forcedSynthesisPrompt(this.chairNotes(meeting), message, meetingData(JSON.stringify(last ?? {})), this.ownerNames(meeting)), turns)
+        // 强制综合：提示词已写明「不要发起调查」，运行时同一口径关闭调查放行
+        const text = await this.speak(meeting, designer, 'synthesis', forcedSynthesisPrompt(this.chairNotes(meeting), message, meetingData(JSON.stringify(last ?? {})), this.ownerNames(meeting)), turns, { investigate: false })
         synthesis = parseEnvelope(text)
       } catch (error) {
         const reasonText = error instanceof Error ? error.message : String(error)

@@ -34,6 +34,9 @@ const check = (condition, label) => {
 }
 const rendered = []
 const r = (text) => { rendered.push(text); return text }
+/** 标记属性值的占位符扫描：verdict="agree|disagree|abstain" 这种写法看着像值，模型会照抄，
+ *  而解析器只认字面值、会静默丢弃整条标记。属性值里出现 | 一律视为缺陷。 */
+const placeholderAttrs = (text) => [...text.matchAll(/<[a-z][^>]*?=[^>]*?\|[^>]*?\/?>/g)].map((m) => m[0])
 
 // ================= 委派域 =================
 console.log('委派域：')
@@ -56,6 +59,20 @@ check(block.split('<delegate').length - 1 === 1, '派发协议：summary 用文�
 check(p.REPORT_INLINE_MAX === delegate.REPORT_INLINE_MAX && block.includes(`${p.REPORT_INLINE_MAX} 字（回灌界）`), '单一发射点：协议里的回灌界 = 回灌组装用的 REPORT_INLINE_MAX')
 check(block.includes(`只附前 ${p.CHILD_BACKGROUND_MAX} 字`), '单一发射点：背景截断上限写进协议（不再承诺「原文会附上」却静默截断）')
 check(block.includes(p.ROUND_MARK) && block.includes(p.ROUND_OUTCOMES), '派发协议：round 标记与 outcome 三值定义同源')
+// round 三值必须与渲染层的显示映射对齐：ROUND_OUTCOMES 是文字列举（不写 | 占位符），
+// 渲染层 ROUND_LABEL 是权威映射表。两边漂移时，合法值会显示成原样英文（用户看到 action 而非「已行动」）。
+{
+  const markdown = fs.readFileSync(path.join(root, 'src/renderer/src/components/Markdown.tsx'), 'utf8')
+  const labelBlock = markdown.match(/const ROUND_LABEL[^=]*=\s*\{([^}]*)\}/)?.[1] ?? ''
+  const labeled = [...labelBlock.matchAll(/([a-z_]+)\s*:/g)].map((m) => m[1]).sort()
+  // 三值从示例标记 + 取值说明里抽取，而不是另抄一份常量（另抄一份就测不出漂移）
+  const sample = p.ROUND_MARK.match(/outcome="([a-z_]+)"/)?.[1] ?? ''
+  const stated = [...p.ROUND_OUTCOMES.matchAll(/\b(action|no_action|failed)\b/g)].map((m) => m[1])
+  const three = [...new Set([sample, ...stated])].sort()
+  check(three.length === 3 && three.join(',') === 'action,failed,no_action', `round 三值恰好三个：${three.join('/')}`)
+  check(labeled.join(',') === three.join(','), `round 三值与渲染层 ROUND_LABEL 对齐（${labeled.join('/') || '未取到映射'}）`)
+  check(delegate.parseRoundNotes(`${p.ROUND_MARK}`).length === 1, 'round 示例标记可被解析器认下（示例给的是合法实例）')
+}
 check(block.includes('去重') && block.includes('改写指令'), '派发协议：说明相同派单会被去重、重派必须改写')
 check(!block.includes('不含任何标记'), '派发协议：不再有「最终总结不含任何标记」与 round/review 的冲突说法')
 check(p.buildDelegationBlock({ ...leader, subordinates: [] }, team) === '', '无队员不注入派发协议')
@@ -87,7 +104,9 @@ const final = r(p.nextStepInstruction('final'))
 check(normal.includes('<review of=') && normal.includes('审核结论') && normal.startsWith('【下一步】') && !normal.includes('不要再输出派发标记'), '下一步（常规）：评估 → 审核 → 继续')
 check(final.includes('不要再输出派发标记') && final.includes('审核结论') && final.includes('列为未完成'), '下一步（预算收尾）：审核 fail 不再说「下一轮改派」')
 check(p.nextStepInstruction('rejects').includes('按上面的拒因改派'), '下一步（带拒单）：指回拒因指引')
-check(delegate.parseReviews(normal).length === 0, '下一步：审核示例标记不会被解析成真实审核（verdict 取值占位）')
+// 审核示例给的是合法实例：解析器认得出（示例必须可解析，否则模型照抄即失效）。
+// 反向对照：写成 | 占位符时解析器直接丢弃整条——这正是示例不能写占位符的原因。
+check(delegate.parseReviews('<review of="#单号" verdict="pass|fail" note="x"/>').length === 0, '下一步：占位符写法的审核标记会被解析器丢弃（所以示例必须给合法值）')
 const feedback = r(p.buildReportFeedback('### 队员 A 的结果（done，单号 #1）\nok', ''))
 check(feedback.startsWith(p.REPORT_PROMPT_HEADER) && !feedback.includes('预算收尾'), '常规回灌：报告头在首、不含预算收尾字样')
 check(r(p.budgetTailFeedback('### 队员 A 的结果（done，单号 #2）\nok', '')).includes('预算收尾'), '预算收尾回灌：标题')
@@ -121,7 +140,7 @@ check(!/[A-Za-z]{4,} [a-z]{3,} /.test(g1.replace(/```json|checkpoint|completedCo
 check(p.GOAL_BLOCK.includes('所有其他代码块之后') && p.GOAL_BLOCK.includes('原文照抄进 blockers'), '协议块：checkpoint 位置与停止条件原文识别写明')
 const recap = r(p.goalRoundRecap({ runCount: 2, summary: 's', incomplete: ['a、b 两项', 'c'], failures: 1, taskError: 'boom' }))
 check(recap.includes(p.ROUND_MARK) && recap.includes(p.ROUND_OUTCOMES), '续轮回灌：round 标记附带取值定义（非领队也读得懂）')
-check(recap.includes('照常按【目标模式】协议') && !recap.includes('完成条件全部达成时按【目标模式】协议输出 checkpoint'), '续轮回灌：每次推进都交 checkpoint（不再只在全部达成时）')
+check(recap.includes('最后一条回复末尾输出 checkpoint') && recap.includes('completedConditions') && !recap.includes('完成条件全部达成时按【目标模式】协议输出 checkpoint'), '续轮回灌：每次推进都交 checkpoint（本地给出最小字段提示，不再只在全部达成时）')
 check(recap.includes('  - a、b 两项\n  - c') && recap.includes('自动续轮 1/2') && recap.includes('失败'), '续轮回灌：条件逐行列出（条件内含顿号也不歧义）')
 const multi = '跑了：\n```bash\nnpm test\n```\n结论如下。\n```json\n{"summary":"done","completedConditions":["测试通过"],"incompleteConditions":[],"nextPlan":"","blockers":[]}\n```'
 check(goal.parseCheckpoint(multi, ['测试通过'])?.summary === 'done', 'checkpoint 解析：前面有别的代码块也取到末尾的 checkpoint')
@@ -158,63 +177,186 @@ check(forced.includes('强制综合') && forced.includes('会议优先') && forc
 check(!forced.includes('<investigate') && forced.includes('不需要表态标记'), '强制综合：不许调查、不要求未消费的表态')
 const office = r(p.officeSessionPrompt('Alpha'))
 check(office.includes('办公室会话') && office.includes('Alpha') && office.includes('不派发工作') && !office.includes('你的定位'), '办公室引导：只说会话用途（人设由 buildAgentPrompt 注入一次）')
-check(sessions.isOfficeTask({ dedupeKey: 'office_ag_x' }) && !sessions.isOfficeTask({ dedupeKey: 'goal_1:phase_0' }) && !sessions.isOfficeTask({}), '办公室任务识别')
+check(
+  sessions.isOfficeTask({ officeAgentId: 'ag_x' }) &&
+  // 判据只认创建侧写入的 officeAgentId：键形是用户可构造的（requestId/idempotencyKey 会成为 dedupeKey）
+  !sessions.isOfficeTask({ agentId: 'ag_x', dedupeKey: 'office_ag_x' }) &&
+  !sessions.isOfficeTask({ dedupeKey: 'goal_1:phase_0' }) &&
+  !sessions.isOfficeTask({}),
+  '办公室任务识别：只认 officeAgentId（用户任务自命 office_ 键形也不被误判）'
+)
+check(
+  sessions.isOfficeTask({ officeAgentId: 'ag_x' }) &&
+  !sessions.isOfficeTask({ agentId: 'ag_lead', dedupeKey: 'office_ag_x' }),
+  '办公室任务识别：键形与 agentId 不匹配的旧键同样不被误判（旧单由迁移补字段）'
+)
 check(r(p.investigationTaskPrompt('查 a.ts 的调用方')).startsWith('只读调查：'), '调查子任务指令')
 check(r(p.investigationFeedback([{ to: 'Gamma', text: 'fact' }])).includes('调查结果') && p.investigationFeedback([{ to: 'Gamma', text: 'x' }]).includes('表态标记'), '调查回灌：提醒原回合格式要求仍然有效')
 check(r(p.actionItemTaskPrompt('补测试', ['覆盖率 80%', 'CI 绿'])).includes('验收条件：\n- 覆盖率 80%\n- CI 绿'), '行动项任务：验收条件逐条列出')
 
 // ================= 示例回灌真实解析器 =================
-// 只断言「文案包含常量」是同源恒真检查。这里把 prompt 里实际渲染出的标记抠出来喂给真实解析器——
-// 解析器认不认，才是这条契约的验收口径（属性值写成 agree|disagree 这类占位符会在这里露馅）。
+// 只断言「文案包含常量」是恒真检查：常量与文案同源。这里把 prompt 里实际渲染出的标记
+// 抠出来喂给真实解析器——解析器认不认，才是这条契约的验收口径。
 console.log('示例回灌解析器：')
-const meetingModule = await bundle('src/main/meeting-controller.ts', 'meeting-controller.cjs')
-const lastLine = (text) => text.trim().split('\n').pop() ?? ''
+const meeting_mod = await bundle('src/main/meeting-controller.ts', 'meeting-controller.cjs')
 
+// 审核：报告里给的示例标记必须被 parseReviews 认下（of 必须形如 #数字）
 const reviewExample = normal.match(/<review of="#1"[^>]*\/>/)?.[0] ?? ''
 check(!!reviewExample && delegate.parseReviews(reviewExample).length === 1, `审核示例标记可被解析：${reviewExample}`)
-check(delegate.parseReviews(reviewExample)[0]?.verdict === 'pass', '审核示例 verdict 是合法取值')
+check(delegate.parseReviews(reviewExample)[0].verdict === 'pass', '审核示例 verdict 取合法值')
 check(delegate.parseReviews('<review of="#单号" verdict="pass|fail" note="x"/>').length === 0, '对照：占位符写法的审核标记确实解析不通过（所以示例必须给实例）')
 
+// 表态：会议每一类发言渲染出的实例必须被 parseStance 认下，且处于最后一行
 for (const [name, text] of [['汇报轮', report], ['质疑轮', challenge], ['答辩轮', defense], ['综合轮', r(p.synthPrompt('', 1, '议题', p.meetingData('x'), [], ['Alpha']))]]) {
-  const stance = meetingModule.parseStance(text)
-  check(!!stance && lastLine(text).startsWith('<stance'), `${name}：渲染出的末行表态可被解析（${stance?.verdict ?? 'null'}）`)
+  const line = text.trim().split('\n').pop() ?? ''
+  const stance = meeting_mod.parseStance(text)
+  check(!!stance && line.startsWith('<stance'), `${name}：渲染出的末行表态可被解析（${stance?.verdict ?? 'null'}）`)
 }
 
+// 反对：质疑轮的示例标记可被 parseObjections 认下（ref 非空）
 const objectionExample = challenge.match(/<objection [^>]*>[^<]*<\/objection>/)?.[0] ?? ''
-check(!!objectionExample && meetingModule.parseObjections(objectionExample, 'critic').length === 1, `反对示例标记可被解析：${objectionExample}`)
+check(!!objectionExample && meeting_mod.parseObjections(objectionExample, 'critic').length === 1, `反对示例标记可被解析：${objectionExample}`)
 
-check(meetingModule.parseEnvelope(p.ENVELOPE_SCHEMA) !== null, '纪要 schema 的字段形状可被 parseEnvelope 接受')
-check(meetingModule.parseEnvelope(JSON.stringify({ decisions: ['x'], objections: [{ text: 't', ref: 'r', resolved: true }], actionItems: [{ title: 'a', owner: 'Alpha', acceptance: ['ok'] }], openQuestions: [] })) !== null, '纪要最小合法实例可被接受')
+// 纪要：答辩/综合/强制综合**实际渲染出**的 JSON 实例必须过 parseEnvelope 的字段校验。
+// 从渲染文本里抠（而不是直接 JSON.parse 常量）：常量与文案同源，只断言常量是恒真检查。
+const envelopeOf = (text) => {
+  const block = text.match(/```json\s*([\s\S]*?)```/)?.[1]
+  if (block) return block.trim()
+  return text.match(/\{"decisions"[\s\S]*?\}/)?.[0] ?? ''
+}
+const renderedInstances = [['答辩轮', defense], ['综合轮', r(p.synthPrompt('', 1, '议题', p.meetingData('x'), [], ['Alpha']))], ['强制综合', forced]]
+for (const [name, text] of renderedInstances) {
+  const instance = envelopeOf(text)
+  const parsed = instance ? meeting_mod.parseEnvelope(instance) : null
+  check(!!instance && parsed !== null, `${name}：渲染出的纪要实例可被 parseEnvelope 接受`)
+  // 空数组实例：照抄不会往纪要里塞假条目（示例反对会被 mergeEnvelopeObjections 登记成真反对）
+  check(!!parsed && parsed.objections.length === 0 && parsed.actionItems.length === 0 && parsed.decisions.length === 0 && parsed.openQuestions.length === 0,
+    `${name}：示例是空骨架，照抄不产生假纪要条目`)
+}
+check(renderedInstances.every(([, text]) => text.includes(p.ENVELOPE_FIELDS)), '纪要字段形状用文字说明（不靠示例内容教学）')
+check(meeting_mod.parseEnvelope(JSON.stringify({ decisions: ['x'], objections: [{ text: 't', ref: 'r', resolved: true }], actionItems: [{ title: 'a', owner: 'Alpha', acceptance: ['ok'] }], openQuestions: [] })) !== null, '纪要最小合法实例可被接受')
 
+// 接力：协议示例带指纹，复述不触发；显式 auto 且非示例的简报才触发
 const continueExample = p.CONTINUE_BLOCK.match(/<continue start="auto">[\s\S]*?<\/continue>/)?.[0] ?? ''
-check(!!continueExample && delegate.parseContinue(continueExample).length === 0, '接力示例（带指纹）位于回复末尾也不触发')
+check(!!continueExample && delegate.parseContinue(continueExample).length === 0, '接力示例（带指纹）即使位于末尾也不触发')
 check(delegate.parseContinue('<continue start="auto">阶段2：按 docs/plan.md 实施 UI；阶段1 已完成数据层；验收：构建通过</continue>').length === 1, '真实接力简报仍可触发')
 
 // ================= 办公室身份端到端 =================
-// 公开建单入口允许自定义 requestId/idempotencyKey，它们会成为 dedupeKey；用户任务因此可以自称
-// office_*——那不该让它被当成办公室会话（跳过派发协议、忽略派单）。
+// P1 回归：公开建单入口允许自定义 requestId/idempotencyKey，它们会成为 dedupeKey。
+// 用户任务因此可以自称 office_*——那不该让它被当成办公室会话（跳过派发协议、忽略派单）。
 console.log('办公室身份：')
 {
-  const [{ TaskStore }, { TaskService }] = await Promise.all([
-    bundle('src/main/store.ts', 'store.cjs'),
-    bundle('src/main/task-service.ts', 'task-service.cjs')
+  const [{ TaskService }, { TaskStore }] = await Promise.all([
+    bundle('src/main/task-service.ts', 'task-service.cjs'),
+    bundle('src/main/store.ts', 'store.cjs')
   ])
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-office-identity-'))
-  const service = new TaskService({ store: new TaskStore(dir) })
-  const impersonator = service.createTask({ title: '用户任务', prompt: '干活', backend: 'zcode', agentId: 'ag_lead', requestId: 'office_ag_lead' })
+  const store = new TaskStore(dir)
+  const service = new TaskService({ store })
+  // 旧键形（office_<id>）被用户任务占用：这正是修复前的碰撞场景。用户任务不带 officeAgentId，
+  // 所以它永远不是办公室会话；办公室会话必须**另建**而不是复用这张用户单。
+  const impersonator = service.createTask({ title: '用户任务', prompt: '干活', backend: 'zcode', agentId: 'ag_lead', requestId: `${sessions.OFFICE_TASK_KEY_PREFIX}ag_lead` })
   check(!sessions.isOfficeTask(impersonator), '用户任务用 requestId 自称 office_* 也不会被误判为办公室会话')
-  const real = service.createTask({ title: '队长·办公室', prompt: '引导', backend: 'zcode', agentId: 'ag_lead', suppressIssue: true, officeAgentId: 'ag_lead', dedupeKey: 'office_ag_lead' })
-  check(sessions.isOfficeTask(real) && real.officeAgentId === 'ag_lead', '注册表创建的真实办公室任务带 officeAgentId 并被识别')
-  check(impersonator.id !== real.id, '两者是不同的任务记录（用户任务没有被办公室会话顶掉）')
+
+  const registryBundles = await bundle('src/main/agent-sessions.ts', 'agent-sessions-v2.cjs')
+  const agents = [
+    { id: 'ag_lead', name: 'Lead', backend: 'zcode', role: '领队', subordinates: ['ag_c'] },
+    { id: 'ag_c', name: 'Claude', backend: 'claude', role: '工程师' }
+  ]
+  const registry = new registryBundles.AgentSessionRegistry({
+    store, taskService: service, getAgents: () => agents,
+    // enqueue 推到终态：ensure() 会等首回合结束，空实现会让它一直等到超时
+    runner: {
+      enqueue: (task) => { store.update(task.id, { status: 'done' }) },
+      followUp: async () => ({ ok: true, finalText: '' })
+    }
+  })
+  // 同键直撞（P1 核心反例）：用户任务先占了 ag_lead 的新键形（requestId 是自由串，键形可被构造）。
+  // 注册表查找 ag_lead 时必须绕开它——键形隔离只防误撞，身份核验才是这道闸。
+  const v2Collide = service.createTask({ title: '同键用户任务', prompt: '干活', backend: 'zcode', agentId: 'ag_lead', requestId: sessions.OFFICE_TASK_KEY_V2_PREFIX + 'ag_lead' })
+  check(service.deduped(sessions.OFFICE_TASK_KEY_V2_PREFIX + 'ag_lead')?.id === v2Collide.id, '同键直撞前提成立：用户任务确实占了 ag_lead 的新键')
+  check(registry.get('ag_lead') === null, 'P1 反例（同键直撞）：键被用户任务占用时 get() 不复用它（旧行为会返回用户单）')
+  check(!sessions.isOfficeTask(v2Collide) && v2Collide.officeAgentId === undefined, '被占用的用户记录不被写入 officeAgentId（原样未动）')
+  // 建单路径同样必须绕开占键记录（复审查出的漏洞）：ensure() 若沿用同一个键，
+  // createTask 会"键命中即复用"、把这张用户单当办公室会话返回，核验形同虚设
+  const ensured = await registry.ensure('ag_lead')
+  check(ensured.id !== v2Collide.id, 'P1 反例（建单路径）：ensure() 不会复用占键的用户任务（改用备用键位另建）')
+  check(sessions.isOfficeTask(ensured) && ensured.officeAgentId === 'ag_lead', 'P1 反例（建单路径）：新建的确实是该队长的办公室单')
+  check(service.deduped(sessions.OFFICE_TASK_KEY_V2_PREFIX + 'ag_lead')?.id === v2Collide.id, '占键的用户记录保持原样（键未被改写）')
+  check(registry.get('ag_lead')?.id === ensured.id, 'P1：备用键位的办公室单可被后续查找复用（会话不丢）')
+
+  // 身份匹配时的正常复用（对照组）：换一位键未被占用的队长，注册表仍复用同一张办公室单
+  const office = service.createTask({ title: 'Claude·办公室', prompt: '引导', backend: 'claude', agentId: 'ag_c', suppressIssue: true, officeAgentId: 'ag_c', dedupeKey: sessions.OFFICE_TASK_KEY_V2_PREFIX + 'ag_c' })
+  check(sessions.isOfficeTask(office) && office.officeAgentId === 'ag_c', '注册表创建的真实办公室任务带 officeAgentId 并被识别')
+  check(registry.get('ag_c')?.id === office.id, '对照组：身份匹配的办公室单被正常复用')
+  check(office.id !== impersonator.id && office.id !== v2Collide.id, '办公室单与两张用户单都是不同记录')
+
+  // 旧键形的历史办公室单：迁移（store.ts 三重键判定）补过 officeAgentId，注册表应收养它而不是另建。
+  // 收养失败会让线上已存在的办公室会话被抛弃、续聊历史留在旧单——这是改键形的最大回归面。
+  const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-office-legacy-'))
+  const legacyStore = new TaskStore(dir2)
+  const legacyService = new TaskService({ store: legacyStore })
+  const legacyTask = legacyStore.create({ title: 'Lead·办公室', prompt: '引导', backend: 'zcode', agentId: 'ag_lead', suppressIssue: true, trigger: 'meeting' })
+  legacyStore.update(legacyTask.id, { dedupeKey: sessions.OFFICE_TASK_KEY_PREFIX + 'ag_lead' })
+  // 重开一次让 store 迁移按旧键形补 officeAgentId（迁移在建库时跑）
+  const reopened = new TaskStore(dir2)
+  const migrated = reopened.list().find((task) => task.id === legacyTask.id)
+  check(migrated?.officeAgentId === 'ag_lead', '旧键形办公室单被迁移补上 officeAgentId')
+  const legacyRegistry = new registryBundles.AgentSessionRegistry({
+    store: reopened, taskService: new TaskService({ store: reopened }), getAgents: () => agents,
+    // enqueue 把任务推到终态：ensure() 会等首回合结束，空实现会让它一直等到超时
+    runner: {
+      enqueue: (task) => { reopened.update(task.id, { status: 'done' }) },
+      followUp: async () => ({ ok: true, finalText: '' })
+    }
+  })
+  check(legacyRegistry.get('ag_lead')?.id === legacyTask.id, '旧键形的历史办公室单被收养（不另建、不丢续聊历史）')
+  // get() 是只读查询：收养时不改键，键的改写留给有副作用的 ensure()
+  check(reopened.get(legacyTask.id)?.dedupeKey === sessions.OFFICE_TASK_KEY_PREFIX + 'ag_lead', '只读 get() 不改写历史单的键（无副作用）')
+  await legacyRegistry.ensure('ag_lead')
+  check(reopened.get(legacyTask.id)?.dedupeKey === sessions.OFFICE_TASK_KEY_V2_PREFIX + 'ag_lead', 'ensure() 收养后键被改写为新键形')
+  check(reopened.list().filter((task) => task.officeAgentId === 'ag_lead').length === 1, '收养不会另建第二张办公室单')
+  fs.rmSync(dir2, { recursive: true, force: true })
+
+  // 咨询受理边界：发起人的直属队员即便顶着队长头衔也不可被咨询（与 buildDelegationBlock 同一名单）
+  const captains = [
+    { id: 'ag_lead', name: 'Lead', backend: 'zcode', role: '领队', subordinates: ['ag_sub'] },
+    { id: 'ag_sub', name: 'SubCap', backend: 'zcode', role: '队长', subordinates: [] },
+    { id: 'ag_peer', name: 'Peer', backend: 'claude', role: '队长', subordinates: [] },
+    // 非中文定位的队长：曾同时出现在展示名单里、却被受理层拒绝（判据两处各写一份的漂移）
+    { id: 'ag_cap', name: 'Cap', backend: 'claude', role: 'captain', subordinates: [] }
+  ]
+  const consultRegistry = new registryBundles.AgentSessionRegistry({
+    store, taskService: service, getAgents: () => captains,
+    runner: { enqueue: (task) => { store.update(task.id, { status: 'done' }) }, followUp: async () => ({ ok: true, finalText: '' }) }
+  })
+  check(consultRegistry.resolve('Peer', 'ag_lead')?.id === 'ag_peer', '咨询受理：非直属的队长可被咨询')
+  check(consultRegistry.resolve('Cap', 'ag_lead')?.id === 'ag_cap', '咨询受理：非中文定位的队长（captain）同样可被咨询')
+  check(consultRegistry.resolve('SubCap', 'ag_lead') === null, '咨询受理：直属队员顶着队长头衔也不可被咨询')
+  check(consultRegistry.resolve('Lead', 'ag_lead') === null, '咨询受理：发起人本人不可被咨询')
+  check(consultRegistry.resolve('', 'ag_lead') === null, '咨询受理：空引用不误命中第一个队长')
+  // 受理名单与展示名单必须同源：提示词里列出的可咨询队长，受理层一个都不能拒
+  {
+    const shown = p.buildDelegationBlock(captains[0], captains)
+      .slice(p.buildDelegationBlock(captains[0], captains).indexOf('可咨询的队长'))
+      .split('\n').slice(1).filter((line) => line.startsWith('- '))
+      .map((line) => line.replace(/^- /, '').split('（')[0].trim())
+    const rejected = shown.filter((name) => consultRegistry.resolve(name, 'ag_lead') === null)
+    check(shown.length > 0 && rejected.length === 0,
+      `咨询受理名单与提示词一致（展示 ${shown.join('/')}，被受理层拒绝：${rejected.join('/') || '无'}）`)
+  }
   fs.rmSync(dir, { recursive: true, force: true })
 }
 
 // ================= 锻造 =================
 console.log('锻造：')
+// 期望的历代正文数量由版本号推导（V1..V(n-1)），版本升级后不误报：
+// 按升级规则，第 n 版正文要带 n-1 份历史正文做比对基准
 const prev = p.FORGE_SKILL_BODIES_PREVIOUS
-check(prev.length === 4 && new Set(prev).size === 4 && !prev.includes(p.FORGE_SKILL_BODY), '历代正文 V1–V4 齐全、互不相同、不含现行版')
+check(prev.length === sharedForge.FORGE_SKILL_VERSION - 1 && new Set(prev).size === prev.length && !prev.includes(p.FORGE_SKILL_BODY),
+  `历代正文共 ${sharedForge.FORGE_SKILL_VERSION - 1} 份（V1–V${sharedForge.FORGE_SKILL_VERSION - 1}）、互不相同、不含现行版`)
 check(!p.FORGE_SKILL_BODY.includes('passRate') && ['<delegate>', '<consult>', '<investigate>', '<continue>', '<round>', '<review>'].every((m) => p.FORGE_SKILL_BODY.includes(m)), 'v5 正文：去掉 passRate、协议标记逐一点名')
-check(p.FORGE_SKILL_MD.includes(`version: ${sharedForge.FORGE_SKILL_VERSION}`) && sharedForge.FORGE_SKILL_VERSION === 5, 'SKILL.md frontmatter 版本 = FORGE_SKILL_VERSION = 5')
+check(p.FORGE_SKILL_MD.includes(`version: ${sharedForge.FORGE_SKILL_VERSION}`), `SKILL.md frontmatter 版本 = FORGE_SKILL_VERSION = ${sharedForge.FORGE_SKILL_VERSION}`)
 const evalPrompt = r(p.buildEvaluatePrompt(p.FORGE_SKILL_BODY, { name: 'x', systemPrompt: 'y' }))
 check(!evalPrompt.split('\n---\n').pop().includes('passRate'), '评测任务尾部重申不再要求 passRate')
 check(r(p.buildDraftPrompt(p.FORGE_SKILL_BODY, '测试工程师', [''])).includes('问1 答：（留空）'), '生成任务：澄清回答留空的写法')
@@ -242,9 +384,8 @@ rendered.push(p.LEAD_PERSONA, p.CLAUDE_PERSONA, p.CODEX_PERSONA, p.OPENCODE_PERS
 const dirty = rendered.filter((text) => /undefined|\[object Object\]|NaN|\$\{/.test(text))
 check(dirty.length === 0, `渲染卫生：${rendered.length} 段渲染文本无 undefined/[object Object]/NaN/未展开的 \${}`)
 check(rendered.every((text) => !/\n{3,}/.test(text)), '渲染卫生：没有连续空两行以上的拼接缝')
-const scanAttrs = [...rendered, p.FORGE_SKILL_BODY]
-const badAttrs = scanAttrs.flatMap((text) => [...text.matchAll(/<[a-z][^>]*?=[^>]*?\|[^>]*?\/?>/g)].map((m) => m[0]))
-check(badAttrs.length === 0, `标记属性里没有 | 占位符（会被照抄成解析器不认的值）：${badAttrs.slice(0, 3).join(' / ') || '无'}`)
+const badAttrs = [...rendered, p.FORGE_SKILL_BODY].flatMap((text) => placeholderAttrs(text))
+check(badAttrs.length === 0, `标记属性里没有 | 占位符（会被照抄成非法值）：${badAttrs.slice(0, 3).join(' / ') || '无'}`)
 
 if (failures) {
   console.log(`\n❌ PROMPTS SMOKE FAILED（${failures} 项）`)

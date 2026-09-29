@@ -37,10 +37,12 @@ const sixParsers = [
   ['continue', parseContinue]
 ]
 /** 回灌消息的队员可控段：截到尾部系统指令之前（【下一步】；兼容旧版「请…」起头的指令）。
- *  找不到边界时整段返回——宁可让黑盒断言报错，也不静默少截一个字符 */
+ *  边界取**最后**一次出现，不用 indexOf 的首次命中：队员原文里若出现同名字样，首次命中会把
+ *  其后的队员内容划到界外，黑盒断言就漏检了（改动后必须与完整队员段等价）。
+ *  找不到边界时整段返回——宁可让断言报错，也不静默少截 */
 const workerVisibleSegment = (report) => {
-  const cuts = ['\n\n【下一步】', '\n\n请'].map((mark) => report.indexOf(mark)).filter((at) => at >= 0)
-  return cuts.length ? report.slice(0, Math.min(...cuts)) : report
+  const cuts = ['\n\n【下一步】', '\n\n请'].map((mark) => report.lastIndexOf(mark)).filter((at) => at >= 0)
+  return cuts.length ? report.slice(0, Math.max(...cuts)) : report
 }
 
 // 渲染层链路（GitSummary）单独构建：快照状态由渲染层消费
