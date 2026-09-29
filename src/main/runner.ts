@@ -346,6 +346,11 @@ export class TaskRunner {
   private turnLifecycles = new Map<string, TurnLifecycle>()
   /** Pending provider batches are flushed at turn and process lifecycle boundaries. */
   private eventBatchers = new Map<BoundedEventBatcher<RunnerEvent>, string>()
+  /** 同键并发建单互斥（dedupeKey → 在途执行）：既有去重是「落盘后查册」，两条并发
+   *  调用在双方都未落盘时互相看不见，各自 reserveWorkerIndex 建子单建树。进程内
+   *  竞态用内存互斥关掉；跨进程仍由 store 层 dedupeKey 落盘约束兜底。执行完成后
+   *  登记即撤，后续调用走既有落盘查册短路。 */
+  private spawnCreatesInFlight = new Map<string, Promise<Task | null>>()
   private shuttingDown = false
   private cancellationDrains = new Map<string, number>()
   private readonly onTaskChanged?: (task: Task) => void
@@ -1297,11 +1302,30 @@ export class TaskRunner {
   }
 
   /**
-   * 建一个委派子任务并立即入队（委派循环与流式嗅探共用）。
-   * 目标解析、防环、层级闸、轮数预算闸都在这里（两条建单路径同一套护栏）；
+   * 建一个委派子任务并立即入队（委派循环与流式嗅探共用）。同键（dedupeKey）并发
+   * 调用共享同一次执行：第二个调用等待复用结果（建出的同一子单，或同一次具名拒单
+   * ——拒单留痕也只发生一次），绝不各自建单建树。
+   * 目标解析、防环、层级闸、轮数预算闸都在互斥体内（两条建单路径同一套护栏）；
    * 回灌不在本方法（仍归委派循环回合末处理）。返回 null = 被护栏拒绝（原因已留痕事件）。
    */
-  async spawnDelegateChild(taskId: string, call: DelegateCall, expectedRunId = this.store.get(taskId)?.runId): Promise<Task | null> {
+  spawnDelegateChild(taskId: string, call: DelegateCall, expectedRunId = this.store.get(taskId)?.runId): Promise<Task | null> {
+    const mutexKey = expectedRunId
+      ? `delegate:${createHash('sha256').update(JSON.stringify([taskId, expectedRunId, call.to, call.prompt])).digest('hex')}`
+      : `${taskId}\n${call.to}\n${call.prompt}`
+    const inFlight = this.spawnCreatesInFlight.get(mutexKey)
+    if (inFlight) return inFlight
+    const execution = this.spawnDelegateChildExclusive(taskId, call, expectedRunId)
+    this.spawnCreatesInFlight.set(mutexKey, execution)
+    // 结算即撤登记（后续同键调用改走既有落盘查册短路）；登记副本自身吞掉
+    // rejection 防 unhandledRejection，结果仍原样返回给调用方（两条调用路径
+    // 都有逐单 catch，异常语义不变）。
+    void execution.finally(() => {
+      if (this.spawnCreatesInFlight.get(mutexKey) === execution) this.spawnCreatesInFlight.delete(mutexKey)
+    }).catch(() => {})
+    return execution
+  }
+
+  private async spawnDelegateChildExclusive(taskId: string, call: DelegateCall, expectedRunId: string | undefined): Promise<Task | null> {
     const task = this.store.get(taskId)
     if (!task) return null
     const claim = this.claimForRun(taskId, expectedRunId)
