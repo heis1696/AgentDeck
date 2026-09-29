@@ -337,9 +337,15 @@ async function main() {
   const fin = await settle(store, task.id)
   const children = store.list().filter((c) => c.parentTaskId === task.id)
   assert(fin.status === 'done', '领队 done（实际 ' + fin.status + '）')
-  assert(children.length === 1 && children[0].status === 'done', '撤销落空后子单跑到终态，不被收口撤销（实际 ' + children.map((c) => c.status).join(',') + '）')
+  assert(children.length === 1, '子单恰好建单（实际 ' + children.length + ' 单）')
+  // 子单终态确定性收场（轮询等待，非固定 sleep）：领队收口与子单终态是两条异步链，
+  // 领队 done 不蕴含子单已终态——先等子单落到终态再检验红证锚点，杜绝「子单还在跑」
+  // 让无关断言抢先变红（误红不算红证）的时序抖动
+  const childFin = await settle(store, children[0].id)
+  assert(childFin.status === 'done', '撤销落空后子单跑到终态，不被收口撤销（实际 ' + childFin.status + '）')
   assert(workerStarts === 1, '子单恰好执行一次（实际 ' + workerStarts + '）')
-  assert(!!children[0].workdir && fs.existsSync(children[0].workdir), '让位后零回收：在用 worktree 原样保留')
+  const childNow = store.get(children[0].id)
+  assert(!!childNow?.workdir && fs.existsSync(childNow.workdir), '让位后零回收：在用 worktree 原样保留')
   assert(!leader.sent.some((c) => c.includes('没有被执行')), '撤销落空不产生「本单未执行」误导拒单')
   console.log('SCENARIO-OK')
   process.exit(0)
@@ -857,11 +863,12 @@ main().catch((e) => { console.error(e); process.exit(3) })
 // 红13｜树名标记按平台折叠 + 登记查找前置规范化（detach 守卫可达性）：旧代码下
 // 「重挂分支的 detach 脚手架按别名写法回收必须同样被拒、目录存活」断言必红——
 //   字面量 startsWith 让大写别名判不中树名标记；登记查找 basename 吃原始串让
-//   `..` 段别名写法被算成伪树名「..」（注册表查不到 → 误判「注册不在案」而非走到守卫）。
+// `..` 段别名写法被算成伪树名「..」（注册表查不到 → 误判「注册不在案」而非走到守卫）。
 // 场景前置：真实 alias 目录（fs 层面存在）+ 物理同树对穿校验（别名写入、规范写法读出），
 // 证明别名不是仅 resolve 字符串相等，而是本机文件系统上的同一棵树。
-// 大小写别名形态仅 win32 文件系统语义成立（POSIX 大小写敏感即另一棵树）；`..` 段别名
-// 形态两平台通用，红18 复用本场景以「段别名写法按 no longer detached 拒收」为锚点。
+// 平台门控：大小写别名形态仅 win32 文件系统语义成立（POSIX 大小写敏感即另一棵树），
+// 大小写别名前置/断言全部 win32 门控；`..` 段别名形态两平台通用、保持跨平台——POSIX 上
+// 红证由它承担（守卫落空 = 伪树名判不中标记，同因必红，红证锚点不放宽）。
 const RED13 = `
 ${PRELUDE}
 const { reclaimWorktree } = require(__MUT_GIT__)
@@ -871,20 +878,25 @@ async function main() {
   const scaffoldName = '.agentdeck-merge-detach-r13'
   const scaffoldBranch = 'agentdeck/task-r13-integrated'
   const scaffoldPath = path.join(repo, '.agentdeck-worktrees', scaffoldName)
-  const aliasSpelling = path.join(repo, '.agentdeck-worktrees', '.AGENTDECK-MERGE-DETACH-R13')
+  // 大小写别名：仅 win32 文件系统语义成立（POSIX 无同树大小写别名，门控见下）
+  const caseAlias = process.platform === 'win32'
+    ? path.join(repo, '.agentdeck-worktrees', '.AGENTDECK-MERGE-DETACH-R13')
+    : null
   // \`..\` 段别名写法：取「树名 + sep + r13-probe + sep + 两点」的形态，resolve 后恰为树
   // 本身，但原始串最后一段是 ".."，basename 吃原始串会把它算成伪树名
   //（直接「树名 + sep + 两点」不行——resolve 会指到父目录 .agentdeck-worktrees）
   const dotDotAlias = scaffoldPath + path.sep + 'r13-probe' + path.sep + '..'
-  assert(aliasSpelling.toLowerCase() === scaffoldPath.toLowerCase() && aliasSpelling !== scaffoldPath, '前置：别名树名同目录不同拼写')
+  if (caseAlias) assert(caseAlias.toLowerCase() === scaffoldPath.toLowerCase() && caseAlias !== scaffoldPath, '前置：别名树名同目录不同拼写')
   git('branch', scaffoldBranch, 'main')
   execFileSync('git', ['-C', repo, 'worktree', 'add', '--detach', scaffoldPath, scaffoldBranch], { stdio: 'ignore' })
   // 真实 alias 目录 + 物理同树校验：别名写法在本机文件系统上真实存在，且经它写入的
   // 文件能从规范写法读出——物理同一棵树，不是仅字符串层面 resolve 相等
-  assert(fs.existsSync(aliasSpelling), '前置：大写别名写法指向真实存在的目录')
+  if (caseAlias) {
+    assert(fs.existsSync(caseAlias), '前置：大写别名写法指向真实存在的目录')
+    fs.writeFileSync(path.join(caseAlias, 'r13-probe.txt'), 'same-tree')
+    assert(fs.readFileSync(path.join(scaffoldPath, 'r13-probe.txt'), 'utf8') === 'same-tree', '前置：别名写法与规范写法物理同树（别名写入、规范读出）')
+  }
   assert(fs.existsSync(dotDotAlias), '前置：\`..\` 段别名写法指向真实存在的目录')
-  fs.writeFileSync(path.join(aliasSpelling, 'r13-probe.txt'), 'same-tree')
-  assert(fs.readFileSync(path.join(scaffoldPath, 'r13-probe.txt'), 'utf8') === 'same-tree', '前置：别名写法与规范写法物理同树（别名写入、规范读出）')
   const pointer = fs.readFileSync(path.join(scaffoldPath, '.git'), 'utf8')
   const gitdir = path.resolve(scaffoldPath, /^gitdir:\\s*(.+?)\\s*$/im.exec(pointer)[1])
   const generation = 'mut-r13-generation'
@@ -900,10 +912,12 @@ async function main() {
   assert(canonicalRefused.ok === false && canonicalRefused.status === 'retained' && (canonicalRefused.reason ?? '').includes('no longer detached'),
     '字面量写法拒绝重挂分支的 detach 脚手架（实际 ' + canonicalRefused.status + ': ' + (canonicalRefused.reason ?? '') + '）')
   assert(fs.existsSync(scaffoldPath), '字面量拒绝后目录存活')
-  const aliasRefused = await reclaimWorktree(aliasSpelling, { force: true, expectedOwnerTaskId: scaffoldName, expectedGenerationId: generation })
-  assert(aliasRefused.ok === false && aliasRefused.status === 'retained' && (aliasRefused.reason ?? '').includes('no longer detached'),
-    '同树别名写法同样拒绝回收重挂分支的 detach 脚手架（实际 ' + aliasRefused.status + ': ' + (aliasRefused.reason ?? '') + '）')
-  assert(fs.existsSync(scaffoldPath), '别名拒绝后目录必须存活（守卫落空会被连目录强删）')
+  if (caseAlias) {
+    const aliasRefused = await reclaimWorktree(caseAlias, { force: true, expectedOwnerTaskId: scaffoldName, expectedGenerationId: generation })
+    assert(aliasRefused.ok === false && aliasRefused.status === 'retained' && (aliasRefused.reason ?? '').includes('no longer detached'),
+      '同树别名写法同样拒绝回收重挂分支的 detach 脚手架（实际 ' + aliasRefused.status + ': ' + (aliasRefused.reason ?? '') + '）')
+    assert(fs.existsSync(scaffoldPath), '别名拒绝后目录必须存活（守卫落空会被连目录强删）')
+  }
   // \`..\` 段别名写法必须走到 detach 守卫、按与标准路径同因（no longer detached）拒收：
   // 旧代码（登记查找前置无规范化）把它算成伪树名「..」，会误判「注册不在案」而非守卫拒收
   const dotDotRefused = await reclaimWorktree(dotDotAlias, { force: true, expectedOwnerTaskId: scaffoldName, expectedGenerationId: generation })
@@ -1042,10 +1056,53 @@ main().catch((e) => { console.error(e); process.exit(3) })
 `
 
 // 红18｜登记查找前置规范化（detach 守卫可达性）：旧代码（registeredWorktreeForPath /
-// verifyWorktreeGeneration 先吃原始串再 basename）下「\`..\` 段别名写法走到 detach 守卫、
+// verifyWorktreeGeneration 先吃原始串再 basename）下「`..` 段别名写法走到 detach 守卫、
 // 按与标准路径同因（no longer detached）拒收」断言必红——伪树名「..」在注册表查不到
-// 登记，世代核验误判「注册不在案」，别名路径走不到守卫（复用红13 场景的 \`..\` 段断言）
-const RED18 = RED13
+// 登记，世代核验误判「注册不在案」，别名路径走不到守卫。
+// 独立夹具：不再复用红13 场景——`..` 段别名形态（树名 + sep + r18-probe + sep + 两点，
+// resolve 恰为树）两平台同树，红18 自此跨平台成立，不借用 win32 专属的大小写别名前置
+const RED18 = `
+${PRELUDE}
+const { reclaimWorktree } = require(__MUT_GIT__)
+async function main() {
+  const { repo, git } = makeRepo('mut-r18-')
+  const scaffoldName = '.agentdeck-merge-detach-r18'
+  const scaffoldBranch = 'agentdeck/task-r18-integrated'
+  const scaffoldPath = path.join(repo, '.agentdeck-worktrees', scaffoldName)
+  const dotDotAlias = scaffoldPath + path.sep + 'r18-probe' + path.sep + '..'
+  assert(path.basename(dotDotAlias) === '..', '前置：段别名写法最后一段是 ".."（basename 吃原始串会算成伪树名）')
+  assert(path.resolve(dotDotAlias) === scaffoldPath, '前置：段别名写法 resolve 恰为树本身（两平台同树）')
+  git('branch', scaffoldBranch, 'main')
+  execFileSync('git', ['-C', repo, 'worktree', 'add', '--detach', scaffoldPath, scaffoldBranch], { stdio: 'ignore' })
+  // 物理同树校验：字符串拼接保住 ".." 段写法（path.join 会把 ".." 消解掉），经别名写法
+  // 写入的文件能从规范写法读出——同一棵树，不是仅字符串层面 resolve 相等
+  assert(fs.existsSync(dotDotAlias), '前置：段别名写法指向真实存在的目录')
+  fs.writeFileSync(dotDotAlias + path.sep + 'r18-probe.txt', 'same-tree')
+  assert(fs.readFileSync(path.join(scaffoldPath, 'r18-probe.txt'), 'utf8') === 'same-tree', '前置：段别名写法与规范写法物理同树（别名写入、规范读出）')
+  const pointer = fs.readFileSync(path.join(scaffoldPath, '.git'), 'utf8')
+  const gitdir = path.resolve(scaffoldPath, /^gitdir:\\s*(.+?)\\s*$/im.exec(pointer)[1])
+  const generation = 'mut-r18-generation'
+  fs.writeFileSync(path.join(gitdir, 'agentdeck-generation'), generation + '\\n')
+  fs.mkdirSync(path.join(repo, '.agentdeck-worktrees', '.metadata'), { recursive: true })
+  fs.writeFileSync(path.join(repo, '.agentdeck-worktrees', '.metadata', scaffoldName + '.json'), JSON.stringify({
+    ownerTaskId: scaffoldName, generationId: generation, repoDir: repo, path: scaffoldPath,
+    branch: scaffoldBranch, baseSha: git('rev-parse', scaffoldBranch), createdAt: Date.now(), cleanupStatus: 'active'
+  }))
+  // 重挂分支：detach 树内检出集成分支（attached HEAD）——detach 守卫的唯一拦截对象
+  git('-C', scaffoldPath, 'switch', scaffoldBranch)
+  const canonicalRefused = await reclaimWorktree(scaffoldPath, { force: true, expectedOwnerTaskId: scaffoldName, expectedGenerationId: generation })
+  assert(canonicalRefused.ok === false && canonicalRefused.status === 'retained' && (canonicalRefused.reason ?? '').includes('no longer detached'),
+    '字面量写法拒绝重挂分支的 detach 脚手架（实际 ' + canonicalRefused.status + ': ' + (canonicalRefused.reason ?? '') + '）')
+  assert(fs.existsSync(scaffoldPath), '字面量拒绝后目录存活')
+  const dotDotRefused = await reclaimWorktree(dotDotAlias, { force: true, expectedOwnerTaskId: scaffoldName, expectedGenerationId: generation })
+  assert(dotDotRefused.ok === false && dotDotRefused.status === 'retained' && (dotDotRefused.reason ?? '').includes('no longer detached'),
+    '\`..\` 段别名写法同样按 no longer detached 拒收（与标准路径同因，实际 ' + dotDotRefused.status + ': ' + (dotDotRefused.reason ?? '') + '）')
+  assert(fs.existsSync(scaffoldPath), '\`..\` 段别名拒收后目录必须存活（守卫落空会被连目录强删）')
+  console.log('SCENARIO-OK')
+  process.exit(0)
+}
+main().catch((e) => { console.error(e); process.exit(3) })
+`
 
 const MUTATIONS = [
   {
@@ -1335,7 +1392,9 @@ const MUTATIONS = [
     ],
     bundles: [{ src: 'src/main/git.ts', var: 'GIT' }],
     scenario: RED13,
-    expectedRed: '同树别名写法同样拒绝回收'
+    // 大小写别名形态仅 win32 文件系统语义成立（场景内已门控）；POSIX 上红证由两平台
+    // 通用的 `..` 段别名形态承担（守卫落空 = 伪树名判不中标记，同因必红，锚点不放宽）
+    expectedRed: process.platform === 'win32' ? '同树别名写法同样拒绝回收' : '段别名写法同样按 no longer detached 拒收'
   },
   {
     name: '红14｜验收器盘符根：旧代码（根键无脑再拼第二个 sep）下「盘符根 workdir 界内目标判界内且存在」断言必红',
@@ -1400,7 +1459,11 @@ const MUTATIONS = [
       { src: 'src/main/git.ts', var: 'GITKEY' }
     ],
     scenario: RED17,
-    expectedRed: '渲染层键与主进程 resolve 派生键必须同源'
+    expectedRed: '渲染层键与主进程 resolve 派生键必须同源',
+    // 平台不适配不构成红证：UNC 共享根仅 win32 路径语义存在，POSIX 无 UNC、`..` 弹出
+    // 下界旧病不适用——非 win32 显式 SKIP 不计红（场景内平台门仅双保险，同红16 手法）
+    platforms: ['win32'],
+    skipReason: 'UNC 段弹出下界仅 win32 路径语义存在；POSIX 无 UNC 共享根，旧病不适用'
   },
   {
     name: '红18｜登记查找前置规范化（detach 守卫可达性）：旧代码（登记查找/核验入口先吃原始串再 basename）下「`..` 段别名写法走到 detach 守卫按 no longer detached 拒收」断言必红',
