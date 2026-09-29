@@ -5884,7 +5884,8 @@
       "dependencies": [],
       "dependents": [
         "src/renderer/src/App.tsx",
-        "src/renderer/src/components/WorkspaceSwitcher.tsx"
+        "src/renderer/src/components/WorkspaceSwitcher.tsx",
+        "src/renderer/src/main.tsx"
       ],
       "orphan": false,
       "valid": true
@@ -5920,7 +5921,8 @@
         "src/renderer/src/components/UsageView.tsx",
         "src/renderer/src/components/WorkspaceView.tsx",
         "src/renderer/src/pet/PetSettingsPage.tsx",
-        "src/renderer/src/pet/PetStage.tsx"
+        "src/renderer/src/pet/PetStage.tsx",
+        "src/renderer/src/main.tsx"
       ],
       "orphan": false,
       "valid": true
@@ -9568,6 +9570,40 @@
       "source": "src/renderer/src/main.tsx",
       "dependencies": [
         {
+          "module": "../../shared/path-key",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/shared/path-key.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
+          "module": "./api",
+          "moduleSystem": "es6",
+          "dynamic": false,
+          "exoticallyRequired": false,
+          "dependencyTypes": [
+            "local",
+            "import"
+          ],
+          "resolved": "src/renderer/src/api.ts",
+          "coreModule": false,
+          "followable": true,
+          "couldNotResolve": false,
+          "matchesDoNotFollow": false,
+          "circular": false,
+          "valid": true
+        },
+        {
           "module": "./App",
           "moduleSystem": "es6",
           "dynamic": false,
@@ -10000,9 +10036,9 @@
     "ignore": 0,
     "advisedExitCode": 0,
     "totalCruised": 191,
-    "totalDependenciesCruised": 458,
+    "totalDependenciesCruised": 460,
     "optionsUsed": {
-      "baseDir": "D:\\agentdeck\\.agentdeck-worktrees\\t_muk3gcd6_1838995e71a2_c35",
+      "baseDir": "D:\\agentdeck\\.agentdeck-worktrees\\t_muk3gcd6_1838995e71a2_c42",
       "combinedDependencies": false,
       "detectJSDocImports": false,
       "detectProcessBuiltinModuleCalls": false,

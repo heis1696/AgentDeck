@@ -16,7 +16,12 @@
  *   B 无 Range 服务端：无视 Range 回 200 全量 → 客户端必须弃残件重下（append 全量=必坏包），sha 对
  *   C 416 重置：残件比产物还长 → 服务端 416 → 客户端重置残件从头下，sha 对
  *   D 连续掐断：三次尝试每次发 512KB 被掐 → downloadArtifact 拒绝但进程存活（无 uncaughtException），
- *     .part 保留且恰为 3×512KB（每次尝试都从上次的字节继续 = 残件即进度）
+ *     .part 保留且累计在 1MB–1.5MB（每次尝试都从上次磁盘实况继续 = 残件即进度；abort 路径
+ *     destroy 丢弃写流缓冲尾块属残件语义允许，预言机取区间防 RST/destroy 竞态抖动）
+ *   E 挂起 read 兜底：mock fetch 提供确定性永挂起的 read()（abort 传播失灵的极端竞态模拟），
+ *     经 setReadStallGuardForTest 缩短读守卫时限后直证 45s 兜底路径——三重试全部由守卫拒绝
+ *    （签名文案 abort 传播失灵兜底，而非 30s 空闲 abort）、每次守卫都 cancel 响应流、
+ *     总耗时被守卫钉死（不挂到 undici bodyTimeout 300s）、.part 保留、无 uncaughtException
  *
  * 隔离铁律：os.tmpdir 临时目录 + 127.0.0.1 本地服务器；不写 src/、不碰真实 userData 与线上 feed。
  */
@@ -72,7 +77,7 @@ await build({
   target: 'node18',
   logLevel: 'silent'
 })
-const { downloadArtifact } = await import(pathToFileURL(outfile).href)
+const { downloadArtifact, FeedError, setReadStallGuardForTest } = await import(pathToFileURL(outfile).href)
 
 // ---------- 可注入故障的本地 Range 服务器 ----------
 /**
@@ -194,15 +199,61 @@ const partOf = (n) => dest + '.part'
   const part = dest + '.part'
   ok(fs.existsSync(part), '.part 保留（残件即进度，不删）')
   const partSize = fs.existsSync(part) ? fs.statSync(part).size : 0
-  ok(partSize === 3 * 512 * 1024, `三次尝试各续 512KB → .part 恰为 1.5MB（实际 ${partSize}）`)
-  // 残件确实可续：换一台不掐的服务器接着同一 dest 下，应只补剩余字节
+  // 三次尝试每次都从上次残件实况续 512KB；写流缓冲里未落盘的尾块（至多一两个 64KB 块）
+  // 会随 abort 路径的 destroy 丢弃——残件语义允许（续传从磁盘实况出发），预言机取区间
+  // 而非精确字节（精确预言机在 RST 掐断与 destroy 的竞态下时序抖动）
+  ok(partSize >= 2 * 512 * 1024 && partSize <= 3 * 512 * 1024,
+    `三次尝试残件累计在 1MB–1.5MB（实际 ${partSize}；每次尝试都从上次磁盘实况继续 = 残件即进度）`)
+  // 残件确实可续：换一台不掐的服务器接着同一 dest 下，应从磁盘实况精确续传补齐剩余字节
   closeServer()
   const artifact2 = artifact
   const { url: url2, requests } = await startServer(artifact2, { supportRange: true })
   await downloadArtifact(url2, 'shell', 'big.bin', dest)
-  ok(requests.length === 1 && requests[0] === 'bytes=1572864-', '换服务器后单连接从 1.5MB 精确续传')
+  ok(requests.length === 1 && requests[0] === `bytes=${partSize}-`, `换服务器后单连接从残件实况 ${partSize} 精确续传`)
   ok(sha256(fs.readFileSync(dest)) === sha256(artifact), '续传完成后 sha256 与原件一致')
   closeServer()
+}
+
+// ---------- E 挂起 read 兜底：45s 读守卫直证（缩短钩子 + 确定性永挂起流） ----------
+{
+  console.log('[scenario] E 挂起 read 兜底：三重试由读守卫拒绝并 cancel（abort 传播失灵模拟）')
+  // 确定性「abort 后 read 永不返回」：底层源 pull 永不 enqueue/关闭，read() 无限挂起——
+  // 真实现场里这是 undici 未把 abort 信号传播进挂起 read() 的极端竞态（挂到 bodyTimeout 300s）；
+  // mock 流把该竞态变成必现，30s 空闲 abort 也不会先到（fetch 被整体 mock，无连接可断）
+  const GUARD_MS = 250
+  setReadStallGuardForTest(GUARD_MS)
+  const cancelCalls = []
+  const fetchCalls = []
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async () => {
+    fetchCalls.push(1)
+    return new Response(new ReadableStream({
+      pull() { /* 永挂起：绝不 enqueue、绝不 close */ },
+      cancel(reason) { cancelCalls.push(String(reason?.message ?? '')) }
+    }))
+  }
+  const destE = path.join(work, 'artifact', 'never.bin')
+  const t0 = Date.now()
+  let rejected = null
+  try {
+    await downloadArtifact('http://mock.invalid/shell/never.bin', 'shell', 'never.bin', destE)
+  } catch (error) {
+    rejected = error
+  } finally {
+    globalThis.fetch = realFetch
+    setReadStallGuardForTest(undefined) // 复位默认 45s，不留测试态
+  }
+  const elapsed = Date.now() - t0
+  ok(rejected instanceof FeedError && rejected.message.includes('abort 传播失灵兜底'),
+    `拒绝为读守卫签名（实际 ${rejected?.constructor?.name ?? 'null'}: ${rejected?.message ?? 'null'}）`)
+  ok(!rejected.message.includes('30 秒无数据'), '拒绝不来自 30s 空闲 abort（守卫路径而非空闲路径）')
+  ok(fetchCalls.length === 3, `三重试各自发起 fetch（实际 ${fetchCalls.length} 次）`)
+  ok(cancelCalls.length === 3, `守卫每次拒绝都 cancel 响应流（实际 ${cancelCalls.length} 次）`)
+  ok(elapsed >= GUARD_MS * 3, `守卫确有等待才拒绝（总耗时 ${elapsed}ms ≥ 3×${GUARD_MS}ms）`)
+  ok(elapsed < 15_000, `守卫钉死等待上界：总耗时 ${elapsed}ms（默认守卫三重试 ≥138s、undici bodyTimeout 300s——挂起即超标）`)
+  ok(fs.existsSync(destE + '.part') && fs.statSync(destE + '.part').size === 0, '.part 保留且 0 字节（失败不删 = 残件即进度，从未收到字节）')
+  ok(!fs.existsSync(destE), 'dest 未落盘（没有任何字节可 rename）')
+  ok(uncaught === null, `无 uncaughtException（race 落选 read 的迟到决议被消化）${uncaught ? `（收到：${uncaught.message}）` : ''}`)
 }
 
 // ---------- 收尾 ----------
