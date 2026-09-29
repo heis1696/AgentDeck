@@ -161,6 +161,15 @@ check(p.CONTINUE_BLOCK.split('<continue').length - 1 === 1, '接力协议：全�
 check(!p.HANDOFF_CUE.includes('<continue') && !p.GOAL_BLOCK.includes('<continue'), '接力按钮指令/目标协议块不写标记字样（复述不产生越界起点）')
 check(delegate.parseContinue(`${p.HANDOFF_CUE}\n好的。<continue start="auto">阶段2：按 docs/plan.md 实施 UI；阶段1 已完成数据层；验收：构建通过</continue>`)[0]?.brief.startsWith('阶段2：按 docs/plan.md 实施 UI'), '复述按钮指令后再输出真实标记：简报完整不被污染')
 check(p.CONTINUE_BLOCK.includes('什么时候用') && p.CONTINUE_BLOCK.includes('怎么写'), '接力协议：按「何时用 / 怎么写」两段组织')
+// 主动性钩子：该交接时不交接的故障形态是 agent 从不主动判断有无后续阶段、做完就停。
+// 固化三段措辞（检查动作、两种处置），并钉住位置——必须在保守默认句之前（列表开头）。
+check(p.CONTINUE_BLOCK.includes('先主动检查是否还有后续阶段') &&
+  p.CONTINUE_BLOCK.includes('有明确后续阶段，就在收尾回复的最后一行交接') &&
+  p.CONTINUE_BLOCK.includes('没有后续阶段、或任务原文根本没提分阶段，就正常收尾，不输出任何标记'),
+  '接力协议：收尾前主动检查后续阶段（检查动作 + 有/无后续阶段两种处置的措辞）')
+check(p.CONTINUE_BLOCK.indexOf('先主动检查是否还有后续阶段') > -1 &&
+  p.CONTINUE_BLOCK.indexOf('先主动检查是否还有后续阶段') < p.CONTINUE_BLOCK.indexOf('阶段进行中、拿不准要不要切会话'),
+  '接力协议：主动性检查位于「什么时候用」列表开头（保守默认句之前）')
 check(p.RETITLE_PROMPT.includes('重起一个简短标题') && p.RETITLE_PROMPT.includes('60 个字符') && p.RETITLE_PROMPT.includes('语言跟随'), '标题回合：中英文上限与语言')
 check(p.HANDOFF_RECEIVE_CUE.includes('【系统·接力接收】') && p.HANDOFF_START_CONFIRMED_CUE.includes('【系统·手动启动确认】'), '接手/启动确认标题')
 rendered.push(p.CONTINUE_BLOCK, p.HANDOFF_CUE, p.HANDOFF_RECEIVE_CUE, p.HANDOFF_START_CONFIRMED_CUE, p.RETITLE_PROMPT)
