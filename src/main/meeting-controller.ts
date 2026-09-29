@@ -357,8 +357,9 @@ export class MeetingController {
   private async runRound(meeting: Meeting): Promise<RoundRun> {
     const turns: MeetingTurn[] = []
     const stances = new Map<string, Stance>()
+    const owners = this.ownerNames(meeting)
     const reporter = meeting.participants.find((participant) => participant.role === 'reporter')!
-    const reportPromptText = reportPrompt(this.chairNotes(meeting), meeting.round, meeting.topic)
+    const reportPromptText = reportPrompt(this.chairNotes(meeting), meeting.round, meeting.topic, this.investigatorNames(reporter.agentId))
     const reportText = await this.speak(meeting, reporter, 'report', reportPromptText, turns)
     const reportStance = parseStance(reportText)
     if (reportStance) stances.set(reporter.agentId, reportStance)
@@ -368,7 +369,7 @@ export class MeetingController {
     const designer = meeting.participants.find((participant) => participant.role === 'designer')!
     for (let inner = 0; inner < Math.max(1, meeting.maxInnerTurns); inner++) {
       for (const critic of critics) {
-        const prompt = challengePrompt(this.chairNotes(meeting), meeting.round, meeting.topic, meetingData(stripMeetingTags(reportText)))
+        const prompt = challengePrompt(this.chairNotes(meeting), meeting.round, meeting.topic, meetingData(stripMeetingTags(reportText)), this.investigatorNames(critic.agentId))
         const text = await this.speak(meeting, critic, 'challenge', prompt, turns)
         const stance = parseStance(text)
         if (stance) stances.set(critic.agentId, stance)
@@ -377,7 +378,7 @@ export class MeetingController {
       if (!objections.length) break
       const objectionText = objections.map((objection) => `- ${objection.id} [${objection.ref}] ${objection.text}`).join('\n')
       // 答辩必须由被质疑的汇报人执行：designer 无权解决针对汇报的反对，只会输出空 envelope，resolved 永远为 false（iss_t_mu420e1e 死循环根因）
-      const defensePromptText = defensePrompt(this.chairNotes(meeting), meeting.round, meeting.topic, meetingData(objectionText))
+      const defensePromptText = defensePrompt(this.chairNotes(meeting), meeting.round, meeting.topic, meetingData(objectionText), this.investigatorNames(reporter.agentId), owners)
       const defenseText = await this.speak(meeting, reporter, 'defense', defensePromptText, turns)
       const defenseStance = parseStance(defenseText)
       if (defenseStance) stances.set(reporter.agentId, defenseStance)
@@ -390,7 +391,7 @@ export class MeetingController {
       const resolutionText = objections.length
         ? objections.map((objection) => `- [${objection.ref}] ${objection.resolved ? '已解决' : '未决'}：${objection.text}${objection.resolution ? ' → ' + objection.resolution : ''}`).join('\n')
         : '（本轮没有反对）'
-      const synthPromptText = synthPrompt(this.chairNotes(meeting), meeting.round, meeting.topic, meetingData(resolutionText))
+      const synthPromptText = synthPrompt(this.chairNotes(meeting), meeting.round, meeting.topic, meetingData(resolutionText), this.investigatorNames(designer.agentId), owners)
       const synthText = await this.speak(meeting, designer, 'synthesis', synthPromptText, turns)
       const synthStance = parseStance(synthText)
       if (synthStance) stances.set(designer.agentId, synthStance)
@@ -399,10 +400,15 @@ export class MeetingController {
     return { reportText, stances, objections, envelope, turns }
   }
 
-  private async speak(meeting: Meeting, participant: MeetingParticipant, phase: MeetingTurnPhase, prompt: string, turns: MeetingTurn[]): Promise<string> {
+  /** opts.investigate 默认放行（会议发言的常规能力）；强制综合的提示词明令「不要发起调查」，
+   *  那里必须显式传 false——否则模型越界输出 <investigate> 会被当成合法回合照发调查。 */
+  private async speak(meeting: Meeting, participant: MeetingParticipant, phase: MeetingTurnPhase, prompt: string, turns: MeetingTurn[], opts?: { investigate?: boolean }): Promise<string> {
     // 发言级实时进度：一回合真实可达 5-15 分钟，轮末才落盘会让 UI 整场"看起来卡死"
     this.save(meeting.id, { currentTurn: { agentId: participant.agentId, role: participant.role, phase, startedAt: this.now() } })
-    const result = await this.offices.followUp(participant.agentId, prompt, { collectFinal: true })
+    // meetingTurn：本回合是结构化会议发言。同一张办公室会话回答咨询（index.ts 的 attachConsult）
+    // 不带此标记，调查随之关闭。会议内部的强制收束回合另用 investigate:false 二次收口。
+    const meetingTurn = opts?.investigate !== false
+    const result = await this.offices.followUp(participant.agentId, prompt, { collectFinal: true, meetingTurn })
     const office = this.offices.get(participant.agentId)
     if (office) participant.officeTaskId = office.id
     if (!result.ok) throw new Error(result.error || `${participant.agentId} 发言失败`)
@@ -417,6 +423,19 @@ export class MeetingController {
   private chairNotes(meeting: Meeting): string {
     // splice(0) 取走插话（消费副作用）保留在 controller；渲染格式集中在 prompts/meeting.ts
     return renderChairNotes(meeting.pendingChairNotes.splice(0))
+  }
+
+  /** 发言人名下可做只读调查的队员名（与 runner.spawnInvestigateChild 的查找范围一致：该队长的 subordinates） */
+  private investigatorNames(agentId: string): string[] {
+    const agents = this.getAgents()
+    const me = agents.find((agent) => agent.id === agentId)
+    return (me?.subordinates ?? []).map((id) => agents.find((agent) => agent.id === id)?.name).filter((name): name is string => !!name)
+  }
+
+  /** 行动项 owner 候选：与会队长名（resolveOwner 按 id/名字解析，名字是模型最可能照抄的形式） */
+  private ownerNames(meeting: Meeting): string[] {
+    const agents = this.getAgents()
+    return meeting.participants.map((participant) => agents.find((agent) => agent.id === participant.agentId)?.name ?? participant.agentId)
   }
 
   private mergeEnvelopeObjections(existing: MeetingObjection[], envelope: Envelope, defender: string): MeetingObjection[] {
@@ -482,7 +501,8 @@ export class MeetingController {
     const designer = meeting.participants.find((participant) => participant.role === 'designer')
     if (designer) {
       try {
-        const text = await this.speak(meeting, designer, 'synthesis', forcedSynthesisPrompt(this.chairNotes(meeting), message, meetingData(JSON.stringify(last ?? {}))), turns)
+        // 强制综合：提示词已写明「不要发起调查」，运行时同一口径关闭调查放行
+        const text = await this.speak(meeting, designer, 'synthesis', forcedSynthesisPrompt(this.chairNotes(meeting), message, meetingData(JSON.stringify(last ?? {})), this.ownerNames(meeting)), turns, { investigate: false })
         synthesis = parseEnvelope(text)
       } catch (error) {
         const reasonText = error instanceof Error ? error.message : String(error)

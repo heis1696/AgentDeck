@@ -13,7 +13,7 @@ const bundle = async (source, name) => {
   return import(pathToFileURL(outfile).href)
 }
 
-const [{ AgentSessionRegistry }, { TaskStore }, { TaskService }, { TaskRunner }] = await Promise.all([
+const [{ AgentSessionRegistry, OFFICE_TASK_KEY_V2_PREFIX }, { TaskStore }, { TaskService }, { TaskRunner }] = await Promise.all([
   bundle('src/main/agent-sessions.ts', 'agent-sessions.cjs'),
   bundle('src/main/store.ts', 'store.cjs'),
   bundle('src/main/task-service.ts', 'task-service.cjs'),
@@ -77,7 +77,8 @@ runner.attachTeam(() => agents)
 const registry = new AgentSessionRegistry({ store, taskService: service, runner, getAgents: () => agents, waitPollMs: 5, waitTimeoutMs: 2_000 })
 const first = await registry.ensure('leader')
 check(first.status === 'done', 'office task bootstrap reaches done')
-check(first.suppressIssue === true && first.dedupeKey === 'office_leader', 'office task is suppressed and durably deduped')
+// 断言键的**归属**（该队长的键空间）而不是字面串：键形是实现细节，语义是「一位队长一张长期单」
+check(first.suppressIssue === true && first.dedupeKey === OFFICE_TASK_KEY_V2_PREFIX + 'leader', 'office task is suppressed and durably deduped')
 
 const again = await registry.ensure('leader')
 check(again.id === first.id, 'repeated ensure reuses one office task')

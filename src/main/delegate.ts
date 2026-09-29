@@ -8,24 +8,23 @@ import type { TaskExpectation, TaskStore } from './store'
 import type { TaskRunner } from './runner'
 import type { BackendSession, BackendTurnResult } from './backends/types'
 import {
-  buildAgentPrompt,
-  buildDelegationBlock,
-  buildChildPrompt,
-  REPORT_PROMPT_HEADER,
   childReportEntry,
   buildRejectionFeedbackPrompt,
-  CONTINUE_INSTRUCTION,
-  CONTINUE_INSTRUCTION_WITH_REJECTS,
-  BUDGET_TAIL_INSTRUCTION,
   buildRejectNotice,
-  REVIEW_INSTRUCTION,
+  buildReportFeedback,
+  budgetTailFeedback,
+  policyRejectionPrompt,
+  summaryFallbackNote,
+  longResultOmittedNote,
   undeliveredReportComment,
   leftoverRejectsComment,
   workerFullReportComment,
   reportCopyMarkdown,
   fullTextPointerLines,
   CHILD_SUMMARY_BODY_PREFIX,
-  childSummaryPrompt
+  childSummaryPrompt,
+  DELEGATE_REJECT_EXCERPT_MARK,
+  REPORT_INLINE_MAX
 } from './prompts'
 import {
   branchExists,
@@ -51,7 +50,8 @@ import {
 import { clampIssueCommentBytes } from './issue-relay'
 import { currentGitChanges } from '../shared/git-snapshot'
 
-export const DELEGATE_REJECT_EXCERPT_MARK = '（被拒指令：'
+// 拒因摘录标记与回灌界定义在 prompts/delegation.ts（提示词与组装共用同一处）；此处转出口供 runner/smoke 沿用旧导入路径
+export { DELEGATE_REJECT_EXCERPT_MARK, REPORT_INLINE_MAX }
 
 const stripRejectExcerpt = (reason: string): string => {
   const excerptStart = reason.indexOf(DELEGATE_REJECT_EXCERPT_MARK)
@@ -325,8 +325,11 @@ export interface ContinueCall {
   loose?: boolean
 }
 
-/** 末尾锚定主通道：标记后只允许空白 */
-const CONTINUE_TAIL_RE = /<continue\b([^>]*)>([\s\S]*?)<\/continue>\s*$/
+/** 末尾锚定主通道：标记后只允许空白。起点取末尾闭合标签之前的**最后一个**开标记
+ *  （lookahead 断言其后全文不再有开标记字样）——agent 正文先出现开标记（讨论/复述里
+ *  引用「我会输出 <continue …> 标记」）、末尾才写真实标记时，简报从真实标记起算，
+ *  不再被拼进前文。 */
+const CONTINUE_TAIL_RE = /<continue\b(?![\s\S]*<continue\b)([^>]*)>([\s\S]*?)<\/continue>\s*$/
 /** 兜底扫描：全文任意位置的完整闭合标记（取最后一个） */
 const CONTINUE_ANY_RE = /<continue\b([^>]*)>([\s\S]*?)<\/continue>/g
 
@@ -342,6 +345,8 @@ function continueStart(attrs: string): { start: 'auto' | 'parked'; explicitAuto:
  * 解析 <continue start="auto|parked">简报</continue>。
  * 主通道末尾锚定：标记后只允许空白——协议即"在回复最后一行输出"，正文/示例/复述
  * 文档里出现标记字样不构成接力意图（防止讨论方案或引用本文档时被误切会话）。
+ * 锚定起点取末尾闭合标签之前的最后一个开标记：正文先出现开标记、末尾写真实标记时，
+ * 简报从真实标记起算，不把中间正文拼进简报。
  * start 属性解析容忍多属性/大小写；只有显式 "auto" 才立即执行，
  * 缺省/非法/无引号一律按 parked 备好待人工启动，防止复述协议时误切会话。
  * 兜底通道：主通道未命中时取全文最后一个完整闭合标记，仅当**显式** start="auto"
@@ -639,10 +644,8 @@ export function buildGitReportSection(digest: WorktreeChangeDigest): string | nu
 }
 
 // ---- 单条回灌正文的结构化组装（C 保底：短文原文整段回灌；长文只回 git 小节 + 全文入口） ----
-
-/** 回灌原文整段回灌的体量界（码点级）：≤ 此界原文整段进正文；超过则正文不放原文，
- *  只回 git 改动小节 + 全文入口指引（全文已双落），领队可选派单时标 summary 走总结轮。 */
-export const REPORT_INLINE_MAX = 2000
+// 回灌界 REPORT_INLINE_MAX（≤ 此界原文整段进正文；超过则正文不放原文，只回 git 改动小节 + 全文入口指引，
+// 领队可选派单时标 summary 走总结轮）定义在 prompts/delegation.ts，派发协议对领队讲的是同一个数。
 
 /** 码点级计数（O(n) 零分配）：代理对算一个码点 */
 function countCodepoints(text: string): number {
@@ -671,8 +674,9 @@ export interface ChildReportBodyInput {
   summaryFallbackNote?: string
 }
 
-/** 回灌正文：done 单 = 队员总结（已采纳时，前置非全文标注）或原文整段（≤体量界，码点级）；
- *  原文超界且无可用总结时正文不放原文，只留回退注记 + git 改动小节 + 全文入口指引。
+/** 回灌正文：done 单 = 队员总结（已采纳时，前置非全文标注）或原文整段（≤回灌界，码点级）；
+ *  原文超界且无可用总结时正文不放原文，只留注记（总结轮回退注记，或未走总结轮时的超界注记——
+ *  说明原文为什么不在，领队不会误以为队员没交代）+ git 改动小节 + 全文入口指引。
  *  任何路径不做切片、不留截断标记——全文由双落通道（Issue 评论 + 报告副本）携带。
  *  队员可控文本统一过序列内破坏转义（与 git 小节同源），回灌体里不再有可解析的活标记。 */
 export function buildChildReportBody(input: ChildReportBodyInput): string {
@@ -683,7 +687,9 @@ export function buildChildReportBody(input: ChildReportBodyInput): string {
       parts.push(`${CHILD_SUMMARY_BODY_PREFIX}\n${escapeProtocolLiterals(summary)}`)
     } else {
       const result = (input.result ?? '').trim()
-      if (result && countCodepoints(result) <= REPORT_INLINE_MAX) parts.push(escapeProtocolLiterals(result))
+      const chars = countCodepoints(result)
+      if (result && chars <= REPORT_INLINE_MAX) parts.push(escapeProtocolLiterals(result))
+      else if (result && !input.summaryFallbackNote) parts.push(longResultOmittedNote(chars))
     }
     if (input.summaryFallbackNote) parts.push(input.summaryFallbackNote)
   } else {
@@ -801,8 +807,7 @@ export async function runDelegationLoop(
     let rejects = pendingRejections()
     if (rejects.length) {
       try {
-        const turn = await runner.sendTurn(taskId, session,
-          `【系统·派单拒绝】以下派单均未建单：\n${rejects.map((reason) => `- ${reason}`).join('\n')}\n本轮已触及政策护栏，不要再派发；请输出当前工作结论。`, runId)
+        const turn = await runner.sendTurn(taskId, session, policyRejectionPrompt(rejects), runId)
         if (!active()) return abandoned()
         if (!turn.ok) throw new Error(turn.error || '拒单回灌失败')
         acknowledgeRejections(rejects.length)
@@ -995,7 +1000,7 @@ export async function runDelegationLoop(
     runner.suspendDelegateSpawns?.(taskId)
     try {
       const turn = await runner.sendTurn(taskId, session,
-        `${REPORT_PROMPT_HEADER}\n\n【预算收尾】委派轮数预算已尽；以下为循环退出前收编完成的队员结果，本回合后不再受理新派单。\n\n${tailEntries.join('\n\n')}${rideAlong.length ? buildRejectNotice(rideAlong, rosterText) : ''}\n\n${BUDGET_TAIL_INSTRUCTION}${REVIEW_INSTRUCTION}`, runId
+        budgetTailFeedback(tailEntries.join('\n\n'), rideAlong.length ? buildRejectNotice(rideAlong, rosterText) : ''), runId
       )
       if (!active()) return
       if (!turn.ok) throw new Error(turn.error || '预算收尾回灌失败')
@@ -1206,7 +1211,7 @@ export async function runDelegationLoop(
         note(`单 #${seq} 总结轮已产出（${countCodepoints(produced)} 字），作为回灌体`)
       } else {
         const why = produced ? '总结仍超长' : '总结轮未产出'
-        summaryFallbackNotes.set(id, `（${why}：原文超回灌界不进正文，全文见下方入口）`)
+        summaryFallbackNotes.set(id, summaryFallbackNote(why))
         note(`单 #${seq} ${why}，回灌按全文入口指引回退`)
       }
     }
@@ -1256,17 +1261,13 @@ export async function runDelegationLoop(
     // 领队连着多轮评估「仍在途等回灌」，该工作项无人领）。take 即清空，兜底通道不会重复送。
     const rideAlongRejects = pendingRejections()
     let rejectNotice = ''
-    let continueInstruction = CONTINUE_INSTRUCTION
     if (rideAlongRejects.length) {
       note(`⚠ ${rideAlongRejects.length} 条派单被拒（未建单），原因随报告回灌给领队改派`)
       rejectNotice = buildRejectNotice(rideAlongRejects, rosterText)
-      continueInstruction = CONTINUE_INSTRUCTION_WITH_REJECTS
     }
     note(`第 ${round} 轮结果已回灌，等待领队继续`)
     try {
-      const turn = await runner.sendTurn(taskId, session,
-        `${REPORT_PROMPT_HEADER}\n\n${report}${rejectNotice}\n\n${continueInstruction}${REVIEW_INSTRUCTION}`, runId
-      )
+      const turn = await runner.sendTurn(taskId, session, buildReportFeedback(report, rejectNotice), runId)
       if (!active()) return abandoned()
       if (!turn.ok) throw new Error(turn.error || '回灌回合失败')
       acknowledgeRejections(rideAlongRejects.length)

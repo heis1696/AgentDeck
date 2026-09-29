@@ -1,0 +1,12 @@
+[eval]:8
+one(G,'    '+SQ+'3. 本次推进结束时，照常按【目标模式】协议在最后一条回复末尾输出 checkpoint；全部完成条件都达成时按协议收尾。'+SQ,['    '+SQ+'3. 本次推进结束时，在最后一条回复末尾输出 checkpoint 代码块（完整定义见本会话首条消息的【目标模式】协议块）：至少要有 "summary" 写这轮做了什么，并逐条照抄完成条件原文填 "completedConditions" / "incompleteConditions"；全部完成条件都达成时按协议收尾。'+SQ+',',
+                                                                                                                                                                                                                                                                         
+Expression expected
+
+SyntaxError: Unexpected end of input
+    at makeContextifyScript (node:internal/vm:185:14)
+    at compileScript (node:internal/process/execution:383:10)
+    at evalTypeScript (node:internal/process/execution:256:22)
+    at node:internal/main/eval_string:74:3
+
+Node.js v22.23.2
