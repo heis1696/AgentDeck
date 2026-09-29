@@ -923,18 +923,34 @@ async function currentWorktreeGeneration(repoDir: string, wtPath: string): Promi
 // ---- worktree add 超时自适应（规模档位） ----
 
 /** worktree add 超时自适应：完整 checkout 耗时随仓库规模线性放大——那台 8.2 万文件 Unity 仓
- *  完整检出要 5-6 分钟，固定 60s 必超时。60s 基线 + 每 1 万文件 +60s（8 万文件 ≈ 9 分钟），
- *  上限封顶 15 分钟。仅用于 createWorktree 的 worktree add；其他 git 调用不动。 */
+ *  完整检出要 5-6 分钟，磁盘争用（并行建树/Unity 编辑器同跑）下更久，实测 9 分钟档位仍会被
+ *  击穿成 locked=initializing 残尸。60s 基线 + 每 1 万文件 +90s（8 万文件 ≈ 13 分钟），上限
+ *  封顶 30 分钟。createWorktree 与集成/合并链路的建树共用；其他 git 调用不动。 */
 export const WORKTREE_ADD_BASE_TIMEOUT_MS = 60_000
-export const WORKTREE_ADD_TIMEOUT_PER_10K_FILES_MS = 60_000
-export const WORKTREE_ADD_MAX_TIMEOUT_MS = 15 * 60_000
+export const WORKTREE_ADD_TIMEOUT_PER_10K_FILES_MS = 90_000
+export const WORKTREE_ADD_MAX_TIMEOUT_MS = 30 * 60_000
 /** 每仓库文件计数缓存 TTL：派单重试/连续派单不重复 ls-files 数一遍 */
 export const WORKTREE_FILE_COUNT_TTL_MS = 10 * 60_000
 
 export function worktreeAddTimeoutFor(fileCount: number): number {
-  // 每**满** 1 万文件加一档（floor）：几十个文件的小仓不吃 60s 额外加档，维持基线
+  // 每**满** 1 万文件加一档（floor）：几十个文件的小仓不吃 90s 额外加档，维持基线
   const tiers = Math.floor(Math.max(0, fileCount) / 10_000)
   return Math.min(WORKTREE_ADD_BASE_TIMEOUT_MS + tiers * WORKTREE_ADD_TIMEOUT_PER_10K_FILES_MS, WORKTREE_ADD_MAX_TIMEOUT_MS)
+}
+
+// ---- worktree 检出并行化（大仓建树提速） ----
+
+/** 检出并行 worker 配置（git checkout.workers）：worktree add 内部检出、池化复用的
+ *  switch/reset 差异重写同走 unpack_trees 并行通道，海量小文件仓（Unity 8 万文件）收益
+ *  最明显。默认按 CPU 取保守档（≥2 才启用：8 核→2、16 核→4，封顶 4），机械盘/网络盘
+ *  可能负优化——AGENTDECK_CHECKOUT_WORKERS=<n> 显式覆盖（≤1 或非法值 = 关闭，回退 git
+ *  顺序检出）。超时树杀不受影响：checkout--worker 是 git 子进程，taskkill /T 按树可达。 */
+export const WORKTREE_CHECKOUT_WORKERS_ENV = 'AGENTDECK_CHECKOUT_WORKERS'
+
+export function checkoutWorkersArgs(cpus = os.cpus().length, env: NodeJS.ProcessEnv = process.env): string[] {
+  const raw = env[WORKTREE_CHECKOUT_WORKERS_ENV]
+  const workers = raw === undefined ? Math.min(4, Math.floor(cpus / 4)) : Number.parseInt(raw, 10)
+  return Number.isFinite(workers) && workers > 1 ? ['-c', `checkout.workers=${workers}`] : []
 }
 
 const worktreeFileCountCache = new Map<string, { count: number; at: number }>()
@@ -1212,11 +1228,11 @@ async function acquirePooledWorktree(
         fs.rmSync(path.join(wtPath, REPORTS_DIR_NAME), { recursive: true, force: true })
         fs.mkdirSync(path.join(wtPath, REPORTS_DIR_NAME), { recursive: true })
       } catch { /* 非阻塞：clean 已兜底带走旧内容 */ }
-      const switched = await runGit(wtPath, ['switch', '-c', branch, baseSha], timeoutMs, undefined, true)
+      const switched = await runGit(wtPath, [...checkoutWorkersArgs(), 'switch', '-c', branch, baseSha], timeoutMs, undefined, true)
       if (!switched.ok) { await evict(); return null }
       let settled = await runGit(wtPath, ['status', '--porcelain'], 30000)
       if (!settled.ok || settled.stdout.trim()) {
-        await runGit(wtPath, ['reset', '--hard', baseSha], timeoutMs, undefined, true)
+        await runGit(wtPath, [...checkoutWorkersArgs(), 'reset', '--hard', baseSha], timeoutMs, undefined, true)
         settled = await runGit(wtPath, ['status', '--porcelain'], 30000)
         if (!settled.ok || settled.stdout.trim()) { await evict(true); return null }
       }
@@ -1285,7 +1301,7 @@ async function createWorktreeUnlocked(
   const pooled = await acquirePooledWorktree(root, name, branch, baseSha, ownerTaskId, planned.timeoutMs, options.onCleanupResidue)
   if (pooled) return pooled
   if (rejectOccupiedTarget(await branchExists(repoDir, branch), pathEntryExists(wtPath))) return null
-  const runAdd = () => runGit(repoDir, ['worktree', 'add', '-b', branch, wtPath, ...(baseBranch ? [baseBranch] : [])], planned.timeoutMs, undefined, true)
+  const runAdd = () => runGit(repoDir, [...checkoutWorkersArgs(), 'worktree', 'add', '-b', branch, wtPath, ...(baseBranch ? [baseBranch] : [])], planned.timeoutMs, undefined, true)
   const out = options.runAddForTest ? await options.runAddForTest(runAdd) : await runAdd()
   if (out.timedOut) {
     // 超时绝不当成功：树杀前的 checkout 可能写了一半，孤儿残留的 index.lock 会卡死后续
@@ -1383,7 +1399,10 @@ export async function createWorktreeAtBranch(
   const baseSha = (await git(root, ['rev-parse', '--verify', '--quiet', branch])).trim()
   if (!baseSha) return null
   fs.mkdirSync(worktreeDir, { recursive: true })
-  const added = await runGit(root, ['worktree', 'add', wtPath, branch], 60000, undefined, true)
+  // 集成建树与 worker 建树同一规模档位：8 万文件仓 60s 固定超时必被检出击穿（残尸现场
+  // 见 locked=initializing + index.lock），小仓维持 60s 基线不变
+  const planned = await planWorktreeAddTimeout(root, root)
+  const added = await runGit(root, [...checkoutWorkersArgs(), 'worktree', 'add', wtPath, branch], planned.timeoutMs, undefined, true)
   if (added.timedOut) {
     // 与 createWorktree 同一吞错封死：超时绝不当成功；集成分支绝不删（集成结果都在分支上）。
     // 清理部分失败留 console 现场（此路径无时间线出口），不静默。
@@ -2506,7 +2525,9 @@ export async function mergeBranchInto(
   const tmpName = `.agentdeck-merge-${Date.now().toString(36)}`
   const wtPath = path.join(managedRoot(root), tmpName)
   fs.mkdirSync(managedRoot(root), { recursive: true })
-  const added = await runGit(root, ['worktree', 'add', wtPath, targetBranch], 60000, undefined, true)
+  // 合并建树与 worker 建树同一规模档位（60s 固定超时在大仓必被检出击穿）
+  const planned = await planWorktreeAddTimeout(root, repoDir)
+  const added = await runGit(root, [...checkoutWorkersArgs(), 'worktree', 'add', wtPath, targetBranch], planned.timeoutMs, undefined, true)
   if (!added.ok) return { ok: false, conflict: false, message: `cannot create merge worktree: ${gitError(added)}` }
   const generationId = await registerWorktreeGeneration(root, wtPath)
   if (!generationId) {
@@ -2676,7 +2697,9 @@ export async function mergeIntoManagedWorktreeDetached(
   if (!head) return refuse(`refusing detached merge: branch ${branch} has no head`)
   const tmpName = `.agentdeck-merge-detach-${Date.now().toString(36)}`
   const wtPath = path.join(managedRoot(repoDir), tmpName)
-  const added = await runGit(repoDir, ['worktree', 'add', '--detach', wtPath, head], 60000, undefined, true)
+  // 合并建树与 worker 建树同一规模档位（60s 固定超时在大仓必被检出击穿）
+  const planned = await planWorktreeAddTimeout(repoDir, repoDir)
+  const added = await runGit(repoDir, [...checkoutWorkersArgs(), 'worktree', 'add', '--detach', wtPath, head], planned.timeoutMs, undefined, true)
   if (!added.ok) return refuse(`cannot create detached merge worktree: ${gitError(added)}`)
   const generationId = await registerWorktreeGeneration(repoDir, wtPath)
   if (!generationId) {

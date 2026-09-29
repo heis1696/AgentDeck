@@ -12,10 +12,12 @@
 
 ### 变更
 
+- **建树超时档位校准 + 检出并行化（大仓建树提速）**：worker 建树档位从「每 1 万文件 +60s、封顶 15 分钟」校准为「+90s、封顶 30 分钟」——8.2 万文件 Unity 仓磁盘争用（并行建树/Unity 编辑器同跑）下 9 分钟档位仍会被击穿，git 被树杀成 `locked=initializing` + `index.lock` 残尸；建树与池化换基线的检出命令（worktree add / switch -c / reset --hard）统一注入 `git -c checkout.workers=<n>` 并行检出（海量小文件仓收益最明显），默认按 CPU 保守档（8 核→2、16 核→4 封顶，`AGENTDECK_CHECKOUT_WORKERS` 显式覆盖，≤1/非法值 = 关闭回退顺序检出）；checkout--worker 是 git 子进程，超时 taskkill /T 树杀照常可达，smoke 补 ①c 注入与开关断言。
 - **API 预设去平台绑定（全局连接档案）**：`ApiPreset` 删除 `backend` 字段——预设只存连接（baseURL/apiKey/协议），不再锁定所属平台，任何 agent 按平台能力引用（同一中转站可同时服务 zcode 与 claude，不必建两份）。IPC 校验、normalize 同步收窄；旧 presets.json 兼容（`backend` 字段加载即忽略、下次保存自然消失）；AgentsView 预设表单与引用芯片简化（-55 行）。
 
 ### 修复
 
+- **集成/合并链路建树超时自适应**：`createWorktreeAtBranch`/`mergeBranchInto`/`mergeIntoManagedWorktreeDetached` 的 worktree add 此前硬编码 60s——8 万文件级仓库完整检出至少 4-6 分钟，必被超时树杀成 initializing 残尸（集成/二次集成在大仓上从不可用，实测 `.agentdeck-merge-*` 残留现场）。现在与 worker 建树共用规模档位（60s 基线 + 每 1 万文件 +90s、封顶 30 分钟），小仓维持 60s 行为不变。
 - **建树失败清理按归属回收（e3ea8bf 回归修复）**：非超时 "already exists" 秒败路径此前无条件删同名分支/目录——外部预置/残留资产被误清后，内置重试反而"意外建树成功"、子任务被建出、领队卡 running 不落终态（smoke:delegate 锁专项③拦截）。现在建树前盘点分支/目录归属：秒败只清本次尝试自建的资产（既存分支原样存活），超时路径维持 hot.7 全清契约（托管命名空间残肢全清，重派不撞 already exists）；smoke-worktree-lifecycle 固化"既存分支秒败后原样存活"守卫，验证门补 smoke:delegate 全量。
 - **worktree add 非超时失败同样清残肢**：add 中途真实报错（长路径/磁盘/文件占用）此前不清残肢即返回，内置重试紧跟着撞 `branch already exists` 且拒单文案只见余波——现在与超时路径同一清理通道（`cleanupWorktreeAddResidue`），部分失败经 `onCleanupResidue` 记 owner 时间线，重派拿到干净现场。
 - **建树重试保留首次失败原因**：runner 三次建树重试此前 `lastWtError` 逐次覆盖，首因（如 `Filename too long`）被重试余波（`branch already exists`）顶掉、真凶不可观测——现在只记首次错误，余波不再掩盖原因。
