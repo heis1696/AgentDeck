@@ -196,11 +196,12 @@ function resultGatePassed(goal: Goal) {
   return criteria.length > 0 && criteria.every((criterion) => criterion.status === 'passed')
 }
 
-/** Parse the small, optional checkpoint envelope an agent can return. */
+/** Parse the small, optional checkpoint envelope an agent can return.
+ *  协议要求 checkpoint 放在最终回复末尾、所有其他代码块之后：围栏块从后往前逐个尝试，
+ *  回复前面出现的其他代码块（命令、diff、示例）不会顶掉真正的 checkpoint。 */
 function parseCheckpoint(result: string, conditions: string[]): ParsedCheckpoint | null {
-  const candidates = [result.trim()]
-  const fenced = result.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]
-  if (fenced) candidates.unshift(fenced.trim())
+  const fenced = [...result.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)].map((match) => match[1].trim()).reverse()
+  const candidates = [...fenced, result.trim()]
   for (const candidate of candidates) {
     try {
       const value = JSON.parse(candidate) as Record<string, unknown>
