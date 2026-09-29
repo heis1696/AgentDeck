@@ -899,8 +899,17 @@ async function verifyWorktreeGeneration(
   return null
 }
 
-async function registerWorktreeGeneration(repoDir: string, wtPath: string): Promise<string | null> {
+/** Git 注册在案判定（与 verifyWorktreeGeneration 同一折叠查找语义）：缺目录补清的
+ *  证据门槛用——注册已被 prune 移除的旧记录视为不可核验。 */
+async function managedWorktreeRegistrationPresent(repoDir: string, wtDir: string): Promise<boolean> {
   const common = await runGit(repoDir, ['rev-parse', '--git-common-dir'])
+  if (!common.ok || !common.stdout.trim()) return false
+  const commonDir = commonGitDir(repoDir, common.stdout.trim())
+  const registrations = listManagedWorktreeRegistrations(repoDir, commonDir)
+  return !!registeredWorktreeForPath(registrations, path.resolve(wtDir))
+}
+
+async function registerWorktreeGeneration(repoDir: string, wtPath: string): Promise<string | null> {  const common = await runGit(repoDir, ['rev-parse', '--git-common-dir'])
   if (!common.ok || !common.stdout.trim()) return null
   return writeWorktreeGeneration(wtPath, commonGitDir(repoDir, common.stdout.trim()))
 }
@@ -1136,17 +1145,39 @@ async function releaseWorktreeToPool(repoDir: string, wtDir: string, branch: str
   })
 }
 
+/** 池损坏条目脱池留痕：代际校验失败（或元数据缺世代）的原目录不再静默出池——
+ *  sidecar 元数据改挂 failed + 待人工处置原因（重启清扫按既有 pooled-owner 流程
+ *  识别，failed 记录随 failed 清单上报并附处置记录），目录与注册一律不动
+ *  （fail-closed 保留现场，绝不代人工强删）；时间线出口即时通知派单方
+ *  （noteOwnerTaskId = 触发复用的请求方任务，损坏发生在它的派单路径上）。 */
+async function retainUnverifiablePoolEntry(
+  root: string,
+  wtPath: string,
+  metadata: WorktreeInfo | null,
+  problem: string,
+  noteOwnerTaskId: string | undefined,
+  notify?: (failure: { name: string; reason: string; ownerTaskId?: string }) => void
+): Promise<void> {
+  const reason = `池条目复用时代际校验失败脱池待人工处置：${problem}；目录与注册保留现场`
+  if (metadata) {
+    try { updateMetadata(metadata, { cleanupStatus: 'failed', cleanupReason: reason }) } catch { /* 标记失败不掩盖主失败，时间线照发 */ }
+  }
+  try { notify?.({ name: path.basename(wtPath), reason: `${reason}（仓库 ${root}）`, ownerTaskId: noteOwnerTaskId }) } catch { /* 出口失败不掩盖主流程 */ }
+}
+
 /** 从池里取一棵复用：clean -ffdx（保留系统目录）→ switch -c <新分支> <基线>（只重写差异文件）
  *  → status 自洽核验（脏则 reset --hard 兜底一次）。任何一步失败都逐出该条目并返回 null，
  *  调用方回落全量 worktree add——池永远是加速捷径而非正确性依赖，复用失败不改变派单语义。
- *  switch/reset 沿用建树的规模自适应超时与进程树击杀通道（病态大差异下同样受控）。 */
+ *  switch/reset 沿用建树的规模自适应超时与进程树击杀通道（病态大差异下同样受控）。
+ *  代际校验失败的条目走 retainUnverifiablePoolEntry 留痕后返回 null，不参与复用。 */
 async function acquirePooledWorktree(
   repoDir: string,
   name: string,
   branch: string,
   baseSha: string,
   ownerTaskId: string,
-  timeoutMs: number
+  timeoutMs: number,
+  notifyUnverifiable?: (failure: { name: string; reason: string; ownerTaskId?: string }) => void
 ): Promise<WorktreeCreateResult | null> {
   const root = path.resolve(repoDir)
   const pool = worktreePoolByRepo.get(worktreePathKey(root))
@@ -1157,14 +1188,30 @@ async function acquirePooledWorktree(
       pool.delete(worktreePathKey(wtPath))
       const poolMetadata = readMetadataFile(metadataFile(root, path.basename(wtPath)))
       const generationId = poolMetadata?.generationId
-      if (!generationId || await verifyWorktreeGeneration(root, wtPath, generationId)) return null
+      if (!generationId) {
+        await retainUnverifiablePoolEntry(root, wtPath, poolMetadata ?? null, '池条目元数据缺世代标记', ownerTaskId, notifyUnverifiable)
+        return null
+      }
+      const generationProblem = await verifyWorktreeGeneration(root, wtPath, generationId)
+      if (generationProblem) {
+        await retainUnverifiablePoolEntry(root, wtPath, poolMetadata ?? null, generationProblem, ownerTaskId, notifyUnverifiable)
+        return null
+      }
       const evict = async (deleteRequestedBranch = false) => {
         await reclaimWorktreeUnlocked(wtPath, { force: true, deleteBranch: true, expectedGenerationId: generationId }).catch(() => {})
         if (deleteRequestedBranch) await deleteBranchWithRetry(root, branch)
       }
       if (!(await isGitRepo(wtPath))) { await evict(); return null }
-      const cleaned = await runGit(wtPath, ['clean', '-ffd', '-x', '--', ...pathspecExcludes()], 60000)
+      // 项5：清理豁免只保托管资产（managedAssetPathspecExcludes）——上一任务的
+      // .agentdeck-reports 内容随 clean -x 离场，不随树泄入新子单
+      const cleaned = await runGit(wtPath, ['clean', '-ffd', '-x', '--', ...managedAssetPathspecExcludes()], 60000)
       if (!cleaned.ok) { await evict(); return null }
+      // 报告目录本身清后重建保约定（目录在、内容空）；清建失败不阻塞复用——报告
+      // 写入侧按需建目录，路径上的旧内容已由 clean 带走
+      try {
+        fs.rmSync(path.join(wtPath, REPORTS_DIR_NAME), { recursive: true, force: true })
+        fs.mkdirSync(path.join(wtPath, REPORTS_DIR_NAME), { recursive: true })
+      } catch { /* 非阻塞：clean 已兜底带走旧内容 */ }
       const switched = await runGit(wtPath, ['switch', '-c', branch, baseSha], timeoutMs, undefined, true)
       if (!switched.ok) { await evict(); return null }
       let settled = await runGit(wtPath, ['status', '--porcelain'], 30000)
@@ -1235,7 +1282,7 @@ async function createWorktreeUnlocked(
     : await planWorktreeAddTimeout(root, repoDir, options.estimateFileCount)
   if (rejectOccupiedTarget(await branchExists(repoDir, branch), pathEntryExists(wtPath))) return null
   // 池化复用先行：同仓池里有空闲 worktree 就换基线复用（只重写差异文件），全量 add 兜底
-  const pooled = await acquirePooledWorktree(root, name, branch, baseSha, ownerTaskId, planned.timeoutMs)
+  const pooled = await acquirePooledWorktree(root, name, branch, baseSha, ownerTaskId, planned.timeoutMs, options.onCleanupResidue)
   if (pooled) return pooled
   if (rejectOccupiedTarget(await branchExists(repoDir, branch), pathEntryExists(wtPath))) return null
   const runAdd = () => runGit(repoDir, ['worktree', 'add', '-b', branch, wtPath, ...(baseBranch ? [baseBranch] : [])], planned.timeoutMs, undefined, true)
@@ -1607,6 +1654,14 @@ function pathspecExcludes(): string[] {
   // glob 形态：直接点名被忽略目录本身会触发 git 的 ignored-paths 报错（exit 1），
   // glob 深度形态不会——与 multica 的 snapshot excludes 同一写法
   return SYSTEM_SIDECAR_DIRS.flatMap((dir) => [`:(exclude,glob)**/${dir}/**`])
+}
+
+/** 池复用清理的 pathspec 豁免只保托管资产（.agentdeck-worktrees 嵌套托管树）——
+ *  报告目录（.agentdeck-reports）不豁免：换基线复用即换任务，上一任务的报告内容
+ *  必须随 clean -x 离场（目录本身由复用路径清后重建保约定），旧任务文件不得泄入
+ *  新子单目录。 */
+function managedAssetPathspecExcludes(): string[] {
+  return SYSTEM_SIDECAR_DIRS.filter((dir) => dir !== REPORTS_DIR_NAME).flatMap((dir) => [`:(exclude,glob)**/${dir}/**`])
 }
 
 function gitBlobSizes(workdir: string, objectIds: string[], env: NodeJS.ProcessEnv): Promise<GitCommandResult> {
@@ -2028,7 +2083,13 @@ async function reclaimWorktreeUnlocked(
     return { ok: false, status: 'retained', path: wtDir, reason: 'worktree generation metadata changed' }
   }
   const expectedGenerationId = options.expectedGenerationId ?? metadata?.generationId
-  if (expectedGenerationId) {
+  // 项4：目录已被外力清掉（崩溃竞态/手工删除）时不因代际核验失败跳过分支处理——
+  // 核验盘的是目录内的 .git 指针/admin 标记，目录不在则必败，托管分支会因此永久
+  // 滞留（重派撞 already exists 连环的源头之一）。归属证据已由前置检查把门（元数据
+  // repoDir/path 严格一致 + expectedOwnerTaskId/expectedGenerationId 匹配 + 池活跃
+  // 拒收），盘面代际核验只对「目录还在的树」做；目录不在时走下方受检 prune +
+  // 调用方决策的分支删除（集成/非托管分支照旧不动），不强删、可核验、留审计。
+  if (expectedGenerationId && fs.existsSync(wtDir)) {
     const generationMismatch = await verifyWorktreeGeneration(
       repoDir,
       wtDir,
@@ -2049,20 +2110,31 @@ async function reclaimWorktreeUnlocked(
     try { updateMetadata(metadata, { cleanupStatus: 'retained', cleanupReason: 'manual keep requested' }) } catch {}
     return { ok: false, status: 'retained', path: wtDir, branch, reason: 'manual keep requested' }
   }
-  const cleanliness = await worktreeDirty(wtDir)
-  if (!options.force && !cleanliness.ok) {
-    try { if (metadata) updateMetadata(metadata, { cleanupStatus: 'failed', cleanupReason: 'could not determine worktree status' }) } catch {}
-    return { ok: false, status: 'failed', path: wtDir, branch, reason: 'could not determine worktree status' }
+  // 项4 证据门槛：目录不在时的补清以 Git 注册仍在案为界——sidecar 独证不足（注册
+  // 已被此前 prune 移除的旧记录无法核验树曾在案，同名分支可能是外置资产），保留
+  // 分支并按 failed 持续报告；注册在案（可核验）才走下方受检 prune + 分支补清。
+  if (expectedGenerationId && !fs.existsSync(wtDir)) {
+    const registrationPresent = await managedWorktreeRegistrationPresent(repoDir, wtDir)
+    if (!registrationPresent) {
+      return { ok: false, status: 'failed', path: wtDir, branch, reason: `current Git worktree registration could not be found${branch ? `; branch ${branch} retained` : ''}` }
+    }
   }
-  if (!options.force && cleanliness.dirty) {
-    try { if (metadata) updateMetadata(metadata, { cleanupStatus: 'retained', cleanupReason: 'uncommitted changes' }) } catch {}
-    return { ok: false, status: 'retained', path: wtDir, branch, reason: 'uncommitted changes' }
-  }
-  // 归池优先（仅限非 force 且干净的管理分支 worktree）：detach + 删分支 + 挂池标记，
-  // 目录与注册留给下一次派单换基线复用；归还失败回落常规移除路径，回收语义不变
-  if (options.repool && !options.force && cleanliness.ok && !cleanliness.dirty && branch.startsWith(MANAGED_BRANCH_PREFIX)) {
-    if (await releaseWorktreeToPool(repoDir, wtDir, branch, metadata)) {
-      return { ok: true, status: 'pooled', path: wtDir, branch, reason: 'returned to worktree pool for reuse' }
+  if (fs.existsSync(wtDir)) {
+    const cleanliness = await worktreeDirty(wtDir)
+    if (!options.force && !cleanliness.ok) {
+      try { if (metadata) updateMetadata(metadata, { cleanupStatus: 'failed', cleanupReason: 'could not determine worktree status' }) } catch {}
+      return { ok: false, status: 'failed', path: wtDir, branch, reason: 'could not determine worktree status' }
+    }
+    if (!options.force && cleanliness.dirty) {
+      try { if (metadata) updateMetadata(metadata, { cleanupStatus: 'retained', cleanupReason: 'uncommitted changes' }) } catch {}
+      return { ok: false, status: 'retained', path: wtDir, branch, reason: 'uncommitted changes' }
+    }
+    // 归池优先（仅限非 force 且干净的管理分支 worktree）：detach + 删分支 + 挂池标记，
+    // 目录与注册留给下一次派单换基线复用；归还失败回落常规移除路径，回收语义不变
+    if (options.repool && !options.force && cleanliness.ok && !cleanliness.dirty && branch.startsWith(MANAGED_BRANCH_PREFIX)) {
+      if (await releaseWorktreeToPool(repoDir, wtDir, branch, metadata)) {
+        return { ok: true, status: 'pooled', path: wtDir, branch, reason: 'returned to worktree pool for reuse' }
+      }
     }
   }
   if (!fs.existsSync(wtDir)) {
@@ -2262,6 +2334,16 @@ export async function pruneWorktrees(
       && sameWorktreePath(metadata.path, wtPath)
       && !!metadata.ownerTaskId.trim()
     if (!metadata || !reliableMetadata) {
+      // 项8：无主空树残骸回收——三方归属证据全空（无 sidecar 元数据、无 Git 注册）
+      // 且目录本身为空：识别为建树中断残骸回收。rmdir 只接受空目录，天然不误删
+      // 有内容的树；有任何证据（注册/分支/元数据错位）的现场仍走下方 failed 清单
+      // 保留（证据清单可见），绝不凭「看起来没主」动有内容的树。
+      const ownerlessEmpty = !metadata && !registration && (() => {
+        try { return fs.existsSync(wtPath) && fs.readdirSync(wtPath).length === 0 } catch { return false }
+      })()
+      if (ownerlessEmpty) {
+        try { fs.rmdirSync(wtPath); result.removed.push(name); continue } catch { /* rmdir 失败（竞态占用等）落回 failed 清单 */ }
+      }
       const registeredBranchExists = registration?.branch ? await branchExists(root, registration.branch) : false
       const evidence = [
         fs.existsSync(wtPath) ? `目录 ${wtPath}` : '',
@@ -2310,8 +2392,17 @@ export async function pruneWorktrees(
       metadata.generationId,
       metadata.cleanupStatus === 'pooled' ? undefined : metadata.branch || undefined
     )
-    if (generationMismatch) {
-      const reason = `${generationMismatch}${metadata.branch ? `; branch ${metadata.branch} retained` : ''}`
+    // 项4：目录已消失的条目不再被盘面代际核验失败拦在 failed 清单外——核验依赖
+    // 目录内指针/标记，目录不在必败；放行到下游（removed 状态的既有收场流程 /
+    // reclaimWorktreeUnlocked 的受检 prune + 证据核验分支删除）。目录还在的树
+    // 照旧 fail-closed。
+    if (generationMismatch && fs.existsSync(wtPath)) {
+      // 池损坏条目的脱池留痕（retainUnverifiablePoolEntry 标记的 failed 记录）随清扫
+      // 上报一并可见：重启清扫可凭处置记录识别「这是复用时代际校验失败脱池的现场」
+      const recordedDisposal = metadata.cleanupStatus === 'failed' && metadata.cleanupReason
+        ? `；处置记录：${metadata.cleanupReason}`
+        : ''
+      const reason = `${generationMismatch}${metadata.branch ? `; branch ${metadata.branch} retained` : ''}${recordedDisposal}`
       result.failed.push({ name, reason, ...(owner && owner !== name ? { ownerTaskId: owner } : {}) })
       continue
     }

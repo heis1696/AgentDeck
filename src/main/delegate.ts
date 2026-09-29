@@ -187,10 +187,15 @@ export interface ConsultCall {
   reason?: string
 }
 
-/** 解析 consult 标签。开标签必须带 to，避免裸标签吞掉后方真实咨询。 */
+/** 解析 consult 标记（与 delegate 同构：开标签必须带 to 避免裸标记吞掉后方真实咨询；
+ *  体部哨兵化——正文绝不跨过下一个 <consult 开标记，残缺标记（漏写闭合/闭合损坏）
+ *  的匹配在自己身上失败，吞不了其后真实咨询的闭合标签——案情一同形态：领队引用
+ *  咨询示例忘写闭合，非贪婪体吃到真实咨询的闭合标签，有效咨询被并进无效单整体消失）。 */
+const CONSULT_RE = /<consult\b(?=[^>]*\bto\s*=)([^>]*)>((?:(?!<consult\b)[\s\S])*?)<\/consult>/
+
 export function parseConsults(text: string): ConsultCall[] {
   const out: ConsultCall[] = []
-  const re = /<consult\b(?=[^>]*\bto\s*=)([^>]*)>([\s\S]*?)<\/consult>/g
+  const re = new RegExp(CONSULT_RE.source, 'g')
   let m: RegExpExecArray | null
   while ((m = re.exec(text))) {
     const prompt = m[2].trim()
@@ -201,8 +206,10 @@ export function parseConsults(text: string): ConsultCall[] {
   return out
 }
 
+/** 同源剥离（与解析同一份正则）：残缺标记剥不掉自身、其文本保留展示，绝不越界吞掉
+ *  后方咨询的展示文本。 */
 export function stripConsults(text: string): string {
-  return text.replace(/<consult\b(?=[^>]*\bto\s*=)[^>]*>[\s\S]*?<\/consult>/g, '').trim()
+  return text.replace(new RegExp(CONSULT_RE.source, 'g'), '').trim()
 }
 
 export function parseConsultsMerged(...texts: string[]): ConsultCall[] {
@@ -225,9 +232,11 @@ export interface InvestigateCall {
   reason?: string
 }
 
+const INVESTIGATE_RE = /<investigate\b(?=[^>]*\bto\s*=)([^>]*)>((?:(?!<investigate\b)[\s\S])*?)<\/investigate>/
+
 export function parseInvestigates(text: string): InvestigateCall[] {
   const out: InvestigateCall[] = []
-  const re = /<investigate\b(?=[^>]*\bto\s*=)([^>]*)>([\s\S]*?)<\/investigate>/g
+  const re = new RegExp(INVESTIGATE_RE.source, 'g')
   let m: RegExpExecArray | null
   while ((m = re.exec(text))) {
     const prompt = m[2].trim()
@@ -238,8 +247,9 @@ export function parseInvestigates(text: string): InvestigateCall[] {
   return out
 }
 
+/** 同源剥离（与解析同一份正则），语义同 stripConsults。 */
 export function stripInvestigates(text: string): string {
-  return text.replace(/<investigate\b(?=[^>]*\bto\s*=)[^>]*>[\s\S]*?<\/investigate>/g, '').trim()
+  return text.replace(new RegExp(INVESTIGATE_RE.source, 'g'), '').trim()
 }
 
 export function parseInvestigatesMerged(...texts: string[]): InvestigateCall[] {
@@ -252,6 +262,53 @@ export function parseInvestigatesMerged(...texts: string[]): InvestigateCall[] {
     out.push(call)
   }
   return out
+}
+
+// ---- consult/investigate 残缺开标记检出（与 delegate 同构的具名回执机械）----
+// 残缺标记解析不出咨询/调查≠可以无痕：必须被具名回执，绝不允许领队按「已应答」
+// 契约等到永远。embedded=截断致残（其正文撞哨兵边界被截断，后方完整标记按字面
+// 独立受理）；契约（保守事实性文案）：只陈述「本单未应答 + 其后完整标记按字面独立
+// 受理」，不断言内嵌单已应答——受理后是否应答以各自回执为准。
+
+function findUnmatchedOpens(text: string, tag: string, blockRe: RegExp): Array<{ to: string; excerpt: string; embedded: boolean }> {
+  const out: Array<{ to: string; excerpt: string; embedded: boolean }> = []
+  const matched: Array<{ start: number; end: number }> = []
+  const reBlocks = new RegExp(blockRe.source, 'g')
+  let m: RegExpExecArray | null
+  while ((m = reBlocks.exec(text))) matched.push({ start: m.index, end: reBlocks.lastIndex })
+  const reOpen = new RegExp(`<${tag}\\b(?=[^>]*\\bto\\s*=)([^>]*)>`, 'g')
+  let o: RegExpExecArray | null
+  while ((o = reOpen.exec(text))) {
+    if (matched.some((range) => o!.index >= range.start && o!.index < range.end)) continue
+    const to = tagAttr(o[1], 'to')
+    if (!to) continue
+    const bodyStart = o.index + o[0].length
+    const embedded = matched.some((range) => range.start > o!.index && !new RegExp(`<\\s*/\\s*${tag}`, 'i').test(text.slice(o!.index, range.start)))
+    out.push({ to, excerpt: text.slice(bodyStart, bodyStart + 80).trim(), embedded })
+  }
+  return out
+}
+
+export function findUnmatchedConsultOpens(text: string): Array<{ to: string; excerpt: string; embedded: boolean }> {
+  return findUnmatchedOpens(text, 'consult', CONSULT_RE)
+}
+
+export function findUnmatchedInvestigateOpens(text: string): Array<{ to: string; excerpt: string; embedded: boolean }> {
+  return findUnmatchedOpens(text, 'investigate', INVESTIGATE_RE)
+}
+
+export function unmatchedConsultOpenReason(broken: { to: string; excerpt: string; embedded?: boolean }, why?: string): string {
+  const base = broken.embedded
+    ? `to="${broken.to}"：consult 标记残缺（缺 </consult> 闭合或被其后完整咨询标记截断），本单未应答；其后出现的完整咨询标记按字面独立受理`
+    : `to="${broken.to}"：consult 标记残缺（缺 </consult> 闭合或闭合损坏），未应答`
+  return why ? `${base}——${why}` : base
+}
+
+export function unmatchedInvestigateOpenReason(broken: { to: string; excerpt: string; embedded?: boolean }, why?: string): string {
+  const base = broken.embedded
+    ? `to="${broken.to}"：investigate 标记残缺（缺 </investigate> 闭合或被其后完整调查标记截断），本单未应答；其后出现的完整调查标记按字面独立受理`
+    : `to="${broken.to}"：investigate 标记残缺（缺 </investigate> 闭合或闭合损坏），未应答`
+  return why ? `${base}——${why}` : base
 }
 
 // ---- 阶段接力（<continue>）：多阶段任务在阶段边界硬切新会话，简报为唯一携带物 ----

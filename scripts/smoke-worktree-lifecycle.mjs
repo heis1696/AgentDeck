@@ -355,7 +355,10 @@ try {
   check(git('-C', reused.path, 'status', '--porcelain') === '', 'reused worktree is clean at the new baseline')
   check(fs.readFileSync(path.join(reused.path, 'feature.txt'), 'utf8').includes('advanced'), 'reused files reflect the advanced baseline')
   check(!fs.existsSync(path.join(reused.path, 'cross-task.ignored')), 'ignored files from the previous task are removed on reuse')
-  check(fs.readFileSync(path.join(reused.path, '.agentdeck-reports', 'retained.txt'), 'utf8').includes('system sidecar'), 'system sidecars survive ignored-file cleanup')
+  // 项5：报告目录不再豁免复用清理——旧任务报告文件不进新子单目录，目录本身保留（空）
+  check(!fs.existsSync(path.join(reused.path, '.agentdeck-reports', 'retained.txt')), 'previous task report files do not leak into the reused tree')
+  const reusedReportsDir = path.join(reused.path, '.agentdeck-reports')
+  check(fs.existsSync(reusedReportsDir) && fs.readdirSync(reusedReportsDir).length === 0, 'report directory itself is preserved empty for the new task')
   check(!await removeWorktree(reused.path, 'pool_task_a'), 'old task cannot delete a pooled tree after reassignment')
   check(fs.existsSync(reused.path) && await branchExists(dir, 'agentdeck/pool_task_b_c1'), 'new owner tree and branch survive stale cleanup')
 
@@ -370,6 +373,74 @@ try {
   const sweepPooled = await pruneWorktrees(dir, () => false, { maxAgeMs: 0, claimWorktree: () => undefined })
   check(sweepPooled.removed.includes('pool_task_a_c1'), 'startup sweep reclaims stale pool entries without a task claim')
   check(!fs.existsSync(reused.path), 'startup pool cleanup removes the stale worktree directory')
+
+  // —— 池损坏条目脱池留痕：代际校验失败不再静默出池 ——
+  // 元数据挂 failed+待人工处置、时间线出口即时通知派单方、目录保留现场（fail-closed），
+  // 重启清扫按处置记录识别；后续派单回落全量 add 不被损坏条目阻塞。
+  {
+    const corrupt = await createWorktree(dir, 'pool_corrupt_a_c1', 'main', 'pool_corrupt_a')
+    check(!!corrupt, 'corrupt fixture: full add builds the tree')
+    const releasedCorrupt = await reclaimWorktree(corrupt.path, { repool: true, expectedOwnerTaskId: corrupt.metadata.ownerTaskId })
+    check(releasedCorrupt.ok && releasedCorrupt.status === 'pooled', 'corrupt fixture: clean completion pools the tree')
+    fs.rmSync(path.join(corrupt.path, '.git')) // 注入损坏：.git 指针缺失 → 代际核验必败（同名删树重建/外部篡改形态）
+    let corruptionNote = null
+    const afterCorruption = await createWorktree(dir, 'pool_corrupt_b_c1', 'main', 'pool_corrupt_b', undefined, {
+      onCleanupResidue: (failure) => { corruptionNote = failure }
+    })
+    check(!!afterCorruption && afterCorruption.pooled !== true, 'corrupt pool entry does not block the dispatch (full add fallback)')
+    check(fs.existsSync(corrupt.path), 'corrupt pool entry directory is preserved (fail-closed, no forced removal)')
+    const corruptMetadata = listWorktreeMetadata(dir).find((item) => item.path === corrupt.path)
+    check(corruptMetadata?.cleanupStatus === 'failed' && (corruptMetadata?.cleanupReason ?? '').includes('待人工处置'),
+      'corrupt pool entry metadata is marked failed with a manual-disposal reason')
+    check(!!corruptionNote && corruptionNote.name === 'pool_corrupt_a_c1' && corruptionNote.reason.includes('待人工处置') && corruptionNote.ownerTaskId === 'pool_corrupt_b',
+      'timeline note fired for the dispatch that hit the corruption')
+    const corruptMetadataFile = path.join(dir, '.agentdeck-worktrees', '.metadata', `${path.basename(corrupt.path)}.json`)
+    const staleCorrupt = JSON.parse(fs.readFileSync(corruptMetadataFile, 'utf8'))
+    fs.writeFileSync(corruptMetadataFile, JSON.stringify({ ...staleCorrupt, poolProcess: { ...staleCorrupt.poolProcess, pid: 2147483647 } }))
+    const corruptSweep = await pruneWorktrees(dir, () => false, { maxAgeMs: 0, claimWorktree: () => undefined })
+    check(corruptSweep.failed.some((item) => item.name === 'pool_corrupt_a_c1' && item.reason.includes('处置记录') && item.reason.includes('待人工处置')),
+      'restart sweep identifies the evicted pool entry via its recorded disposal reason')
+    check(fs.existsSync(corrupt.path), 'restart sweep keeps the unverifiable scene (no forced removal)')
+  }
+
+  // —— 缺目录分支补清：目录被外力清掉时代际核验必败（指针在目录里），托管分支不因此滞留 ——
+  // 归属证据齐备（可靠元数据 + 世代标记 + 托管分支）时核验补清：prune 注册 + 删托管分支；
+  // 集成分支绝不由清扫带走（只清注册侧），有主树（keepTask/租约/owner 证据）照旧把门。
+  {
+    const vanished = await createWorktree(dir, 'vanished_task_c1', 'main', 'vanished_owner')
+    check(!!vanished, 'vanished fixture: tree built')
+    const vanishedBranch = vanished.metadata.branch
+    fs.rmSync(vanished.path, { recursive: true, force: true })
+    check(!fs.existsSync(vanished.path) && await branchExists(dir, vanishedBranch), 'vanished fixture: directory gone, managed branch retained')
+    const vanishedSweep = await pruneWorktrees(dir, () => false, { maxAgeMs: 0, claimWorktree: testClaim })
+    check(vanishedSweep.removed.includes('vanished_task_c1'), 'missing-dir tree is sweepable via evidence-backed cleanup')
+    check(!await branchExists(dir, vanishedBranch), 'missing-dir managed branch is cleaned up (verified supplementary cleanup)')
+    const vanishedAudit = listWorktreeMetadata(dir).find((item) => item.path === vanished.path)
+    check(vanishedAudit?.cleanupStatus === 'removed', 'missing-dir cleanup leaves a removed audit record')
+    git('branch', 'agentdeck/task-integral')
+    const integral = await createWorktreeAtBranch(dir, 'integral_tree_c1', 'agentdeck/task-integral', 'integral_owner')
+    check(!!integral, 'integration fixture: tree built at existing branch')
+    fs.rmSync(integral.path, { recursive: true, force: true })
+    const integralSweep = await pruneWorktrees(dir, () => false, { maxAgeMs: 0, claimWorktree: testClaim })
+    check(await branchExists(dir, 'agentdeck/task-integral'), 'missing-dir integration branch is never deleted by the sweep')
+    check(integralSweep.removed.includes('integral_tree_c1'), 'missing-dir integration tree side is still reclaimed (registration pruned)')
+    git('branch', '-D', 'agentdeck/task-integral')
+  }
+
+  // —— 无主空树残骸回收：三方证据全空 + 目录为空 → rmdir 级安全回收；有内容的无主树照旧 fail-closed ——
+  {
+    const emptyGhost = path.join(dir, '.agentdeck-worktrees', 'ghost_empty_c1')
+    fs.mkdirSync(emptyGhost, { recursive: true })
+    const ghostSweep = await pruneWorktrees(dir, () => false, { maxAgeMs: 0, claimWorktree: testClaim })
+    check(ghostSweep.removed.includes('ghost_empty_c1'), 'ownerless empty directory is recycled as build-interrupt debris')
+    check(!fs.existsSync(emptyGhost), 'ownerless empty directory is gone after sweep')
+    const contentGhost = path.join(dir, '.agentdeck-worktrees', 'ghost_content_c1')
+    fs.mkdirSync(contentGhost, { recursive: true })
+    fs.writeFileSync(path.join(contentGhost, 'someone.txt'), 'not ours\n')
+    const ghostSweep2 = await pruneWorktrees(dir, () => false, { maxAgeMs: 0, claimWorktree: testClaim })
+    check(ghostSweep2.failed.some((item) => item.name === 'ghost_content_c1'), 'ownerless non-empty tree stays fail-closed with evidence')
+    check(fs.existsSync(contentGhost), 'ownerless non-empty tree is preserved')
+  }
 
   for (const [name, timedOut] of [['raced_non_timeout_c1', false], ['raced_timeout_c1', true]]) {
     const branch = `agentdeck/${name}`

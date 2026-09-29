@@ -6,7 +6,7 @@ import path from 'node:path'
 import { sameExecutionOwner, type TaskExpectation, type TaskStore } from './store'
 import { createExecutionOwner } from './persistence'
 import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnStamp, PermissionRequest, BackendTurnResult } from './backends/types'
-import { runDelegationLoop, parseContinueMerged, stripContinue, parseDelegates, parseConsultsMerged, stripConsults, parseInvestigatesMerged, stripInvestigates, ancestorBudget, sanitizeChildPrompt, escapeProtocolLiterals, MAX_DEPTH, MAX_TOTAL_ROUNDS, DELEGATE_REJECT_EXCERPT_MARK, type AgentLike, type DelegateCall, type ConsultCall, type InvestigateCall, type IssueCommentLike } from './delegate'
+import { runDelegationLoop, parseContinueMerged, stripContinue, parseDelegates, parseConsultsMerged, stripConsults, parseInvestigatesMerged, stripInvestigates, ancestorBudget, sanitizeChildPrompt, escapeProtocolLiterals, MAX_DEPTH, MAX_TOTAL_ROUNDS, DELEGATE_REJECT_EXCERPT_MARK, findUnmatchedConsultOpens, findUnmatchedInvestigateOpens, unmatchedConsultOpenReason, unmatchedInvestigateOpenReason, type AgentLike, type DelegateCall, type ConsultCall, type InvestigateCall, type IssueCommentLike } from './delegate'
 import { buildAgentPrompt, buildDelegationBlock, buildChildPrompt, CONTINUE_BLOCK, HANDOFF_CUE, HANDOFF_RECEIVE_CUE, HANDOFF_START_CONFIRMED_CUE, RETITLE_PROMPT } from './prompts'
 import { findHandoffSuccessor, prepareManualTaskStart, repeatsHandoffPhase } from './handoff'
 import { probeGitRepository, probeCurrentBranch, createWorktree, setWorktreeOwner, reclaimWorktree, replayLeaderBaseline, sameWorktreePath, worktreePathKey, type GitRepositoryProbeResult } from './git'
@@ -86,6 +86,15 @@ function isStreamDeltaEvent(event: RunnerEvent): boolean {
 function hasStableEventIdentity(event: RunnerEvent): boolean {
   return (typeof event.eventId === 'string' && event.eventId.length > 0)
     || (typeof event.id === 'string' && event.id.length > 0)
+}
+
+/** 接受即恢复边界（onPending 正常路径）给无身份事件暂存的批身份前缀：崩溃重放/
+ * 重试幂等用它当稳定身份，但它不算「提供方身份」——合并判定必须放行，否则每个
+ * delta 在接受时被派 id 后即终结合并链（IPC 每 token 一包）。 */
+const STAGED_BATCH_ID_PREFIX = 'agentdeck:batch:'
+
+function hasStagedBatchIdentity(event: RunnerEvent): boolean {
+  return typeof event.eventId === 'string' && event.eventId.startsWith(STAGED_BATCH_ID_PREFIX)
 }
 
 function streamType(event: RunnerEvent): string {
@@ -337,6 +346,11 @@ export class TaskRunner {
   private turnLifecycles = new Map<string, TurnLifecycle>()
   /** Pending provider batches are flushed at turn and process lifecycle boundaries. */
   private eventBatchers = new Map<BoundedEventBatcher<RunnerEvent>, string>()
+  /** 同键并发建单互斥（dedupeKey → 在途执行）：既有去重是「落盘后查册」，两条并发
+   *  调用在双方都未落盘时互相看不见，各自 reserveWorkerIndex 建子单建树。进程内
+   *  竞态用内存互斥关掉；跨进程仍由 store 层 dedupeKey 落盘约束兜底。执行完成后
+   *  登记即撤，后续调用走既有落盘查册短路。 */
+  private spawnCreatesInFlight = new Map<string, Promise<Task | null>>()
   private shuttingDown = false
   private cancellationDrains = new Map<string, number>()
   private readonly onTaskChanged?: (task: Task) => void
@@ -483,7 +497,7 @@ export class TaskRunner {
     const turnOpenedAt = Date.now()
     const stagePending = (events: readonly RunnerEvent[]) => {
       for (const event of events) {
-        if (!hasStableEventIdentity(event)) event.eventId = `agentdeck:batch:${stamp.id}:${++eventSequence}`
+        if (!hasStableEventIdentity(event)) event.eventId = `${STAGED_BATCH_ID_PREFIX}${stamp.id}:${++eventSequence}`
       }
       try {
         if (this.store.stagePendingEvents(taskId, stamp.id, claim.runId, events, runCondition(claim), turnOpenedAt)) return true
@@ -504,9 +518,12 @@ export class TaskRunner {
       maxPendingBytes: 1024 * 1024,
       onPending: stagePending,
       sizeOf: eventSize,
+      // 接受即恢复边界会给合并组领导暂存批身份（接受时同步写恢复副本需要稳定身份，
+      // 崩溃重放与重试幂等都靠它）——这类暂存身份不算稳定身份：合并链照常延续，
+      // 否则每个 delta 都因领导带 id 被拆成独立事件，IPC/UI 每 token 一包。
       canMerge: (previous, next) => isStreamDeltaEvent(previous)
         && isStreamDeltaEvent(next)
-        && !hasStableEventIdentity(previous)
+        && (!hasStableEventIdentity(previous) || hasStagedBatchIdentity(previous))
         && !hasStableEventIdentity(next)
         && streamType(previous) === streamType(next)
         && streamPersistence(previous) === streamPersistence(next),
@@ -1285,11 +1302,30 @@ export class TaskRunner {
   }
 
   /**
-   * 建一个委派子任务并立即入队（委派循环与流式嗅探共用）。
-   * 目标解析、防环、层级闸、轮数预算闸都在这里（两条建单路径同一套护栏）；
+   * 建一个委派子任务并立即入队（委派循环与流式嗅探共用）。同键（dedupeKey）并发
+   * 调用共享同一次执行：第二个调用等待复用结果（建出的同一子单，或同一次具名拒单
+   * ——拒单留痕也只发生一次），绝不各自建单建树。
+   * 目标解析、防环、层级闸、轮数预算闸都在互斥体内（两条建单路径同一套护栏）；
    * 回灌不在本方法（仍归委派循环回合末处理）。返回 null = 被护栏拒绝（原因已留痕事件）。
    */
-  async spawnDelegateChild(taskId: string, call: DelegateCall, expectedRunId = this.store.get(taskId)?.runId): Promise<Task | null> {
+  spawnDelegateChild(taskId: string, call: DelegateCall, expectedRunId = this.store.get(taskId)?.runId): Promise<Task | null> {
+    const mutexKey = expectedRunId
+      ? `delegate:${createHash('sha256').update(JSON.stringify([taskId, expectedRunId, call.to, call.prompt])).digest('hex')}`
+      : `${taskId}\n${call.to}\n${call.prompt}`
+    const inFlight = this.spawnCreatesInFlight.get(mutexKey)
+    if (inFlight) return inFlight
+    const execution = this.spawnDelegateChildExclusive(taskId, call, expectedRunId)
+    this.spawnCreatesInFlight.set(mutexKey, execution)
+    // 结算即撤登记（后续同键调用改走既有落盘查册短路）；登记副本自身吞掉
+    // rejection 防 unhandledRejection，结果仍原样返回给调用方（两条调用路径
+    // 都有逐单 catch，异常语义不变）。
+    void execution.finally(() => {
+      if (this.spawnCreatesInFlight.get(mutexKey) === execution) this.spawnCreatesInFlight.delete(mutexKey)
+    }).catch(() => {})
+    return execution
+  }
+
+  private async spawnDelegateChildExclusive(taskId: string, call: DelegateCall, expectedRunId: string | undefined): Promise<Task | null> {
     const task = this.store.get(taskId)
     if (!task) return null
     const claim = this.claimForRun(taskId, expectedRunId)
@@ -1784,6 +1820,19 @@ export class TaskRunner {
   ): Promise<{ finalText: string; scanTexts: string[] }> {
     let finalText = initialText
     let scanTexts = initialScanTexts
+    const expected = runCondition(claim)
+    // 残缺 investigate 开标记具名回执（与 delegate 同构）：解析不出调查≠可以无痕，
+    // 多源去重后逐条留痕（本单未应答 + 其后完整标记按字面独立受理，不断言内嵌已应答）
+    const notedBrokenInvestigates = new Set<string>()
+    const drainBrokenInvestigates = () => {
+      for (const broken of scanTexts.flatMap((text) => findUnmatchedInvestigateOpens(text))) {
+        const key = `${broken.to}\n${broken.excerpt}`
+        if (notedBrokenInvestigates.has(key)) continue
+        notedBrokenInvestigates.add(key)
+        this.note(taskId, `⚠ ${unmatchedInvestigateOpenReason(broken)}`, expected)
+      }
+    }
+    drainBrokenInvestigates()
     const seen = new Set<string>()
     const calls = parseInvestigatesMerged(...scanTexts).filter((call) => {
       const key = `${call.to}\n${call.prompt}`
@@ -1805,6 +1854,7 @@ export class TaskRunner {
     if (!turn.ok) throw new Error(turn.error || '调查结果回灌回合失败')
     finalText = turn.response
     scanTexts = [turn.delegationText ?? '', turn.response]
+    drainBrokenInvestigates()
     return { finalText: stripInvestigates(finalText), scanTexts }
   }
 
@@ -1824,6 +1874,19 @@ export class TaskRunner {
   ): Promise<{ finalText: string; scanTexts: string[] }> {
     let finalText = initialText
     let scanTexts = initialScanTexts
+    const expected = runCondition(claim)
+    // 残缺 consult 开标记具名回执（与 delegate 同构）：本单未应答也要具名留痕，
+    // 绝不允许领队按「已应答」契约等到永远；多源去重，回灌回合新见的一并补痕
+    const notedBrokenConsults = new Set<string>()
+    const drainBrokenConsults = () => {
+      for (const broken of scanTexts.flatMap((text) => findUnmatchedConsultOpens(text))) {
+        const key = `${broken.to}\n${broken.excerpt}`
+        if (notedBrokenConsults.has(key)) continue
+        notedBrokenConsults.add(key)
+        this.note(taskId, `⚠ ${unmatchedConsultOpenReason(broken)}`, expected)
+      }
+    }
+    drainBrokenConsults()
     const seen = new Set<string>()
     let rounds = 0
     for (;;) {
@@ -1849,6 +1912,7 @@ export class TaskRunner {
       if (!turn.ok) throw new Error(turn.error || '咨询回灌回合失败')
       finalText = turn.response
       scanTexts = [turn.delegationText ?? '', turn.response]
+      drainBrokenConsults()
     }
   }
 

@@ -145,6 +145,8 @@ export class SidecarManager {
   private readonly diagnostics: SidecarDiagnostic[] = []
   private startPromise: Promise<SidecarSnapshot> | null = null
   private status: SidecarStatus = 'stopped'
+  /** probe 失败（非 409）的末次原因：probe 内部吞错返回 null，启动终败的末条错误靠它补记 */
+  private lastProbeError = ''
   private readonly listeners = new Set<StatusListener>()
   private readonly rpcQueue: Array<{ method: string; params: unknown; resolve: (value: unknown) => void; reject: (error: unknown) => void }> = []
 
@@ -247,6 +249,7 @@ export class SidecarManager {
         this.state = prior
         throw error
       }
+      this.lastProbeError = error instanceof Error ? error.message : String(error)
       this.state = prior
       return null
     }
@@ -298,19 +301,27 @@ export class SidecarManager {
       })
     }
     let crash = false
+    let crashCode: string | undefined
+    let crashEvidence = ''
     child.once('error', (error) => {
       const evidence = `spawn failed: ${clamp(error instanceof Error ? error.message : String(error))}`
       onGone(evidence)
       if (this.status !== 'stopping') note('spawn', (error as NodeJS.ErrnoException).code ?? 'spawn_error', evidence)
     })
     child.once('exit', (code, signal) => {
-      const evidence = signal ? `killed by signal ${signal}` : `exited with code ${code ?? 'unknown'}`
-      onGone(evidence)
+      // 末条错误的落盘/转发在 close 收口：exit 只记证据，stderr tail 到 close 才完整，
+      // 折入 exit 备注的 message（内存快照转发给 UI；文件按既有契约只存 code 元数据）
       crash = this.status !== 'stopping'
-      if (crash) note('exit', signal ? `signal:${signal}` : `code:${code ?? 'unknown'}`)
+      crashCode = signal ? `signal:${signal}` : `code:${code ?? 'unknown'}`
+      crashEvidence = signal ? `killed by signal ${signal}` : `exited with code ${code ?? 'unknown'}`
+      onGone(crashEvidence)
     })
     child.once('close', () => {
-      if (crash) for (const line of tail) note('stderr', undefined, line)
+      if (crash) {
+        const lastStderrLine = tail.at(-1)
+        note('exit', crashCode, [crashEvidence, lastStderrLine].filter(Boolean).join(' — ').slice(0, SIDECAR_DIAGNOSTIC_LINE_LIMIT) || undefined)
+        for (const line of tail) note('stderr', undefined, line)
+      }
       tail = []
       partial = ''
     })
@@ -378,15 +389,24 @@ export class SidecarManager {
         }
       } catch (error) { lastError = error instanceof Error ? error.message : String(error) }
       await new Promise((resolve) => setTimeout(resolve, 50 + Math.min(250, attempt * 10)))
-    }
-    this.setStatus('degraded')
+    }    this.setStatus('degraded')
     const failedChild = this.child
     this.child = null
     this.ownsSidecar = false
     if (failedChild && failedChild.exitCode === null) {
       try { failedChild.kill() } catch {}
     }
-    const detail = [bootFailure, lastError].filter(Boolean).join('; ')
+    // probe 内部吞错返回 null（ECONNREFUSED 等）不进 lastError——末条错误从 lastProbeError 补
+    const detail = [bootFailure, lastError || this.lastProbeError].filter(Boolean).join('; ')
+    // 末条错误补记（漏记末条错误的收口）：启动终败的原因此前只进抛出异常——挂死
+    // 不退出的子进程连 exit 诊断都没有，重启后无据可查。这里以 boot_failed 记进
+    // 诊断环（message 随快照转发给 UI，文件按既有契约只落 code 元数据），token
+    // 沿用诊断通道的同款折叠脱敏。
+    if (detail) {
+      const token = this.state?.token
+      const redacted = token ? detail.split(token).join('[redacted]') : detail
+      this.recordDiagnostic({ at: Date.now(), source: 'spawn', code: 'boot_failed', message: redacted.slice(0, SIDECAR_DIAGNOSTIC_LINE_LIMIT) })
+    }
     throw new SidecarProtocolError(`Sidecar failed to start${detail ? `: ${detail}` : ''}`, 503)
   }
 

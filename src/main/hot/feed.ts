@@ -109,9 +109,17 @@ export function setReadStallGuardForTest(ms: number | undefined): void {
   readStallGuardMs = ms ?? READ_STALL_GUARD_MS
 }
 
+// 空闲中止时限的测试钩子：smoke 直证「空闲中止先发生 → read() 仍待决 → 守卫是唯一出口」
+// 因果链用（缩短到毫秒级，让空闲中止在守卫之前到点），传 undefined 复位为默认 30s。
+// 生产代码不得调用。
+let idleAbortTimeoutMs = DOWNLOAD_IDLE_TIMEOUT_MS
+export function setIdleAbortTimeoutForTest(ms: number | undefined): void {
+  idleAbortTimeoutMs = ms ?? DOWNLOAD_IDLE_TIMEOUT_MS
+}
+
 async function downloadOnce(url: string, tmp: string, onProgress?: (progress: DownloadProgress) => void): Promise<void> {
   const controller = new AbortController()
-  const armIdle = () => setTimeout(() => controller.abort(new FeedError('下载停滞超时（30 秒无数据）')), DOWNLOAD_IDLE_TIMEOUT_MS)
+  const armIdle = () => setTimeout(() => controller.abort(new FeedError('下载停滞超时（30 秒无数据）')), idleAbortTimeoutMs)
   let idle = armIdle()
   try {
     let offset = 0

@@ -339,6 +339,40 @@ function harness(team, leaderBackend, onWorkerStart, optsExtra = {}) {
   fs.rmSync(repo, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
 }
 
+{
+  // 场景：同键并发双调用（对齐「现有测试只覆盖不同派单」的缺口）——既有落盘查册
+  // 去重在双方都未落盘时互相看不见，同键并发必须共享同一次执行：只建一个子单、
+  // 一棵树，第二个调用等待复用（返回同一子单），workerIndex 也只预留一个。
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'sdr-same-key-'))
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim()
+  git('init', '-q', '-b', 'main')
+  git('config', 'user.email', 'smoke@example.invalid')
+  git('config', 'user.name', 'Smoke')
+  fs.writeFileSync(path.join(repo, 'base.txt'), 'baseline')
+  git('add', 'base.txt')
+  git('commit', '-qm', 'baseline')
+  const team = [
+    { id: 'L1', name: 'Boss', backend: 'zcode', role: '领队', systemPrompt: '', subordinates: ['W1'] },
+    { id: 'W1', name: 'Alpha', backend: 'alpha', role: '工程师', systemPrompt: '' }
+  ]
+  const { store, runner } = harness(team, makeLeaderBackend({ step() {} }))
+  const task = store.create({ title: '同键并发', prompt: '重复派同一单', workdir: repo, backend: 'zcode', agentId: 'L1' })
+  store.update(task.id, { status: 'done', runId: 'run-same-key', endedAt: Date.now() })
+  const call = { to: 'Alpha', prompt: '同键并发检查' }
+  const [a, b] = await Promise.all([
+    runner.spawnDelegateChild(task.id, call, 'run-same-key'),
+    runner.spawnDelegateChild(task.id, call, 'run-same-key')
+  ])
+  assert(!!a && !!b && a.id === b.id, '同键并发双调用返回同一子单（第二个等待复用）')
+  assert(!!a.dedupeKey && a.dedupeKey.startsWith('delegate:'), '同键并发子单带派单键登记')
+  const sameKeyChildren = store.list().filter((t) => t.parentTaskId === task.id)
+  assert(sameKeyChildren.length === 1, `同键并发只建一个子单（${sameKeyChildren.length}）`)
+  assert(!!a.worktree && fs.existsSync(a.worktree.path), '同键并发只建一棵树且目录在案')
+  assert(a.worktree.branch === `agentdeck/${task.id}_c1`, `同键并发只预留一个 workerIndex（${a.worktree.branch}）`)
+  assert(git('branch', '--list', `agentdeck/${task.id}_c*`).trim().split('\n').filter(Boolean).length === 1, '同键并发不残留第二分支')
+  fs.rmSync(repo, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
+}
+
 console.log('\n✅ 派单被拒回灌冒烟全绿')
 {
   const team = [

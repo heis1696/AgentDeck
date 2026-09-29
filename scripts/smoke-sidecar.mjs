@@ -239,6 +239,12 @@ if (persisted.port !== first.port || persisted.token !== first.token) throw new 
   const savedDiagnostics = JSON.parse(fs.readFileSync(diagnosticFile, 'utf8'))
   assert(savedDiagnostics.some((entry) => entry.source === 'exit' && entry.code === 'code:7'), 'exit code survives to bounded metadata file')
   assert(savedDiagnostics.every((entry) => !('message' in entry) && !('token' in entry)), 'metadata file never stores stderr or credentials')
+  // 项6：末条错误落盘/转发补齐——exit 备注折入末条 stderr（内存快照转发），启动终败记 boot_failed
+  assert(exitNote?.message?.includes('exited with code 7') && exitNote.message.includes('FATAL token=[redacted]'),
+    `the crash exit note folds the last stderr line with evidence (got ${JSON.stringify(exitNote)})`)
+  assert(diags.some((d) => d.source === 'spawn' && d.code === 'boot_failed' && d.message?.includes('exited with code 7')),
+    `a terminal start failure records the boot_failed diagnostic (${JSON.stringify(diags.map((d) => [d.source, d.code]))})`)
+  assert(savedDiagnostics.some((entry) => entry.source === 'spawn' && entry.code === 'boot_failed'), 'boot_failed metadata survives to the bounded file')
   const reopened = new SidecarManager({ userDataDir: failDir, entrypoint: bomb, preferredPort: 0 })
   try { await reopened.start() } catch {}
   assert(reopened.snapshot?.diagnostics.some((entry) => entry.at === exitNote.at && entry.code === 'code:7'), 'a new manager replays prior exit metadata')
@@ -253,6 +259,21 @@ if (persisted.port !== first.port || persisted.token !== first.token) throw new 
   assert(Date.now() - spawnStartedAt < 8000, 'a spawn failure must fail the start fast')
   assert((spawnManager.snapshot?.diagnostics ?? []).some((d) => d.source === 'spawn' && d.message?.includes('ENOENT')), `the spawn error is recorded (${JSON.stringify(spawnManager.snapshot?.diagnostics)})`)
   await spawnManager.stop()
+
+  // 项6：挂死不退出的子进程——连 exit 证据都没有，启动终败的末条错误必须仍被记录
+  {
+    const hangDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-sidecar-hang-'))
+    const hangEntry = path.join(hangDir, 'hang.cjs')
+    fs.writeFileSync(hangEntry, "setTimeout(() => {}, 60000)")
+    const hangManager = new SidecarManager({ userDataDir: hangDir, entrypoint: hangEntry, preferredPort: 0 })
+    let hangFailure = null
+    try { await hangManager.start() } catch (error) { hangFailure = error }
+    assert(hangFailure instanceof Error, `a hung child must fail manager.start() (${hangFailure})`)
+    const hangDiags = hangManager.snapshot?.diagnostics ?? []
+    assert(hangDiags.some((d) => d.source === 'spawn' && d.code === 'boot_failed' && (d.message ?? '').length > 0),
+      `a hung (never-exiting) child still leaves a boot_failed record with the last probe error (${JSON.stringify(hangDiags.map((d) => [d.source, d.code]))})`)
+    await hangManager.stop()
+  }
 
   for (let cycle = 0; cycle < 6; cycle++) {
     let again = null

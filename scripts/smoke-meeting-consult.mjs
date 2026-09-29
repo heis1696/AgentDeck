@@ -32,6 +32,22 @@ check(delegate.parseConsults('<consult reason="why" to="Beta">question</consult>
 check(delegate.parseConsults('<consult>not a call</consult><consult to="Beta">real</consult>').length === 1, 'consult parser rejects phantom calls without to')
 check(delegate.stripConsults('before <consult to="Beta">question</consult> after') === 'before  after', 'consult markers are stripped from displayed text')
 
+// —— 吞标记回归（对齐案情一形态）：残缺 consult 不得吞掉其后真实咨询 ——
+{
+  const brokenThenReal = '<consult to="Beta" reason="示例">忘写闭合的引用示例'
+  const swallowText = `${brokenThenReal}<consult to="Beta2">real question</consult>`
+  const parsed = delegate.parseConsults(swallowText)
+  check(parsed.length === 1 && parsed[0].to === 'Beta2' && parsed[0].prompt === 'real question',
+    'broken consult open cannot swallow the following real consult (sentinelized body)')
+  check(delegate.stripConsults(swallowText).includes('忘写闭合的引用示例'), 'broken consult text stays visible in display (strip is same-source)')
+  const broken = delegate.findUnmatchedConsultOpens(swallowText)
+  check(broken.length === 1 && broken[0].to === 'Beta' && broken[0].embedded === true, 'broken consult open is detected with the embedded flag')
+  check(delegate.unmatchedConsultOpenReason(broken[0]).includes('按字面独立受理') && !delegate.unmatchedConsultOpenReason(broken[0]).includes('已应答'),
+    'embedded consult reason states literal acceptance without asserting an answer')
+  const plainBroken = delegate.findUnmatchedConsultOpens('<consult to="Gamma">忘写闭合，后方再无任何标记')
+  check(plainBroken.length === 1 && !delegate.unmatchedConsultOpenReason(plainBroken[0]).includes('按字面'), 'plain broken consult keeps the non-embedded wording')
+}
+
 const consultBlock = prompts.buildDelegationBlock(
   { id: 'ag_alpha', name: 'Alpha', backend: 'zcode', role: '队长', subordinates: ['ag_member'] },
   [
@@ -115,5 +131,46 @@ check(behavior.sends.some((item) => item.agent === 'beta' && item.content.includ
 check(behavior.maxActive === 1, 'consult path preserves single-flight provider turns')
 
 await runner.shutdown()
+
+// —— 残缺 consult 具名回执（管线级）：有效咨询照常应答，残缺单时间线留痕不断言内嵌已应答 ——
+{
+  const receiptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-consult-receipt-'))
+  const receiptBackend = {
+    id: 'fake-consult-receipt',
+    label: 'Fake consult receipt',
+    supportsResume: true,
+    async probe() { return { ok: true, detail: 'fake' } },
+    async start({ prompt, events, turn }) {
+      const emit = (content, stamp) => {
+        const text = content.includes('咨询回复') ? 'done after consult'
+          : '<consult to="Ghost">broken example missing close\n<consult to="Beta">real question</consult>'
+        events.onEvent({ ts: Date.now(), kind: 'final', text }, stamp)
+        events.onTurnEnd({ ok: true, response: text }, stamp)
+      }
+      setTimeout(() => emit(prompt, turn), 3)
+      return { sessionId: 'receipt-session', turnScoped: true, async send(content, stamp) { await sleep(3); emit(content, stamp) }, async stop() {}, async close() {} }
+    }
+  }
+  const receiptStore = new TaskStore(receiptDir)
+  const receiptRunner = new TaskRunner(receiptStore, new Map([[receiptBackend.id, receiptBackend]]), () => ({ concurrency: 1, mode: 'yolo', notify: false }))
+  receiptRunner.attachTeam(() => agents)
+  const consulted = []
+  receiptRunner.attachConsult(async ({ call }) => {
+    consulted.push(call.to)
+    return 'beta answer'
+  })
+  const receiptTask = receiptStore.create({ title: 'receipt source', prompt: 'consult with broken marker', workdir: '', backend: receiptBackend.id, agentId: 'alpha' })
+  receiptRunner.enqueue(receiptTask)
+  for (let i = 0; i < 300 && receiptStore.get(receiptTask.id)?.status !== 'done'; i++) await sleep(10)
+  check(receiptStore.get(receiptTask.id)?.status === 'done', 'receipt fixture leader completes')
+  check(consulted.length === 1 && consulted[0] === 'Beta', 'the real consult is still answered (broken one did not swallow it)')
+  const timeline = receiptStore.readEvents(receiptTask.id).filter((event) => event.kind === 'status' && event.text?.includes('consult 标记残缺'))
+  check(timeline.length === 1 && timeline[0].text.includes('to="Ghost"') && timeline[0].text.includes('按字面独立受理'),
+    `the broken consult is receipted exactly once with conservative wording (${JSON.stringify(timeline.map((e) => e.text))})`)
+  check(!timeline.some((event) => event.text.includes('已应答')), 'the receipt never asserts the embedded call was answered')
+  await receiptRunner.shutdown()
+  fs.rmSync(receiptDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
+}
+
 if (process.exitCode) process.exit(1)
 console.log('\n✅ MEETING CONSULT SMOKE PASSED')

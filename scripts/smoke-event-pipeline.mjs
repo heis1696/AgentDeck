@@ -397,6 +397,72 @@ assert.equal(replayed.stagePendingEvents(orderedTask.id, 'ordered-earlier', 'ord
 const restoredOrder = new TaskStore(backupDir)
 assert.deepEqual(restoredOrder.readEvents(orderedTask.id).filter((event) => event.kind === 'text').map((event) => event.text), ['first', 'second'])
 
+// —— 接受即恢复边界（崩溃窗收口）：批次定时器到期前硬崩溃，已接受事件可恢复 ——
+// 原先 onPending 保护只在 flush 失败后（retryAttempt > 0）生效，正常路径上接受与
+// 首次落盘之间存在最长 maxDelayMs 的纯内存崩溃窗。本例定时器 1 小时永不到期：
+// 任何恢复都只能来自接受时同步写入的恢复副本。
+{
+  const crashDir = path.join(tmp, 'crash-window')
+  const crashStore = new TaskStore(crashDir)
+  const crashTask = crashStore.create({ title: 'crash window', prompt: 'run', workdir: '', backend: 'hang' })
+  let stageSeq = 0
+  const stage = (events) => {
+    for (const event of events) {
+      if (!(event.eventId || event.id)) event.eventId = `agentdeck:batch:crash-stamp:${++stageSeq}`
+    }
+    return crashStore.stagePendingEvents(crashTask.id, 'crash-turn', 'crash-run', events, { status: 'queued' })
+  }
+  // 与 runner 同规：暂存批身份不算稳定身份，合并链照常延续
+  const stagedBatchId = (event) => typeof event.eventId === 'string' && event.eventId.startsWith('agentdeck:batch:')
+  const crashMergeable = (previous, next) => previous.kind === 'text' && next.kind === 'text'
+    && ((!previous.eventId && !previous.id) || stagedBatchId(previous))
+    && !next.eventId && !next.id
+  const crashBatcher = new BoundedEventBatcher({
+    maxDelayMs: 3_600_000,
+    maxItems: 64,
+    maxBytes: 1024 * 1024,
+    sizeOf: eventBytes,
+    canMerge: crashMergeable,
+    merge: mergeText,
+    onPending: stage,
+    onFlush: () => { throw new Error('crash-window repro must never flush') }
+  })
+  crashBatcher.add({ eventId: 'crash-tool', ts: 1, kind: 'tool', data: { name: 'probe' } })
+  crashBatcher.add({ eventId: 'crash-text', ts: 2, kind: 'text', text: 'accepted before crash' })
+  crashBatcher.add({ ts: 3, kind: 'text', text: 'delta one|' })
+  crashBatcher.add({ ts: 4, kind: 'text', text: 'delta two|' })
+  crashBatcher.add({ eventId: 'crash-final', ts: 5, kind: 'final', text: 'authoritative text' })
+  // 崩溃：不 flush 不 close，内存态直接抛弃；恢复副本必须已在盘上
+  crashBatcher.dispose()
+  assert.equal(crashStore.readEvents(crashTask.id).length, 0, '崩溃窗复现前提：定时器未到，事件日志零写入')
+  crashStore.flush()
+  const restarted = new TaskStore(crashDir)
+  const replayedCrash = restarted.readEvents(crashTask.id)
+  assert.ok(replayedCrash.some((e) => e.eventId === 'crash-tool'), '崩溃窗内接受的 tool 事件重启后可恢复')
+  assert.ok(replayedCrash.some((e) => e.eventId === 'crash-text' && e.text === 'accepted before crash'), '崩溃窗内接受的文本事件重启后可恢复')
+  assert.ok(replayedCrash.some((e) => e.eventId === 'crash-final' && e.text === 'authoritative text'), 'final 事件接受即保护，权威文本完整')
+  assert.ok(replayedCrash.some((e) => (e.text ?? '').includes('delta one|delta two|')), '合并组文本随后续非合并接受一并刷新进恢复副本')
+}
+
+// —— 管线级：真实 runner 里接受即落恢复副本——副本先于 events.jsonl 出现 ——
+{
+  const boundaryDir = path.join(tmp, 'accept-boundary')
+  const boundaryStore = new TaskStore(boundaryDir)
+  const boundaryRunner = new TaskRunner(boundaryStore, new Map([['hang', backends.get('hang')]]), () => ({ concurrency: 1, mode: 'yolo', notify: false }))
+  const boundaryTask = boundaryStore.create({ title: 'accept boundary', prompt: 'run', workdir: '', backend: 'hang' })
+  boundaryRunner.enqueue(boundaryTask)
+  const boundaryPendingDir = path.join(boundaryDir, 'tasks', boundaryTask.id, 'pending-events')
+  await waitFor(() => fs.existsSync(boundaryPendingDir)
+    && fs.readdirSync(boundaryPendingDir).some((entry) => entry.endsWith('.json'))
+    && boundaryStore.readEvents(boundaryTask.id).every((event) => event.kind !== 'text'),
+  'accept-time recovery copy appears before any batch commit')
+  const boundaryReplay = new TaskStore(boundaryDir)
+  assert.ok(boundaryReplay.readEvents(boundaryTask.id).some((event) => event.text === 'hanging'), '重启侧从恢复副本回放接受时事件')
+  await boundaryRunner.shutdown()
+  assert.equal(boundaryStore.readEvents(boundaryTask.id).filter((event) => event.text === 'hanging').length, 1,
+    '接受时已带稳定身份：原进程恢复后补投与重启回放按身份幂等，不双写')
+}
+
 const noBackupDir = path.join(tmp, 'unwritable-backup')
 const noBackupStore = new TaskStore(noBackupDir)
 const noBackupTask = noBackupStore.create({ title: 'both writes fail', prompt: 'run', workdir: '', backend: 'backup' })
