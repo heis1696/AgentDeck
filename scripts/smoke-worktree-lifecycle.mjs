@@ -745,6 +745,126 @@ try {
   } else {
     console.log('  SKIP 大小写别名并发专项（非 win32 平台，路径等价判定退化为字面量比较）')
   }
+
+  // ---- 归池时机前移（nxii 场景端到端）：子单终态即归池，同会话第二轮派单复用第一轮树 ----
+  // 旧时序归池只在全部轮次结束的集成段：多轮派单逐单付全量建树全款（nxii 8 万文件仓
+  // 每单 13 分钟）。管线级断言：第一轮子单终态（commitAll+全文双落）后树即入池（时间线
+  // 注记可见），第二轮派单取池命中拿到同一目录（分支不同）；归池 detach 不删分支——
+  // 集成仍按分支合并，两轮成果都进集成分支；首轮建树前的「池未命中」也留痕。
+  {
+    const temp2 = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-repool-e2e-'))
+    try {
+      const build2 = async (file, name) => {
+        const outfile = path.join(temp2, name + '.cjs')
+        await build({ entryPoints: [path.join(root, file)], outfile, bundle: true, platform: 'node', format: 'cjs', target: 'node18', external: ['electron'], logLevel: 'silent' })
+        return import(pathToFileURL(outfile).href)
+      }
+      const [{ TaskRunner }, { TaskStore }] = await Promise.all([
+        build2('src/main/runner.ts', 'runner'),
+        build2('src/main/store.ts', 'store')
+      ])
+      const e2eRepo = path.join(temp2, 'repo')
+      fs.mkdirSync(e2eRepo, { recursive: true })
+      const egit = (...args) => execFileSync('git', ['-C', e2eRepo, ...args], { encoding: 'utf8' }).trim()
+      egit('init', '-q', '-b', 'main')
+      egit('config', 'user.email', 'smoke@example.com')
+      egit('config', 'user.name', 'AgentDeck Smoke')
+      fs.writeFileSync(path.join(e2eRepo, 'base.txt'), 'base\n')
+      egit('add', '.')
+      egit('commit', '-qm', 'base')
+      const team2 = [
+        { id: 'L1', name: 'Boss', backend: 'zcode', role: '领队', systemPrompt: '', subordinates: ['W1', 'W2'] },
+        { id: 'W1', name: 'WorkerOne', backend: 'alpha', role: '工程师', systemPrompt: '' },
+        { id: 'W2', name: 'WorkerTwo', backend: 'beta', role: '工程师', systemPrompt: '' }
+      ]
+      const leader2 = {
+        sent: [], id: 'zcode', label: 'Boss',
+        async probe() { return { ok: true, detail: '' } },
+        async start({ events: rawEvents, turn }) {
+          // 跨回合派单必须 turnScoped（回合对象绑定，mutation makeLeader 同构）：
+          // 反馈回合的 delegationText 才会被嗅探建单
+          let activeTurn = turn
+          const events = {
+            onEvent: (event) => rawEvents.onEvent(event, activeTurn),
+            onTurnEnd: (result) => rawEvents.onTurnEnd(result, activeTurn)
+          }
+          const emit = (text, delegationText) => {
+            events.onEvent({ ts: Date.now(), kind: 'final', text })
+            events.onTurnEnd({ response: text, delegationText, ok: true })
+          }
+          await Promise.resolve()
+          setTimeout(() => emit('第一轮：', '<delegate to="WorkerOne">写 round1.txt</delegate>'), 20)
+          return {
+            sessionId: 'sess_lead2',
+            turnScoped: true,
+            async send(content, nextTurn) {
+              activeTurn = nextTurn
+              leader2.sent.push(String(content))
+              setTimeout(() => {
+                if (String(content).includes('队员执行结果汇报') && !String(content).includes('预算收尾')) emit('第二轮：', '<delegate to="WorkerTwo">写 round2.txt</delegate>')
+                else emit('最终总结：两轮完成。')
+              }, 20)
+            },
+            async stop() {}, async close() {}
+          }
+        }
+      }
+      const makeE2eWorker = (tag, file) => ({
+        id: tag, label: tag,
+        async probe() { return { ok: true, detail: '' } },
+        async start({ workdir, events }) {
+          setTimeout(() => {
+            fs.writeFileSync(path.join(workdir, file), `by ${tag}\n`)
+            const response = `done ${tag}`
+            events.onEvent({ ts: Date.now(), kind: 'final', text: response })
+            events.onTurnEnd({ response, ok: true })
+          }, 30)
+          return { sessionId: `sess_${tag}`, async send() {}, async stop() {}, async close() {} }
+        }
+      })
+      const store2 = new TaskStore(path.join(temp2, 'store-data'))
+      const runner2 = new TaskRunner(store2, new Map([
+        ['zcode', leader2],
+        ['alpha', makeE2eWorker('alpha', 'round1.txt')],
+        ['beta', makeE2eWorker('beta', 'round2.txt')]
+      ]), () => ({ concurrency: 1, mode: 'yolo', notify: false, workerConcurrency: 3 }))
+      runner2.attachTeam(() => team2)
+      const leader2Task = store2.create({ title: '两轮复用', prompt: '两轮派单', workdir: e2eRepo, backend: 'zcode', agentId: 'L1' })
+      runner2.enqueue(leader2Task)
+      const wait2 = (ms) => new Promise((r) => setTimeout(r, ms))
+      let kids = []
+      const tKids = Date.now()
+      while (Date.now() - tKids < 60000) {
+        kids = store2.list().filter((t) => t.parentTaskId === leader2Task.id).sort((a, b) => a.createdAt - b.createdAt)
+        if (kids.length === 2 && kids.every((k) => k.worktree?.path && fs.existsSync(k.worktree.path))) break
+        await wait2(100)
+      }
+      check(kids.length === 2, `两轮各建一单（实际 ${kids.length}）`)
+      const [first, second] = kids
+      check(!!first?.worktree?.path && !!second?.worktree?.path, '两单都有隔离工作树')
+      check(second.worktree.path === first.worktree.path, `第二轮子单复用第一轮树（nxii 场景：${path.basename(String(first.worktree.path))}）`)
+      check(first.worktree.branch !== second.worktree.branch, '复用换分支不换目录（两单分支不同）')
+      const tFin = Date.now()
+      while (Date.now() - tFin < 90000) {
+        if (['done', 'failed'].includes(store2.get(leader2Task.id).status)) break
+        await wait2(150)
+      }
+      const fin2 = store2.get(leader2Task.id)
+      check(fin2.status === 'done', `领队 done（实际 ${fin2.status}${fin2.error ? ' ' + fin2.error : ''}）`)
+      const integ2 = fin2.integration?.branch ?? ''
+      check(!!integ2, '集成分支已产出')
+      const integ2Tree = egit('ls-tree', '-r', '--name-only', integ2)
+      check(integ2Tree.includes('round1.txt'), '归池不删分支：第一轮成果按分支合并进集成分支')
+      check(integ2Tree.includes('round2.txt'), '第二轮成果照常进集成分支')
+      const timeline2 = store2.readEvents(leader2Task.id).map((e) => e.text ?? '').join('\n')
+      check(timeline2.includes('池未命中（池内无空闲树）'), '首轮建树前的取池 miss 原因入时间线')
+      check(timeline2.includes('已提前归池'), '终态提前归池注记入时间线')
+      check(timeline2.includes('取池命中'), '第二轮取池命中注记入时间线')
+      console.log('  OK 归池时机前移端到端：第二轮子单复用第一轮树（同目录异分支）、归池/命中/miss 注记可见、两轮成果都按分支集成')
+    } finally {
+      fs.rmSync(temp2, { recursive: true, force: true, maxRetries: 3, retryDelay: 500 })
+    }
+  }
   console.log('\nWORKTREE LIFECYCLE SMOKE PASSED')
 } finally {
   fs.rmSync(dir, { recursive: true, force: true })

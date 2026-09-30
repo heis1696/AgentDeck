@@ -1011,6 +1011,9 @@ export interface WorktreeCreateOptions {
   addTimeoutMs?: number
   /** 无法核验归属的失败现场时间线出口（runner 接 store.noteWorktreeCleanupFailure） */
   onCleanupResidue?: (failure: { name: string; reason: string; ownerTaskId?: string }) => void
+  /** 取池未命中原因出口（归池可观测性）：池内有条目但全部不可复用、或池空，逐次带回
+   *  具名原因（runner 落时间线注记，让「这次为什么没省时间」可查） */
+  onPoolMiss?: (reason: string) => void
   runAddForTest?: (run: () => Promise<GitCommandResult>) => Promise<GitCommandResult>
   /** 稀疏检出的目录前缀列表（cone 模式，`/` 分隔）：§6.2 三步建树（add --no-checkout →
    *  set --cone → checkout）。任一目录在基线中不存在、或设置/检出失败 → 回落全量并在结果
@@ -1139,6 +1142,14 @@ export function worktreePoolEntriesForTest(repoDir: string): string[] {
   return pool ? [...pool.values()] : []
 }
 
+/** 树当前是否为活跃池条目（进程内池登记为准，路径键折叠别名）：delegate 集成段判断
+ *  「子单终态已提前归池」的权威依据——登记先于 store 落盘，store 里的 cleanupStatus
+ *  可能带着崩溃窗的滞后，池登记本身就是 releaseWorktreeToPool 的同一事实源。 */
+export function worktreeInPool(repoDir: string, wtDir: string): boolean {
+  const pool = worktreePoolByRepo.get(worktreePathKey(repoDir))
+  return !!pool && pool.has(worktreePathKey(wtDir))
+}
+
 /** 归还入池：detach HEAD（同提交零文件重写，解除分支检出占用——否则调用方随后的
  *  分支删除会被 "used by worktree" 拒绝）。分支删除不在此做：归调用方决策（集成完成
  *  路径自行 deleteBranch 并跟踪失败；集成分支等保留分支不受影响）→ 元数据改挂池
@@ -1204,7 +1215,8 @@ async function retainUnverifiablePoolEntry(
  *  → status 自洽核验（脏则 reset --hard 兜底一次）。任何一步失败都逐出该条目并返回 null，
  *  调用方回落全量 worktree add——池永远是加速捷径而非正确性依赖，复用失败不改变派单语义。
  *  switch/reset 沿用建树的规模自适应超时与进程树击杀通道（病态大差异下同样受控）。
- *  代际校验失败的条目走 retainUnverifiablePoolEntry 留痕后返回 null，不参与复用。 */
+ *  代际校验失败的条目走 retainUnverifiablePoolEntry 留痕后返回 null，不参与复用。
+ *  onPoolMiss（归池可观测性）：池空/条目逐出都带具名原因回传，供调用方落时间线。 */
 async function acquirePooledWorktree(
   repoDir: string,
   name: string,
@@ -1212,11 +1224,16 @@ async function acquirePooledWorktree(
   baseSha: string,
   ownerTaskId: string,
   timeoutMs: number,
-  notifyUnverifiable?: (failure: { name: string; reason: string; ownerTaskId?: string }) => void
+  notifyUnverifiable?: (failure: { name: string; reason: string; ownerTaskId?: string }) => void,
+  onPoolMiss?: (reason: string) => void
 ): Promise<WorktreeCreateResult | null> {
   const root = path.resolve(repoDir)
   const pool = worktreePoolByRepo.get(worktreePathKey(root))
-  if (!pool || !pool.size) return null
+  if (!pool || !pool.size) {
+    onPoolMiss?.('池内无空闲树')
+    return null
+  }
+  const misses: string[] = []
   for (const wtPath of [...pool.values()]) {
     const reused = await withWorktreePathLock(wtPath, async () => {
       if (!pool.has(worktreePathKey(wtPath))) return null
@@ -1225,25 +1242,27 @@ async function acquirePooledWorktree(
       const generationId = poolMetadata?.generationId
       if (!generationId) {
         await retainUnverifiablePoolEntry(root, wtPath, poolMetadata ?? null, '池条目元数据缺世代标记', ownerTaskId, notifyUnverifiable)
+        misses.push(`${path.basename(wtPath)} 元数据缺世代标记`)
         return null
       }
       const generationProblem = await verifyWorktreeGeneration(root, wtPath, generationId)
       if (generationProblem) {
         await retainUnverifiablePoolEntry(root, wtPath, poolMetadata ?? null, generationProblem, ownerTaskId, notifyUnverifiable)
+        misses.push(`${path.basename(wtPath)} 代际校验失败`)
         return null
       }
       const evict = async (deleteRequestedBranch = false) => {
         await reclaimWorktreeUnlocked(wtPath, { force: true, deleteBranch: true, expectedGenerationId: generationId }).catch(() => {})
         if (deleteRequestedBranch) await deleteBranchWithRetry(root, branch)
       }
-      if (!(await isGitRepo(wtPath))) { await evict(); return null }
+      if (!(await isGitRepo(wtPath))) { await evict(); misses.push(`${path.basename(wtPath)} 非 Git 仓库`); return null }
       // 带稀疏配置的池条目（外部遗留/异常路径入池）一律逐出回落全量 add：本单需要的物化
       // 范围未知，绝不沿用旧稀疏范围——宁可整树回收重建，不复用出错误范围
-      if (await isSparseWorktree(wtPath)) { await evict(); return null }
+      if (await isSparseWorktree(wtPath)) { await evict(); misses.push(`${path.basename(wtPath)} 带稀疏配置（稀疏↔全量不混用）`); return null }
       // 项5：清理豁免只保托管资产（managedAssetPathspecExcludes）——上一任务的
       // .agentdeck-reports 内容随 clean -x 离场，不随树泄入新子单
       const cleaned = await runGit(wtPath, ['clean', '-ffd', '-x', '--', ...managedAssetPathspecExcludes()], 60000)
-      if (!cleaned.ok) { await evict(); return null }
+      if (!cleaned.ok) { await evict(); misses.push(`${path.basename(wtPath)} 清理失败`); return null }
       // 报告目录本身清后重建保约定（目录在、内容空）；清建失败不阻塞复用——报告
       // 写入侧按需建目录，路径上的旧内容已由 clean 带走
       try {
@@ -1251,12 +1270,12 @@ async function acquirePooledWorktree(
         fs.mkdirSync(path.join(wtPath, REPORTS_DIR_NAME), { recursive: true })
       } catch { /* 非阻塞：clean 已兜底带走旧内容 */ }
       const switched = await runGit(wtPath, [...checkoutWorkersArgs(), 'switch', '-c', branch, baseSha], timeoutMs, undefined, true)
-      if (!switched.ok) { await evict(); return null }
+      if (!switched.ok) { await evict(); misses.push(`${path.basename(wtPath)} 换基线失败`); return null }
       let settled = await runGit(wtPath, ['status', '--porcelain'], 30000)
       if (!settled.ok || settled.stdout.trim()) {
         await runGit(wtPath, [...checkoutWorkersArgs(), 'reset', '--hard', baseSha], timeoutMs, undefined, true)
         settled = await runGit(wtPath, ['status', '--porcelain'], 30000)
-        if (!settled.ok || settled.stdout.trim()) { await evict(true); return null }
+        if (!settled.ok || settled.stdout.trim()) { await evict(true); misses.push(`${path.basename(wtPath)} 换基线后状态不自洽`); return null }
       }
       const metadata: WorktreeInfo = {
         ownerTaskId,
@@ -1268,11 +1287,12 @@ async function acquirePooledWorktree(
         createdAt: Date.now(),
         cleanupStatus: 'active'
       }
-      try { writeMetadata(metadata) } catch { await evict(true); return null }
+      try { writeMetadata(metadata) } catch { await evict(true); misses.push(`${path.basename(wtPath)} 元数据写入失败`); return null }
       return { path: wtPath, branch, metadata, pooled: true }
     })
     if (reused) return reused
   }
+  onPoolMiss?.(`池内 ${misses.length} 条均不可复用：${misses.join('；')}`)
   return null
 }
 
@@ -1441,8 +1461,9 @@ async function createWorktreeUnlocked(
     }
     sparseOutcome = { status: 'fallback', reason: check.reason }
   }
-  // 池化复用先行：同仓池里有空闲 worktree 就换基线复用（只重写差异文件），全量 add 兜底
-  const pooled = await acquirePooledWorktree(root, name, branch, baseSha, ownerTaskId, planned.timeoutMs, options.onCleanupResidue)
+  // 池化复用先行：同仓池里有空闲 worktree 就换基线复用（只重写差异文件），全量 add 兜底；
+  // 未命中带原因回传（归池可观测性，runner 落时间线注记）
+  const pooled = await acquirePooledWorktree(root, name, branch, baseSha, ownerTaskId, planned.timeoutMs, options.onCleanupResidue, options.onPoolMiss)
   if (pooled) return sparseOutcome ? { ...pooled, sparse: sparseOutcome } : pooled
   if (rejectOccupiedTarget(await branchExists(repoDir, branch), pathEntryExists(wtPath))) return null
   const runAdd = () => runGit(repoDir, [...checkoutWorkersArgs(), 'worktree', 'add', '-b', branch, wtPath, ...(baseBranch ? [baseBranch] : [])], planned.timeoutMs, undefined, true)

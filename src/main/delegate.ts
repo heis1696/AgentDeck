@@ -3,6 +3,7 @@
 // 结果回灌 → 领队继续。循环直到领队不再派发。任何支持续聊的后端都适用。
 // 提示词文案集中在 src/main/prompts/delegation.ts（本文件只保留解析器与循环逻辑）。
 import path from 'node:path'
+import fs from 'node:fs'
 import type { Task, TaskEvent, ThinkingLevel } from '../shared/types'
 import type { TaskExpectation, TaskStore } from './store'
 import type { TaskRunner } from './runner'
@@ -46,6 +47,7 @@ import {
   sameWorktreePath,
   snapshotGitAfter,
   worktreeChangeDigest,
+  worktreeInPool,
   writeReportCopy,
   type WorktreeChangeDigest
 } from './git'
@@ -1252,6 +1254,43 @@ export async function runDelegationLoop(
       fullTextEntries.set(id, { seq, issueOk, copyPath: copyAbs ? reportCopyRelPath(task.workdir!, copyAbs) : '' })
     }
 
+    // ---- 归池时机前移（nxii 根因——多轮派单时每单都等到集成段才归还，逐单付全量建树
+    // 全款）：子单终态（commitAll 成功 + 全文双落之后）即尝试归池，同会话下一轮派单
+    // 换基线秒级复用。沿用 reclaimWorktree(repool) 既有条件语义零放宽：世代有效、非 force、
+    // 托管分支、容量、clean（commitAll 已落盘即 clean；落盘失败的树不干净自然 retained
+    // 留现场）；cancelled 不在此列（现场保留契约不变）；集成仍按分支合并——归池只 detach
+    // 不删分支，集成分支合并不受影响；崩溃恢复与现状一致（同一 releaseWorktreeToPool
+    // 通道，owner=池标记 + poolProcess，启动清扫照旧回收）。归池成败与原因都落时间线。
+    for (let idx = 0; idx < childIds.length; idx++) {
+      const id = childIds[idx]
+      const c = store.get(id)
+      if (!c?.worktree || !c.workdir || (c.status !== 'done' && c.status !== 'failed')) continue
+      const capturedChild: TaskExpectation = {
+        status: c.status, runId: c.runId, executionOwner: c.executionOwner,
+        attempt: c.attempt, startedAt: c.startedAt, phaseIndex: c.phaseIndex,
+        workdir: c.workdir, workVersion: c.workVersion
+      }
+      const reclaimed = await reclaimWorktree(c.workdir, {
+        repool: true,
+        expectedOwnerTaskId: c.id,
+        ...(c.worktree?.generationId ? { expectedGenerationId: c.worktree.generationId } : {})
+      })
+      if (!active()) return abandoned()
+      if (c.worktree) store.updateIf(id, capturedChild, {
+        worktree: {
+          ...c.worktree,
+          cleanupStatus: reclaimed.status,
+          ...(reclaimed.reason ? { cleanupReason: reclaimed.reason } : {}),
+          ...(reclaimed.ok ? { cleanedAt: Date.now() } : {})
+        }
+      })
+      if (reclaimed.ok && reclaimed.status === 'pooled') {
+        note(`单 #${idx + 1} worktree 已提前归池（下一轮派单秒级换基线复用；集成仍按分支合并）`)
+      } else {
+        note(`⚠ 单 #${idx + 1} 提前归池未成（${reclaimed.reason ?? reclaimed.status}），现场按既有回收语义处理`)
+      }
+    }
+
     // ---- summary 层（可选）：派单标了 summary 且结果超回灌界时，在全文双落之后向该
     // 子单会话追加一轮总结请求，产出（≤回灌界才采纳）作为回灌体并前置「非全文」标注。
     // 时序契约：commitAll 与全文双落已在上方完成且行为不变；总结轮不改子单终态；
@@ -1461,15 +1500,30 @@ export async function runDelegationLoop(
           const ownBranch = delegateChildBranch(c, taskId, idx)
           const subIntegration = await branchExists(task.workdir, `agentdeck/task-${cid}`) ? `agentdeck/task-${cid}` : ''
           if (!active()) return abandoned()
+          // 归池前移接驳（终态已提前归池的子单，集成只剩分支级动作）：
+          // ① 树在池（worktreeInPool 以池登记为准，store 的 cleanupStatus 可能带崩溃窗滞后）
+          //    ——跳过回收（活跃池条目 reclaim 必被拒）；
+          // ② 树已在终态提前回收（目录不在 + store 登记 removed——容量满时归池失败已回落
+          //    常规移除）——跳过回收；
+          // 两种形态下归池只 detach 不删分支，该合的分支照合，合并成功后照旧删除自己的工作分支。
+          const earlyPooled = !!c.workdir && worktreeInPool(task.workdir, c.workdir)
+          const terminalReclaimed = !!c.workdir && !fs.existsSync(c.workdir) && c.worktree?.cleanupStatus === 'removed'
           if (!ownBranch && !subIntegration) {
             // 没有任何可集成改动，worktree 里没有值得保留的东西：直接回收（优先归池复用）
             if (!childOwnsWorktree(c)) continue
+            if (earlyPooled || terminalReclaimed) continue
             const reclaimed = await reclaimWorktree(c.workdir, {
               repool: true,
               expectedOwnerTaskId: c.id,
               ...(c.worktree?.generationId ? { expectedGenerationId: c.worktree.generationId } : {})
             })
             if (!active()) return abandoned()
+            // 树已提前归池并被后续派单复用（所有权转移到新子单）：改动都在分支上，回收
+            // 已无对象，按已处置放行，不拖垮集成（store 登记不动，新 owner 的记录指向该树）
+            if (!reclaimed.ok && reclaimed.status === 'retained' && (reclaimed.reason ?? '').includes('ownership changed')) {
+              note(`单 #${idx} 的 worktree 已提前归池并被后续派单复用（所有权转移），集成跳过回收`)
+              continue
+            }
             if (c.worktree) store.updateIf(cid, capturedChild, {
               worktree: {
                 ...c.worktree,
@@ -1540,38 +1594,52 @@ export async function runDelegationLoop(
           if (childAdvanced) mergedCount++
           // 收尾回收：全部合入集成分支后 worktree 即无保留价值（改动都在集成分支上），
           // 顺带删掉已合并的工作分支（优先归池，供下一次派单换基线秒级复用）；
-          // 有失败/冲突则保留现场便于排查，留待任务删除时回收
+          // 有失败/冲突则保留现场便于排查，留待任务删除时回收。
+          // 终态已提前归池/提前回收的子单跳过树回收（earlyPooled/terminalReclaimed，
+          // 见上方接驳注释），只剩分支删除；树被后续派单复用的（ownership changed）
+          // 同样只跳过树侧动作，分支删除照旧（该分支已无人检出、改动已合并）。
+          let treeTransferred = false
           if (childOk && childOwnsWorktree(c)) {
-            const reclaimed = await reclaimWorktree(c.workdir, {
-              repool: true,
-              expectedOwnerTaskId: c.id,
-              ...(c.worktree?.generationId ? { expectedGenerationId: c.worktree.generationId } : {})
-            })
-            if (!active()) return abandoned()
-            if (c.worktree) store.updateIf(cid, capturedChild, {
-              worktree: {
-                ...c.worktree,
-                cleanupStatus: reclaimed.status,
-                ...(reclaimed.reason ? { cleanupReason: reclaimed.reason } : {}),
-                ...(reclaimed.ok ? { cleanedAt: Date.now() } : {})
+            if (!earlyPooled && !terminalReclaimed) {
+              const reclaimed = await reclaimWorktree(c.workdir, {
+                repool: true,
+                expectedOwnerTaskId: c.id,
+                ...(c.worktree?.generationId ? { expectedGenerationId: c.worktree.generationId } : {})
+              })
+              if (!active()) return abandoned()
+              treeTransferred = !reclaimed.ok && reclaimed.status === 'retained' && (reclaimed.reason ?? '').includes('ownership changed')
+              if (treeTransferred) {
+                note(`单 #${idx} 的 worktree 已提前归池并被后续派单复用（所有权转移），集成跳过回收`)
+              } else {
+                if (c.worktree) store.updateIf(cid, capturedChild, {
+                  worktree: {
+                    ...c.worktree,
+                    cleanupStatus: reclaimed.status,
+                    ...(reclaimed.reason ? { cleanupReason: reclaimed.reason } : {}),
+                    ...(reclaimed.ok ? { cleanedAt: Date.now() } : {})
+                  }
+                })
+                // 部分成功（目录已回收、分支/注册残留）同样浮出：residue 清单进问题汇总
+                //（回合末记上时间线），不再静默 retained——残留分支会在重派时撞 already exists
+                if (!reclaimed.ok && (reclaimed.status === 'failed' || reclaimed.residue?.length)) {
+                  childOk = false
+                  allOk = false
+                  problems.push(`worktree cleanup: ${reclaimed.reason ?? 'failed'}${reclaimed.residue?.length ? `（残留：${reclaimed.residue.join('、')}）` : ''}`)
+                }
               }
-            })
-            // 部分成功（目录已回收、分支/注册残留）同样浮出：residue 清单进问题汇总
-            //（回合末记上时间线），不再静默 retained——残留分支会在重派时撞 already exists
-            if (!reclaimed.ok && (reclaimed.status === 'failed' || reclaimed.residue?.length)) {
-              childOk = false
-              allOk = false
-              problems.push(`worktree cleanup: ${reclaimed.reason ?? 'failed'}${reclaimed.residue?.length ? `（残留：${reclaimed.residue.join('、')}）` : ''}`)
             }
             if (childOk && ownBranch && !(await deleteBranch(task.workdir, ownBranch))) {
               if (!active()) return abandoned()
               childOk = false
               allOk = false
               problems.push(`branch cleanup: ${ownBranch}`)
-              if (c.worktree) store.updateIf(cid, capturedChild, {
-                worktree: { ...c.worktree, cleanupStatus: 'retained', cleanupReason: `branch ${ownBranch} could not be deleted` }
-              })
-              await markWorktreeCleanup(c.workdir, 'retained', `branch ${ownBranch} could not be deleted`)
+              // 树侧标记只对仍归属本单的树做：池中/已回收/已转移的树，元数据是池或新 owner 的
+              if (!earlyPooled && !terminalReclaimed && !treeTransferred) {
+                if (c.worktree) store.updateIf(cid, capturedChild, {
+                  worktree: { ...c.worktree, cleanupStatus: 'retained', cleanupReason: `branch ${ownBranch} could not be deleted` }
+                })
+                await markWorktreeCleanup(c.workdir, 'retained', `branch ${ownBranch} could not be deleted`)
+              }
             }
             if (!active()) return abandoned()
           }

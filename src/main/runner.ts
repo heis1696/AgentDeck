@@ -1468,7 +1468,7 @@ export class TaskRunner {
       // worktree 创建与领队/其他子任务的 git 操作可能撞 index.lock：重试两次再放弃。
       // lastWtError 只记首次失败——后续重试撞上的是首次失败留下的残肢（branch already
       // exists 等），属余波而非原因；报余波会掩盖真凶（如 Filename too long 被顶掉）
-      let wt: { path: string; metadata: WorktreeInfo; sparse?: WorktreeSparseOutcome } | null = null
+      let wt: { path: string; metadata: WorktreeInfo; sparse?: WorktreeSparseOutcome; pooled?: boolean } | null = null
       let lastWtError = ''
       const leaderDir = task.workdir
       const reclaimCancelledWorktree = async (candidate: { path: string; metadata: WorktreeInfo }, phase: string) => {
@@ -1492,6 +1492,8 @@ export class TaskRunner {
           // 超时残肢清理部分失败（分支/注册残留）→ owner 时间线可见，重派撞
           // already exists 时现场与原因都查得到，不再静默
           onCleanupResidue: (failure) => { this.store.noteWorktreeCleanupFailure(leaderDir, failure) },
+          // 取池未命中带原因上时间线（归池可观测性）：「这次为什么没省时间」可查
+          onPoolMiss: (reason) => { guardedNote(`↘ 池未命中（${reason}），走全量建树`) },
           // 稀疏检出（声明 sparse 属性时）：建树侧目录校验/设置失败自行回落全量，
           // 结果带 sparse 观测面——成功/回落都在下方落时间线注记
           ...(sparseDirs.length ? { sparseDirs } : {})
@@ -1502,6 +1504,8 @@ export class TaskRunner {
         }
       }
       if (wt) {
+        // 取池命中上时间线（归池可观测性）：秒级换基线复用，语义与全量建树无差别
+        if (wt.pooled) guardedNote('↘ 取池命中：复用池内工作树换基线（秒级，未走全量建树）')
         if (wt.sparse) {
           if (wt.sparse.status === 'applied') guardedNote(`↘ 稀疏检出生效（${wt.sparse.dirs?.join('、')}），子单工作树只物化声明目录`)
           else guardedNote(`⚠ 稀疏检出回落全量：${wt.sparse.reason}；本单按全量建树继续，不拒单`)
