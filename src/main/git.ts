@@ -1649,18 +1649,42 @@ export async function worktreeChangeDigest(
   }
 }
 
-/** 把 workdir 里所有改动（含未跟踪）提交到当前分支；agent 身份；无改动返回 false */
-export async function commitAll(workdir: string, message: string): Promise<boolean> {
-  if (!(await isGitRepo(workdir))) return false
+/** commitAll 的可观测形态：failed 把「git 操作层失败」从「无改动」（committed/failed 双
+ *  false）里分离出来并带原因——调用方据此落具名时间线注记与报告标记，绝不静默丢成果。 */
+export interface CommitAllResult {
+  /** true = 有改动且提交成功 */
+  committed: boolean
+  /** true = 提交尝试失败（非仓库/add/暂存/commit 任一步 git 失败）；false 且 committed=false = 无可提交改动 */
+  failed: boolean
+  /** failed 时的失败原因（时间线注记/报告标记文案） */
+  reason: string
+}
+
+/** 把 workdir 里所有改动（含未跟踪）提交到当前分支；agent 身份。
+ *  稀疏树必须 `add -A --sparse`：cone 外的队员成果会被 skip-worktree 位拦下——git 2.49
+ *  实测不带该旗标整个 add 以 exit 1 拒收（范围内改动也一起进不了提交，调用方再无视
+ *  返回值就是「队员写出 scope 外文件 → 成果全丢」）；`--sparse` 全收且不扩 cone
+ *  （sparse-checkout list 复验不变）。非稀疏树不加旗标，行为与旧版逐字节一致。 */
+export async function commitAllDetailed(workdir: string, message: string): Promise<CommitAllResult> {
+  if (!(await isGitRepo(workdir))) return { committed: false, failed: true, reason: 'not a git repository' }
   const status = await git(workdir, ['status', '--porcelain'])
-  if (!status.trim()) return false
+  if (!status.trim()) return { committed: false, failed: false, reason: '' }
+  const sparse = await isSparseWorktree(workdir)
   // 排除常见生成物（worker 运行时产生的缓存/构建产物）；此 git 不支持 :! 简写，用长格式
-  const added = await runGit(workdir, ['add', '-A', '--', '.', ':(exclude)__pycache__', ':(exclude)*.pyc', ':(exclude)node_modules', ':(exclude)dist', ':(exclude)build'])
-  if (!added.ok) return false
+  const added = await runGit(workdir, ['add', '-A', ...(sparse ? ['--sparse'] : []), '--', '.', ':(exclude)__pycache__', ':(exclude)*.pyc', ':(exclude)node_modules', ':(exclude)dist', ':(exclude)build'])
+  if (!added.ok) return { committed: false, failed: true, reason: gitError(added) }
   const staged = await runGit(workdir, ['diff', '--cached', '--name-only'])
-  if (!staged.ok || !staged.stdout.trim()) return false
+  if (!staged.ok) return { committed: false, failed: true, reason: gitError(staged) }
+  if (!staged.stdout.trim()) return { committed: false, failed: false, reason: '' }
   const committed = await runGit(workdir, [...AGENT_GIT_IDENTITY, 'commit', '-m', message], 30000)
-  return committed.ok
+  if (!committed.ok) return { committed: false, failed: true, reason: gitError(committed) }
+  return { committed: true, failed: false, reason: '' }
+}
+
+/** 把 workdir 里所有改动（含未跟踪）提交到当前分支；agent 身份；无改动返回 false。
+ *  布尔形态供既有消费方（smoke 直连契约冻结）；需要区分失败原因的调用方走 commitAllDetailed。 */
+export async function commitAll(workdir: string, message: string): Promise<boolean> {
+  return (await commitAllDetailed(workdir, message)).committed
 }
 
 // ---- 队员报告全文副本（主仓库根 .agentdeck-reports/，摘要回灌之外的持久全文通道） ----

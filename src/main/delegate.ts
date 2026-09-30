@@ -32,6 +32,7 @@ import {
   branchDiffSummary,
   branchHead,
   commitAll,
+  commitAllDetailed,
   createWorktreeAtBranch,
   currentBranch,
   deleteBranch,
@@ -710,6 +711,15 @@ export interface ChildReportBodyInput {
   /** 子单稀疏检出的生效范围（WorktreeInfo.sparseDirs）：failed 单的失败说明据此附
    *  「本单稀疏检出范围」扩圈提示（§7.2，sparseScopeFailureNote 单一发射点）；全量单不传 */
   sparseDirs?: string[]
+  /** 终态落盘失败标记（commitLossReportNote 产物，系统文案原样进正文）：队员成果没能
+   *  提交到工作分支的事实必须随报告可见——领队不能把该单当成「改动已在分支上」 */
+  commitLossNote?: string
+}
+
+/** 终态落盘失败（commitAllDetailed failed）的报告标记文案：时间线注记之外的第二个可见面
+ *  ——随回灌正文进领队视野，写明改动未提交、集成不会携带、现场保留。 */
+export function commitLossReportNote(reason: string): string {
+  return `⚠ 本单 worktree 改动落盘失败（${reason}）：改动未提交到工作分支，集成不会携带这些改动；现场已保留待人工处理`
 }
 
 /** 回灌正文：done 单 = 队员总结（已采纳时，前置非全文标注）或原文整段（≤回灌界，码点级）；
@@ -737,6 +747,8 @@ export function buildChildReportBody(input: ChildReportBodyInput): string {
     if (input.status === 'failed' && input.sparseDirs?.length) parts.push(sparseScopeFailureNote(input.sparseDirs))
   }
   if (input.gitSection) parts.push(input.gitSection)
+  // 落盘失败标记（系统文案原样，不过转义）：先于全文入口，领队读完状态就能看到
+  if (input.commitLossNote) parts.push(input.commitLossNote)
   if (input.pointers?.length) parts.push(input.pointers.map((line) => escapeProtocolLiterals(line)).join('\n'))
   return parts.filter((part) => part !== '').join('\n\n')
 }
@@ -973,12 +985,20 @@ export async function runDelegationLoop(
       check()
     })
     if (!active()) return
-    // 队员改动落盘（multica「nothing silently discarded」，与主循环同规）
+    // 队员改动落盘（multica「nothing silently discarded」，与主循环同规）；落盘失败同样
+    // 具名时间线注记 + 报告标记（收编回灌的正文组装在下方带 commitLossNote），绝不静默
+    const tailCommitLosses = new Map<string, string>()
+    let tailIdx = 0
     for (const id of tailChildren.keys()) {
+      tailIdx++
       const c = store.get(id)
       if (!c?.worktree || !c.workdir || (c.status !== 'done' && c.status !== 'failed')) continue
-      await commitAll(c.workdir, `agentdeck: ${c.title}`)
+      const landed = await commitAllDetailed(c.workdir, `agentdeck: ${c.title}`)
       if (!active()) return
+      if (landed.failed) {
+        tailCommitLosses.set(id, landed.reason)
+        note(`⚠ 收编单 #${tailIdx} 的 worktree 改动落盘失败：${landed.reason}——改动未提交到工作分支，现场保留；已随报告标记`)
+      }
     }
     // 全文双落 + 报告组装（与主循环同源文案）；单号顺延已报告子单之后。
     // 收编单变 cancelled 保留终局回执：状态行进报告，不从回灌与 allChildren 静默消失。
@@ -1025,7 +1045,8 @@ export async function runDelegationLoop(
         error: c.error,
         gitSection,
         pointers: fullTextPointerLines(copyRel, issueOk, seq),
-        sparseDirs: c.worktree?.sparseDirs
+        sparseDirs: c.worktree?.sparseDirs,
+        commitLossNote: tailCommitLosses.has(id) ? commitLossReportNote(tailCommitLosses.get(id)!) : undefined
       })
       tailEntries.push(childReportEntry(call?.to ?? c.agentId ?? c.backend, c.status, seq, body))
       allChildren.push(id)
@@ -1177,11 +1198,19 @@ export async function runDelegationLoop(
     // 队员的实际改动都已留在可发现的分支提交里，而不是悬在随时可能被清扫的未提交状态。
     // 只对带 worktree 元数据的队员执行（workdir 属于隔离 worktree）；cancelled 不在此列，
     // 其现场保持原样交由保留判定与人工处理。
-    for (const id of childIds) {
+    // 落盘失败绝不静默（P0：稀疏树 add 曾整批拒收+调用方无视返回值=成果全丢）：具名
+    // 时间线注记 + 回灌报告标记（commitLosses 随下方报告组装进正文），现场保留。
+    const commitLosses = new Map<string, string>()
+    for (let idx = 0; idx < childIds.length; idx++) {
+      const id = childIds[idx]
       const c = store.get(id)
       if (!c?.worktree || !c.workdir || (c.status !== 'done' && c.status !== 'failed')) continue
-      await commitAll(c.workdir, `agentdeck: ${c.title}`)
+      const landed = await commitAllDetailed(c.workdir, `agentdeck: ${c.title}`)
       if (!active()) return abandoned()
+      if (landed.failed) commitLosses.set(id, landed.reason)
+    }
+    for (const [id, reason] of commitLosses) {
+      note(`⚠ 单 #${childIds.indexOf(id) + 1} 的 worktree 改动落盘失败：${reason}——改动未提交到工作分支，现场保留；已随报告标记`)
     }
 
     // ---- 全文双落（队员终态即执行，不随摘要回灌的成败）：完整 result 同时落到
@@ -1293,7 +1322,8 @@ export async function runDelegationLoop(
         pointers: full ? fullTextPointerLines(full.copyPath, full.issueOk, full.seq) : [],
         summary: summaryBodies.get(id),
         summaryFallbackNote: summaryFallbackNotes.get(id),
-        sparseDirs: c.worktree?.sparseDirs
+        sparseDirs: c.worktree?.sparseDirs,
+        commitLossNote: commitLosses.has(id) ? commitLossReportNote(commitLosses.get(id)!) : undefined
       })
       reportEntries.push(childReportEntry(call?.to ?? c.agentId ?? c.backend, c.status, seq, body))
     }
@@ -1454,11 +1484,27 @@ export async function runDelegationLoop(
             }
             continue
           }
-          if (ownBranch) await commitAll(c.workdir, `agentdeck: ${c.title}`)
+          // 集成期兜底落盘（终态已 commitAll，此处通常零改动短路）：失败绝不静默合并——
+          // 分支上没有的改动合了也是空，硬合会让「丢成果」伪装成「集成成功」。具名问题
+          // + 现场保留（retained），本单不合并，后续集成停止（与冲突路径同规）。
+          let deliveryLost = false
+          if (ownBranch) {
+            const landed = await commitAllDetailed(c.workdir, `agentdeck: ${c.title}`)
+            if (!active()) return abandoned()
+            if (landed.failed) {
+              deliveryLost = true
+              allOk = false
+              problems.push(`单 #${idx} 的 worktree 改动落盘失败：${landed.reason}（改动未提交，不进集成分支；现场保留）`)
+              if (c.worktree) store.updateIf(cid, capturedChild, {
+                worktree: { ...c.worktree, cleanupStatus: 'retained', cleanupReason: `集成期落盘失败：${landed.reason}` }
+              })
+              note(`⚠ 单 #${idx} 集成期落盘失败：${landed.reason}；本单不合并，现场保留`)
+            }
+          }
           if (!active()) return abandoned()
-          let childOk = true
+          let childOk = !deliveryLost
           let childAdvanced = false
-          for (const b of [ownBranch, subIntegration].filter(Boolean)) {
+          for (const b of deliveryLost ? [] : [ownBranch, subIntegration].filter(Boolean)) {
             // M3：merge 对 Already-up-to-date 的分支返回成功但不产生新提交——
             // 只有集成分支 HEAD 真实前进才计入 mergedCount，否则空 diff 会清掉既有证据
             const headBefore = await branchHead(task.workdir, integrationBranch)

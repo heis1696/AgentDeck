@@ -1104,6 +1104,65 @@ async function main() {
 main().catch((e) => { console.error(e); process.exit(3) })
 `
 
+// 红19｜稀疏 commitAll 丢成果（P0）：队员写出 sparse scope 外文件 + 范围内改动——
+// 旧代码（add -A 不带 --sparse，稀疏树整批 exit 1 拒收且调用方无视返回值）下
+// 「范围外成果已进集成分支」断言必红。夹具自建目录形仓库（makeRepo 无子目录）。
+const RED19 = `
+${PRELUDE}
+async function main() {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'mut-r19-'))
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim()
+  git('init', '-q', '-b', 'main')
+  git('config', 'user.email', 'smoke@example.invalid')
+  git('config', 'user.name', 'Smoke')
+  fs.mkdirSync(path.join(repo, 'svc'), { recursive: true })
+  fs.writeFileSync(path.join(repo, 'svc', 'in.txt'), 'in v1\\n')
+  fs.writeFileSync(path.join(repo, 'root.txt'), 'root\\n')
+  git('add', '-A')
+  git('commit', '-qm', 'init')
+  const team = [
+    { id: 'L1', name: 'Boss', backend: 'zcode', role: 'leader', systemPrompt: '', subordinates: ['W1'] },
+    { id: 'W1', name: 'Alpha', backend: 'alpha', role: 'worker', systemPrompt: '' }
+  ]
+  const leader = makeLeader((n, { events, content }) => {
+    if (n === 0) emitTurn(events, '派单（稀疏范围 svc）。', ['<delegate to="Alpha" sparse="svc">改 svc/in.txt</delegate>'])
+    else if (content.includes('队员执行结果汇报')) emitTurn(events, '最终总结：svc 改完。')
+    else emitTurn(events, '继续。')
+  })
+  const store = new TaskStore(fs.mkdtempSync(path.join(os.tmpdir(), 'mut-r19-store-')))
+  const runner = new TaskRunner(store, new Map([
+    ['zcode', leader],
+    ['alpha', { id: 'alpha', label: 'alpha', async probe() { return { ok: true, detail: '' } },
+      async start({ workdir, events }) {
+        setTimeout(() => {
+          // 范围内改动 + scope 外成果（cone 外目录不物化，队员自建目录直写）
+          fs.writeFileSync(path.join(workdir, 'svc', 'in.txt'), 'in v2 by Alpha\\n')
+          fs.mkdirSync(path.join(workdir, 'client'), { recursive: true })
+          fs.writeFileSync(path.join(workdir, 'client', 'rogue.txt'), 'out-of-scope by Alpha\\n')
+          events.onTurnEnd({ response: 'done alpha', ok: true })
+        }, 50)
+        return { sessionId: 'sess_w', async send() {}, async stop() {}, async close() {} }
+      } }]
+  ]), () => ({ concurrency: 1, mode: 'yolo', notify: false, workerConcurrency: 3 }))
+  runner.attachTeam(() => team)
+  const task = store.create({ title: '稀疏落盘', prompt: '处理', workdir: repo, backend: 'zcode', agentId: 'L1' })
+  runner.enqueue(task)
+  const fin = await settle(store, task.id, 60000)
+  assert(fin.status === 'done', '领队 done（实际 ' + fin.status + '）')
+  const ib = fin.integration && fin.integration.branch
+  assert(!!ib, '集成分支存在')
+  let rogue = ''
+  try { rogue = git('show', ib + ':client/rogue.txt') } catch {}
+  assert(rogue.includes('out-of-scope'), '范围外成果已进集成分支（稀疏 commitAll --sparse 全收；实际 ' + (rogue ? '内容缺失' : '文件不存在') + '）')
+  let inTxt = ''
+  try { inTxt = git('show', ib + ':svc/in.txt') } catch {}
+  assert(inTxt.includes('in v2'), '范围内改动随同一次落盘进集成分支（旧代码整批拒收时一起丢；实际 ' + (inTxt || '文件不存在') + '）')
+  console.log('SCENARIO-OK')
+  process.exit(0)
+}
+main().catch((e) => { console.error(e); process.exit(3) })
+`
+
 const MUTATIONS = [
   {
     name: '红1｜建单门禁：旧代码（无 holding；绑定失败直接撤销）下「让位不撤销」断言必红',
@@ -1483,6 +1542,19 @@ const MUTATIONS = [
     bundles: [{ src: 'src/main/git.ts', var: 'GIT' }],
     scenario: RED18,
     expectedRed: '段别名写法同样按 no longer detached 拒收'
+  },
+  {
+    name: '红19｜稀疏 commitAll 丢成果（P0）：旧代码（add -A 不带 --sparse，稀疏树整批 exit 1 拒收且调用方无视返回值）下「范围外成果已进集成分支」断言必红',
+    originalPass: true,
+    mutations: [
+      {
+        file: 'src/main/git.ts',
+        find: "  const added = await runGit(workdir, ['add', '-A', ...(sparse ? ['--sparse'] : []), '--', '.', ",
+        replace: "  const added = await runGit(workdir, ['add', '-A', '--', '.', "
+      }
+    ],
+    scenario: RED19,
+    expectedRed: '范围外成果已进集成分支'
   }
 ]
 

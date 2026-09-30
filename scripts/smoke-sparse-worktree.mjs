@@ -12,6 +12,8 @@
 // ⑦ 回放并集（§6.3 关键点，第二批）：稀疏范围外有未提交改动也被回放——增量触达目录补进
 //    cone 后 cherry-pick，范围外改动在工作树真实物化、子分支推进到回放提交、status 自洽；
 //    无关目录照常不物化；全量树（未带范围）回放行为零变化
+// ⑧ commitAll 稀疏全收（P0）：队员写出 scope 外文件 + 范围内改动，commitAllDetailed 一并
+//    提交（旧代码 add -A 在稀疏树整批 exit 1 拒收=成果全丢且调用方无视返回值）；cone 不扩
 import assert from 'node:assert/strict'
 import { build } from 'esbuild'
 import { execFileSync } from 'node:child_process'
@@ -34,7 +36,7 @@ const [git, delegate, { TaskRunner }, { TaskStore }] = await Promise.all([
   load('src/main/store.ts', 'store')
 ])
 const { parseSparseAttr, parseDelegates } = delegate
-const { createWorktree, reclaimWorktree, clearWorktreePool, clearWorktreeFileCountCache, worktreePoolEntriesForTest, replayLeaderBaseline } = git
+const { createWorktree, reclaimWorktree, clearWorktreePool, clearWorktreeFileCountCache, worktreePoolEntriesForTest, replayLeaderBaseline, commitAllDetailed } = git
 
 const makeRepo = (name) => {
   const dir = path.join(temp, name, 'repo')
@@ -180,10 +182,15 @@ try {
     async probe() { return { ok: true, detail: '' } },
     async start({ workdir, events }) {
       setTimeout(async () => {
-        // Alpha 写声明范围内的文件；其余写根文件（cone 模式根文件恒物化，全量树自不待言）
+        // Alpha 写声明范围内的文件 + 一个 scope 外文件（P0 案形：cone 外目录不物化，队员
+        // 自建目录直写——旧代码 commitAll 的 add -A 在稀疏树整批拒收，成果全丢）；
+        // 其余写根文件（cone 模式根文件恒物化，全量树自不待言）
         try {
-          if (tag === 'Alpha') fs.writeFileSync(path.join(workdir, 'client', 'Assets', 'GameMain', 'alpha.txt'), `by ${tag}\n`)
-          else fs.writeFileSync(path.join(workdir, `${tag.toLowerCase()}.txt`), `by ${tag}\n`)
+          if (tag === 'Alpha') {
+            fs.writeFileSync(path.join(workdir, 'client', 'Assets', 'GameMain', 'alpha.txt'), `by ${tag}\n`)
+            fs.mkdirSync(path.join(workdir, 'client', 'Assets', 'Art'), { recursive: true })
+            fs.writeFileSync(path.join(workdir, 'client', 'Assets', 'Art', 'rogue.txt'), `out-of-scope by ${tag}\n`)
+          } else fs.writeFileSync(path.join(workdir, `${tag.toLowerCase()}.txt`), `by ${tag}\n`)
         } catch { /* 写失败也回话：断言面看工作树物化与时间线注记 */ }
         await workersGate
         const response = `done ${tag}`
@@ -265,7 +272,13 @@ try {
   }
   const fin = store.get(leader.id)
   assert.equal(fin.status, 'done', `领队 done（${fin.status}${fin.error ? ' ' + fin.error : ''}）`)
-  console.log('  OK ⑥ runner 端到端：四单全建成、子树范围与声明一致、生效/回落/格式非法注记全部落时间线')
+  // P0 管线级断言：范围外成果经终态 commitAll（--sparse）落盘 → 随分支合并进集成分支
+  const integBranch = fin.integration?.branch ?? ''
+  assert.ok(integBranch, '⑥ P0 前置：集成分支已产出')
+  const integTree = e2e.g('ls-tree', '-r', '--name-only', integBranch)
+  assert.ok(integTree.includes('client/Assets/GameMain/alpha.txt'), '⑥ P0：范围内成果进集成分支')
+  assert.ok(integTree.includes('client/Assets/Art/rogue.txt'), `⑥ P0：范围外成果经 --sparse 落盘后进集成分支（实际 ls-tree：${integTree.split('\n').filter((f) => f.includes('Art') || f.includes('rogue')).join('、') || '无'}）`)
+  console.log('  OK ⑥ runner 端到端：四单全建成、子树范围与声明一致、生效/回落/格式非法注记全部落时间线、范围外成果进集成分支（P0）')
 
   // ---- ⑦ 回放并集（§6.3 关键点）：稀疏范围外有未提交改动也被回放 ----
   // 领队在范围外改已跟踪文件 + 在新目录塞未跟踪文件 + 在范围内也改一份 → 回放前把增量
@@ -304,6 +317,30 @@ try {
   assert.equal(plainApplied.status, 'applied', `⑦ 不带范围的回放照常 applied（${plainApplied.reason}）`)
   assert.equal(fs.readFileSync(path.join(plainWt2.path, 'docs', 'd.txt'), 'utf8').replace(/\r\n/g, '\n'), 'd v2 领队未提交\n', '⑦ 不带范围的回放行为零变化')
   console.log('  OK ⑦ 回放并集：范围外未提交改动也被回放且真实物化（含新目录），无关目录不物化，全量对照零变化')
+
+  // ---- ⑧ commitAll 稀疏全收（P0）：scope 外成果 + 范围内改动一并提交，cone 不扩 ----
+  // 旧代码形态（变异红19 固化）：add -A 不带 --sparse 在稀疏树整批 exit 1 拒收——范围内
+  // 改动也进不了提交，调用方再无视返回值就是「队员写出 scope 外文件 → 成果全丢」。
+  const p0 = makeRepo('p0-commit')
+  const p0Wt = await createWorktree(p0.dir, 'task_p0_c1', 'main', 'task_p0', undefined, { sparseDirs: ['client/Assets/GameMain'] })
+  assert.equal(p0Wt.sparse?.status, 'applied', '⑧ 前置：稀疏树建成')
+  fs.writeFileSync(path.join(p0Wt.path, 'client', 'Assets', 'GameMain', 'a.txt'), 'a v2 队员改动\n')
+  fs.mkdirSync(path.join(p0Wt.path, 'server', 'legacy'), { recursive: true })
+  fs.writeFileSync(path.join(p0Wt.path, 'server', 'legacy', 'rogue.txt'), 'scope 外成果\n')
+  const landed = await commitAllDetailed(p0Wt.path, 'agentdeck: p0 成果')
+  assert.equal(landed.committed, true, `⑧ 落盘成功（failed=${landed.failed}${landed.reason ? '：' + landed.reason : ''}）`)
+  const p0Tree = p0.g('ls-tree', '-r', '--name-only', p0Wt.branch)
+  assert.ok(p0Tree.includes('client/Assets/GameMain/a.txt'), '⑧ 范围内改动已提交')
+  assert.ok(p0Tree.includes('server/legacy/rogue.txt'), '⑧ scope 外成果已提交（旧代码整批丢失）')
+  assert.equal(p0.g('-C', p0Wt.path, 'status', '--porcelain'), '', '⑧ 提交后 status 自洽')
+  const p0Cone = execFileSync('git', ['-C', p0Wt.path, 'sparse-checkout', 'list'], { encoding: 'utf8' }).split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
+  assert.ok(!p0Cone.some((d) => d === 'server' || d.startsWith('server/')), `⑧ cone 不扩（list=${p0Cone.join('、')}）`)
+  // 对照组：全量树 commitAllDetailed 行为零变化（干净副本无改动 → committed=false 且非失败）
+  const p0Plain = await createWorktree(p0.dir, 'task_p0_c2', 'main', 'task_p0_b')
+  const plainLanded = await commitAllDetailed(p0Plain.path, 'agentdeck: 空改动')
+  assert.equal(plainLanded.committed, false, '⑧ 对照：干净全量树无可提交改动')
+  assert.equal(plainLanded.failed, false, '⑧ 对照：无改动不算失败（与旧 commitAll false 语义一致）')
+  console.log('  OK ⑧ commitAll 稀疏全收：scope 外成果+范围内改动一并提交、cone 不扩、全量对照零变化')
 
   console.log('\nSPARSE WORKTREE SMOKE PASSED')
 } finally {
