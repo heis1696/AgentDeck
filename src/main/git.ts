@@ -1150,6 +1150,14 @@ export function worktreeInPool(repoDir: string, wtDir: string): boolean {
   return !!pool && pool.has(worktreePathKey(wtDir))
 }
 
+/** 树当前 sidecar 元数据登记的 owner 任务 id（缺失/非托管路径返回 null）：delegate 集成段
+ *  判断「这棵树仍归属本单」用——归池前移后子单的 workdir 可能已指向被后续派单复用的树
+ *  （池复用改写 owner），此时对本单的任何落盘/回收动作都必须让位。 */
+export async function worktreeOwnerTaskId(wtDir: string): Promise<string | null> {
+  const resolved = await resolveManagedWorktree(wtDir)
+  return resolved?.metadata?.ownerTaskId ?? null
+}
+
 /** 归还入池：detach HEAD（同提交零文件重写，解除分支检出占用——否则调用方随后的
  *  分支删除会被 "used by worktree" 拒绝）。分支删除不在此做：归调用方决策（集成完成
  *  路径自行 deleteBranch 并跟踪失败；集成分支等保留分支不受影响）→ 元数据改挂池

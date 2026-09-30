@@ -48,6 +48,7 @@ import {
   snapshotGitAfter,
   worktreeChangeDigest,
   worktreeInPool,
+  worktreeOwnerTaskId,
   writeReportCopy,
   type WorktreeChangeDigest
 } from './git'
@@ -1541,8 +1542,13 @@ export async function runDelegationLoop(
           // 集成期兜底落盘（终态已 commitAll，此处通常零改动短路）：失败绝不静默合并——
           // 分支上没有的改动合了也是空，硬合会让「丢成果」伪装成「集成成功」。具名问题
           // + 现场保留（retained），本单不合并，后续集成停止（与冲突路径同规）。
+          // 树仍归属本单才兜底（worktreeOwnerTaskId 以磁盘 sidecar 为准）：归池前移后
+          // 本单的 workdir 可能已指向被后续派单复用的树——那棵树里的「未提交改动」是
+          // 新子单的现场，绝不能由本单的落盘提交掉（cancelled 现场保留契约由此被打破）。
           let deliveryLost = false
-          if (ownBranch) {
+          const treeStillOurs = !earlyPooled && !terminalReclaimed
+            && !!c.workdir && (await worktreeOwnerTaskId(c.workdir)) === c.id
+          if (ownBranch && treeStillOurs) {
             const landed = await commitAllDetailed(c.workdir, `agentdeck: ${c.title}`)
             if (!active()) return abandoned()
             if (landed.failed) {
