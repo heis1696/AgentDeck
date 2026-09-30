@@ -35,7 +35,10 @@ const gatePlugin = {
       contents: `import * as real from ${JSON.stringify(gitSource)};
         export * from ${JSON.stringify(gitSource)};
         export async function commitAll(...args) { await globalThis.__gitGate?.('commitAll'); return real.commitAll(...args) }
-        export async function reclaimWorktree(...args) { await globalThis.__gitGate?.('reclaimWorktree'); return real.reclaimWorktree(...args) }`
+        export async function commitAllDetailed(...args) { await globalThis.__gitGate?.('commitAll'); return real.commitAllDetailed(...args) }
+        export async function reclaimWorktree(...args) { await globalThis.__gitGate?.('reclaimWorktree'); return real.reclaimWorktree(...args) }
+        export async function mergeBranchInto(...args) { await globalThis.__gitGate?.('mergeBranchInto'); return real.mergeBranchInto(...args) }
+        export async function deleteBranch(...args) { await globalThis.__gitGate?.('deleteBranch'); return real.deleteBranch(...args) }`
     }))
   }
 }
@@ -119,19 +122,20 @@ async function fixture(name) {
 }
 
 try {
-  for (const stage of ['commitAll', 'reclaimWorktree']) {
+  // 池化前移后的集成期 git 工作面：终态落盘（commitAllDetailed）与终态归池（reclaimWorktree
+  // repool）都发生在 operation 认领之前，集成期对已归池/已复用子单不再有这两类调用——
+  // 「Git 工作持有 operation 认领」的不变量改由集成期仍在发生的合并（mergeBranchInto）与
+  // 分支删除（deleteBranch）承载：门闩各自拦住一次，断言认领期间重跑/追问/删除/改题全部被拒。
+  for (const stage of ['mergeBranchInto', 'deleteBranch']) {
     const f = await fixture(stage)
     let entered
     let release
     const paused = new Promise((resolve) => { entered = resolve })
     const resume = new Promise((resolve) => { release = resolve })
-    // M1 终态即落盘：循环在等待终态解析后先对队员 worktree 跑一次 commitAll（无 Git
-    // operation 持有）——gate 只拦集成期（operation 已认领）的那次调用
     let gateCalls = 0
     globalThis.__gitGate = async (at) => {
       if (at === stage) {
         gateCalls++
-        if (stage === 'commitAll' && gateCalls === 1) return
         entered(); await resume
       }
     }
