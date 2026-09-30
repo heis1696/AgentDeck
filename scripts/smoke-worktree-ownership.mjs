@@ -469,6 +469,61 @@ try {
     console.log('PASS detached fallback channel + phantom-staging realign guard')
   }
 
+  // 块五：owner 核验 × 集成期兜底落盘的并发定序论证（检查-动作窗口无可达污染，断言固化）。
+  // delegate.ts 集成段的兜底落盘是 check-then-act：worktreeInPool + worktreeOwnerTaskId
+  // 两查通过后才 commitAllDetailed。定序论证分两半固化：
+  // ① 窗口内不可达——查得「树归属本单且不在池」后、落盘前，新子单拿到这棵树的唯一通道
+  //   是池（acquirePooledWorktree 只遍历池条目），而树进池只能经终态归池（归池在回灌前
+  //   同步 await，先于集成段开始，此后无任何执行体会再归池一棵终态树）——窗口内树不可
+  //   能变成池条目，「核验后、落盘前新子单复用同树写入」结构上不可达；本块在窗口内真实
+  //   发起一次新子单派单，断言它取不到本树（全新建树）、本树观测面不动，随后本单落盘
+  //   只收本单成果。
+  // ② 状态翻转面——树真的入池/被新单复用时，池/owner 观测面同步翻转，核验让位（不落盘）。
+  //   任何一侧观测面与池状态脱钩（比如复用通道开始扫描非池树），①的断言即红。
+  {
+    const seqRepo = path.join(temp, 'owner-seq', 'repo')
+    fs.mkdirSync(seqRepo, { recursive: true })
+    runGit(seqRepo, 'init', '-q', '-b', 'main')
+    runGit(seqRepo, 'config', 'user.email', 'smoke@example.com')
+    runGit(seqRepo, 'config', 'user.name', 'AgentDeck Smoke')
+    fs.writeFileSync(path.join(seqRepo, 'base.txt'), 'base\n')
+    runGit(seqRepo, 'add', '.')
+    runGit(seqRepo, 'commit', '-qm', 'base')
+    git.clearWorktreePool()
+    const wtA = await git.createWorktree(seqRepo, 'wt_seq_a_c1', 'main', 'child-a')
+    assert.ok(wtA, '块五前置：子单A 托管树建成')
+    assert.deepEqual(git.worktreePoolEntriesForTest(seqRepo), [], '块五前置：本仓池为空（终态归池未发生=集成段起点）')
+    fs.writeFileSync(path.join(wtA.path, 'a-result.txt'), 'a 的成果\n')
+    // 检查点（delegate 集成段同一对观测面）：树不在池 + 归属本单 → 兜底落盘获准
+    assert.equal(git.worktreeInPool(seqRepo, wtA.path), false, '块五检查点①：树不在池（earlyPooled=false）')
+    assert.equal(await git.worktreeOwnerTaskId(wtA.path), 'child-a', '块五检查点②：树归属本单（owner 核验通过）')
+    // 窗口内动作：核验后、落盘前，新子单派单（复用同树的唯一通道=池）
+    const wtB = await git.createWorktree(seqRepo, 'wt_seq_b_c1', 'main', 'child-b')
+    assert.ok(wtB && wtB.pooled !== true, '块五：窗口内新子单取不到本树（不在池=不可复用），回落全新建树')
+    assert.notEqual(wtB.path, wtA.path, '块五：新子单拿到的是另一棵树')
+    fs.writeFileSync(path.join(wtB.path, 'b-result.txt'), 'b 的成果\n')
+    assert.equal(git.worktreeInPool(seqRepo, wtA.path), false, '块五：窗口内树不进池（无执行体能归池一棵在管树）')
+    assert.equal(await git.worktreeOwnerTaskId(wtA.path), 'child-a', '块五：窗口内核验观测面不动（owner 仍=本单）')
+    assert.ok(!fs.existsSync(path.join(wtA.path, 'b-result.txt')), '块五：新子单写入落在它自己的树上，不越界到本树')
+    // 动作：本单兜底落盘——只收本单成果，零外来内容
+    const landed = await git.commitAllDetailed(wtA.path, 'agentdeck: 子单A成果')
+    assert.equal(landed.failed, false, `块五：本单落盘零失败（${landed.reason}）`)
+    assert.equal(landed.committed, true, '块五：本单成果落盘成提交')
+    assert.equal(runGit(seqRepo, 'show', wtA.branch + ':a-result.txt'), 'a 的成果', '块五：提交内容=本单成果')
+    assert.equal(runGit(seqRepo, 'show', wtA.branch + ':base.txt'), 'base', '块五：分支基线原样（无回滚）')
+    // 状态翻转面（论证的另一半）：树真的入池 → 观测面翻转，核验让位
+    const repooledA = await git.reclaimWorktree(wtA.path, { repool: true, expectedOwnerTaskId: 'child-a', expectedGenerationId: wtA.metadata.generationId })
+    assert.equal(repooledA.status, 'pooled', '块五前置：本树此刻真入池')
+    assert.equal(git.worktreeInPool(seqRepo, wtA.path), true, '块五：入池后 earlyPooled=true → 核验让位')
+    assert.equal(await git.worktreeOwnerTaskId(wtA.path), git.WORKTREE_POOL_OWNER, '块五：入池后 owner=池标记 → owner 核验让位')
+    // 对照：真在池条目才被复用；复用即换 owner——两条让位路径都闭合
+    const wtC = await git.createWorktree(seqRepo, 'wt_seq_c_c1', 'main', 'child-c')
+    assert.ok(wtC && wtC.pooled === true && wtC.path === wtA.path, '块五：对照——在池条目按池语义复用同树')
+    assert.equal(await git.worktreeOwnerTaskId(wtA.path), 'child-c', '块五：被新单复用后 owner=新单 → 核验让位')
+    git.clearWorktreePool()
+    console.log('PASS owner-check × terminal-commit ordering: the check-then-act window has no reachable pollution path')
+  }
+
   // M1：清扫路径绝不删集成分支——即使 owner 记录已删除（借 repo 内其他任务的 claim 回收目录）
   chain.peer.delete(chain.parent.id)
   const orphanSweep = await git.pruneWorktrees(chain.repo, (owner, worktree) => git.shouldKeepTaskWorktree(chain.peer.list(), chain.repo, owner, worktree), {

@@ -1289,7 +1289,13 @@ async function acquirePooledWorktree(
         return null
       }
       const evict = async (deleteRequestedBranch = false) => {
-        await reclaimWorktreeUnlocked(wtPath, { force: true, deleteBranch: true, expectedGenerationId: generationId }).catch(() => {})
+        // 项1（丢工作根治）：逐出只回收目录与 Git 注册，绝不删分支——池条目 sidecar 的
+        // branch 字段挂着上一任务的成果分支（终态已归池、待集成分支合并），按池元数据
+        // deleteBranch=把别人待集成的成果一起删掉。「分支确认无主待集成」的判定并不存在
+        // （池元数据不追踪集成状态），故一律保留分支；托管分支随后续 tasks:delete 回收
+        // 契约兜底。deleteRequestedBranch（本次 switch -c 刚建、零独有提交的请求分支）
+        // 照旧补删：它属于本次失败的复用尝试，留着只会让重派撞 already exists。
+        await reclaimWorktreeUnlocked(wtPath, { force: true, expectedGenerationId: generationId }).catch(() => {})
         if (deleteRequestedBranch) await deleteBranchWithRetry(root, branch)
       }
       if (!(await isGitRepo(wtPath))) { await evict(); misses.push(`${path.basename(wtPath)} 非 Git 仓库`); return null }
@@ -1745,7 +1751,7 @@ export async function worktreeChangeDigest(
 export interface CommitAllResult {
   /** true = 有改动且提交成功 */
   committed: boolean
-  /** true = 提交尝试失败（非仓库/add/暂存/commit 任一步 git 失败）；false 且 committed=false = 无可提交改动 */
+  /** true = 提交尝试失败（非仓库/status 盘点/add/暂存/commit 任一步 git 失败）；false 且 committed=false = 无可提交改动 */
   failed: boolean
   /** failed 时的失败原因（时间线注记/报告标记文案） */
   reason: string
@@ -1758,8 +1764,12 @@ export interface CommitAllResult {
  *  （sparse-checkout list 复验不变）。非稀疏树不加旗标，行为与旧版逐字节一致。 */
 export async function commitAllDetailed(workdir: string, message: string): Promise<CommitAllResult> {
   if (!(await isGitRepo(workdir))) return { committed: false, failed: true, reason: 'not a git repository' }
-  const status = await git(workdir, ['status', '--porcelain'])
-  if (!status.trim()) return { committed: false, failed: false, reason: '' }
+  // 三态彻底化：status 盘点走可检查退出状态的结果通道——git() 失败返空串在旧写法里
+  // 与「无改动」不可区分（索引锁竞争/磁盘故障被静默当成零改动跳过提交=成果滞留现场），
+  // 盘点失败一律归入 failed 三态带原因上报，绝不冒充「无可提交改动」
+  const statusProbe = await runGit(workdir, ['status', '--porcelain'])
+  if (!statusProbe.ok) return { committed: false, failed: true, reason: gitError(statusProbe) }
+  if (!statusProbe.stdout.trim()) return { committed: false, failed: false, reason: '' }
   const sparse = await isSparseWorktree(workdir)
   // 排除常见生成物（worker 运行时产生的缓存/构建产物）；此 git 不支持 :! 简写，用长格式
   const added = await runGit(workdir, ['add', '-A', ...(sparse ? ['--sparse'] : []), '--', '.', ':(exclude)__pycache__', ':(exclude)*.pyc', ':(exclude)node_modules', ':(exclude)dist', ':(exclude)build'])

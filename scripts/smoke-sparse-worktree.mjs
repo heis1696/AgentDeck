@@ -7,7 +7,8 @@
 // ④ 缺省零变化：不带 sparseDirs 的建树结果无 sparse 字段、全量物化、池化行为原样
 // ⑤ 池化范围矩阵（二期）：范围在案的稀疏树照常入池（元数据记录范围）；范围未知不入池
 //    （一期护栏兜底）；同范围秒级 switch -c 换基线复用；异范围重设 sparse+增量物化；
-//    稀疏↔全量双向永不混用；复用失败（index.lock 卡死换基线）逐出回落全量稀疏建树
+//    稀疏↔全量双向永不混用；复用失败（index.lock 卡死换基线）逐出回落全量稀疏建树；
+//    ⑤g 逐出不丢成果——旧单有独有提交经逐出后成果分支保留、集成照常取得全部成果
 // ⑥ runner 端到端：派单 sparse 属性 → 时间线注记可见（生效/回落含被拒目录/格式非法含通配符），
 //    四单全部建成（不拒单），子单工作树物化范围与声明一致，范围外成果进集成分支（P0）
 // ⑦ 回放并集（§6.3 关键点，第二批）：稀疏范围外有未提交改动也被回放——增量触达目录补进
@@ -37,7 +38,7 @@ const [git, delegate, { TaskRunner }, { TaskStore }] = await Promise.all([
   load('src/main/store.ts', 'store')
 ])
 const { parseSparseAttr, parseDelegates } = delegate
-const { createWorktree, reclaimWorktree, clearWorktreePool, clearWorktreeFileCountCache, worktreePoolEntriesForTest, replayLeaderBaseline, commitAllDetailed } = git
+const { createWorktree, reclaimWorktree, clearWorktreePool, clearWorktreeFileCountCache, worktreePoolEntriesForTest, replayLeaderBaseline, commitAllDetailed, branchExists, mergeBranchInto } = git
 
 const makeRepo = (name) => {
   const dir = path.join(temp, name, 'repo')
@@ -234,6 +235,34 @@ try {
   clearWorktreePool()
   clearWorktreeFileCountCache()
   console.log('  OK ⑤f 复用失败回落：正确性地板不变（全量稀疏建树照常生效）')
+  // ⑤g 逐出不丢成果（丢工作根治）：旧单有独有提交 → 异类型派单触发逐出 → 旧单集成
+  // 仍取得全部成果。逐出（稀疏×全量互斥/复用失败等全部 evict 调用点）只回收目录与
+  // 注册，绝不删池条目 sidecar 挂着的旧成果分支——旧子单终态已归池、分支待集成；
+  // 托管分支随 tasks:delete 回收契约兜底
+  const nolossOwner = makeRepo('pool-noloss')
+  const oldTree = await createWorktree(nolossOwner.dir, 'task_nl_c1', 'main', 'nl_owner_a', undefined, { sparseDirs: ['client/Assets/GameMain'] })
+  assert.equal(oldTree.sparse?.status, 'applied', '⑤g 前置：旧单稀疏树建成')
+  fs.mkdirSync(path.join(oldTree.path, 'client', 'Assets', 'GameMain'), { recursive: true })
+  fs.writeFileSync(path.join(oldTree.path, 'client', 'Assets', 'GameMain', 'old-result.txt'), '旧单独有成果\n')
+  const oldLanded = await commitAllDetailed(oldTree.path, 'agentdeck: 旧单成果')
+  assert.equal(oldLanded.committed, true, '⑤g 前置：旧单成果落盘（分支独有提交）')
+  const oldBranch = oldTree.branch
+  const oldTip = nolossOwner.g('rev-parse', oldBranch)
+  const repooledOld = await reclaimWorktree(oldTree.path, { repool: true, expectedOwnerTaskId: 'nl_owner_a' })
+  assert.equal(repooledOld.status, 'pooled', '⑤g 前置：旧单树带成果分支入池（终态归池、成果待集成）')
+  const evictor = await createWorktree(nolossOwner.dir, 'task_nl_c2', 'main', 'nl_owner_b')
+  assert.ok(evictor && evictor.pooled !== true, '⑤g：异类型派单（全量）不取稀疏条目——触发逐出回落全量建树')
+  assert.notEqual(evictor.path, oldTree.path, '⑤g：逐出走全新目录')
+  assert.ok(!fs.existsSync(oldTree.path), '⑤g：逐出条目目录照常回收')
+  assert.deepEqual(worktreePoolEntriesForTest(nolossOwner.dir), [], '⑤g：池条目已出池（不占容量）')
+  assert.equal(await branchExists(nolossOwner.dir, oldBranch), true, '⑤g：逐出后旧成果分支保留（逐出绝不 deleteBranch）')
+  assert.equal(nolossOwner.g('rev-parse', oldBranch), oldTip, '⑤g：旧分支 tip 不动（独有提交一个不少）')
+  const nolossMerged = await mergeBranchInto(nolossOwner.dir, 'agentdeck/task-nl-integ', oldBranch)
+  assert.equal(nolossMerged.ok, true, `⑤g：旧成果分支照常合入集成分支（${nolossMerged.message}）`)
+  assert.equal(nolossOwner.g('show', 'agentdeck/task-nl-integ:client/Assets/GameMain/old-result.txt'), '旧单独有成果', '⑤g：旧单集成仍取得全部成果')
+  clearWorktreePool()
+  clearWorktreeFileCountCache()
+  console.log('  OK ⑤g 逐出不丢成果：旧单独有提交经逐出后分支保留、集成照常取得全部成果')
 
   // ---- ⑥ runner 端到端：注记可见 + 不拒单 + 子单范围正确 ----
   // 集成完成后子树会被回收，物化范围断言必须在树存活窗口内做：worker 收工受测试闸控制，

@@ -714,8 +714,9 @@ export interface ChildReportBodyInput {
   /** 子单稀疏检出的生效范围（WorktreeInfo.sparseDirs）：failed 单的失败说明据此附
    *  「本单稀疏检出范围」扩圈提示（§7.2，sparseScopeFailureNote 单一发射点）；全量单不传 */
   sparseDirs?: string[]
-  /** 终态落盘失败标记（commitLossReportNote 产物，系统文案原样进正文）：队员成果没能
-   *  提交到工作分支的事实必须随报告可见——领队不能把该单当成「改动已在分支上」 */
+  /** 终态落盘失败标记（commitLossReportNote 产物）：队员成果没能提交到工作分支的事实
+   *  必须随报告可见——领队不能把该单当成「改动已在分支上」。模板是系统文案，但内嵌
+   *  失败原因含队员可控的 Git stderr，回灌入口统一过转义后才进正文 */
   commitLossNote?: string
 }
 
@@ -750,8 +751,10 @@ export function buildChildReportBody(input: ChildReportBodyInput): string {
     if (input.status === 'failed' && input.sparseDirs?.length) parts.push(sparseScopeFailureNote(input.sparseDirs))
   }
   if (input.gitSection) parts.push(input.gitSection)
-  // 落盘失败标记（系统文案原样，不过转义）：先于全文入口，领队读完状态就能看到
-  if (input.commitLossNote) parts.push(input.commitLossNote)
+  // 落盘失败标记：先于全文入口，领队读完状态就能看到。模板是系统文案，但内嵌的失败
+  // 原因含 Git stderr（队员可控——文件名/路径/报错摘录都进得来），统一回灌入口对整条
+  // 注记过序列内破坏转义（与 error/summary 同规）：失败原因里嵌的活协议标记不可解析
+  if (input.commitLossNote) parts.push(escapeProtocolLiterals(input.commitLossNote))
   if (input.pointers?.length) parts.push(input.pointers.map((line) => escapeProtocolLiterals(line)).join('\n'))
   return parts.filter((part) => part !== '').join('\n\n')
 }
