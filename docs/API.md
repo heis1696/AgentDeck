@@ -149,7 +149,7 @@ Goal 是绑定**真实 Issue** 的持久长时程目标（v2 起不再创建独�
 | `install(name, targetId)` / `uninstall` | 安装/卸载到目标目录（整目录拷贝，逐字节比较 CRLF 归一） |
 | `openDir` | 在系统文件管理器打开共享目录 |
 
-内置安装目标：`~/.claude/skills`、`~/.codex/skills`、`~/.zcode/skills`、跨工具共享位 `~/.agents/skills`。目录参数由主进程注入、`path.relative` 逃逸校验，设计见 `docs/SKILLS-SHARED-DIR.md`。
+内置安装目标：`~/.claude/skills`、`~/.codex/skills`、`~/.zcode/skills`、跨工具共享位 `~/.agents/skills`。目录参数由主进程注入、`path.relative` 逃逸校验。
 
 ### 1.7 运行时与用量 `bridge.runtimes` / `bridge.analytics`
 

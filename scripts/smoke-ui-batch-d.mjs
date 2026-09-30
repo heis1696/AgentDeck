@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * scripts/smoke-ui-batch-d.mjs — 用量 + 小助理设置行为冒烟（Batch D，docs/UX-WORKFLOW-OPTIMIZATION.md）
+ * scripts/smoke-ui-batch-d.mjs — 用量 + 小助理设置行为冒烟（Batch D）
  *
  * 只驱动真实组件（jsdom + 假桥 scripts/fixtures/ui-batch-d-bridge），不改写组件内部判定：
  *   UsageView      —— 首读失败不得渲染 0 用量；切范围期间旧快照按「它自己的范围」展示与分桶；

@@ -1,4 +1,4 @@
-// smoke-skills.mjs：共享目录 + 技能库冒烟（按 docs/SKILLS-SHARED-DIR.md §6）
+// smoke-skills.mjs：共享目录 + 技能库冒烟（技能库规约）
 // 覆盖：frontmatter 往返、list/save/rename/delete、import 重名、
 // install→in-sync→改源→outdated→重装→in-sync、uninstall、`..` 逃逸拒绝、CRLF 归一不误报
 import fs from 'node:fs'

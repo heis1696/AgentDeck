@@ -1,7 +1,7 @@
 # docs/ 文档索引
 
-> 基线：`6b2f038` / v0.22.0-hot.19（2026-09-19 全量审计：docs/ 32 篇 md → **现行参考 9 篇 + archive 史料 23 篇**，图片 6 张随档案迁入）。
-> 三档判定：**A 仍有效**（就地保留，头部有「校验于」行）／**B 过时有史料价值**（移入 `archive/`，头部有引注块：写于何时 · 被什么取代 · 现状看哪篇）／**C 彻底失效或误导**（本仓审计未发现，空档）。本仓库一律不物理删除文档。
+> 基线：`6b2f038` / v0.22.0-hot.19（2026-09-19 全量审计）→ 2026-09-30 清理：完工施工记录与失效调研**物理删除**（19 篇，git 历史可恢复），现行参考与仍有史料价值的 archive 档案保留。
+> 三档判定：**A 仍有效**（就地保留）／**B 过时有史料价值**（在 `archive/`，按写作时点封存）／**C 完工记录或彻底失效**（物理删除，依赖 git 历史）。
 
 ---
 
@@ -10,17 +10,24 @@
 | 文档 | 一句话 | 状态 |
 |---|---|---|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 架构总览：Issue-first 工作模型、模块地图、关键数据流、可靠性设计、测试基线 | A · 头部差异注记（新模块/导航/测试矩阵待补） |
-| [API.md](API.md) | 四层接口：IPC 桥全量表格、数据模型、后端适配器接口、委派协议、ZCode 协议要点 | A · 头部差异注记（正文 v0.13.x 基准，70 调用点未收录，对照表见注记框） |
+| [API.md](API.md) | 四层接口：IPC 桥全量表格、数据模型、后端适配器接口、委派协议、ZCode 协议要点 | A · 头部差异注记（正文 v0.13.x 基准，桌宠 pet 域未收录，对照表见注记框） |
 | [PROMPTS.md](PROMPTS.md) | 提示词系统：模块地图、注入地图、协议标记与解析器契约、术语表、措辞约定、smoke 固化原文、锻造升级规则 | A · 2026-09-29 去歧义重做后写成，改提示词以此为准 |
-| [VALIDATION.md](VALIDATION.md) | 阶段 0–8 重构验证记录（typecheck/smoke/dist 逐阶段留痕） | A · 历史验证快照，现行回归以 `smoke:all`（46 套件）为准 |
 | [SIDECAR.md](SIDECAR.md) | Business Brain sidecar：独立 Node 进程、loopback RPC 契约与生命周期 | A |
-| [SKILLS-SHARED-DIR.md](SKILLS-SHARED-DIR.md) | 共享目录（`~/.agentdeck`）与技能库设计：SKILL.md 模型、安装目标与同步状态 | A |
-| [EXTENSIONS-HUB.md](EXTENSIONS-HUB.md) | 扩展模块设计：Skills/MCP/Hooks/插件四类资产 + 扩展源仓库 + 插件市场闭环 | A |
-| [UI-UNIFICATION.md](UI-UNIFICATION.md) | 统一视觉与交互中心：当前设计决策、模块边界及验收记录 | A |
-| [DESIGN-SYSTEM-V2.md](DESIGN-SYSTEM-V2.md) | v2 视觉规范参考；本轮统一调整以 UI-UNIFICATION.md 为准 | A · 已注明后续替代项 |
+| [EXTENSIONS-HUB.md](EXTENSIONS-HUB.md) | 扩展模块设计：Skills/MCP/Hooks/插件四类资产 + 扩展源仓库 + 插件市场闭环 | A · §8.8（cc-switch 阶段3f）待施工 |
+| [UI-DETAIL-FEEDBACK.md](UI-DETAIL-FEEDBACK.md) | UI 细节反馈：§B 为 Settings 控件几何/状态**现行契约**；§A 详情交互、git 快照、窄 Dock 为已落地完工记录 | A · §B 被 `polish/operations.css` 与 browser 冒烟引用钉死 |
+| [DESIGN-SYSTEM-V2.md](DESIGN-SYSTEM-V2.md) | v2 视觉规范背景；现行令牌以 `src/renderer/src/tokens.css` 为准 | A · 文头已注明被取代项 |
 | [HOT-UPDATE-IMPL-DESIGN.md](HOT-UPDATE-IMPL-DESIGN.md) | 免安装热更机制设计基准：三层（渲染/载荷/壳）指针模型、验签、自愈回退 | A · 0.19–0.21 已全量落地 |
 | [HOT-FEED-DEPLOY.md](HOT-FEED-DEPLOY.md) | 热更 feed 运维手册：nginx 部署、两条发版命令、回滚、域名迁移 | A · 现行操作手册 |
-| `graph/`（INVENTORY.md · CodeGraph 索引 · README） | 领域图谱：IPC 面 141 调用点/20 域清单、CodeGraph 语义索引（`npm run graph:index`）及读图指南 | 随并行工作合入本目录后即为现行参考 |
+| [WORKTREE-BIG-REPO-PERF.md](WORKTREE-BIG-REPO-PERF.md) | 大仓派单性能：建树慢根因档案与 worktree 池化/稀疏检出方案 | A · §1–5 根因仍准；§6–7「下一阶段」已被稀疏检出上线超越 |
+| `graph/`（INVENTORY.md · CodeGraph 索引 · README） | 领域图谱：IPC 面调用点/域清单、CodeGraph 语义索引（`npm run graph:index`）及读图指南 | A |
+
+### 功能契约与路线图
+
+| 文档 | 一句话 | 状态 |
+|---|---|---|
+| [features/desktop-pet.md](features/desktop-pet.md) | 小助理（桌宠）现行功能契约：设置项名、`pet.json` 字段、七态状态名为稳定契约 | A · 0.23.0 上线 |
+| [plan/pet-pack-ai-generation.md](plan/pet-pack-ai-generation.md) | 八态素材包 AI 生成配方 | A · 被 `src/main/pet/pet-gen.ts` 按节引用 |
+| [plan/desktop-pet-standalone.md](plan/desktop-pet-standalone.md) | 小助理独立窗口/独立仓库/多宠路线图 | B · 阶段 1 已实现，后续阶段未施工 |
 
 ---
 
@@ -28,25 +35,9 @@
 
 > 迁入文档头部均带引注块；此区内容按写作时点封存，不代表现状。
 
-### 施工方案与设计定稿
-
 | 文档 | 一句话 | 状态 |
 |---|---|---|
-| [CONSTRUCTION-PLAN.md](archive/CONSTRUCTION-PLAN.md) | 0.14–0.18 架构重构施工方案（事件日志/投影/编排/IPC 契约分阶段拆分） | B · 阶段 0–8 全部实施完成 |
-| [ORCHESTRATION-GOAL-CONSTRUCTION.md](archive/ORCHESTRATION-GOAL-CONSTRUCTION.md) | 编排与目标模式施工总册：不变量、风险台账、阶段闸门 | B · 主要阶段已分批落地 |
-| [TEAM-MEETING-CONSTRUCTION.md](archive/TEAM-MEETING-CONSTRUCTION.md) | 结构化会议模式施工方案（确定性主持人、回合制、收敛门） | B · 0.16.0 落地后三轮实战返工 |
-| [GOAL-AUTOPILOT-REDESIGN.md](archive/GOAL-AUTOPILOT-REDESIGN.md) | 目标模式 v2 重设计：Issue 内 Goal-based loop + maker/checker 审核 | B · 0.15.0 落地，语义看 ARCHITECTURE §7.1 |
-| [AGENT-PROFILES-PLAN.md](archive/AGENT-PROFILES-PLAN.md) | Agent 管理提级 + 同平台多队员各钉模型施工方案 | B · 已实施 |
-| [INSTALLER-FREE-HOT-UPDATE.md](archive/INSTALLER-FREE-HOT-UPDATE.md) | 免安装热更方案讨论稿（三层模型、rename dance、分发形态对比） | B · 被 HOT-UPDATE-IMPL-DESIGN.md 取代并实施 |
-
-### 调研与选型
-
-| 文档 | 一句话 | 状态 |
-|---|---|---|
-| [LOOP-ENGINEERING.md](archive/LOOP-ENGINEERING.md) | Loop Engineering 方法论综述 + 六项目拆解计划 + 12 条行动清单 | B · 拆解已完成，行动项陆续落地 |
-| [AGENT-GENERATION-RESEARCH.md](archive/AGENT-GENERATION-RESEARCH.md) | 「描述生成 Agent 定义」生态调研（subagent 文件格式、元提示词、评测回路） | B · 结论由锻造师（0.19–0.20）实施 |
-| [HOT-UPDATE-COMPARISON.md](archive/HOT-UPDATE-COMPARISON.md) | 热更三路线对比（electron-updater / 渲染层热更 / 混合），结论选混合分阶段 | B · 选型已按后续方案实施 |
-| [DESIGN-LANGUAGE.md](archive/DESIGN-LANGUAGE.md) | 0.12 界面宪法（源自 Multica 拆解：表面分层、页面骨架、签名布局、操作模型） | B · 整改清单已完成，视觉规范由 DESIGN-SYSTEM-V2.md 承接 |
+| [INSTALLER-FREE-HOT-UPDATE.md](archive/INSTALLER-FREE-HOT-UPDATE.md) | 免安装热更方案讨论稿（三层模型、rename dance、分发形态对比） | B · 被 HOT-UPDATE-IMPL-DESIGN.md 取代并实施；§5 仍被 `src/main/hot/shell.ts` 注释引为设计依据 |
 
 ### 外部项目拆解（`teardown/`，2026-09-09/10，均为 B 档调研快照）
 
@@ -79,6 +70,6 @@
 
 ## 维护约定
 
-1. 新文档默认落本目录并在此登记；施工/调研类写完即归档，不与活文档混放。
-2. 归档 = `git mv` 到 `archive/` + 头部补引注块（写于何时 · 被什么取代 · 现状看哪篇），**一律不物理删除**；移动后需全量校验 `docs/`、`README.md`、`CHANGELOG.md` 的内部引用不断链。
-3. 活文档（ARCHITECTURE / API / VALIDATION / SIDECAR 等）改版时更新头部「校验于」行与差异注记，不做结构性重写。
+1. 新文档默认落本目录并在此登记；施工/调研类写完即处理，不与活文档混放。
+2. 处置分两路：**仍有史料价值**的 `git mv` 到 `archive/` + 头部补引注块（写于何时 · 被什么取代 · 现状看哪篇）；**完工记录、失效调研**直接物理删除（git 历史可恢复）。删除/移动后需校验 `docs/`、根 `README.md`、`src/`、`scripts/` 的活引用不断链（`CHANGELOG.md` 为历史日志，允许悬空）。
+3. 活文档（ARCHITECTURE / API / SIDECAR 等）改版时更新头部「校验于」行与差异注记，不做结构性重写。

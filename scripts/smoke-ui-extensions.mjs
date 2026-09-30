@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * scripts/smoke-ui-extensions.mjs — 扩展 / 技能读状态冒烟（Batch B follow-up，docs/UX-WORKFLOW-OPTIMIZATION.md）
+ * scripts/smoke-ui-extensions.mjs — 扩展 / 技能读状态冒烟（Batch B follow-up）
  *
  * 只驱动真实组件（jsdom + 假桥 scripts/fixtures/ui-visual-bridge），不改写组件内部判定：
  *   技能 / MCP / Hooks / 插件四个 tab 的读状态必须互斥可辨：

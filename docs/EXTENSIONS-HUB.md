@@ -2,7 +2,7 @@
 > ✅ 校验于 `6b2f038` / v0.22.0-hot.19（2026-09-19 文档审计）——设计已全量落地（含 §8.1 插件市场闭环：`marketplaces:*` 与 `plugins:install/uninstall`，0.15.0）；现行 IPC 面差异见 API.md 头部差异注记。
 
 
-> 目标：把「技能」页升级为完整的**扩展模块**——统一管理 Skills / MCP 服务器 / Hooks / 插件四类扩展资产，全部存放于 AgentDeck 共享目录（`~/.agentdeck`，与既有技能库同根），可一键安装到各 agent CLI 的用户级配置；并新增**扩展源仓库**层：内置常用仓库精选目录（一键添加）+ 自定义添加 git/本地仓库，扫描发现可导入资产。设计延续 [SKILLS-SHARED-DIR.md](SKILLS-SHARED-DIR.md)（skills 部分已实现，本文档只做增量）。
+> 目标：把「技能」页升级为完整的**扩展模块**——统一管理 Skills / MCP 服务器 / Hooks / 插件四类扩展资产，全部存放于 AgentDeck 共享目录（`~/.agentdeck`，与既有技能库同根），可一键安装到各 agent CLI 的用户级配置；并新增**扩展源仓库**层：内置常用仓库精选目录（一键添加）+ 自定义添加 git/本地仓库，扫描发现可导入资产。（skills 部分沿自既有技能库实现，本文档只做增量）。
 
 ## 1. 共享目录布局（增量）
 
@@ -226,3 +226,4 @@ export const EXTENSION_CATALOG: CatalogEntry[] = [
 - **C. skills.sh 在线搜索**（发现区来源切换「我的源 | skills.sh」）：主进程 `searchOnlineSkills(query, limit, offset)` fetch skills.sh API（10s 超时，离线/失败返回空不报错）；`installOnlineSkill(entry)` clone `https://github.com/<owner>/<repo>` --depth 1 到临时目录 → 定位 `<skillId>/SKILL.md`（或 `skills/<skillId>/SKILL.md`）→ 复用 importSkill 导入 → 清理临时目录；`skills:open-external`（shell.openExternal，仅 https 白名单校验）。
 - smoke：searchOnline 用注入 fetch stub 测解析/超时容错；installOnline 用参数注入的本地 fixture git 仓库（repoUrl 前缀可注入）测定位/导入/清理/找不到 skillId 报错；openExternal 校验拒绝非 https。
 - 验收：typecheck + smoke 绿；真机：技能行开关组点亮/熄灭真实写各 CLI 配置、发现区卡片网格+查看外链、skills.sh 搜到真技能并一键安装成功。
+- 现状（2026-09-30 核）：A/B/C 均未施工——preload 已冻结 `skills:searchOnline/installOnline/open-external` 契约（`src/preload/index.ts`），主进程尚无对应 handler、发现区卡片网格未建（原 BUG-AUDIT-PERSISTENCE.md 的 gap 记录并入此条，该文档已随 2026-09-30 清理删除）。

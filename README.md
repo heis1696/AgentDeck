@@ -93,7 +93,7 @@ src/
 
 - [架构文档](docs/ARCHITECTURE.md) — 总览、模块地图、关键数据流、可靠性设计、测试基线、已知限制
 - [API 文档](docs/API.md) — IPC 桥全接口、数据模型、后端适配器接口、委派协议、ZCode 协议要点
-- [共享目录与技能库](docs/SKILLS-SHARED-DIR.md) · [扩展模块](docs/EXTENSIONS-HUB.md) · [设计系统 V2](docs/DESIGN-SYSTEM-V2.md)（现行视觉规范） · [Sidecar 架构](docs/SIDECAR.md)（进程模型与契约）
+- [扩展模块](docs/EXTENSIONS-HUB.md) · [设计系统 V2](docs/DESIGN-SYSTEM-V2.md)（现行视觉规范） · [Sidecar 架构](docs/SIDECAR.md)（进程模型与契约）
 - [热更机制设计](docs/HOT-UPDATE-IMPL-DESIGN.md) · [热更 feed 部署运维](docs/HOT-FEED-DEPLOY.md)（现行操作手册）
 - 历史文档（施工方案 / 调研 / 选型对比）归档于 `docs/archive/`：竞品与架构报告见 `docs/archive/reports/`，外部项目拆解见 `docs/archive/teardown/`
 

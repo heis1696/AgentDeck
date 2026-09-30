@@ -357,7 +357,7 @@ delegate 标记 → 目标解析（限 subordinates，名字/平台 id 忽略大
 
 ## 7.1 目标模式 v2：Issue 内自动推进（Goal-based Loop）
 
-目标模式 v2 不建立独立「目标」页或合成 Issue（`iss_goal_xxx`），而是**在真实 Issue 内开启**，按 Loop Engineering 的 Goal-based loop 理念自动推进（对照 `docs/archive/LOOP-ENGINEERING.md` §3 模块映射：Goal-based loop → `goal-controller.ts` + `goal-store.ts`）。`Goal` 层作为持久化状态脊柱叠加在 `Issue -> Run -> Task` 之上，不替代该模型：
+目标模式 v2 不建立独立「目标」页或合成 Issue（`iss_goal_xxx`），而是**在真实 Issue 内开启**，按 Loop Engineering 的 Goal-based loop 理念自动推进。`Goal` 层作为持久化状态脊柱叠加在 `Issue -> Run -> Task` 之上，不替代该模型：
 
 - **目标绑定真实 Issue**：`GoalCreateInput.issueId` 必填。开启即「收养」该 Issue 当前最新 Task 作为阶段任务：无 Task → 建首个（prompt 末尾注入目标模式块，startNow 即入队）；有 Task → 登记为当前阶段任务，startNow 时按其状态启动（queued/running 等执行、done/failed 走续聊回灌）。循环跟随 Issue 最新任务（天然含 `<continue>` 接力产生的 handoff 任务），不再只认自己建的任务。
 - **自省自推直到完成条件达成**：每轮 Task 终态（含失败/取消）→ 解析 checkpoint envelope 落盘 `GoalCheckpoint`（runId 幂等，状态脊柱）→ 预算扣减与护栏决策 → 续轮**优先同会话续聊回灌**（`continueTask` = `runner.followUp`，不重开上下文）；后端未注入续聊或 Task 无 `sessionId` 时**兜底新建 Task**（prompt 与首次推进同一构造器：目标 + 上次 checkpoint 简报 + 完成/停止条件 + 目标模式协议块——新会话看不到之前的上下文，见 [PROMPTS.md](PROMPTS.md) §2.1）。

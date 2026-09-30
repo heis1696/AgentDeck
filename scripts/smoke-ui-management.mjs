@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * scripts/smoke-ui-management.mjs — 管理区行为冒烟（Batch B，docs/UX-WORKFLOW-OPTIMIZATION.md）
+ * scripts/smoke-ui-management.mjs — 管理区行为冒烟（Batch B）
  *
  * 只驱动真实组件（jsdom + 假桥 scripts/fixtures/ui-visual-bridge），不改写组件内部判定：
  *   RuntimeView   —— 首探失败不得渲染「0 健康 / 0 关注」假健康；刷新失败保留上次成功快照并给重试；

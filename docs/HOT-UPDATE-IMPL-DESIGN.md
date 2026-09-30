@@ -2,7 +2,7 @@
 > ✅ 校验于 `6b2f038` / v0.22.0-hot.19（2026-09-19 文档审计）——本篇为热更机制的现行设计基准：阶段 0–2 已随 0.19.0 落地，阶段 3–4（feed 上线 + L0 壳自替换）已随 0.21.0 落地；日常发版/部署操作看 HOT-FEED-DEPLOY.md。
 
 
-> 前置文档：`docs/archive/INSTALLER-FREE-HOT-UPDATE.md`（三层免安装架构：L2 渲染层 / L1 JS 载荷 / L0 壳）、`docs/archive/HOT-UPDATE-COMPARISON.md`（机制细节：staging → 验签 → 原子指针 → 自愈回退）。
+> 前置文档：`docs/archive/INSTALLER-FREE-HOT-UPDATE.md`（三层免安装架构：L2 渲染层 / L1 JS 载荷 / L0 壳）。
 > 本文 = 仓库侧实现设计：文件格式、接口签名、时序到可编码粒度；**不含实现代码**。阶段 3（目录式 zip 分发管线收口）只定义发布产物契约，阶段 4（L0 壳自替换）不在范围内，仅做字段/目录预留。
 > 所有引用已按工作区现状（= HEAD `4f24a77`，git status 干净）逐条核实到行号。
 > 「外部机制与开放问题」章节（§9）已由领队补齐：四问决策 + feed 终局布局 + 私钥流程，外部事实经辅程联网核实（来源随文标注）。
@@ -16,7 +16,7 @@
 | P3 | 加载解析单源：bootstrap（载荷级）与 `index.ts`（渲染层级）消费同一个解析函数 | `src/main/hot/resolve.ts`（§3.2 / §4.1） |
 | P4 | IPC 契约**只增不改**：新增 `updates` 命名空间，既有 channel 零触碰（已核对 `src/preload/index.ts` 全量 invoke/on 名称，无 `updates:` 冲突） | §5.2 |
 | P5 | 任何一层失败的最坏结果 = 回退 asar 内置版本继续可用，绝不出现"起不来" | §3.3 / §4.3 |
-| P6 | 层间覆盖规则：L1 载荷 ⊇ 自带渲染层；载荷应用时重置 L2 指针（"全量 > 增量"沿用 `docs/archive/HOT-UPDATE-COMPARISON.md` §5.1） | §4.1 / §6.3 |
+| P6 | 层间覆盖规则：L1 载荷 ⊇ 自带渲染层；载荷应用时重置 L2 指针（"全量 > 增量"） | §4.1 / §6.3 |
 
 ---
 
@@ -203,7 +203,7 @@ const hot = resolveHotState(app.getPath('userData'), app.getVersion())
 mainWindow.loadFile(hot.rendererIndexHtml ?? path.join(__dirname, '../renderer/index.html'))
 ```
 
-dev 分支（`:90-92` `ELECTRON_RENDERER_URL`）保持不变且优先。相对路径前提成立：electron-vite 渲染层产物 `base: './'`、全部 asset 相对引用（V3），整体搬移可加载——阶段 1 第一动作用 `npm run build` 产物落 userData 实测加载（含刷新、深链接），作为上线门禁（沿用 `docs/archive/HOT-UPDATE-COMPARISON.md` §4.4）。
+dev 分支（`:90-92` `ELECTRON_RENDERER_URL`）保持不变且优先。相对路径前提成立：electron-vite 渲染层产物 `base: './'`、全部 asset 相对引用（V3），整体搬移可加载——阶段 1 第一动作用 `npm run build` 产物落 userData 实测加载（含刷新、深链接），作为上线门禁。
 
 ### 4.2 其余 `__dirname` 引用点逐点结论（全部**不需改**）
 

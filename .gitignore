@@ -25,7 +25,7 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Teardown study clones (see docs/LOOP-ENGINEERING.md)
+# Teardown study clones
 teardown/repos/
 
 # Local backup artifacts (branch bundle / worktree snapshots / GUI test shots)

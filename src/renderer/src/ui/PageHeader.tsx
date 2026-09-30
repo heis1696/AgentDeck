@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import '../polish/page-header.css'
 
 /**
- * 主页面共享页头（docs/UI-VISUAL-REPAIR.md · Shared Header Contract）。
+ * 主页面共享页头（Shared Header Contract）。
  *
  * 七个主页面 + 详情标题共用同一个页头结构：每个页面只有一个可见主标题（h1），
  * 标题 / 图标 / 计数 / 上下文 / 操作的沟槽与几何完全一致。
