@@ -43,7 +43,7 @@ preload 以 `contextBridge` 暴露，全部经 `ipcRenderer.invoke/on` 与主进
 | `events` | `(id, afterSeq = 0) => Promise<TaskEvent[]>` | 增量读执行日志（seq > afterSeq，上限 5000 条） |
 | `create` | `(input: TaskCreateInput) => Promise<Task>` | 创建并按 `startNow` 决定是否立即入队。`input: { title, prompt, workdir, backend?, agentId?, handoff?, startNow?, trigger? }`。`agentId` 优先于 `backend`；领队身份由该 agent 的 `subordinates` 决定；`startNow: false` 落为 parked（等 `start` 手动拉起）。相同 `dedupeKey` / `requestId` / `idempotencyKey` 的重放复用原任务，不解除停放；启动已有任务需显式调用 `start` |
 | `start` | `(id) => Promise<IpcResult>` | 启动 queued 任务（含 parked 和排队解卡）；接力任务记录本阶段人工启动确认并传入首回合，不代表工具权限或其他审批已获批准 |
-| `cancel` | `(id) => Promise<IpcResult>` | 取消排队/运行中任务；**级联取消其运行中子任务** |
+| `cancel` | `(id, reason?) => Promise<IpcResult>` | 取消排队/运行中任务；**级联取消其运行中子任务**（级联属系统取消，不打标）。`reason` 回执契约：`undefined` = 系统取消不打标；string（含空串）= 用户主动打断——非空 trim 后 ≤500 字符记「用户打断：\<原因\>」，空记「用户打断（未填写原因）」；文案写入任务 `error` 字段并落时间线 status 事件，cancelled 子单经委派报告正文「状态 cancelled: \<error\>」回灌领队 |
 | `followUp` | `(id, content, opts?: { relay?: boolean }) => Promise<IpcResult>` | 在已完成任务会话上追问（done/failed/cancelled 均可）；无活跃会话走 resume（dsh ACP 无跨进程 resume，重启后追问会新建会话）。`relay: true` 仅由「接力下一阶段」按钮传入；若已有非取消后继则复用，queued 后继按人工确认启动，不重复建单 |
 | `delete` | `(id) => Promise<IpcResult>` | 删除任务及日志（连带子任务），回收名下委派 worktree，并连带清理任务与子单在主仓库根 `.agentdeck-reports/` 的报告副本；运行中拒绝 |
 | `retry` | `(id) => Promise<IpcResult>` | 清空结果/会话/attempt 重置为 queued 重跑 |
@@ -110,7 +110,7 @@ Goal 是绑定**真实 Issue** 的持久长时程目标（v2 起不再创建独�
 | `delete(id)` | 清除目标模式：非终态先停任务，级联删除目标及其全部 runs/checkpoints，广播 `onDeleted`；任何状态（含已取消/已完成/失败）都可清，面板回到可重新开启的空态 |
 | `onUpdated` / `onDeleted` 订阅 | 目标变更/删除广播（看板 🎯 徽标与面板即时摘除） |
 
-自动推进语义：每轮 Task 终态（含失败/取消）→ 解析 checkpoint envelope 落盘（runId 幂等）→ 预算/停止条件/连续失败护栏决策 → 续轮**优先同会话续聊回灌**（`runner.followUp`，不重开上下文）；后端未注入续聊或 Task 无 `sessionId` 时**兜底新建 Task**（prompt = 目标块 + checkpoint 简报）。完成条件逐条对照原文全部达成 → goal completed、Issue 自动归档 done。重启恢复：active → `waiting_user`，需显式 continue，绝不静默续跑。
+自动推进语义：每轮 Task 终态（含失败/取消）→ 解析 checkpoint envelope 落盘（runId 幂等）→ 预算/停止条件/连续失败护栏决策 → 续轮**优先同会话续聊回灌**（`runner.followUp`，不重开上下文）；后端未注入续聊或 Task 无 `sessionId` 时**兜底新建 Task**（prompt 与首次推进同一构造器：目标 + 上次 checkpoint 简报 + 完成/停止条件 + 目标模式协议块——新会话看不到之前的上下文）。完成条件逐条对照原文全部达成 → goal completed、Issue 自动归档 done。重启恢复：active → `waiting_user`，需显式 continue，绝不静默续跑。
 
 委派单审核（maker/checker）：委派结果回灌后，领队须对每个 done 单输出审核标记 `<review of="#单号" verdict="pass|fail" note="…"/>`——pass → 对应 Issue 看板自动归档 done；fail → 标 blocked 并由领队改派/修复；未出结论的单保持人工审核（不改状态）。匹配与剥离规则见 §5。
 
@@ -119,8 +119,8 @@ Goal 是绑定**真实 Issue** 的持久长时程目标（v2 起不再创建独�
 | 标记 | 用途 |
 |---|---|
 | `<delegate to="…" reason="…">…</delegate>` | 委派子任务（领队能力协议，详见 §5.1） |
-| `<round outcome="…" reason="…"/>` | 每轮收尾自评，运行时截获留痕并从展示文本剥除 |
-| `<continue>…</continue>` | 阶段边界换新会话接力（简报自包含），一般推进不硬切会话 |
+| `<round outcome="action\|no_action\|failed" reason="…"/>` | 每轮收尾自评，运行时截获留痕并从展示文本剥除 |
+| `<continue start="auto\|parked">…</continue>` | 阶段边界换新会话接力（简报自包含），一般推进不硬切会话 |
 | `<review of="#单号" verdict="pass\|fail" note="…"/>` | 委派单审核结论：pass → 看板归档 done；fail → blocked（详见 §5.1） |
 
 ### 1.5 自动化 `bridge.automations`
@@ -502,7 +502,7 @@ const scoped = bindTurn(events, turn)
 
 - 可多个，本轮并行执行；每轮上限 `workerConcurrency`
 - 领队最终输出不应再含标记；对外结果经 `stripDelegates` 剥离
-- 子任务提示 = 指令 + 领队任务原文背景块（`buildChildPrompt`，≤2000 字符，声明"参考非指令、冲突以指令为准"）
+- 子任务提示 = 指令 + 领队任务原文背景块（`buildChildPrompt`，≤2000 字符、超长标注截断，声明"参考非指令、冲突以指令为准"）+ 工程纪律
 
 委派单审核结论标记（maker/checker）：
 
@@ -518,11 +518,11 @@ const scoped = bindTurn(events, turn)
 每轮评估与阶段接力标记（目标模式/长任务共用）：
 
 ```
-<round outcome="done|partial|blocked" reason="…"/>      // 每轮收尾自评，截获留痕后剥除
-<continue>
-下一阶段简报（自包含：目标、已完成、下一步、风险）
-</continue>                                             // 阶段边界换新会话，简报为唯一携带物
+<round outcome="action|no_action|failed" reason="…"/>   // 每轮收尾自评，截获留痕后剥除（action=有新动作 / no_action=没有新动作 / failed=受阻）
+<continue start="auto|parked">下一阶段简报</continue>   // 阶段边界换新会话，简报自包含、为唯一携带物；须在回复末尾，缺省/写错按 parked
 ```
+
+提示词文案、注入顺序与「示例标记不可被复述解析」的约定见 [PROMPTS.md](PROMPTS.md)。
 
 ### 5.2 导出 API
 

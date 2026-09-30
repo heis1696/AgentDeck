@@ -51,7 +51,7 @@ export function resolveForgeSkillBody(sharedDir: string): string {
 
 
 /** 派发协议标记：混进字段值会劫持领队的派发/接力循环，逐字段剥离 */
-const DISPATCH_TAG_RE = /<\/?(?:delegate|consult|continue|round|review)\b[^>]*>/gi
+const DISPATCH_TAG_RE = /<\/?(?:delegate|consult|investigate|continue|round|review)\b[^>]*>/gi
 
 /** 字段清洗：非字符串归空 → 剥派发标记 → trim → 超长截断 */
 function cleanField(value: unknown, maxLen: number): string {

@@ -11,6 +11,7 @@
 |---|---|---|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 架构总览：Issue-first 工作模型、模块地图、关键数据流、可靠性设计、测试基线 | A · 头部差异注记（新模块/导航/测试矩阵待补） |
 | [API.md](API.md) | 四层接口：IPC 桥全量表格、数据模型、后端适配器接口、委派协议、ZCode 协议要点 | A · 头部差异注记（正文 v0.13.x 基准，70 调用点未收录，对照表见注记框） |
+| [PROMPTS.md](PROMPTS.md) | 提示词系统：模块地图、注入地图、协议标记与解析器契约、术语表、措辞约定、smoke 固化原文、锻造升级规则 | A · 2026-09-29 去歧义重做后写成，改提示词以此为准 |
 | [VALIDATION.md](VALIDATION.md) | 阶段 0–8 重构验证记录（typecheck/smoke/dist 逐阶段留痕） | A · 历史验证快照，现行回归以 `smoke:all`（46 套件）为准 |
 | [SIDECAR.md](SIDECAR.md) | Business Brain sidecar：独立 Node 进程、loopback RPC 契约与生命周期 | A |
 | [SKILLS-SHARED-DIR.md](SKILLS-SHARED-DIR.md) | 共享目录（`~/.agentdeck`）与技能库设计：SKILL.md 模型、安装目标与同步状态 | A |
@@ -19,7 +20,7 @@
 | [DESIGN-SYSTEM-V2.md](DESIGN-SYSTEM-V2.md) | v2 视觉规范参考；本轮统一调整以 UI-UNIFICATION.md 为准 | A · 已注明后续替代项 |
 | [HOT-UPDATE-IMPL-DESIGN.md](HOT-UPDATE-IMPL-DESIGN.md) | 免安装热更机制设计基准：三层（渲染/载荷/壳）指针模型、验签、自愈回退 | A · 0.19–0.21 已全量落地 |
 | [HOT-FEED-DEPLOY.md](HOT-FEED-DEPLOY.md) | 热更 feed 运维手册：nginx 部署、两条发版命令、回滚、域名迁移 | A · 现行操作手册 |
-| `graph/`（INVENTORY.md · deps.json · README） | 领域图谱：IPC 面 141 调用点/20 域清单、模块依赖图及读图指南 | 随并行工作合入本目录后即为现行参考 |
+| `graph/`（INVENTORY.md · CodeGraph 索引 · README） | 领域图谱：IPC 面 141 调用点/20 域清单、CodeGraph 语义索引（`npm run graph:index`）及读图指南 | 随并行工作合入本目录后即为现行参考 |
 
 ---
 

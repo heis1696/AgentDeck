@@ -1,6 +1,6 @@
 // worktree 建树超时连环根治的断言面（背景：8.2 万文件 Unity 仓，60s 固定超时只杀 git 父进程，
 // checkout 孤儿继续持有 index.lock → 回放撞活锁拒单 → 回收残肢 → 重派 branch already exists）：
-// ① 超时自适应：worktree add 按 ls-files 计数放大超时（60s 基线 + 每 1 万文件 +60s，封顶 15 分钟），每仓 TTL 缓存
+// ① 超时自适应：worktree add 按 ls-files 计数放大超时（60s 基线 + 每 1 万文件 +90s，封顶 30 分钟），每仓 TTL 缓存
 // ①b 计数归一：子目录调用与根调用同值同键（repositoryRoot 归一后计数/缓存），消除子目录低估+低值缓存回退面
 // ② 既存 worktree/branch 拒绝接管；超时现场无法归属时保留并具名报告
 // ③ 进程树击杀：win32 taskkill /PID <pid> /T /F 参数断言级 + 真实孤儿 hook 对照（旧病可复现、树杀后不复发）
@@ -110,9 +110,9 @@ try {
   // ---- ① 超时自适应：规模档位 + 真实计数（已跟踪+可回放未跟踪）+ 每仓 TTL 缓存 ----
   assert.equal(git.worktreeAddTimeoutFor(0), 60_000, '小仓/计数失败档位维持 60s 基线')
   assert.equal(git.worktreeAddTimeoutFor(9_999), 60_000, '不足 1 万文件不加档')
-  assert.equal(git.worktreeAddTimeoutFor(10_000), 120_000, '每 1 万文件 +60s')
-  assert.equal(git.worktreeAddTimeoutFor(80_000), 540_000, '8 万文件 ≈ 9 分钟（那台 Unity 机的实测体量）')
-  assert.equal(git.worktreeAddTimeoutFor(10_000_000), 900_000, '上限封顶 15 分钟')
+  assert.equal(git.worktreeAddTimeoutFor(10_000), 150_000, '每 1 万文件 +90s')
+  assert.equal(git.worktreeAddTimeoutFor(80_000), 780_000, '8 万文件 ≈ 13 分钟（9 分钟档位在磁盘争用下仍会被击穿成残尸）')
+  assert.equal(git.worktreeAddTimeoutFor(10_000_000), 1_800_000, '上限封顶 30 分钟')
   assert.ok(git.WORKTREE_FILE_COUNT_TTL_MS > 0 && git.WORKTREE_FILE_COUNT_TTL_MS <= 15 * 60_000, '计数缓存 TTL 有界')
 
   const counted = makeRepo('counted')
@@ -126,9 +126,9 @@ try {
   const big = makeRepo('big')
   const bigResult = await git.createWorktree(big.dir, 'task_big_c1', 'main', 'task_big', undefined, { estimateFileCount: async () => 80_000 })
   assert.ok(bigResult, '大仓注入计数下照常建成（真实 add 远快于档位超时）')
-  assert.equal(bigResult.addTimeoutMs, 540_000, 'createWorktree 大仓档位按规模放大')
+  assert.equal(bigResult.addTimeoutMs, 780_000, 'createWorktree 大仓档位按规模放大')
   const cachedResult = await git.createWorktree(big.dir, 'task_big_c2', 'main', 'task_big', undefined, { estimateFileCount: async () => 0 })
-  assert.equal(cachedResult.addTimeoutMs, 540_000, 'TTL 内复用每仓缓存计数（注入不同值也吃缓存）')
+  assert.equal(cachedResult.addTimeoutMs, 780_000, 'TTL 内复用每仓缓存计数（注入不同值也吃缓存）')
   git.clearWorktreeFileCountCache()
   const smallResult = await git.createWorktree(big.dir, 'task_big_c3', 'main', 'task_big', undefined, { estimateFileCount: async () => 0 })
   assert.equal(smallResult.addTimeoutMs, 60_000, '清缓存后小计数回到 60s 档')
@@ -156,7 +156,7 @@ try {
   const subSeeded = await git.createWorktree(nestedDeep, 'task_nz_c1', 'main', 'task_nz', undefined, {
     estimateFileCount: async (key) => { injectedKeys.push(key); return 80_000 }
   })
-  assert.equal(subSeeded.addTimeoutMs, 540_000, '子目录调用按整仓规模放大超时')
+  assert.equal(subSeeded.addTimeoutMs, 780_000, '子目录调用按整仓规模放大超时')
   assert.equal(subSeeded.fileCount, 80_000, '子目录调用带回归一后的整仓计数')
   assert.equal(injectedKeys.length, 1, '子目录调用注入估计器恰好一次')
   assert.equal(injectedKeys[0], path.resolve(nestedRoot), '缓存键 = 归一后的仓库根（非调用子目录）')
@@ -165,10 +165,10 @@ try {
     estimateFileCount: async () => { poisoned = true; return 0 }
   })
   assert.equal(poisoned, false, '根调用命中子目录调用播种的缓存（同键）')
-  assert.equal(rootCached.addTimeoutMs, 540_000, '根调用复用整仓档位，不被子目录低值覆盖')
+  assert.equal(rootCached.addTimeoutMs, 780_000, '根调用复用整仓档位，不被子目录低值覆盖')
   if (process.platform === 'win32') {
-    // ①c 缓存键别名收口：同一仓库按别名写法（大小写差异）调用必须命中同一份缓存，
-    // 绝不按别名写法重复计数、重复播种
+    // ①b-别名 缓存键别名收口：同一仓库按别名写法（大小写差异）调用必须命中同一份缓存，
+    // 绝不按别名写法重复计数、重复播种（①c 检出并行化见下节）
     const aliasRoot = nestedRoot[0] === nestedRoot[0].toLowerCase()
       ? nestedRoot[0].toUpperCase() + nestedRoot.slice(1)
       : nestedRoot[0].toLowerCase() + nestedRoot.slice(1)
@@ -179,10 +179,20 @@ try {
       estimateFileCount: async () => { aliasPoisoned = true; return 0 }
     })
     assert.equal(aliasPoisoned, false, '别名写法调用命中真实写法播种的缓存（缓存键按别名折叠，不重复计数）')
-    assert.equal(aliasCached.addTimeoutMs, 540_000, '别名写法调用复用整仓档位')
+    assert.equal(aliasCached.addTimeoutMs, 780_000, '别名写法调用复用整仓档位')
   }
   git.clearWorktreeFileCountCache()
   console.log('  OK ①b 计数归一：子目录与根同值同键，低值缓存回退面消除')
+
+  // ---- ①c 检出并行化：checkout.workers 注入（env 覆盖/关闭；默认按 CPU 保守档） ----
+  assert.deepEqual(git.checkoutWorkersArgs(64, { [git.WORKTREE_CHECKOUT_WORKERS_ENV]: '3' }), ['-c', 'checkout.workers=3'], 'env 显式覆盖 worker 数')
+  assert.deepEqual(git.checkoutWorkersArgs(64, { [git.WORKTREE_CHECKOUT_WORKERS_ENV]: '0' }), [], 'env=0 关闭并行（保持 git 顺序检出）')
+  assert.deepEqual(git.checkoutWorkersArgs(64, { [git.WORKTREE_CHECKOUT_WORKERS_ENV]: 'x' }), [], '非法 env 值按关闭处理')
+  assert.deepEqual(git.checkoutWorkersArgs(64, { [git.WORKTREE_CHECKOUT_WORKERS_ENV]: '' }), [], '空 env 值按关闭处理（显式设置即以设置为准）')
+  assert.deepEqual(git.checkoutWorkersArgs(64, {}), ['-c', 'checkout.workers=4'], '默认档位：大核机封顶 4')
+  assert.deepEqual(git.checkoutWorkersArgs(8, {}), ['-c', 'checkout.workers=2'], '默认档位：8 核取 2')
+  assert.deepEqual(git.checkoutWorkersArgs(4, {}), [], '默认档位：小核机不启用并行')
+  console.log('  OK ①c 检出并行化：checkout.workers 注入与 AGENTDECK_CHECKOUT_WORKERS 开关')
 
   // ---- ② 既存树不接管：同名 worktree 与分支已存在时必须快拒绝且保持原样 ----
   const swallow = makeRepo('swallow')

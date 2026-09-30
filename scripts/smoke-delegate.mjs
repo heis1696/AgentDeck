@@ -36,6 +36,14 @@ const sixParsers = [
   ['review', parseReviews],
   ['continue', parseContinue]
 ]
+/** 回灌消息的队员可控段：截到尾部系统指令之前（【下一步】；兼容旧版「请…」起头的指令）。
+ *  边界取**最后**一次出现，不用 indexOf 的首次命中：队员原文里若出现同名字样，首次命中会把
+ *  其后的队员内容划到界外，黑盒断言就漏检了（改动后必须与完整队员段等价）。
+ *  找不到边界时整段返回——宁可让断言报错，也不静默少截 */
+const workerVisibleSegment = (report) => {
+  const cuts = ['\n\n【下一步】', '\n\n请'].map((mark) => report.lastIndexOf(mark)).filter((at) => at >= 0)
+  return cuts.length ? report.slice(0, Math.max(...cuts)) : report
+}
 
 // 渲染层链路（GitSummary）单独构建：快照状态由渲染层消费
 globalThis.window = { agentdeck: {} }
@@ -364,6 +372,12 @@ const digestBase = {
   assert(capped.includes('结论') && capped.includes('【git 改动摘录】') && capped.length > 5000, '去截断：git 小节超界也不再挤压掉正文（无硬顶切片）')
   const failed = buildChildReportBody({ status: 'failed', error: 'e'.repeat(2000) })
   assert(failed.startsWith('状态 failed') && failed.includes('e'.repeat(2000)), '去截断：failed 单 error 不再 slice(0,300)')
+
+  // 稀疏单失败回灌附扩圈提示（WORKTREE-BIG-REPO-PERF §7.2）：仅 failed 且带范围；全量单零变化
+  const sparseFailed = buildChildReportBody({ status: 'failed', error: '找不到 src/app.ts', sparseDirs: ['client', 'excel-tool'] })
+  assert(sparseFailed.includes('本单稀疏检出范围：client、excel-tool——若子任务报告文件缺失，请扩圈或去掉 sparse 属性重派'), '§7.2：稀疏单失败说明附本单稀疏范围与扩圈指引')
+  assert(!buildChildReportBody({ status: 'failed', error: 'x' }).includes('稀疏检出范围'), '§7.2：全量单失败回灌不附稀疏提示（零变化）')
+  assert(!buildChildReportBody({ status: 'cancelled', sparseDirs: ['client'] }).includes('稀疏检出范围'), '§7.2：cancelled 单不附稀疏提示（只有失败形态才教扩圈）')
 
   // 路径③④（单元面）：总结采纳 → 前置标注 + 总结体；回退 → 注记 + 入口
   const summaryBody = buildChildReportBody({
@@ -1193,9 +1207,9 @@ const report1 = roundReports[0]
 // A1/A3 live：摘要为结构化形态（标题带单号+状态；体带全文入口指引；队员可控段过六解析器零命中）
 assert(report1.includes('— 全文入口 —') && report1.includes(`${REPORTS_DIR_NAME}/`), 'A3：live 摘要尾带报告副本相对路径指引')
 assert(!report1.includes('Issue 评论「队员报告全文'), 'A3：无 Issue 通道（评论未送达）时不虚标评论入口')
-// 六解析器零命中的口径=报告的队员可控段（条目+git 小节+指引）：尾部协议指令模板里的
+// 六解析器零命中的口径=报告的队员可控段（条目+git 小节+指引）：尾部【下一步】指令模板里的
 // <round>/<delegate>/<review> 字样是给领队看的语法示例，本就不该被转义
-const workerVisibleReport = report1.slice(0, report1.indexOf('\n\n请'))
+const workerVisibleReport = workerVisibleSegment(report1)
 for (const [name, parse] of sixParsers) {
   assert(parse(workerVisibleReport).length === 0, `A3 黑盒：live 报告队员可控段（含指引）过 ${name} 解析器零命中`)
 }
@@ -2080,7 +2094,7 @@ assert(execSync(`git show ${ibE}:f2.txt`, { cwd: repo5, encoding: 'utf8' }).incl
   assert(report9.includes('— 全文入口 —') && report9.includes(`${REPORTS_DIR_NAME}/${child9.id}.md`), '场景 H③：全文入口指引仍在')
   assert(report9.includes('【git 改动摘录】'), '场景 H③：git 小节仍在')
   for (const [name, parse] of sixParsers) {
-    assert(parse(report9.slice(0, report9.indexOf('\n\n请'))).length === 0, `场景 H 黑盒：回灌队员可控段过 ${name} 解析器零命中`)
+    assert(parse(workerVisibleSegment(report9)).length === 0, `场景 H 黑盒：回灌队员可控段过 ${name} 解析器零命中`)
   }
   // 独立通路红线：无存活会话的目标返回 null（不抛错、不写任何状态）
   assert(await runner9.sendChildSummaryTurn('no-such-task', 'x') === null, '场景 H：无存活会话 → 通路返回 null（回退由调用方裁决）')
@@ -2627,6 +2641,144 @@ assert(execSync(`git show ${ibE}:f2.txt`, { cwd: repo5, encoding: 'utf8' }).incl
   assert(execSync(`git show ${ibN}:beta-n.txt`, { cwd: repoN, encoding: 'utf8' }).includes('v3 by WorkerN2'), '场景 O：收编单 B 的改动合入集成分支（不悬空、不丢弃）')
   const receiptsN = finN.delegateRejections ?? []
   assert(receiptsN.length === 1 && receiptsN[0].deliveredAt && receiptsN[0].reason.includes('委派轮数预算已耗尽'), '场景 O：C 的拒单恰好一条且已送达')
+}
+
+// ================= 场景 P：用户打断回执——队员单打断（原因可空）落时间线并回灌领队 =================
+{
+  // 场景装配：真 git 仓 + 挂起不结束回合的队员后端（等用户打断终结）+ 收到汇报即收尾的领队
+  const makeInterruptScene = (label) => {
+    const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), `delegate-interrupt-${label}-`))
+    fs.writeFileSync(path.join(repoDir, 'w.txt'), 'w v1\n')
+    execSync('git init -q -b main && git add -A && git -c user.email=t@t -c user.name=t commit -qm init', { cwd: repoDir })
+    const store = new TaskStore(fs.mkdtempSync(path.join(os.tmpdir(), `delegate-interrupt-store-${label}-`)))
+    const hangingWorker = {
+      id: `wp-${label}`, label: `wp-${label}`,
+      async probe() { return { ok: true, detail: '' } },
+      async start({ events }) {
+        events.onEvent({ ts: Date.now(), kind: 'status', text: '开工，先摸清现场' })
+        return { sessionId: `s_wp_${label}`, async send() {}, async stop() {}, async close() {} }
+      }
+    }
+    return { repoDir, store, hangingWorker }
+  }
+  const interruptLeader = (backendId, reportSink) => ({
+    id: backendId, label: backendId,
+    async probe() { return { ok: true, detail: '' } },
+    async start({ events: rawEvents, turn }) {
+      const scoped = scopedCallbacks(rawEvents, turn)
+      const events = scoped.events
+      setTimeout(() => {
+        const text = '<delegate to="InterruptWorker">慢慢改 w.txt</delegate>'
+        events.onEvent({ ts: Date.now(), kind: 'final', text })
+        events.onTurnEnd({ response: '已派活。', delegationText: text, ok: true })
+      }, 20)
+      return {
+        sessionId: `s_${backendId}`, turnScoped: true,
+        async send(content, nextTurn) {
+          scoped.setTurn(nextTurn)
+          reportSink.push(content)
+          setTimeout(() => {
+            events.onEvent({ ts: Date.now(), kind: 'final', text: '收到，本轮收尾。' })
+            events.onTurnEnd({ response: '收到，本轮收尾。', ok: true })
+          }, 20)
+        },
+        async stop() {}, async close() {}
+      }
+    }
+  })
+  const interruptTeam = (leadBackend, workerBackend) => [
+    { id: 'LP', name: 'BossP', backend: leadBackend, role: '领队', subordinates: ['WP'] },
+    { id: 'WP', name: 'InterruptWorker', backend: workerBackend, role: '工程师' }
+  ]
+  const waitChildRunning = async (store, parentId) => {
+    const deadline = Date.now() + 20000
+    while (Date.now() < deadline) {
+      const child = store.list().find((t) => t.parentTaskId === parentId && t.status === 'running')
+      if (child) return child
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    return null
+  }
+  const waitLeaderTerminal = async (store, leaderId) => {
+    const deadline = Date.now() + 30000
+    while (Date.now() < deadline) {
+      const t = store.get(leaderId)
+      if (t.status === 'done' || t.status === 'failed' || t.status === 'cancelled') return t
+      await new Promise((r) => setTimeout(r, 100))
+    }
+    return store.get(leaderId)
+  }
+  const reportRound = (reports) => reports.find((c) => c.includes('结果汇报')) ?? ''
+
+  // P① running 子单带原因打断：error 字段 + status 事件落「用户打断：<原因>」，随回灌正文到领队
+  {
+    const reports = []
+    const scene = makeInterruptScene('reason')
+    const runner = new TaskRunner(scene.store, new Map([['leadP-reason', interruptLeader('leadP-reason', reports)], ['wp-reason', scene.hangingWorker]]),
+      () => ({ concurrency: 1, mode: 'yolo', notify: false, workerConcurrency: 2, maxRetryAttempts: 0 }))
+    runner.attachTeam(() => interruptTeam('leadP-reason', 'wp-reason'))
+    const leaderTask = scene.store.create({ title: '打断回执-带原因', prompt: '改 w.txt', workdir: scene.repoDir, backend: 'leadP-reason', agentId: 'LP' })
+    runner.enqueue(leaderTask)
+    const child = await waitChildRunning(scene.store, leaderTask.id)
+    assert(!!child, '场景 P①：子单进入 running')
+    const cancelResult = await runner.cancel(child.id, { reason: '方向偏了，重新派单' })
+    assert(cancelResult.ok, `场景 P①：带原因打断成功（${cancelResult.error ?? ''}）`)
+    const childAfter = scene.store.get(child.id)
+    assert(childAfter.status === 'cancelled', `场景 P①：子单 cancelled（${childAfter.status}）`)
+    assert(childAfter.error === '用户打断：方向偏了，重新派单', `场景 P①：error 字段落回执文案（${childAfter.error ?? '无'}）`)
+    const childEventLines = scene.store.readEvents(child.id).map((e) => `${e.kind}:${e.text ?? ''}`)
+    assert(childEventLines.includes('status:用户打断：方向偏了，重新派单'), `场景 P①：时间线落 status 事件（${JSON.stringify(childEventLines)}）`)
+    const finP = await waitLeaderTerminal(scene.store, leaderTask.id)
+    assert(finP.status === 'done', `场景 P①：领队收尾 done（${finP.status}${finP.error ? ' ' + finP.error : ''}）`)
+    assert(reportRound(reports).includes('状态 cancelled: 用户打断：方向偏了，重新派单'), '场景 P①：回灌正文带打断回执（状态 cancelled 行）')
+  }
+
+  // P② 空原因打断：文案「用户打断（未填写原因）」，同样落时间线并回灌
+  {
+    const reports = []
+    const scene = makeInterruptScene('empty')
+    const runner = new TaskRunner(scene.store, new Map([['leadP-empty', interruptLeader('leadP-empty', reports)], ['wp-empty', scene.hangingWorker]]),
+      () => ({ concurrency: 1, mode: 'yolo', notify: false, workerConcurrency: 2, maxRetryAttempts: 0 }))
+    runner.attachTeam(() => interruptTeam('leadP-empty', 'wp-empty'))
+    const leaderTask = scene.store.create({ title: '打断回执-空原因', prompt: '改 w.txt', workdir: scene.repoDir, backend: 'leadP-empty', agentId: 'LP' })
+    runner.enqueue(leaderTask)
+    const child = await waitChildRunning(scene.store, leaderTask.id)
+    assert(!!child, '场景 P②：子单进入 running')
+    const cancelResult = await runner.cancel(child.id, { reason: '' })
+    assert(cancelResult.ok, `场景 P②：空原因打断成功（${cancelResult.error ?? ''}）`)
+    const childAfter = scene.store.get(child.id)
+    assert(childAfter.error === '用户打断（未填写原因）', `场景 P②：error 字段落未填写文案（${childAfter.error ?? '无'}）`)
+    const childEventLines = scene.store.readEvents(child.id).map((e) => `${e.kind}:${e.text ?? ''}`)
+    assert(childEventLines.includes('status:用户打断（未填写原因）'), `场景 P②：时间线落 status 事件（${JSON.stringify(childEventLines)}）`)
+    const finP = await waitLeaderTerminal(scene.store, leaderTask.id)
+    assert(finP.status === 'done', `场景 P②：领队收尾 done（${finP.status}${finP.error ? ' ' + finP.error : ''}）`)
+    assert(reportRound(reports).includes('状态 cancelled: 用户打断（未填写原因）'), '场景 P②：回灌正文带未填写回执')
+  }
+
+  // P③ 领队级联取消子单：系统取消不打标——error 为空、时间线无「用户打断」字样
+  {
+    const reports = []
+    const scene = makeInterruptScene('cascade')
+    const runner = new TaskRunner(scene.store, new Map([['leadP-cascade', interruptLeader('leadP-cascade', reports)], ['wp-cascade', scene.hangingWorker]]),
+      () => ({ concurrency: 1, mode: 'yolo', notify: false, workerConcurrency: 2, maxRetryAttempts: 0 }))
+    runner.attachTeam(() => interruptTeam('leadP-cascade', 'wp-cascade'))
+    const leaderTask = scene.store.create({ title: '打断回执-级联对照', prompt: '改 w.txt', workdir: scene.repoDir, backend: 'leadP-cascade', agentId: 'LP' })
+    runner.enqueue(leaderTask)
+    const child = await waitChildRunning(scene.store, leaderTask.id)
+    assert(!!child, '场景 P③：子单进入 running')
+    const cancelResult = await runner.cancel(leaderTask.id)
+    assert(cancelResult.ok, `场景 P③：领队取消成功（${cancelResult.error ?? ''}）`)
+    const deadline = Date.now() + 20000
+    let childAfter = scene.store.get(child.id)
+    while (Date.now() < deadline && childAfter.status !== 'cancelled') {
+      await new Promise((r) => setTimeout(r, 50))
+      childAfter = scene.store.get(child.id)
+    }
+    assert(childAfter.status === 'cancelled', `场景 P③：级联取消到子单（${childAfter.status}）`)
+    assert(!childAfter.error, `场景 P③：级联取消不写回执 error（${childAfter.error ?? '无'}）`)
+    const childEventLines = scene.store.readEvents(child.id).map((e) => `${e.kind}:${e.text ?? ''}`)
+    assert(!childEventLines.some((line) => line.includes('用户打断')), `场景 P③：级联取消不误标「用户打断」（${JSON.stringify(childEventLines)}）`)
+  }
 }
 
 console.log('\n✅ DELEGATION SMOKE PASSED (v2 + review flow)')

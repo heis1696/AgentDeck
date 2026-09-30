@@ -13,7 +13,7 @@ const bundle = async (source, name) => {
   return import(pathToFileURL(outfile).href)
 }
 
-const [{ AgentSessionRegistry }, { TaskStore }, { TaskService }, { TaskRunner }, delegate, prompts] = await Promise.all([
+const [{ AgentSessionRegistry, OFFICE_TASK_KEY_V2_PREFIX }, { TaskStore }, { TaskService }, { TaskRunner }, delegate, prompts] = await Promise.all([
   bundle('src/main/agent-sessions.ts', 'agent-sessions.cjs'),
   bundle('src/main/store.ts', 'store.cjs'),
   bundle('src/main/task-service.ts', 'task-service.cjs'),
@@ -126,7 +126,7 @@ for (let i = 0; i < 200 && store.get(source.id)?.status === 'running'; i++) awai
 const done = store.get(source.id)
 check(done?.status === 'done', `consult source reaches done (got ${done?.status})`)
 check(done?.result === 'source-finished', 'consult answer is re-injected and source continues')
-check(store.list().filter((task) => task.dedupeKey === 'office_beta').length === 1, 'consult creates one target office task')
+check(store.list().filter((task) => task.dedupeKey === OFFICE_TASK_KEY_V2_PREFIX + 'beta').length === 1, 'consult creates one target office task')
 check(behavior.sends.some((item) => item.agent === 'beta' && item.content.includes('Please inspect')), 'target office receives the consultation prompt')
 check(behavior.maxActive === 1, 'consult path preserves single-flight provider turns')
 
@@ -170,6 +170,69 @@ await runner.shutdown()
   check(!timeline.some((event) => event.text.includes('已应答')), 'the receipt never asserts the embedded call was answered')
   await receiptRunner.shutdown()
   fs.rmSync(receiptDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
+}
+
+// —— 咨询回合不得发起只读调查（P2 反例）：办公室会话身份同时承载「会议发言」与「咨询应答」，
+// 拿身份当放行条件会让顾问把咨询当会议、真发出 investigate。放行面由发起侧显式标注（meetingTurn）。
+{
+  const scopeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-consult-scope-'))
+  const investigated = []
+  // 办公室会话在**任何**回合都回 investigate 标记；只有 meetingTurn 回合才该被受理
+  const scopeBackend = {
+    id: 'fake-consult-scope',
+    label: 'Fake consult scope',
+    supportsResume: true,
+    async probe() { return { ok: true, detail: 'fake' } },
+    async start({ events, turn }) {
+      const respond = (text, t) => {
+        events.onEvent({ ts: Date.now(), kind: 'final', text }, t)
+        events.onTurnEnd({ ok: true, response: text }, t)
+      }
+      const session = {
+        sessionId: 'scope-session', turnScoped: true,
+        async send(_content, t) {
+          await sleep(5)
+          respond('<investigate to="Member" reason="evidence">read src/a.ts:4</investigate>', t)
+        },
+        async stop() {}, async close() {}
+      }
+      setTimeout(() => respond('office-ready', turn), 5)
+      return session
+    }
+  }
+  const scopeStore = new TaskStore(scopeDir)
+  const scopeService = new TaskService({ store: scopeStore })
+  const scopeRunner = new TaskRunner(scopeStore, new Map([[scopeBackend.id, scopeBackend]]), () => ({ concurrency: 2, workerConcurrency: 2, mode: 'yolo', notify: false }))
+  const scopeAgents = [
+    { id: 'lead', name: 'Lead', backend: scopeBackend.id, role: '队长', subordinates: ['member'] },
+    { id: 'member', name: 'Member', backend: scopeBackend.id, role: '工程师' }
+  ]
+  scopeRunner.attachTeam(() => scopeAgents)
+  scopeRunner.attachInvestigate(async ({ call }) => { investigated.push(call.to); return 'investigated' })
+  const scopeRegistry = new AgentSessionRegistry({ store: scopeStore, taskService: scopeService, runner: scopeRunner, getAgents: () => scopeAgents, waitPollMs: 5, waitTimeoutMs: 2_000 })
+
+  // ① 咨询应答回合（不带 meetingTurn）：调查必须被拒，且时间线具名留痕
+  const consultTurn = await scopeRegistry.followUp('lead', '请给意见', { collectFinal: true })
+  check(consultTurn.ok, '咨询应答回合正常完成')
+  check(investigated.length === 0, 'P2 反例：咨询应答回合不发起只读调查')
+  const officeTaskId = scopeRegistry.get('lead')?.id ?? ''
+  const notes = scopeStore.readEvents(officeTaskId).filter((event) => event.kind === 'status' && event.text?.includes('调查标记'))
+  check(notes.length >= 1 && notes[0].text.includes('咨询应答'), `P2：被拒的调查在时间线具名留痕（${JSON.stringify(notes.map((e) => e.text))}）`)
+  check(!consultTurn.finalText?.includes('<investigate'), 'P2：被拒的标记从展示文本剥离')
+
+  // ② 会议发言回合（带 meetingTurn）：调查照常受理（会议能力不被误伤）
+  const before = investigated.length
+  const meetingTurn = await scopeRegistry.followUp('lead', '会议发言', { collectFinal: true, meetingTurn: true })
+  check(meetingTurn.ok, '会议发言回合正常完成')
+  check(investigated.length === before + 1 && investigated[before] === 'Member', 'P2 对照：会议发言回合的只读调查照常受理')
+
+  // ③ 强制综合等显式关闭调查的会议回合（meetingTurn=false）：提示词说「不要发起调查」，运行时同口径
+  const beforeForced = investigated.length
+  const forced = await scopeRegistry.followUp('lead', '强制综合', { collectFinal: true, meetingTurn: false })
+  check(forced.ok, '会议收束回合正常完成')
+  check(investigated.length === beforeForced, 'P2：显式关闭调查的会议回合（强制综合）不发起调查')
+  await scopeRunner.shutdown()
+  fs.rmSync(scopeDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
 }
 
 if (process.exitCode) process.exit(1)

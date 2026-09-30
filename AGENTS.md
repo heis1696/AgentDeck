@@ -10,11 +10,11 @@ npm run build            # electron-vite build（main/preload/renderer 三入口
 npm run smoke:stage6     # 类型 + 事件日志/任务流/回合模型/迁移/issues 关键冒烟
 ```
 
-改到编排、委派、sidecar、worktree 时加跑对应专项：`npm run smoke`、`npm run smoke:lifecycle`、`npm run smoke:sidecar`、`npm run smoke:worktrees`；smoke 全量串见 `npm run smoke:all`。
+改到编排、委派、sidecar、worktree 时加跑对应专项：`npm run smoke`、`npm run smoke:lifecycle`、`npm run smoke:sidecar`、`npm run smoke:worktrees`；改到 `src/main/prompts/` 或拼装/解析提示词的调用点时跑 `npm run smoke:prompts`（约定见 `docs/PROMPTS.md`）；smoke 全量串见 `npm run smoke:all`。
 
 ## 代码地图
 
-- **入口：`docs/graph/README.md`** —— 图谱枢纽（`ARCHITECTURE-GRAPH.md` 人读主图 6 张 / `deps.mmd`+`deps.json` 机读全量依赖图 / `INVENTORY.md` 原始盘点与死代码判定）。改动 `src/` 结构后跑 `npm run graph:deps` 刷新机读图。
+- **入口：`docs/graph/README.md`** —— CodeGraph 语义索引 + `npm run graph:index` 刷新（tree-sitter 语义图：函数/类/导入/调用链；`ARCHITECTURE-GRAPH.md` 人读主图 6 张与 `INVENTORY.md` 原始盘点仍在同目录）。改动 `src/` 结构后跑 `npm run graph:index` 刷新索引。
 - 设计决策与领域概念看 `docs/ARCHITECTURE.md`；IPC API 面参考看 `docs/API.md`。
 
 ## 铁律：smoke 测试面不是死代码
