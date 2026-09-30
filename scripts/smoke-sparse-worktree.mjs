@@ -5,10 +5,11 @@
 // ③ 回落全量：目录在基线中不存在（cone 对不存在目录静默接受，必须自查）→ 整单回落全量，
 //    结果 sparse.status='fallback' 附原因（含被拒目录），绝不拒单、树全量物化
 // ④ 缺省零变化：不带 sparseDirs 的建树结果无 sparse 字段、全量物化、池化行为原样
-// ⑤ 池化安全（一期不做范围匹配）：稀疏树不入池（走常规回收）；池条目带稀疏配置 → 复用侧
-//    逐出回落全量 add；带稀疏范围的派单不进池复用（宁建新树，不复用出错误范围）
+// ⑤ 池化范围矩阵（二期）：范围在案的稀疏树照常入池（元数据记录范围）；范围未知不入池
+//    （一期护栏兜底）；同范围秒级 switch -c 换基线复用；异范围重设 sparse+增量物化；
+//    稀疏↔全量双向永不混用；复用失败（index.lock 卡死换基线）逐出回落全量稀疏建树
 // ⑥ runner 端到端：派单 sparse 属性 → 时间线注记可见（生效/回落含被拒目录/格式非法含通配符），
-//    四单全部建成（不拒单），子单工作树物化范围与声明一致
+//    四单全部建成（不拒单），子单工作树物化范围与声明一致，范围外成果进集成分支（P0）
 // ⑦ 回放并集（§6.3 关键点，第二批）：稀疏范围外有未提交改动也被回放——增量触达目录补进
 //    cone 后 cherry-pick，范围外改动在工作树真实物化、子分支推进到回放提交、status 自洽；
 //    无关目录照常不物化；全量树（未带范围）回放行为零变化
@@ -129,39 +130,110 @@ try {
   assert.ok(hasAll(listTree(plainWt.path), FULL_TREE), '缺省建树全量物化')
   console.log('  OK ④ 缺省零变化：无 sparse 字段、全量物化')
 
-  // ---- ⑤ 池化安全（一期无范围匹配：宁可重设/回落全量，不复用出错误范围）----
-  // ⑤a 稀疏树不入池：归还时按 core.sparseCheckout 拒绝入池，走常规回收（删树）
+  // ---- ⑤ 池化范围矩阵（二期）----
+  // ⑤a 范围在案的稀疏树照常入池：元数据记录生效范围（复用侧匹配的唯一依据）
   const sparseOwner = makeRepo('pool-sparse-owner')
   const sparseTree = await createWorktree(sparseOwner.dir, 'task_pools_c1', 'main', 'pool_owner_a', undefined, { sparseDirs: ['client/Assets/GameMain'] })
   assert.equal(sparseTree.sparse?.status, 'applied', '⑤a 前置：稀疏树建成')
   const sparseRelease = await reclaimWorktree(sparseTree.path, { repool: true, expectedOwnerTaskId: 'pool_owner_a' })
-  assert.notEqual(sparseRelease.status, 'pooled', '稀疏树拒绝入池（走常规回收）')
-  assert.ok(!fs.existsSync(sparseTree.path), '稀疏树已按常规回收移除')
-  assert.deepEqual(worktreePoolEntriesForTest(sparseOwner.dir), [], '池内无稀疏条目')
-  // ⑤b 复用侧逐出：池条目带稀疏配置（外部遗留/异常路径入池形态）→ 复用时逐出，回落全量 add
+  assert.equal(sparseRelease.status, 'pooled', '稀疏树（范围在案）照常入池（二期）')
+  assert.deepEqual(worktreePoolEntriesForTest(sparseOwner.dir), [sparseTree.path], '池内恰一条稀疏条目')
+  const pooledSparseMeta = JSON.parse(fs.readFileSync(path.join(sparseOwner.dir, '.agentdeck-worktrees', '.metadata', 'task_pools_c1.json'), 'utf8'))
+  assert.deepEqual(pooledSparseMeta.sparseDirs, ['client/Assets/GameMain'], '池条目元数据记录稀疏范围')
+  // ⑤a2 范围未知的稀疏树拒绝入池（一期护栏保留为兜底）：剥掉元数据 sparseDirs 再归还。
+  // 独立仓库夹具——同仓第二棵树会命中池的异范围复用（正是 ⑤e 的语义），不构成本案
+  const unknownOwner = makeRepo('pool-unknown')
+  const unknownTree = await createWorktree(unknownOwner.dir, 'task_pools_u1', 'main', 'pool_owner_u', undefined, { sparseDirs: ['excel-tool'] })
+  assert.equal(unknownTree.sparse?.status, 'applied', '⑤a2 前置：稀疏树建成')
+  const unknownMetaFile = path.join(unknownOwner.dir, '.agentdeck-worktrees', '.metadata', 'task_pools_u1.json')
+  const unknownMeta = JSON.parse(fs.readFileSync(unknownMetaFile, 'utf8'))
+  delete unknownMeta.sparseDirs
+  fs.writeFileSync(unknownMetaFile, JSON.stringify(unknownMeta))
+  const unknownRelease = await reclaimWorktree(unknownTree.path, { repool: true, expectedOwnerTaskId: 'pool_owner_u' })
+  assert.notEqual(unknownRelease.status, 'pooled', '范围未知的稀疏树拒绝入池（一期护栏兜底）')
+  assert.ok(!fs.existsSync(unknownTree.path), '范围未知的稀疏树按常规回收移除')
+  assert.deepEqual(worktreePoolEntriesForTest(sparseOwner.dir), [sparseTree.path], '护栏兜底不影响他仓池容量')
+  // ⑤d 同范围秒级复用：基线推进后同范围派单 → 取池换基线，cone 原样生效、新基线文件物化
+  fs.writeFileSync(path.join(sparseOwner.dir, 'client', 'Assets', 'GameMain', 'new-base.txt'), 'advanced baseline\n')
+  sparseOwner.g('add', '.')
+  sparseOwner.g('commit', '-qm', 'advance baseline')
+  const advancedSha = sparseOwner.g('rev-parse', 'main')
+  const reusedSparse = await createWorktree(sparseOwner.dir, 'task_pools_c2', 'main', 'pool_owner_b2', undefined, { sparseDirs: ['client/Assets/GameMain'] })
+  assert.equal(reusedSparse.pooled, true, '同范围稀疏派单取池复用（秒级换基线）')
+  assert.equal(reusedSparse.path, sparseTree.path, '复用同一目录')
+  assert.equal(reusedSparse.metadata.baseSha, advancedSha, '复用换到新基线')
+  assert.equal(reusedSparse.sparse?.status, 'applied', '复用结果带 applied 观测面')
+  assert.deepEqual(reusedSparse.metadata.sparseDirs, ['client/Assets/GameMain'], '复用元数据记录生效范围')
+  const reuseList = listTree(reusedSparse.path)
+  assert.ok(hasAll(reuseList, ['client/', 'client/Assets/', 'client/Assets/GameMain/', 'client/Assets/GameMain/a.txt', 'client/Assets/GameMain/new-base.txt', 'root.txt']), `同范围复用按新基线物化：${JSON.stringify(reuseList)}`)
+  assert.ok(hasNone(reuseList, ['docs/', 'server/', 'excel-tool/']), '复用不扩 cone')
+  assert.equal(sparseOwner.g('-C', reusedSparse.path, 'status', '--porcelain'), '', '复用后 status 自洽')
+  // ⑤e 异范围重设：归还后换范围派单 → cone 重设 + 增量物化（新范围进、旧范围退）
+  const reRelease = await reclaimWorktree(reusedSparse.path, { repool: true, expectedOwnerTaskId: 'pool_owner_b2' })
+  assert.equal(reRelease.status, 'pooled', '⑤e 前置：复用树再次入池')
+  const switchedRange = await createWorktree(sparseOwner.dir, 'task_pools_c3', 'main', 'pool_owner_c3', undefined, { sparseDirs: ['docs', 'excel-tool'] })
+  assert.equal(switchedRange.pooled, true, '异范围稀疏派单取池复用（重设+增量物化）')
+  assert.equal(switchedRange.path, sparseTree.path, '仍是同一棵树')
+  assert.deepEqual(switchedRange.sparse?.dirs, ['docs', 'excel-tool'], '结果观测面带新范围')
+  const switchList = listTree(switchedRange.path)
+  assert.ok(hasAll(switchList, ['docs/', 'docs/d.txt', 'excel-tool/', 'excel-tool/b.txt', 'root.txt']), `异范围重设物化新范围：${JSON.stringify(switchList)}`)
+  assert.ok(hasNone(switchList, ['client/', 'server/']), '旧范围目录已随重设退场')
+  assert.equal(sparseOwner.g('-C', switchedRange.path, 'status', '--porcelain'), '', '重设后 status 自洽')
+  clearWorktreePool()
+  console.log('  OK ⑤a/a2/d/e 池化范围矩阵：范围在案入池+范围未知兜底+同范围秒级复用+异范围重设增量物化')
+  // ⑤b 复用侧逐出：池条目带稀疏配置但范围未知（外部遗留/异常路径入池形态）→ 复用时逐出，
+  //    回落全量 add——一期护栏保留为兜底
   const legacyOwner = makeRepo('pool-legacy')
   const pooledFull = await createWorktree(legacyOwner.dir, 'task_pool_c1', 'main', 'pool_owner_b')
   const repooled = await reclaimWorktree(pooledFull.path, { repool: true, expectedOwnerTaskId: 'pool_owner_b' })
   assert.equal(repooled.status, 'pooled', '⑤b 前置：全量树照常入池')
   legacyOwner.g('-C', pooledFull.path, 'sparse-checkout', 'set', '--cone', '--', 'client')
   const afterLegacy = await createWorktree(legacyOwner.dir, 'task_pool_c2', 'main', 'pool_owner_c')
-  assert.ok(afterLegacy && afterLegacy.pooled !== true, '带稀疏配置的池条目不被复用（回落全量 add 新树）')
+  assert.ok(afterLegacy && afterLegacy.pooled !== true, '带稀疏配置但范围未知的池条目不被复用（回落全量 add 新树）')
   assert.notEqual(afterLegacy.path, pooledFull.path, '复用走的是全新目录')
   assert.deepEqual(worktreePoolEntriesForTest(legacyOwner.dir), [], '稀疏池条目已逐出')
   assert.ok(!fs.existsSync(pooledFull.path), '逐出条目按归属回收')
   assert.ok(hasAll(listTree(afterLegacy.path), FULL_TREE), '新树全量物化（不带错误范围）')
-  // ⑤c 带稀疏范围的派单不进池复用：池里有空闲全量树也跳过（一期不做范围匹配）
+  // ⑤c 稀疏↔全量双向隔离（永不混用）
+  // ⑤c1 稀疏派单不取全量条目
   const skipOwner = makeRepo('pool-skip')
   const poolable = await createWorktree(skipOwner.dir, 'task_skip_c1', 'main', 'pool_owner_d')
   await reclaimWorktree(poolable.path, { repool: true, expectedOwnerTaskId: 'pool_owner_d' })
-  assert.equal(worktreePoolEntriesForTest(skipOwner.dir).length, 1, '⑤c 前置：池内有一条空闲全量树')
+  assert.equal(worktreePoolEntriesForTest(skipOwner.dir).length, 1, '⑤c1 前置：池内有一条空闲全量树')
   const sparseSkip = await createWorktree(skipOwner.dir, 'task_skip_c2', 'main', 'pool_owner_e', undefined, { sparseDirs: ['excel-tool'] })
-  assert.ok(sparseSkip && sparseSkip.pooled !== true, '稀疏派单不进池复用（宁建新树）')
+  assert.ok(sparseSkip && sparseSkip.pooled !== true, '稀疏派单不取全量条目（宁建新树）')
   assert.equal(sparseSkip.sparse?.status, 'applied', '稀疏新树范围生效')
   assert.ok(hasNone(listTree(sparseSkip.path), ['docs/', 'server/']), '新树按声明范围物化')
+  // ⑤c2 全量派单不取稀疏条目（范围在案也逐出——绝不把部分物化的树当全量交出去）
+  const isoOwner = makeRepo('pool-iso')
+  const isoSparse = await createWorktree(isoOwner.dir, 'task_iso_c1', 'main', 'iso_owner_a', undefined, { sparseDirs: ['client/Assets/GameMain'] })
+  await reclaimWorktree(isoSparse.path, { repool: true, expectedOwnerTaskId: 'iso_owner_a' })
+  assert.equal(worktreePoolEntriesForTest(isoOwner.dir).length, 1, '⑤c2 前置：池内一条稀疏条目（范围在案）')
+  const fullTake = await createWorktree(isoOwner.dir, 'task_iso_c2', 'main', 'iso_owner_b')
+  assert.ok(fullTake && fullTake.pooled !== true, '全量派单不取稀疏条目（逐出回落全量 add）')
+  assert.notEqual(fullTake.path, isoSparse.path, '全量新树走全新目录')
+  assert.deepEqual(worktreePoolEntriesForTest(isoOwner.dir), [], '稀疏条目已逐出')
+  assert.ok(!fs.existsSync(isoSparse.path), '逐出条目按归属回收')
+  assert.ok(hasAll(listTree(fullTake.path), FULL_TREE), '全量新树整树物化')
+  console.log('  OK ⑤b/c 池化隔离：范围未知逐出兜底 + 稀疏↔全量双向不混用')
+  // ⑤f 复用失败回落全量建树（正确性地板）：index.lock 卡死换基线 → 逐出回落新建稀疏树
+  const failOwner = makeRepo('pool-fail')
+  const failSparse = await createWorktree(failOwner.dir, 'task_pf_c1', 'main', 'pf_owner_a', undefined, { sparseDirs: ['client/Assets/GameMain'] })
+  await reclaimWorktree(failSparse.path, { repool: true, expectedOwnerTaskId: 'pf_owner_a' })
+  assert.equal(worktreePoolEntriesForTest(failOwner.dir).length, 1, '⑤f 前置：稀疏条目入池')
+  const failPointer = fs.readFileSync(path.join(failSparse.path, '.git'), 'utf8')
+  const failGitdir = path.resolve(failSparse.path, /^gitdir:\s*(.+?)\s*$/im.exec(failPointer)[1])
+  fs.writeFileSync(path.join(failGitdir, 'index.lock'), '')
+  const failReuse = await createWorktree(failOwner.dir, 'task_pf_c2', 'main', 'pf_owner_b', undefined, { sparseDirs: ['client/Assets/GameMain'] })
+  assert.ok(failReuse && failReuse.pooled !== true, '复用失败回落全量稀疏建树（不走坏条目）')
+  assert.notEqual(failReuse.path, failSparse.path, '回落走全新目录')
+  assert.equal(failReuse.sparse?.status, 'applied', '回落新树范围照常生效')
+  assert.ok(hasAll(listTree(failReuse.path), ['client/', 'client/Assets/', 'client/Assets/GameMain/', 'client/Assets/GameMain/a.txt', 'root.txt']), '回落新树按声明范围物化')
+  assert.ok(hasNone(listTree(failReuse.path), ['docs/', 'server/']), '回落新树不物化范围外目录')
+  assert.deepEqual(worktreePoolEntriesForTest(failOwner.dir), [], '失败条目已逐出（不占容量）')
   clearWorktreePool()
   clearWorktreeFileCountCache()
-  console.log('  OK ⑤ 池化安全：稀疏树不入池、池条目带稀疏配置逐出、稀疏派单不进池')
+  console.log('  OK ⑤f 复用失败回落：正确性地板不变（全量稀疏建树照常生效）')
 
   // ---- ⑥ runner 端到端：注记可见 + 不拒单 + 子单范围正确 ----
   // 集成完成后子树会被回收，物化范围断言必须在树存活窗口内做：worker 收工受测试闸控制，

@@ -1165,9 +1165,11 @@ export function worktreeInPool(repoDir: string, wtDir: string): boolean {
 async function releaseWorktreeToPool(repoDir: string, wtDir: string, branch: string, metadata?: WorktreeInfo | null): Promise<boolean> {
   const root = path.resolve(repoDir)
   return withRepoRepoolLock(root, async () => {
-    // 稀疏树不入池（一期）：换基线会沿用旧稀疏范围物化出新基线的子集，复用即错误范围——
-    // 宁可放弃池化走常规回收（删树，后续派单全量重建），二期再做池条目稀疏范围记录与匹配
-    if (await isSparseWorktree(wtDir)) return false
+    // 稀疏树入池（二期）：生效范围已记录在元数据（sparseDirs）才可入池——池条目记录稀疏
+    // 范围，复用侧按范围匹配（同范围秒级换基线/异范围重设增量物化）；范围未知的稀疏树
+    // （一期遗留/异常路径形态）一律不入池走常规回收（一期护栏保留为兜底）
+    const sparse = await isSparseWorktree(wtDir)
+    if (sparse && !metadata?.sparseDirs?.length) return false
     const pool = poolFor(root)
     if (pool.size >= WORKTREE_POOL_MAX_PER_REPO || pool.has(worktreePathKey(wtDir)) || !metadata?.generationId) return false
     const detached = await runGit(wtDir, ['switch', '--detach'], 30000)
@@ -1183,7 +1185,9 @@ async function releaseWorktreeToPool(repoDir: string, wtDir: string, branch: str
         baseSha: metadata?.baseSha ?? '',
         createdAt: Date.now(),
         cleanupStatus: 'pooled',
-        cleanupReason: 'idle in worktree pool awaiting reuse'
+        cleanupReason: 'idle in worktree pool awaiting reuse',
+        // 稀疏生效范围随条目入池（复用侧范围匹配的唯一依据）
+        ...(sparse && metadata.sparseDirs?.length ? { sparseDirs: metadata.sparseDirs } : {})
       })
     } catch { return false }
     pool.set(worktreePathKey(wtDir), wtDir)
@@ -1211,12 +1215,35 @@ async function retainUnverifiablePoolEntry(
   try { notify?.({ name: path.basename(wtPath), reason: `${reason}（仓库 ${root}）`, ownerTaskId: noteOwnerTaskId }) } catch { /* 出口失败不掩盖主流程 */ }
 }
 
+/** 稀疏范围等价（池条目匹配用）：分隔符与首尾斜杠归一后按集合比较（顺序无关）。
+ *  parseSparseAttr 已在协议层归一，这里兜底同一语义，防元数据手改形态漏匹配。 */
+function sameSparseDirs(a: readonly string[], b: readonly string[]): boolean {
+  const key = (dirs: readonly string[]) => [...dirs]
+    .map((d) => d.replace(/\\/g, '/').replace(/^\/+|\/+$/g, ''))
+    .filter(Boolean)
+    .sort()
+    .join('\n')
+  return key(a) === key(b)
+}
+
+/** 池条目当前 cone 清单（`sparse-checkout list`，cone 模式逐目录一行）；读取失败返回 null
+ *  ——调用方按「实际 cone 未知」处理（重设到请求范围）。 */
+async function sparseCheckoutList(wtPath: string): Promise<string[] | null> {
+  const list = await runGit(wtPath, ['sparse-checkout', 'list'], 15000)
+  if (!list.ok) return null
+  return list.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
+}
+
 /** 从池里取一棵复用：clean -ffdx（保留系统目录）→ switch -c <新分支> <基线>（只重写差异文件）
  *  → status 自洽核验（脏则 reset --hard 兜底一次）。任何一步失败都逐出该条目并返回 null，
  *  调用方回落全量 worktree add——池永远是加速捷径而非正确性依赖，复用失败不改变派单语义。
  *  switch/reset 沿用建树的规模自适应超时与进程树击杀通道（病态大差异下同样受控）。
  *  代际校验失败的条目走 retainUnverifiablePoolEntry 留痕后返回 null，不参与复用。
- *  onPoolMiss（归池可观测性）：池空/条目逐出都带具名原因回传，供调用方落时间线。 */
+ *  onPoolMiss（归池可观测性）：池空/条目逐出都带具名原因回传，供调用方落时间线。
+ *  稀疏感知（二期）：requestedSparseDirs 声明本单范围——同范围条目秒级 switch -c 换基线
+ *  （cone 原样生效）；范围漂移/异范围条目换基线后 `sparse-checkout set` 重设并增量物化
+ *  （秒-分钟级）；稀疏↔全量永不混用（全量条目不交稀疏单、稀疏条目不交全量单，范围未知
+ *  的稀疏条目按一期护栏逐出）。 */
 async function acquirePooledWorktree(
   repoDir: string,
   name: string,
@@ -1225,9 +1252,11 @@ async function acquirePooledWorktree(
   ownerTaskId: string,
   timeoutMs: number,
   notifyUnverifiable?: (failure: { name: string; reason: string; ownerTaskId?: string }) => void,
-  onPoolMiss?: (reason: string) => void
+  onPoolMiss?: (reason: string) => void,
+  requestedSparseDirs?: readonly string[]
 ): Promise<WorktreeCreateResult | null> {
   const root = path.resolve(repoDir)
+  const sparseRequest = !!requestedSparseDirs?.length
   const pool = worktreePoolByRepo.get(worktreePathKey(root))
   if (!pool || !pool.size) {
     onPoolMiss?.('池内无空闲树')
@@ -1256,9 +1285,21 @@ async function acquirePooledWorktree(
         if (deleteRequestedBranch) await deleteBranchWithRetry(root, branch)
       }
       if (!(await isGitRepo(wtPath))) { await evict(); misses.push(`${path.basename(wtPath)} 非 Git 仓库`); return null }
-      // 带稀疏配置的池条目（外部遗留/异常路径入池）一律逐出回落全量 add：本单需要的物化
-      // 范围未知，绝不沿用旧稀疏范围——宁可整树回收重建，不复用出错误范围
-      if (await isSparseWorktree(wtPath)) { await evict(); misses.push(`${path.basename(wtPath)} 带稀疏配置（稀疏↔全量不混用）`); return null }
+      // 稀疏感知匹配：稀疏↔全量永不混用（一期双侧护栏保留为兜底——范围未知的稀疏条目
+      // 无论请求形态都逐出，绝不沿用未知范围物化）
+      const entrySparse = await isSparseWorktree(wtPath)
+      const entryDirs = poolMetadata?.sparseDirs?.length ? poolMetadata.sparseDirs : undefined
+      if (!sparseRequest) {
+        if (entrySparse) {
+          await evict()
+          misses.push(`${path.basename(wtPath)} 带稀疏配置（${entryDirs ? `范围 ${entryDirs.join('、')}` : '范围未知'}，本单全量——稀疏↔全量不混用）`)
+          return null
+        }
+      } else if (!entrySparse || !entryDirs) {
+        await evict()
+        misses.push(`${path.basename(wtPath)} ${entrySparse ? '稀疏范围未记录' : '为全量树'}，本单声明稀疏（稀疏↔全量不混用）`)
+        return null
+      }
       // 项5：清理豁免只保托管资产（managedAssetPathspecExcludes）——上一任务的
       // .agentdeck-reports 内容随 clean -x 离场，不随树泄入新子单
       const cleaned = await runGit(wtPath, ['clean', '-ffd', '-x', '--', ...managedAssetPathspecExcludes()], 60000)
@@ -1271,6 +1312,15 @@ async function acquirePooledWorktree(
       } catch { /* 非阻塞：clean 已兜底带走旧内容 */ }
       const switched = await runGit(wtPath, [...checkoutWorkersArgs(), 'switch', '-c', branch, baseSha], timeoutMs, undefined, true)
       if (!switched.ok) { await evict(); misses.push(`${path.basename(wtPath)} 换基线失败`); return null }
+      // 稀疏条目：换基线后 cone 对表请求范围——异范围复用/范围外漂移都在此重设
+      // （sparse-checkout set 语义是整体替换+增量物化：只写新增目录、只删移除目录）
+      if (sparseRequest) {
+        const current = await sparseCheckoutList(wtPath)
+        if (!current || !sameSparseDirs(current, requestedSparseDirs!)) {
+          const set = await runGit(wtPath, ['sparse-checkout', 'set', '--cone', '--', ...requestedSparseDirs!], 60000)
+          if (!set.ok) { await evict(); misses.push(`${path.basename(wtPath)} 稀疏范围重设失败`); return null }
+        }
+      }
       let settled = await runGit(wtPath, ['status', '--porcelain'], 30000)
       if (!settled.ok || settled.stdout.trim()) {
         await runGit(wtPath, [...checkoutWorkersArgs(), 'reset', '--hard', baseSha], timeoutMs, undefined, true)
@@ -1285,10 +1335,18 @@ async function acquirePooledWorktree(
         branch,
         baseSha,
         createdAt: Date.now(),
-        cleanupStatus: 'active'
+        cleanupStatus: 'active',
+        // 稀疏复用的生效范围落进新任务的元数据（§7.2 扩圈提示/回放并集据此发射）
+        ...(sparseRequest ? { sparseDirs: [...requestedSparseDirs!] } : {})
       }
       try { writeMetadata(metadata) } catch { await evict(true); misses.push(`${path.basename(wtPath)} 元数据写入失败`); return null }
-      return { path: wtPath, branch, metadata, pooled: true }
+      return {
+        path: wtPath,
+        branch,
+        metadata,
+        pooled: true,
+        ...(sparseRequest ? { sparse: { status: 'applied' as const, dirs: [...requestedSparseDirs!] } } : {})
+      }
     })
     if (reused) return reused
   }
@@ -1422,12 +1480,16 @@ async function createWorktreeUnlocked(
     }
   }
   // 稀疏检出一批（§6.2 三步）：目录校验失败即整单回落全量——照常走下方池化+全量 add 原路径，
-  // 只多一条结果观测面；校验通过则不进池（一期无池化稀疏范围匹配，宁建新树不复用旧范围），
-  // 走 add --no-checkout → set --cone → checkout，与全量 add 同超时档位、同残肢清理通道
+  // 只多一条结果观测面；校验通过则先试池（二期稀疏范围感知匹配：同范围条目秒级换基线/
+  // 异范围重设增量物化/稀疏↔全量不混用），池未命中才走 add --no-checkout → set --cone →
+  // checkout 新建，与全量 add 同超时档位、同残肢清理通道
   let sparseOutcome: WorktreeSparseOutcome | undefined
   if (options.sparseDirs?.length) {
     const check = await validateSparseDirs(repoDir, baseSha, options.sparseDirs)
     if (check.ok) {
+      const pooledSparse = await acquirePooledWorktree(root, name, branch, baseSha, ownerTaskId, planned.timeoutMs, options.onCleanupResidue, options.onPoolMiss, check.dirs)
+      // 池复用结果自带 sparse=applied 与元数据 sparseDirs（acquire 写入），回灌/回放链路无差别
+      if (pooledSparse) return pooledSparse
       const runSparseAdd = () => runGit(repoDir, [...checkoutWorkersArgs(), 'worktree', 'add', '--no-checkout', '-b', branch, wtPath, ...(baseBranch ? [baseBranch] : [])], planned.timeoutMs, undefined, true)
       const sparseAdded = options.runAddForTest ? await options.runAddForTest(runSparseAdd) : await runSparseAdd()
       if (sparseAdded.timedOut || !sparseAdded.ok) {
