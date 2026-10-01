@@ -138,7 +138,7 @@ const { HotUpdater } = await loadTs('src/main/hot/updater.ts')
 const { resolveHotState } = await loadTs('src/main/hot/resolve.ts')
 const { channelRoot, clearPointer, pointerFilePath, readPointer, writePointerAtomic } = await loadTs('src/main/hot/pointer.ts')
 const { compareSemver } = await loadTs('src/main/hot/verifier.ts')
-const { createZipStore } = await loadTs('src/main/hot/zip.ts')
+const { createZipStore, extractZipStore } = await loadTs('src/main/hot/zip.ts')
 const { canonicalJson } = await loadTs('src/main/hot/canonical.ts')
 
 // ---------- 本地 feed 组装 ----------
@@ -202,11 +202,12 @@ const signManifest = (payload) =>
  * tamper：签名之后改 manifest.version（伪造/被改 → 验签必不过）。
  */
 function publish(channel, version, opts = {}) {
-  const { minMainVersion = SHELL, minShellVersion = SHELL, corrupt = null, tamper = false } = opts
+  const { minMainVersion = SHELL, minShellVersion = SHELL, corrupt = null, tamper = false, slipPath = null } = opts
   const treeDir = writeTree(path.join(treesDir, channel, version), versionFiles(channel, version))
   const entries = walkTree(treeDir).map(({ rel, abs }) => ({ path: rel, data: fs.readFileSync(abs) }))
-  const zip = Buffer.from(createZipStore(entries))
   const files = entries.map((e) => ({ path: e.path, sha256: sha256(e.data), size: e.data.length }))
+  if (slipPath) entries.push({ path: slipPath, data: Buffer.from('zip-slip probe\n') })
+  const zip = Buffer.from(createZipStore(entries))
   let served = zip
   let declared = zip
   if (corrupt === 'sha') served = flipFirstEntryByte(zip)
@@ -616,6 +617,46 @@ async function main() {
   const appliedH3 = await h3.updater.apply('renderer')
   eq(appliedH3.ok, false, `H3 apply 拦下验签不过的 manifest（error=${show(appliedH3.error)}）`)
   assertUntouched('H3', { effBefore: effBeforeH, pointers: pointersH })
+
+  console.log('\n[scenario] H4 zip-slip 产物回退（反斜杠逃逸 / 正斜杠 .. 段 / 盘符路径 / 正常条目）')
+  const slipDest = path.join(work, 'slip-dest')
+  const slipCases = [
+    [['..', 'escaped-back.txt'].join('\\'), 'escaped-back.txt', 'win32 反斜杠逃逸形态'],
+    ['../escaped-fwd.txt', 'escaped-fwd.txt', '正斜杠 .. 段'],
+    ['C:/escaped-drive.txt', 'escaped-drive.txt', '盘符绝对路径']
+  ]
+  for (const [slipRel, escapedName, label] of slipCases) {
+    fs.rmSync(slipDest, { recursive: true, force: true })
+    fs.mkdirSync(slipDest, { recursive: true })
+    const slipZipPath = path.join(work, `slip-${escapedName}.zip`)
+    fs.writeFileSync(slipZipPath, Buffer.from(createZipStore([{ path: slipRel, data: Buffer.from('x\n') }])))
+    const slip = await attempt(() => extractZipStore(slipZipPath, slipDest))
+    ok(!!slip.threw && slip.threw.includes('unsafe entry path'),
+      `H4 直连解压拒绝${label}（实际 ${show(slip.threw ?? JSON.stringify(slip.value))}）`)
+    eq(fs.existsSync(path.join(work, escapedName)), false, `H4 ${label} 无文件落到 destDir 之外`)
+  }
+  fs.rmSync(slipDest, { recursive: true, force: true })
+  fs.mkdirSync(slipDest, { recursive: true })
+  const benignZipPath = path.join(work, 'benign.zip')
+  fs.writeFileSync(benignZipPath, Buffer.from(createZipStore([
+    { path: 'out/renderer/index.html', data: Buffer.from('<html></html>') },
+    { path: 'out/renderer/assets/app.js', data: Buffer.from('console.log(1)') }
+  ])))
+  const benign = await attempt(() => extractZipStore(benignZipPath, slipDest))
+  eq(benign.value?.length, 2, `H4 对照：正常正斜杠条目照常解出（实际 ${show(benign.threw ?? benign.value)}）`)
+  ok(fs.existsSync(path.join(slipDest, 'out', 'renderer', 'index.html')), 'H4 对照：正常条目内容真实落位')
+
+  const zipSlipVersion = `${SHELL}-hot.37`
+  publish('renderer', zipSlipVersion, { slipPath: ['..', '..', '..', 'escaped-e2e.txt'].join('\\') })
+  const zipSlipRuntime = restart()
+  const zipSlipState = await zipSlipRuntime.updater.check()
+  eq(zipSlipState.available?.renderer, zipSlipVersion, 'H4 manifest 合法且 sha 门可过 → check 仍提示')
+  const zipSlipApplied = await zipSlipRuntime.updater.apply('renderer')
+  eq(zipSlipApplied.ok, false, `H4 apply 拦下 zip-slip 产物（error=${show(zipSlipApplied.error)}）`)
+  ok(!!zipSlipApplied.error && zipSlipApplied.error.includes('unsafe entry path'),
+    `H4 失败原因指向解压器路径逃逸防护（error=${show(zipSlipApplied.error)}）`)
+  eq(fs.existsSync(path.join(userData, 'escaped-e2e.txt')), false, 'H4 逃逸文件未落 userData（hot-renderer 之外）')
+  assertUntouched('H4', { effBefore: effBeforeH, pointers: pointersH, notInstalled: { channel: 'renderer', name: zipSlipVersion } })
 
   // —— 收尾：整场结束后 L1 仍生效
   console.log('\n[scenario] Z 收尾对账（L1 全程保持生效）')
