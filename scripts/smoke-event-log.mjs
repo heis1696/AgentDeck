@@ -240,6 +240,77 @@ if (noNewlineLog.read().length !== 1 || noNewlineLog.append({ ts: 2, kind: 'stat
   if (new EventLog(extFile).read().map((event) => event.seq).join(',') !== '1,2,3') throw new Error('fresh instance replay diverged after external append')
 }
 
+for (const replacementMode of ['same-size', 'larger']) {
+  const replacementFile = path.join(tmp, `replacement-${replacementMode}.jsonl`)
+  const writer = new EventLog(replacementFile)
+  writer.append({ ts: 1, kind: 'status', text: 'old', eventId: 'old-1' })
+  writer.append({ ts: 2, kind: 'status', text: 'old', eventId: 'old-2' })
+  const reader = new EventLog(replacementFile)
+  assert.deepEqual(reader.read().map((event) => event.eventId), ['old-1', 'old-2'])
+  const originalSize = fs.statSync(replacementFile).size
+  assert.deepEqual(writer.truncate(0), [])
+  writer.append({ ts: 1, kind: 'status', text: 'new', eventId: 'new-1' })
+  writer.append({ ts: 2, kind: 'status', text: 'new', eventId: 'new-2' })
+  const expectedIds = ['new-1', 'new-2']
+  if (replacementMode === 'larger') {
+    writer.append({ ts: 3, kind: 'status', text: 'new', eventId: 'new-3' })
+    expectedIds.push('new-3')
+    assert.ok(fs.statSync(replacementFile).size > originalSize)
+  } else {
+    assert.equal(fs.statSync(replacementFile).size, originalSize)
+  }
+  assert.deepEqual(reader.read().map((event) => event.eventId), expectedIds,
+    `${replacementMode}: a replaced log must invalidate the cached prefix`)
+  assert.equal(reader.append({ ts: 4, kind: 'status', text: 'restored', eventId: 'old-1' })?.seq,
+    expectedIds.length + 1, `${replacementMode}: removed identities must not suppress new appends`)
+  assert.deepEqual(JSON.parse(JSON.stringify(reader.read())), JSON.parse(JSON.stringify(new EventLog(replacementFile).read())),
+    `${replacementMode}: cached replay must match the replaced file`)
+}
+
+{
+  const replacementFile = path.join(tmp, 'replacement-during-open.jsonl')
+  const writer = new EventLog(replacementFile)
+  writer.append({ ts: 1, kind: 'status', text: 'old', eventId: 'old-1' })
+  const reader = new EventLog(replacementFile)
+  assert.equal(reader.read()[0]?.eventId, 'old-1')
+  writer.append({ ts: 2, kind: 'status', text: 'old', eventId: 'old-2' })
+  const originalOpen = fs.openSync
+  let replacedWhileOpening = false
+  fs.openSync = (file, ...args) => {
+    if (file === replacementFile && args[0] === 'r' && !replacedWhileOpening) {
+      replacedWhileOpening = true
+      assert.deepEqual(writer.truncate(0), [])
+      writer.appendBatch([
+        { ts: 1, kind: 'status', text: 'new', eventId: 'new-1' },
+        { ts: 2, kind: 'status', text: 'new', eventId: 'new-2' }
+      ])
+    }
+    return originalOpen(file, ...args)
+  }
+  try {
+    assert.deepEqual(reader.read().map((event) => event.eventId), ['new-1', 'new-2'],
+      'a replacement between stat and open must not mix old and new histories')
+    assert.equal(replacedWhileOpening, true)
+  } finally {
+    fs.openSync = originalOpen
+  }
+}
+
+{
+  const dataDir = path.join(tmp, 'replacement-store')
+  const writerStore = new TaskStore(dataDir)
+  const replacementTask = writerStore.create({ title: 'replacement', prompt: 'test', workdir: '', backend: 'fake' })
+  writerStore.appendEvent(replacementTask.id, { ts: 1, kind: 'status', text: 'old', eventId: 'old-1' })
+  const readerStore = new TaskStore(dataDir)
+  assert.equal(readerStore.readEvents(replacementTask.id)[0]?.text, 'old')
+  assert.equal(writerStore.truncateEvents(replacementTask.id, 0), true)
+  writerStore.appendEvent(replacementTask.id, { ts: 1, kind: 'status', text: 'new', eventId: 'new-1' })
+  assert.deepEqual(readerStore.readEvents(replacementTask.id).map((event) => event.eventId), ['new-1'],
+    'a second TaskStore must observe replaced events without restarting')
+  writerStore.flush()
+  readerStore.flush()
+}
+
 // Trailing partial line: a torn fragment without its newline must not leak
 // into reads, and a later append must reconcile it instead of concatenating.
 {

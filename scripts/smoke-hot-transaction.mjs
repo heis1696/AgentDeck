@@ -42,6 +42,14 @@ const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex'
 const version = (n) => `${shell}-hot.${n}`
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
+async function waitUntil(predicate, message) {
+  const deadline = Date.now() + 10_000
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(message)
+    await sleep(10)
+  }
+}
+
 async function loadTs(entry) {
   const outfile = path.join(work, `${path.basename(entry, '.ts')}-${Math.random().toString(36).slice(2)}.cjs`)
   await build({ entryPoints: [path.join(root, entry)], outfile, bundle: true, platform: 'node', format: 'cjs', target: 'node18', logLevel: 'silent' })
@@ -53,6 +61,8 @@ const { resolveHotState } = await loadTs('src/main/hot/resolve.ts')
 const { readPointer } = await loadTs('src/main/hot/pointer.ts')
 const { createZipStore } = await loadTs('src/main/hot/zip.ts')
 const { canonicalJson } = await loadTs('src/main/hot/canonical.ts')
+const { TaskRunner } = await loadTs('src/main/runner.ts')
+const { TaskStore } = await loadTs('src/main/store.ts')
 
 function writeTree(channel, release, payload) {
   const tree = path.join(work, 'trees', channel, release)
@@ -131,7 +141,7 @@ function makeUpdater(userData, idle = true) {
   const states = []
   const updater = new HotUpdater({
     getWindow: () => ({ loadFile: (file) => calls.loadFile.push(file), webContents: { send: () => {} } }),
-    isMainIdle: () => currentIdle,
+    isMainIdle: () => typeof currentIdle === 'function' ? currentIdle() : currentIdle,
     relaunchForUpdate: (release) => calls.relaunch.push(release),
     settings: () => ({ updateFeedUrl: feedBase }),
     getUserDataDir: () => userData,
@@ -315,6 +325,66 @@ async function scenarioDirectOldVersion() {
   }
 }
 
+async function scenarioCompletedSessionCanUpdate() {
+  console.log('\n[scenario] completed and followed-up tasks do not block an update')
+  const userData = setUserData('completed-session')
+  const store = new TaskStore(userData)
+  let backendEvents
+  let backendTurn
+  let sends = 0
+  const session = {
+    sessionId: 'hot-update-completed-session',
+    turnScoped: true,
+    async send(content, turn) { sends++; backendTurn = turn },
+    async stop() {},
+    async close() {}
+  }
+  const backend = {
+    id: 'fake', label: 'fake',
+    async start({ events, turn }) { backendEvents = events; backendTurn = turn; return session }
+  }
+  const runner = new TaskRunner(store, new Map([[backend.id, backend]]),
+    () => ({ concurrency: 1, mode: 'yolo', notify: false }))
+  const context = makeUpdater(userData, () => runner.isIdle())
+  const payloadVersion = version(40)
+  const rendererVersion = version(41)
+  publish('payload', payloadVersion)
+  publish('renderer', rendererVersion, { minMainVersion: payloadVersion })
+  try {
+    equal(runner.isIdle(), true, 'a fresh runner allows updates')
+    const task = store.create({ title: 'update regression', prompt: 'complete', workdir: '', backend: backend.id })
+    runner.enqueue(task)
+    await waitUntil(() => runner.sessionCount() === 1, 'task session did not start')
+    equal(runner.isIdle(), false, 'an executing task still blocks payload activation')
+    equal((await context.updater.apply('payload')).ok, true, 'running task permits downloading and staging')
+    equal(pointerVersion(userData, 'payload'), null, 'running task leaves the payload pointer untouched')
+    equal(context.calls.relaunch.length, 0, 'running task is not interrupted by an update')
+
+    backendEvents.onTurnEnd({ ok: true, response: 'completed task' }, backendTurn)
+    await waitUntil(() => store.get(task.id)?.status === 'done'
+      && runner.launchHandles.size === 0 && runner.eventBatchers.size === 0, 'task did not finish draining')
+    equal(runner.sessionCount(), 1, 'completed session remains available for follow-up')
+    equal(runner.isIdle(), true, 'a completed cached session must not block updates')
+
+    const followUp = runner.followUp(task.id, 'follow up')
+    await waitUntil(() => sends === 1, 'cached session did not accept the follow-up')
+    equal(runner.isIdle(), false, 'a follow-up using the cached session blocks updates while running')
+    backendEvents.onTurnEnd({ ok: true, response: 'completed follow-up' }, backendTurn)
+    equal((await followUp).ok, true, 'cached session follow-up still succeeds')
+    equal(runner.sessionCount(), 1, 'follow-up completion retains the reusable session')
+    equal(runner.isIdle(), true, 'a finished follow-up restores update eligibility')
+
+    equal((await context.updater.applyAll()).ok, true, 'updating after completed work succeeds without restarting first')
+    equal(pointerVersion(userData, 'payload'), payloadVersion, 'completed work allows activating the staged payload')
+    equal(pointerVersion(userData, 'renderer'), rendererVersion, 'completed work allows the dependent renderer update')
+    equal(context.calls.relaunch.length, 1, 'completed work permits exactly one update relaunch')
+  } finally {
+    context.updater.stop()
+    await runner.shutdown()
+    store.flush()
+  }
+}
+
 async function scenarioElectronRestart() {
   console.log('\n[scenario] real HotUpdater waits for delayed L2 before Electron restarts')
   const electron = createRequire(import.meta.url)('electron')
@@ -331,8 +401,9 @@ async function scenarioElectronRestart() {
   publish('renderer', l2, { minMainVersion: l1 })
   rendererDelayMs = 800
   await build({
-    entryPoints: [path.join(root, 'src/main/hot/updater.ts'), path.join(root, 'src/main/hot/resolve.ts')],
-    outdir: electronDir, outExtension: { '.js': '.cjs' }, bundle: true, platform: 'node',
+    entryPoints: [path.join(root, 'src/main/hot/updater.ts'), path.join(root, 'src/main/hot/resolve.ts'),
+      path.join(root, 'src/main/runner.ts'), path.join(root, 'src/main/store.ts')],
+    outdir: electronDir, entryNames: '[name]', outExtension: { '.js': '.cjs' }, bundle: true, platform: 'node',
     format: 'cjs', target: 'node18', logLevel: 'silent'
   })
   const harness = path.join(electronDir, 'main.cjs')
@@ -341,20 +412,62 @@ const { app } = require('electron')
 const fs = require('node:fs')
 const { HotUpdater } = require('./updater.cjs')
 const { resolveHotState } = require('./resolve.cjs')
+const { TaskRunner } = require('./runner.cjs')
+const { TaskStore } = require('./store.cjs')
 const dataDir = process.env.AGENTDECK_TRANSACTION_USER_DATA
 const shell = process.env.AGENTDECK_TRANSACTION_SHELL
 const restarted = process.argv.includes('--hot-transaction-restarted')
+let runner
+let store
+let quitReady = false
+let quitInProgress = false
+let stoppedSessions = 0
+let closedSessions = 0
 const log = (event, fields = {}) => fs.appendFileSync(process.env.AGENTDECK_TRANSACTION_LOG,
   JSON.stringify({ event, pid: process.pid, restarted, ...fields }) + '\\n')
 app.disableHardwareAcceleration()
 app.setPath('userData', dataDir)
 const timeout = setTimeout(() => { log('timeout'); app.exit(1) }, 15000)
 app.on('will-quit', () => { clearTimeout(timeout); log('quit') })
+app.on('before-quit', (event) => {
+  if (quitReady) return
+  event.preventDefault()
+  if (quitInProgress) return
+  quitInProgress = true
+  void (async () => {
+    await runner?.shutdown()
+    store?.flush()
+    log('runner-stopped', { sessions: runner?.sessionCount(), stoppedSessions, closedSessions })
+  })().finally(() => { quitReady = true; app.quit() })
+})
 app.whenReady().then(async () => {
   log('boot')
+  store = new TaskStore(dataDir)
+  const backend = {
+    id: 'fake', label: 'fake',
+    async start({ events, turn }) {
+      setTimeout(() => events.onTurnEnd({ ok: true, response: 'finished before update' }, turn), 10)
+      return {
+        sessionId: 'electron-update-completed-session', turnScoped: true,
+        async send() {},
+        async stop() { stoppedSessions++ },
+        async close() { closedSessions++ }
+      }
+    }
+  }
+  runner = new TaskRunner(store, new Map([[backend.id, backend]]),
+    () => ({ concurrency: 1, mode: 'yolo', notify: false }))
+  if (!restarted) {
+    const task = store.create({ title: 'finished before update', prompt: 'finish', workdir: '', backend: backend.id })
+    runner.enqueue(task)
+    while (store.get(task.id)?.status !== 'done' || runner.launchHandles.size || runner.eventBatchers.size) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    log('completed-task', { status: store.get(task.id)?.status, sessions: runner.sessionCount(), idle: runner.isIdle() })
+  }
   const updater = new HotUpdater({
     getWindow: () => ({ loadFile: () => log('load-renderer'), webContents: { send: () => {} } }),
-    isMainIdle: () => true,
+    isMainIdle: () => runner.isIdle(),
     relaunchForUpdate: (version) => {
       const hot = resolveHotState(dataDir, shell)
       log('relaunch-requested', { version, payload: hot.payload?.version, renderer: hot.rendererVersion })
@@ -367,7 +480,7 @@ app.whenReady().then(async () => {
     getAppDir: () => null
   })
   const state = await updater.check()
-  log('checked', { state })
+  log('checked', { state, taskStatus: store.list().find((task) => task.title === 'finished before update')?.status })
   if (restarted) { app.quit(); return }
   const result = await updater.applyAll()
   log('applied', { result })
@@ -402,14 +515,24 @@ app.whenReady().then(async () => {
   const events = readEvents()
   const boots = events.filter((event) => event.event === 'boot')
   const launches = events.filter((event) => event.event === 'relaunch-requested')
+  const completed = events.find((event) => event.event === 'completed-task')
+  const shutdown = events.find((event) => !event.restarted && event.event === 'runner-stopped')
   const after = events.find((event) => event.restarted && event.event === 'checked')?.state
   equal(launches.length, 1, 'real updater requests exactly one relaunch')
+  equal(completed?.status, 'done', 'real task finishes before applying the update')
+  equal(completed?.sessions, 1, 'real completed task retains its cached session before updating')
+  equal(completed?.idle, true, 'real update gate allows a completed cached session')
+  equal(shutdown?.sessions, 0, 'update shutdown releases cached runner sessions')
+  equal(shutdown?.stoppedSessions, 1, 'update shutdown stops the cached backend session once')
+  equal(shutdown?.closedSessions, 1, 'update shutdown closes the cached backend session once')
   equal(launches[0]?.payload, l1, 'L1 is committed before requesting relaunch')
   equal(launches[0]?.renderer, l2, 'delayed L2 is committed before requesting relaunch')
   equal(events.some((event) => event.event === 'load-renderer'), false, 'old main never loads the dependent L2')
   equal(boots.length, 2, 'Electron produces exactly two headless boots')
   ok(boots[0]?.pid !== boots[1]?.pid, 'relaunch uses a new process')
   equal(after?.currentVersion, l1, 'restarted updater resolves the new L1')
+  equal(events.find((event) => event.restarted && event.event === 'checked')?.taskStatus, 'done',
+    'completed task history remains durable after the update relaunch')
   equal(after?.activeRendererVersion, l2, 'restarted updater resolves the new L2')
   equal(after && Object.keys(after.available ?? {}).length, 0, 'restarted updater does not repeat the update prompt')
   equal(events.filter((event) => event.event === 'quit').length, 2, 'both isolated Electron processes finish')
@@ -447,6 +570,7 @@ try {
   await scenarioFeedRollbackAfterCheck()
   await scenarioDirectOldVersion()
   await scenarioPointerChangesDuringDownload()
+  await scenarioCompletedSessionCanUpdate()
   await scenarioElectronRestart()
 } finally {
   await new Promise((resolve) => server?.close(resolve))

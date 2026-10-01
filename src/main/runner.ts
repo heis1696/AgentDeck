@@ -2888,7 +2888,7 @@ export class TaskRunner {
 
   /** 空闲判定（热更 L1 apply 门控，设计 §7.4）：无在跑会话、无启动竞态句柄、store 无 running 任务。 */
   isIdle(): boolean {
-    return this.sessions.size === 0 && this.launchHandles.size === 0 && this.eventBatchers.size === 0
+    return this.launchHandles.size === 0 && this.eventBatchers.size === 0
       && this.store.list().every((task) => task.status !== 'running')
   }
 

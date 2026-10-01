@@ -389,7 +389,7 @@ dist/feed/
 
 ### 7.4 空闲门控接口（新增）
 
-`src/main/runner.ts` 增加公共方法 `isIdle(): boolean`，实现 = `this.sessions.size === 0 && this.launchHandles.size === 0 && this.store.list().every(t => t.status !== 'running')`（三条件分别覆盖在跑会话、启动竞态窗口、store 层僵尸；具体私有名以实现期 runner 现状为准，签名固定）。updater 经 `UpdaterDeps.isMainIdle` 注入（§5.1），index.ts 装配处传 `() => runner.isIdle()` 并叠加 `!automationTick临界区`（步 3 重查语义）。
+`src/main/runner.ts` 的公共方法 `isIdle(): boolean` 判定 = `this.launchHandles.size === 0 && this.eventBatchers.size === 0 && this.store.list().every(task => task.status !== 'running')`，分别覆盖启动/收尾窗口、尚未落盘的回合事件与持久化的运行状态。`sessions` 保留已完成任务的连接以供追问，非空不代表仍有任务执行，不能作为更新门禁；真正退出时由 `runner.shutdown()` 关闭这些缓存会话。updater 经 `UpdaterDeps.isMainIdle` 注入（§5.1），index.ts 装配处传 `() => runner.isIdle()` 并叠加 `!automationTick临界区`（步 3 重查语义）。
 
 ---
 
