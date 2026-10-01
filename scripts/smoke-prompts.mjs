@@ -191,6 +191,11 @@ check(challenge.includes('质疑轮') && challenge.includes('<stance verdict=') 
 const defense = r(p.defensePrompt('', 1, '议题', p.meetingData('- obj_1 [a.ts:1] x'), [], ['Alpha', 'Beta']))
 check(defense.includes('答辩轮') && defense.includes('"decisions"') && defense.includes('"actionItems"') && defense.includes('照抄') && defense.includes('Alpha、Beta'), '答辩轮：纪要 schema + ref 照抄 + owner 候选')
 check(r(p.synthPrompt('', 1, '议题', p.meetingData('（本轮没有反对）'), [], ['Alpha'])).includes('综合轮'), '综合轮')
+const defenseReview = r(p.reviewPrompt('', 1, '议题', p.meetingData('最新答辩'), ['Gamma'], 'defense'))
+const finalReview = r(p.reviewPrompt('', 1, '议题', p.meetingData('最终纪要'), [], 'minutes'))
+check(defenseReview.includes('答辩复核') && defenseReview.includes('解决提议') && defenseReview.includes('其他人无权替你关闭') && defenseReview.includes('Gamma'), '答辩复核：作者确认反对并保留只读调查能力')
+check(finalReview.includes('最终纪要确认') && finalReview.includes('必须重新表态') && finalReview.includes('最终纪要'), '最终确认：针对真实纪要重新表态')
+check(r(p.reportPrompt('', 2, '议题', [], p.meetingData('上一轮未决反对'))).includes('上一轮未决反对'), '后续汇报：注入前轮讨论，不能只重发议题')
 const forced = r(p.forcedSynthesisPrompt('', '会议轮数预算耗尽', p.meetingData('{}'), ['Alpha']))
 check(forced.includes('强制综合') && forced.includes('会议优先') && forced.includes(p.ENVELOPE_SCHEMA) && forced.includes('resolved=false'), '强制综合：补上会议优先与完整纪要 schema')
 check(!forced.includes('<investigate') && forced.includes('不需要表态标记'), '强制综合：不许调查、不要求未消费的表态')
@@ -226,7 +231,7 @@ check(delegate.parseReviews(reviewExample)[0].verdict === 'pass', '审核示例 
 check(delegate.parseReviews('<review of="#单号" verdict="pass|fail" note="x"/>').length === 0, '对照：占位符写法的审核标记确实解析不通过（所以示例必须给实例）')
 
 // 表态：会议每一类发言渲染出的实例必须被 parseStance 认下，且处于最后一行
-for (const [name, text] of [['汇报轮', report], ['质疑轮', challenge], ['答辩轮', defense], ['综合轮', r(p.synthPrompt('', 1, '议题', p.meetingData('x'), [], ['Alpha']))]]) {
+for (const [name, text] of [['汇报轮', report], ['质疑轮', challenge], ['答辩轮', defense], ['答辩复核', defenseReview], ['最终纪要确认', finalReview], ['综合轮', r(p.synthPrompt('', 1, '议题', p.meetingData('x'), [], ['Alpha']))]]) {
   const line = text.trim().split('\n').pop() ?? ''
   const stance = meeting_mod.parseStance(text)
   check(!!stance && line.startsWith('<stance'), `${name}：渲染出的末行表态可被解析（${stance?.verdict ?? 'null'}）`)
