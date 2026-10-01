@@ -5,7 +5,7 @@
 import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnStamp } from './types'
 import { bindTurn } from './types'
 import type { TaskEvent, ToolEditMeta } from '../../shared/types'
-import { isJsonObject, jsonObject, jsonString, runCliJsonl, toolEvent, killProcessTree } from './cli-common'
+import { isJsonObject, jsonObject, jsonString, runCliJsonl, toolEvent, killProcessTree, type CliJsonlRunner } from './cli-common'
 import { parseEditMeta, stringifyToolArgs } from './edit-meta'
 import { resolveCli, probeCli, type ResolvedCli } from './cli-locator'
 import { createOpencodeServerBackend, OpencodeServerClient, OpencodeServerVersionError, OpencodeServerUnavailableError, type FetchLike } from './opencode-server'
@@ -48,7 +48,7 @@ export function createOpencodeBackend(config: OpencodeBackendOptions = {}): Agen
     events: BackendSessionEvents,
     model?: string,
     /** 本会话当前进程句柄落点：stop/close 只杀自己会话的进程，多任务并发不再串杀/漏杀 */
-    onSpawn?: (runner: { kill: () => void | Promise<unknown> }) => void
+    onSpawn?: (runner: Pick<CliJsonlRunner, 'kill'>) => void
   ): Promise<{ sessionId: string; response: string; ok: boolean; error?: string }> => {
     const emit = (e: Omit<TaskEvent, 'seq' | 'ts'>) => events.onEvent({ ...e, ts: Date.now() })
     const resolved = resolveCli('opencode')
@@ -156,7 +156,7 @@ export function createOpencodeBackend(config: OpencodeBackendOptions = {}): Agen
       return p.ok ? { ok: true, detail: `opencode ${p.version}` } : { ok: false, detail: p.error ?? '未安装' }
     },
     async start({ prompt, workdir, events: rawEvents, resumeSessionId, model, turn }) {
-      let own: { kill: () => void } | null = null
+      let own: Pick<CliJsonlRunner, 'kill'> | null = null
       // 一次性 CLI：每回合一个进程；回合身份随进程绑定
       const runTurn = (turnPrompt: string, resumeId?: string, turnStamp?: BackendTurnStamp) =>
         runOnce(turnPrompt, workdir, resumeId, bindTurn(rawEvents, turnStamp), model, (r) => { own = r })
@@ -174,7 +174,8 @@ export function createOpencodeBackend(config: OpencodeBackendOptions = {}): Agen
           await Promise.resolve(own?.kill())
         },
         async close() {
-          await Promise.resolve(own?.kill())
+          const result = await own?.kill()
+          if (result && !result.ok) throw new Error(result.error || 'OpenCode process cleanup failed')
         }
       }
     }

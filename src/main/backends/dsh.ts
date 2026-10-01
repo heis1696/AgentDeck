@@ -9,7 +9,7 @@ import path from 'node:path'
 import os from 'node:os'
 import type { AgentBackend, BackendSession, BackendSessionEvents } from './types'
 import { bindTurn } from './types'
-import { runCliJsonl } from './cli-common'
+import { runCliJsonl, type CliJsonlRunner } from './cli-common'
 import { resolveCli, findOnPath, findSystemNode } from './cli-locator'
 import { findDshAcpBin, startDshAcpSession, AcpBootError } from './dsh-acp'
 
@@ -69,7 +69,7 @@ export function createDshBackend(getPaths: () => { dshPath: string }): AgentBack
     workdir: string,
     events: BackendSessionEvents,
     /** 本会话当前进程句柄落点：stop/close 只杀自己会话的进程，多任务并发不再串杀/漏杀 */
-    onSpawn?: (runner: { kill: () => void | Promise<unknown> }) => void
+    onSpawn?: (runner: Pick<CliJsonlRunner, 'kill'>) => void
   ): Promise<{ response: string; ok: boolean; error?: string }> => {
     // 每次调用现取设置，设置页改路径后无需重启即可生效
     const dsh = findDshBin(getPaths().dshPath || undefined)
@@ -164,7 +164,7 @@ export function createDshBackend(getPaths: () => { dshPath: string }): AgentBack
       }
       // Headless is one process per turn, so one fixed channel is sufficient.
       const events = bindTurn(rawEvents, turn)
-      let own: { kill: () => void } | null = null
+      let own: Pick<CliJsonlRunner, 'kill'> | null = null
       const r = await runOnce(prompt, workdir, events, (runner) => { own = runner })
       if (!r.ok) throw new Error(r.error || 'dsh 回合失败')
       return {
@@ -177,7 +177,8 @@ export function createDshBackend(getPaths: () => { dshPath: string }): AgentBack
           await Promise.resolve(own?.kill())
         },
         async close() {
-          await Promise.resolve(own?.kill())
+          const result = await own?.kill()
+          if (result && !result.ok) throw new Error(result.error || 'DSH process cleanup failed')
         }
       }
     }

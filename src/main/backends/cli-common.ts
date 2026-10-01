@@ -22,35 +22,68 @@ export interface KillProcessResult {
 /** Kill a CLI and every tool process it spawned, returning when the kill
  * request has completed. The bounded wait keeps shutdown observable without
  * hanging forever on a provider that ignores termination. */
+const processTreeKills = new WeakMap<ChildProcess, Promise<KillProcessResult>>()
+
 export function killProcessTree(child: ChildProcess): Promise<KillProcessResult> {
-  return new Promise((resolve) => {
+  const existing = processTreeKills.get(child)
+  if (existing) return existing
+  const pending = new Promise<KillProcessResult>((resolve) => {
     let settled = false
     let timer: NodeJS.Timeout | undefined
+    let killer: ChildProcess | undefined
+    let childClosed = false
+    let killCompleted = true
+    let killError: KillProcessResult | undefined
     const finish = (result: KillProcessResult) => {
       if (settled) return
       settled = true
       if (timer) clearTimeout(timer)
+      child.removeListener('close', onClose)
+      child.removeListener('error', onError)
+      killer?.removeListener('error', onError)
+      killer?.removeListener('close', onKillClose)
       resolve(result)
     }
-    timer = setTimeout(() => finish({ ok: false, error: 'process kill timed out' }), 2_000)
-    const onExit = (code: number | null) => finish({ ok: true, code })
+    const complete = () => {
+      if (childClosed && killCompleted) finish({ ok: true, code: child.exitCode })
+    }
+    const onClose = () => { childClosed = true; complete() }
+    const onKillClose = (code: number | null) => {
+      if (code !== 0) killError = { ok: false, code, error: `taskkill exited ${code}` }
+      killCompleted = true
+      complete()
+    }
     const onError = (error: Error) => finish({ ok: false, error: error.message })
-    child.once('exit', onExit)
+    const exited = child.exitCode !== null || child.signalCode !== null
+    if (exited) {
+      killCompleted = true
+      if ((!child.stdin || child.stdin.destroyed) && (!child.stdout || child.stdout.destroyed) && (!child.stderr || child.stderr.destroyed)) {
+        finish({ ok: true, code: child.exitCode })
+        return
+      }
+    }
+    timer = setTimeout(() => finish(killError ?? { ok: false, error: 'process kill timed out' }), 2_000)
+    child.once('close', onClose)
     child.once('error', onError)
     try {
+      if (exited) return
       if (process.platform === 'win32' && child.pid) {
-        const killer = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+        killCompleted = false
+        killer = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
         killer.once('error', onError)
-        killer.once('close', (code) => finish(code === 0 ? { ok: true, code } : { ok: false, code, error: `taskkill exited ${code}` }))
-      } else if (child.killed || child.exitCode !== null) {
-        finish({ ok: true, code: child.exitCode })
-      } else if (!child.kill('SIGKILL')) {
+        killer.once('close', onKillClose)
+      } else if (!child.killed && !child.kill('SIGKILL')) {
         finish({ ok: false, error: 'process kill was rejected' })
       }
     } catch (error) {
       finish({ ok: false, error: error instanceof Error ? error.message : String(error) })
     }
   })
+  processTreeKills.set(child, pending)
+  void pending.then((result) => {
+    if (!result.ok && processTreeKills.get(child) === pending) processTreeKills.delete(child)
+  })
+  return pending
 }
 
 export function jsonObject(value: unknown): JsonObject {
@@ -126,7 +159,13 @@ export function runCliJsonl(opts: {
    *  继续打 API 的孤儿（429 残留来源之一）。Windows 用 taskkill /T /F 走 PID 树。 */
   const killTree = () => {
     killed = true
-    if (!killPromise) killPromise = killProcessTree(child)
+    if (!killPromise) {
+      const pending = killProcessTree(child)
+      killPromise = pending
+      void pending.then((result) => {
+        if (!result.ok && killPromise === pending) killPromise = undefined
+      })
+    }
     return killPromise
   }
   const idleTimer = setTimeout(() => {

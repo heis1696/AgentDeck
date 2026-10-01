@@ -113,7 +113,7 @@ export function registerTaskIpc(ctx: IpcContext) {
     if (!deleted) return { ok: false, error: '任务状态已变化，请重试' }
     for (const childId of deleted) await Promise.resolve(ctx.runner.forget?.(childId))
     // 回收该任务（含子任务）的委派 worktree，防累积；失败不阻塞删除，留待启动清扫兜底
-    for (const item of worktrees) void removeWorktree(item.worktreePath, item.ownerTaskId).catch(() => {})
+    for (const item of worktrees) void removeWorktree(item.worktreePath, item.ownerTaskId, (workdir) => ctx.runner.releaseWorktreeSessions(workdir)).catch(() => {})
     // 报告副本 GC 挂线一（tasks:delete 显式回收）：任务与子单在主仓库根的全文副本一并清掉；
     // 副本经 git-common-dir 归位主仓库根，worktree 目录先删也不影响这一步
     {

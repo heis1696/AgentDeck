@@ -6,7 +6,7 @@
 import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnResult, BackendTurnStamp } from './types'
 import { bindTurn } from './types'
 import type { TaskEvent, ThinkingLevel, ToolEditMeta } from '../../shared/types'
-import { isJsonObject, jsonObject, jsonString, runCliJsonl, toolEvent } from './cli-common'
+import { isJsonObject, jsonObject, jsonString, runCliJsonl, toolEvent, type CliJsonlRunner } from './cli-common'
 import { parseEditMeta } from './edit-meta'
 import { resolveCli, probeCli } from './cli-locator'
 
@@ -22,7 +22,7 @@ export function createCodexBackend(): AgentBackend {
     model?: string,
     thinking?: ThinkingLevel,
     /** 本会话当前进程句柄落点：stop/close 只杀自己会话的进程，多任务并发不再串杀/漏杀 */
-    onSpawn?: (runner: { kill: () => void | Promise<unknown> }) => void
+    onSpawn?: (runner: Pick<CliJsonlRunner, 'kill'>) => void
   ): Promise<{ sessionId: string } & BackendTurnResult> => {
     const emit = (e: Omit<TaskEvent, 'seq' | 'ts'>) => events.onEvent({ ...e, ts: Date.now() })
     const resolved = resolveCli('codex')
@@ -134,7 +134,7 @@ export function createCodexBackend(): AgentBackend {
     },
     async start({ prompt, workdir, events: rawEvents, resumeSessionId, model, thinking, turn }) {
       const dir = workdir || process.cwd()
-      let own: { kill: () => void } | null = null
+      let own: Pick<CliJsonlRunner, 'kill'> | null = null
       // 一次性 CLI：每个回合一个进程。回合身份随进程绑定，被杀旧进程的迟到回调带旧身份。
       const runTurn = (turnPrompt: string, resumeId?: string, turnStamp?: BackendTurnStamp) =>
         runOnce(turnPrompt, dir, resumeId, bindTurn(rawEvents, turnStamp), model, thinking, (r) => { own = r })
@@ -152,7 +152,8 @@ export function createCodexBackend(): AgentBackend {
           await Promise.resolve(own?.kill())
         },
         async close() {
-          await Promise.resolve(own?.kill())
+          const result = await own?.kill()
+          if (result && !result.ok) throw new Error(result.error || 'Codex process cleanup failed')
         }
       }
     }

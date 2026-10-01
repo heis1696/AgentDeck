@@ -558,6 +558,10 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
             await conn.request('session/stop', { sessionId })
           } catch {}
         },
+        async detach() {
+          const result = await conn.kill()
+          if (!result.ok) throw new Error(result.error || 'zcode process cleanup failed')
+        },
         async close() {
           try {
             await Promise.race([
@@ -565,7 +569,8 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
               new Promise((r) => setTimeout(r, 1500))
             ])
           } catch {}
-          await conn.kill()
+          const result = await conn.kill()
+          if (!result.ok) throw new Error(result.error || 'zcode process cleanup failed')
         }
       }
       return session

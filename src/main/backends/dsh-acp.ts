@@ -526,7 +526,8 @@ export async function startDshAcpSession(opts: DshAcpSessionOptions): Promise<Ba
       settleTurn({ ok: false, response: '', error: '会话已关闭' })
       // 关闭即断开归属：之后连接上再冒出来的消息不再属于任何回合
       active = undefined
-      await conn.kill()
+      const result = await conn.kill()
+      if (!result.ok) throw new Error(result.error || 'DSH ACP process cleanup failed')
     }
   }
 }

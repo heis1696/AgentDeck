@@ -5,7 +5,7 @@
 import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnStamp } from './types'
 import { bindTurn } from './types'
 import type { TaskEvent, ThinkingLevel, ToolEditMeta } from '../../shared/types'
-import { isJsonObject, jsonNumber, jsonObject, jsonString, runCliJsonl, toolEvent } from './cli-common'
+import { isJsonObject, jsonNumber, jsonObject, jsonString, runCliJsonl, toolEvent, type CliJsonlRunner } from './cli-common'
 import { parseEditMeta, stringifyToolArgs } from './edit-meta'
 import { resolveCli, probeCli } from './cli-locator'
 
@@ -23,7 +23,7 @@ export function createClaudeBackend(): AgentBackend {
     connection?: { name: string; baseURL: string; apiKey: string },
     thinking?: ThinkingLevel,
     /** 本会话当前进程句柄落点：stop/close 只杀自己会话的进程，多任务并发不再串杀/漏杀 */
-    onSpawn?: (runner: { kill: () => void | Promise<unknown> }) => void
+    onSpawn?: (runner: Pick<CliJsonlRunner, 'kill'>) => void
   ): Promise<{ sessionId: string; response: string; ok: boolean; error?: string }> => {
     const emit = (e: Omit<TaskEvent, 'seq' | 'ts'>) => events.onEvent({ ...e, ts: Date.now() })
     /** tool_result 里没有入参：started 时按 tool_use id 存好编辑元数据，result 时补挂上 */
@@ -149,7 +149,7 @@ export function createClaudeBackend(): AgentBackend {
     },
     async start({ prompt, workdir, events: rawEvents, resumeSessionId, model, connection, thinking, turn }) {
       const dir = workdir || process.cwd()
-      let own: { kill: () => void } | null = null
+      let own: Pick<CliJsonlRunner, 'kill'> | null = null
       // 每个回合都是独立进程：把它自己的回合身份绑到该进程的所有回调上，
       // 被杀掉的旧进程再吐终态也只会带着旧身份，被运行器丢弃。
       const runTurn = (turnPrompt: string, resumeId?: string, turnStamp?: BackendTurnStamp) =>
@@ -172,7 +172,8 @@ export function createClaudeBackend(): AgentBackend {
           await Promise.resolve(own?.kill())
         },
         async close() {
-          await Promise.resolve(own?.kill())
+          const result = await own?.kill()
+          if (result && !result.ok) throw new Error(result.error || 'Claude process cleanup failed')
         }
       }
       void sidPromise

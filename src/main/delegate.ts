@@ -1258,43 +1258,6 @@ export async function runDelegationLoop(
       fullTextEntries.set(id, { seq, issueOk, copyPath: copyAbs ? reportCopyRelPath(task.workdir!, copyAbs) : '' })
     }
 
-    // ---- 归池时机前移（nxii 根因——多轮派单时每单都等到集成段才归还，逐单付全量建树
-    // 全款）：子单终态（commitAll 成功 + 全文双落之后）即尝试归池，同会话下一轮派单
-    // 换基线秒级复用。沿用 reclaimWorktree(repool) 既有条件语义零放宽：世代有效、非 force、
-    // 托管分支、容量、clean（commitAll 已落盘即 clean；落盘失败的树不干净自然 retained
-    // 留现场）；cancelled 不在此列（现场保留契约不变）；集成仍按分支合并——归池只 detach
-    // 不删分支，集成分支合并不受影响；崩溃恢复与现状一致（同一 releaseWorktreeToPool
-    // 通道，owner=池标记 + poolProcess，启动清扫照旧回收）。归池成败与原因都落时间线。
-    for (let idx = 0; idx < childIds.length; idx++) {
-      const id = childIds[idx]
-      const c = store.get(id)
-      if (!c?.worktree || !c.workdir || (c.status !== 'done' && c.status !== 'failed')) continue
-      const capturedChild: TaskExpectation = {
-        status: c.status, runId: c.runId, executionOwner: c.executionOwner,
-        attempt: c.attempt, startedAt: c.startedAt, phaseIndex: c.phaseIndex,
-        workdir: c.workdir, workVersion: c.workVersion
-      }
-      const reclaimed = await reclaimWorktree(c.workdir, {
-        repool: true,
-        expectedOwnerTaskId: c.id,
-        ...(c.worktree?.generationId ? { expectedGenerationId: c.worktree.generationId } : {})
-      })
-      if (!active()) return abandoned()
-      if (c.worktree) store.updateIf(id, capturedChild, {
-        worktree: {
-          ...c.worktree,
-          cleanupStatus: reclaimed.status,
-          ...(reclaimed.reason ? { cleanupReason: reclaimed.reason } : {}),
-          ...(reclaimed.ok ? { cleanedAt: Date.now() } : {})
-        }
-      })
-      if (reclaimed.ok && reclaimed.status === 'pooled') {
-        note(`单 #${idx + 1} worktree 已提前归池（下一轮派单秒级换基线复用；集成仍按分支合并）`)
-      } else {
-        note(`⚠ 单 #${idx + 1} 提前归池未成（${reclaimed.reason ?? reclaimed.status}），现场按既有回收语义处理`)
-      }
-    }
-
     // ---- summary 层（可选）：派单标了 summary 且结果超回灌界时，在全文双落之后向该
     // 子单会话追加一轮总结请求，产出（≤回灌界才采纳）作为回灌体并前置「非全文」标注。
     // 时序契约：commitAll 与全文双落已在上方完成且行为不变；总结轮不改子单终态；
@@ -1370,6 +1333,55 @@ export async function runDelegationLoop(
       })
       reportEntries.push(childReportEntry(call?.to ?? c.agentId ?? c.backend, c.status, seq, body))
     }
+    // ---- 归池时机前移（nxii 根因——多轮派单时每单都等到集成段才归还，逐单付全量建树
+    // 全款）：子单终态（commitAll 成功 + 全文双落 + 总结与报告采集之后）即尝试归池，同会话下一轮派单
+    // 换基线秒级复用。沿用 reclaimWorktree(repool) 既有条件语义零放宽：世代有效、非 force、
+    // 托管分支、容量、clean（commitAll 已落盘即 clean；落盘失败的树不干净自然 retained
+    // 留现场）；cancelled 不在此列（现场保留契约不变）；集成仍按分支合并——归池只 detach
+    // 不删分支，集成分支合并不受影响；崩溃恢复与现状一致（同一 releaseWorktreeToPool
+    // 通道，owner=池标记 + poolProcess，启动清扫照旧回收）。归池成败与原因都落时间线。
+    for (let idx = 0; idx < childIds.length; idx++) {
+      const id = childIds[idx]
+      const c = reportedChildren.get(id)
+      if (!c?.worktree || !c.workdir || (c.status !== 'done' && c.status !== 'failed')) continue
+      const capturedChild: TaskExpectation = {
+        status: c.status, runId: c.runId, executionOwner: c.executionOwner,
+        attempt: c.attempt, startedAt: c.startedAt, phaseIndex: c.phaseIndex,
+        workdir: c.workdir, workVersion: c.workVersion
+      }
+      const operation = store.claimGitOperation([{ id, expected: capturedChild }])
+      if (!operation) {
+        note(`⚠ 单 #${idx + 1} 的执行状态已变化，跳过提前归池`)
+        continue
+      }
+      try {
+        const reclaimed = await reclaimWorktree(c.workdir, {
+          repool: true,
+          expectedOwnerTaskId: c.id,
+          beforeReclaim: runner.releaseWorktreeSessions ? (workdir) => runner.releaseWorktreeSessions(workdir) : undefined,
+          ...(c.worktree?.generationId ? { expectedGenerationId: c.worktree.generationId } : {})
+        })
+        if (!active()) return abandoned()
+        store.updateIf(id, { ...capturedChild, gitOperationToken: operation.token }, {
+          worktree: {
+            ...c.worktree,
+            cleanupStatus: reclaimed.status,
+            ...(reclaimed.reason ? { cleanupReason: reclaimed.reason } : {}),
+            ...(reclaimed.ok ? { cleanedAt: Date.now() } : {})
+          }
+        })
+        if (reclaimed.ok && reclaimed.status === 'pooled') {
+          note(`单 #${idx + 1} worktree 已提前归池（下一轮派单秒级换基线复用；集成仍按分支合并）`)
+        } else {
+          note(`⚠ 单 #${idx + 1} 提前归池未成（${reclaimed.reason ?? reclaimed.status}），现场按既有回收语义处理`)
+        }
+      } finally {
+        store.releaseGitOperation(operation)
+      }
+      const current = store.get(id)
+      if (current && store.matches(id, capturedChild)) reportedChildren.set(id, current)
+    }
+
     const report = reportEntries.join('\n\n')
     // 拒单随报告捎带：只靠「整轮零新单」兜底送达的话，领队每轮都有新单时永远收不到，
     // 会带着「该单在途」的幻觉继续排计划（iss_t_mu5t2em6_ymbllw 实测：混合轮里一单被拒，
@@ -1519,6 +1531,7 @@ export async function runDelegationLoop(
             const reclaimed = await reclaimWorktree(c.workdir, {
               repool: true,
               expectedOwnerTaskId: c.id,
+              beforeReclaim: runner.releaseWorktreeSessions ? (workdir) => runner.releaseWorktreeSessions(workdir) : undefined,
               ...(c.worktree?.generationId ? { expectedGenerationId: c.worktree.generationId } : {})
             })
             if (!active()) return abandoned()
@@ -1613,6 +1626,7 @@ export async function runDelegationLoop(
               const reclaimed = await reclaimWorktree(c.workdir, {
                 repool: true,
                 expectedOwnerTaskId: c.id,
+                beforeReclaim: runner.releaseWorktreeSessions ? (workdir) => runner.releaseWorktreeSessions(workdir) : undefined,
                 ...(c.worktree?.generationId ? { expectedGenerationId: c.worktree.generationId } : {})
               })
               if (!active()) return abandoned()

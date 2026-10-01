@@ -2372,14 +2372,14 @@ async function deleteBranchWithRetry(workdir: string, name: string): Promise<boo
  *  目录与 git 注册保留、子分支删除、元数据挂池标记，下一次派单换基线秒级复用。 */
 export async function reclaimWorktree(
   wtDir: string,
-  options: { force?: boolean; deleteBranch?: boolean; repool?: boolean; expectedOwnerTaskId?: string; expectedGenerationId?: string } = {}
+  options: { force?: boolean; deleteBranch?: boolean; repool?: boolean; expectedOwnerTaskId?: string; expectedGenerationId?: string; beforeReclaim?: (wtDir: string) => Promise<boolean> } = {}
 ): Promise<WorktreeCleanupResult> {
   return withWorktreePathLock(wtDir, () => reclaimWorktreeUnlocked(wtDir, options))
 }
 
 async function reclaimWorktreeUnlocked(
   wtDir: string,
-  options: { force?: boolean; deleteBranch?: boolean; repool?: boolean; expectedOwnerTaskId?: string; expectedGenerationId?: string } = {},
+  options: { force?: boolean; deleteBranch?: boolean; repool?: boolean; expectedOwnerTaskId?: string; expectedGenerationId?: string; beforeReclaim?: (wtDir: string) => Promise<boolean> } = {},
   allowVerifiedMergeScaffold = false
 ): Promise<WorktreeCleanupResult> {
   const resolved = await resolveManagedWorktree(wtDir)
@@ -2431,6 +2431,15 @@ async function reclaimWorktreeUnlocked(
   if (metadata?.manualKeep) {
     try { updateMetadata(metadata, { cleanupStatus: 'retained', cleanupReason: 'manual keep requested' }) } catch {}
     return { ok: false, status: 'retained', path: wtDir, branch, reason: 'manual keep requested' }
+  }
+  if (options.beforeReclaim) {
+    let released = false
+    try { released = await options.beforeReclaim(wtDir) } catch {}
+    if (!released) {
+      const reason = 'backend session is still active or could not be released; worktree retained'
+      try { if (metadata) updateMetadata(metadata, { cleanupStatus: 'failed', cleanupReason: reason }) } catch {}
+      return { ok: false, status: 'failed', path: wtDir, branch, reason }
+    }
   }
   // 项4 证据门槛：目录不在时的补清以 Git 注册仍在案为界——sidecar 独证不足（注册
   // 已被此前 prune 移除的旧记录无法核验树曾在案，同名分支可能是外置资产），保留
@@ -2583,8 +2592,8 @@ export async function markWorktreeCleanup(
 }
 
 /** Backward-compatible boolean wrapper. It is fail-closed for dirty/manual-kept trees. */
-export async function removeWorktree(wtDir: string, expectedOwnerTaskId?: string): Promise<boolean> {
-  const result = await reclaimWorktree(wtDir, { deleteBranch: true, ...(expectedOwnerTaskId !== undefined ? { expectedOwnerTaskId } : {}) })
+export async function removeWorktree(wtDir: string, expectedOwnerTaskId?: string, beforeReclaim?: (wtDir: string) => Promise<boolean>): Promise<boolean> {
+  const result = await reclaimWorktree(wtDir, { deleteBranch: true, beforeReclaim, ...(expectedOwnerTaskId !== undefined ? { expectedOwnerTaskId } : {}) })
   return result.ok
 }
 
@@ -2599,7 +2608,7 @@ export async function deleteBranch(workdir: string, name: string): Promise<boole
 export async function pruneWorktrees(
   repoDir: string,
   keepTask: (taskId: string, worktree?: WorktreeInfo) => boolean = () => false,
-  options: { maxAgeMs?: number; now?: number; claimWorktree?: (taskId: string, mergeWorktree: boolean) => WorktreePruneLease | undefined } = {}
+  options: { maxAgeMs?: number; now?: number; claimWorktree?: (taskId: string, mergeWorktree: boolean) => WorktreePruneLease | undefined; beforeReclaim?: (wtDir: string) => Promise<boolean> } = {}
 ): Promise<WorktreePruneResult> {
   const root = await repositoryRoot(repoDir)
   const result: WorktreePruneResult = { repoDir: root ?? repoDir, scanned: 0, removed: [], retained: [], failed: [] }
@@ -2777,7 +2786,8 @@ export async function pruneWorktrees(
         ...(crashLeftover ? { force: true } : {}),
         deleteBranch: !verifiedMergeScaffold && !isIntegrationBranch(metadata?.branch),
         ...(hasOwnerMetadata ? { expectedOwnerTaskId: metadata.ownerTaskId } : {}),
-        expectedGenerationId: metadata.generationId
+        expectedGenerationId: metadata.generationId,
+        beforeReclaim: options.beforeReclaim
       }
       const reclaimed = verifiedMergeScaffold
         ? await withWorktreePathLock(wtPath, () => reclaimWorktreeUnlocked(wtPath, reclaimOptions, true))
@@ -2803,7 +2813,7 @@ export async function pruneWorktrees(
 export async function sweepWorktrees(
   repoDir: string,
   keepTask: (taskId: string, worktree?: WorktreeInfo) => boolean,
-  options: { maxAgeMs?: number; now?: number; claimWorktree?: (taskId: string, mergeWorktree: boolean) => WorktreePruneLease | undefined } = {}
+  options: { maxAgeMs?: number; now?: number; claimWorktree?: (taskId: string, mergeWorktree: boolean) => WorktreePruneLease | undefined; beforeReclaim?: (wtDir: string) => Promise<boolean> } = {}
 ): Promise<WorktreePruneResult> {
   // Ownerless worktrees remain fail-closed even when clean; callers receive them in failed.
   return pruneWorktrees(repoDir, keepTask, {

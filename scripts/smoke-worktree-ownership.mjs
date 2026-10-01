@@ -154,7 +154,7 @@ try {
       const workVersion = parent.workVersion
       assert.equal(f.peer.update(parent.id, { title: 'renamed during Git' }), undefined, 'content edits cannot change workVersion during Git work')
       assert.equal(f.peer.get(parent.id).workVersion, workVersion, 'rejected edit leaves the captured workVersion stable')
-      registerTaskIpc({ store: f.peer, runner: { pushTask() {} }, issueStore: { sync() {}, syncEventually() {} }, getWindow: () => null })
+      registerTaskIpc({ store: f.peer, runner: { pushTask() {}, async releaseWorktreeSessions() { return true } }, issueStore: { sync() {}, syncEventually() {} }, getWindow: () => null })
       assert.equal(globalThis.__worktreeHandlers.get('tasks:rename')(null, parent.id, 'IPC rename during Git'), null, 'IPC rename reports the Git reservation conflict')
       assert.ok(fs.existsSync(f.worktree.path), 'the reserved worktree is still present at the operation boundary')
       const mergeName = `.agentdeck-merge-protected-${stage}`
@@ -347,7 +347,7 @@ try {
   assert.ok(fs.existsSync(cancelledMeta.path) && cancelledSweep.retained.some((item) => item.name === path.basename(cancelledMeta.path)), 'the sweep retains the cancelled scene (directory included)')
   assert.equal(await git.branchExists(cancelled.repo, cancelledMeta.branch), true, 'the sweep never deletes the cancelled child branch')
   // 删任务的显式路径统一回收：目录与分支一起带走
-  registerTaskIpc({ store: cancelled.peer, runner: { pushTask() {} }, issueStore: { sync() {}, syncEventually() {} }, getWindow: () => null })
+  registerTaskIpc({ store: cancelled.peer, runner: { pushTask() {}, async releaseWorktreeSessions() { return true } }, issueStore: { sync() {}, syncEventually() {} }, getWindow: () => null })
   const cancelledDelete = await globalThis.__worktreeHandlers.get('tasks:delete')(null, cancelled.child.id)
   assert.ok(cancelledDelete.ok, 'explicit deletion of the cancelled child succeeds')
   const cancelledDeadline = Date.now() + 8000
@@ -613,7 +613,7 @@ try {
     const occupied = fs.openSync(path.join(corpse4Path, 'occupied.txt'), 'w')
     fs.writeFileSync(path.join(corpse4Path, 'occupied.txt'), '外部程序占用的文件\n')
     fs.rmSync(path.join(corpse4Path, '.git'))
-    registerSystemIpc({ store: corpse.peer, settings: { worktreeMaxAgeDays: 30 }, getWindow: () => null })
+    registerSystemIpc({ runner: { async releaseWorktreeSessions() { return true } }, store: corpse.peer, settings: { worktreeMaxAgeDays: 30 }, getWindow: () => null })
     const report = await globalThis.__worktreeHandlers.get('worktrees:prune')()
     assert.ok(report.failed.some((item) => item.name === corpse4Name), '③ reclaim 失败计入 failed（不再静默）')
     const eventsFile = path.join(corpse.data, 'tasks', leaderId, 'events.jsonl')
@@ -641,7 +641,7 @@ try {
     assert.notEqual(aliasWorktreePath, syncChild.worktree.path, '前置：别名写法与真实写法不同')
     // 任务登记写成别名 + 过期的 removed 状态；磁盘 sidecar 实为 active（领队还在跑，清扫保留现场）
     syncAlias.peer.update(syncChild.id, { worktree: { ...syncChild.worktree, path: aliasWorktreePath, cleanupStatus: 'removed' } })
-    registerSystemIpc({ store: syncAlias.peer, settings: { worktreeMaxAgeDays: 30 }, getWindow: () => null })
+    registerSystemIpc({ runner: { async releaseWorktreeSessions() { return true } }, store: syncAlias.peer, settings: { worktreeMaxAgeDays: 30 }, getWindow: () => null })
     const syncReport = await globalThis.__worktreeHandlers.get('worktrees:prune')()
     assert.ok(syncReport, '前置：清扫完成')
     const synced = syncAlias.peer.get(syncChild.id)
@@ -694,7 +694,7 @@ try {
     const e2eChild = e2eTree.peer.get(e2eTree.child.id)
     // 子单的 workdir 改写成同一棵集成树的别名写法（无 worktree 登记，走 workdir 通道）
     e2eTree.peer.update(e2eChild.id, { workdir: flipCase(e2eWtPath), worktree: undefined })
-    registerTaskIpc({ store: e2eTree.peer, runner: { pushTask() {} }, issueStore: { sync() {}, syncEventually() {} }, getWindow: () => null })
+    registerTaskIpc({ store: e2eTree.peer, runner: { pushTask() {}, async releaseWorktreeSessions() { return true } }, issueStore: { sync() {}, syncEventually() {} }, getWindow: () => null })
     // 恰好一次直接计数：处理器 bundle 的 removeWorktree 经计数插件包装（globalThis
     // 跨 bundle 可见），折叠去重失效会对同一棵树发起两次并发回收，计数翻倍即红
     globalThis.__removeWorktreeCalls = 0
@@ -726,7 +726,7 @@ try {
     // 拆掉续链保留判定（integration.branch 在册即保留集成树）：让断言只考验「别名仓库
     // 集合去重 + 终态任务树回收」，不被续链保留规则截住
     manualSweep.peer.update(manualLeader.id, { integration: undefined })
-    registerSystemIpc({ store: manualSweep.peer, settings: { worktreeMaxAgeDays: 0 }, getWindow: () => null })
+    registerSystemIpc({ runner: { async releaseWorktreeSessions() { return true } }, store: manualSweep.peer, settings: { worktreeMaxAgeDays: 0 }, getWindow: () => null })
     // 扫描数预言机：磁盘目录 + sidecar + Git 注册表三源并集按路径键折叠后的元素数
     const manualManagedDir = path.join(manualSweep.repo, '.agentdeck-worktrees')
     const manualDiskTrees = fs.readdirSync(manualManagedDir, { withFileTypes: true })
@@ -765,7 +765,7 @@ try {
   fs.mkdirSync(reportsDirChain2, { recursive: true })
   fs.writeFileSync(path.join(reportsDirChain2, `${chain2.parent.id}.md`), 'parent 全文\n')
   fs.writeFileSync(path.join(reportsDirChain2, `${keeperChain2.id}.md`), 'keeper 全文\n')
-  registerTaskIpc({ store: chain2.peer, runner: { pushTask() {} }, issueStore: { sync() {}, syncEventually() {} }, getWindow: () => null })
+  registerTaskIpc({ store: chain2.peer, runner: { pushTask() {}, async releaseWorktreeSessions() { return true } }, issueStore: { sync() {}, syncEventually() {} }, getWindow: () => null })
   const deleteResult = await globalThis.__worktreeHandlers.get('tasks:delete')(null, chain2.parent.id)
   assert.ok(deleteResult.ok, 'explicit task deletion succeeds')
   // removeWorktree 是删除处理器里的 fire-and-forget：轮询到目录与分支都消失

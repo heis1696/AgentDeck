@@ -276,6 +276,10 @@ class SessionTurnRouter {
     this.abandonTurn()
   }
 
+  hasOpenTurn() {
+    return this.open.size > 0
+  }
+
   /** Drop every callback still associated with this connection. */
   retire(reason: 'closed' | 'replaced' = 'closed') {
     for (const id of [...this.open.keys()]) this.revoke(id)
@@ -318,6 +322,7 @@ export class TaskRunner {
   /** 会话绑定的工作目录（安装该会话时 backend.start 用的 cwd）。续链换基线后
    *  task.workdir 变更，followUp 凭它发现内存会话还跑在旧目录，强制走 resume 重建。 */
   private sessionWorkdirs = new Map<string, string>()
+  private worktreeSessionReleases = new Map<BackendSession, { workdir: string; promise: Promise<void>; release: () => Promise<void>; failed: boolean }>()
   /** Runs this runner committed to. Only a committed claim may start a backend
    *  or authorize a later write; the durable record is the tie-breaker. */
   private claims = new Map<string, RunClaim>()
@@ -367,19 +372,31 @@ export class TaskRunner {
 
   /** Cleanup must be awaited, but a broken provider must not block cancellation
    * or application shutdown indefinitely. */
-  private awaitCleanup(action: () => Promise<unknown> | void, timeoutMs = 2_000): Promise<void> {
+  private awaitCleanup(action: () => Promise<unknown> | void, timeoutMs = 2_000): Promise<boolean> {
     return new Promise((resolve) => {
       let settled = false
       let timer: NodeJS.Timeout
-      const finish = () => {
+      const finish = (ok: boolean) => {
         if (settled) return
         settled = true
         clearTimeout(timer)
-        resolve()
+        resolve(ok)
       }
-      timer = setTimeout(finish, timeoutMs)
-      Promise.resolve().then(action).then(finish, finish)
+      timer = setTimeout(() => finish(false), timeoutMs)
+      Promise.resolve().then(action).then(() => finish(true), () => finish(false))
     })
+  }
+
+  private trackSessionRelease(session: BackendSession, workdir: string, release: () => Promise<void>): Promise<void> {
+    const previous = this.worktreeSessionReleases.get(session)
+    if (previous && !previous.failed) return previous.promise
+    const retry = previous?.release ?? release
+    const entry = { workdir: previous?.workdir ?? workdir, promise: Promise.resolve().then(retry), release: retry, failed: false }
+    this.worktreeSessionReleases.set(session, entry)
+    void entry.promise.then(() => {
+      if (this.worktreeSessionReleases.get(session) === entry) this.worktreeSessionReleases.delete(session)
+    }, () => { entry.failed = true })
+    return entry.promise
   }
 
   constructor(
@@ -910,9 +927,11 @@ export class TaskRunner {
   /** 关闭并移除内存会话（容错）：防止放弃的会话继续在后台跑、往任务日志里交错写事件 */
   async closeSession(taskId: string, expected?: TaskExpectation, preserveProviderSession = false) {
     const s = this.sessions.get(taskId)
+    const workdir = this.sessionWorkdirs.get(taskId) ?? ''
     const claim = this.claims.get(taskId) ?? (s && this.sessionTurns.get(s)?.lastClaim)
     if (expected && (!claim || claim.runId !== expected.runId || !sameExecutionOwner(claim.owner, expected.executionOwner))) return
     await this.closeEventBatches(taskId)
+    if (this.sessions.get(taskId) !== s) return
     this.clearRetry(taskId)
     this.bumpTurnGen(taskId)
     this.earlySpawns.delete(taskId)
@@ -922,8 +941,50 @@ export class TaskRunner {
     this.sessions.delete(taskId)
     this.sessionWorkdirs.delete(taskId)
     this.retireSession(s)
-    await this.awaitCleanup(() => s.stop())
-    await this.awaitCleanup(() => preserveProviderSession && s.detach ? s.detach() : s.close())
+    await this.awaitCleanup(() => this.trackSessionRelease(s, workdir, async () => {
+      await this.awaitCleanup(() => s.stop())
+      await (preserveProviderSession && s.detach ? s.detach() : s.close())
+    }), 4_000)
+  }
+
+  async releaseWorktreeSessions(workdir: string): Promise<boolean> {
+    const targets: Array<{ taskId: string; session: BackendSession }> = []
+    for (const [taskId, session] of this.sessions) {
+      const boundDir = this.sessionWorkdirs.get(taskId)
+      if (!boundDir || !sameWorktreePath(boundDir, workdir)) continue
+      const task = this.store.get(taskId)
+      if (!task || !['done', 'failed', 'cancelled'].includes(task.status)) return false
+      const claim = this.claims.get(taskId) ?? this.sessionTurns.get(session)?.lastClaim
+      if (!claim || claim.runId !== task.runId || !sameExecutionOwner(claim.owner, task.executionOwner)) return false
+      if (this.sessionTurns.get(session)?.hasOpenTurn()) return false
+      targets.push({ taskId, session })
+    }
+    for (const { taskId, session } of targets) {
+      this.clearRetry(taskId)
+      this.bumpTurnGen(taskId)
+      this.retireSession(session, 'replaced')
+      const promise = this.trackSessionRelease(session, workdir, async () => {
+        if (session.detach) await session.detach()
+        else {
+          await this.awaitCleanup(() => session.stop())
+          await session.close()
+        }
+      })
+      void promise.then(() => {
+        if (this.sessions.get(taskId) !== session) return
+        this.sessions.delete(taskId)
+        this.sessionWorkdirs.delete(taskId)
+        this.launchHandles.delete(taskId)
+        this.permissionBroker.cancelTask(taskId)
+        this.toolWindows.delete(taskId)
+      }, () => {})
+    }
+    const pending = [...this.worktreeSessionReleases].filter(([, entry]) => sameWorktreePath(entry.workdir, workdir))
+    const results = await Promise.all(pending.map(([session, entry]) => {
+      const promise = entry.failed ? this.trackSessionRelease(session, entry.workdir, entry.release) : entry.promise
+      return this.awaitCleanup(() => promise, 4_000)
+    }))
+    return results.every(Boolean)
   }
 
   /** Release in-memory lifecycle state after IPC removes a terminal task. */
@@ -934,6 +995,7 @@ export class TaskRunner {
     this.launchHandles.delete(taskId)
     this.claims.delete(taskId)
     const session = this.sessions.get(taskId)
+    const workdir = this.sessionWorkdirs.get(taskId) ?? ''
     this.sessions.delete(taskId)
     this.sessionWorkdirs.delete(taskId)
     if (session) this.retireSession(session)
@@ -946,8 +1008,10 @@ export class TaskRunner {
     this.turnLifecycles.get(taskId)?.dispose()
     this.turnLifecycles.delete(taskId)
     if (session) {
-      await this.awaitCleanup(() => session.stop())
-      await this.awaitCleanup(() => session.close())
+      await this.awaitCleanup(() => this.trackSessionRelease(session, workdir, async () => {
+        await this.awaitCleanup(() => session.stop())
+        await session.close()
+      }), 4_000)
     }
   }
 
@@ -2844,6 +2908,7 @@ export class TaskRunner {
       const persistenceWarning = drained ? '' : '任务已停止，但部分事件日志写入失败；已保存的恢复副本将在重启时回放，无法写入副本的事件可能丢失'
       const session = this.sessions.get(taskId)
       const launchHandle = this.launchHandles.get(taskId)
+      const sessionWorkdir = this.sessionWorkdirs.get(taskId) ?? task.workdir
       const claim = this.claims.get(taskId)
       if (!claim || !this.isCurrentRun(claim)) return { ok: false, error: '执行归属不在当前运行器，未取消任务' }
       const cancelled = this.store.updateIf(taskId, runCondition(claim), { status: 'cancelled', endedAt: Date.now(), ...(interrupt || persistenceWarning ? { error: [interrupt, persistenceWarning].filter(Boolean).join('；') } : {}) })
@@ -2875,8 +2940,10 @@ export class TaskRunner {
       if (!session) {
         try { await this.awaitCleanup(() => launchHandle?.stop()) } catch {}
       }
-      await this.awaitCleanup(() => session?.stop())
-      await this.awaitCleanup(() => session?.close())
+      if (session) await this.awaitCleanup(() => this.trackSessionRelease(session, sessionWorkdir, async () => {
+        await this.awaitCleanup(() => session.stop())
+        await session.close()
+      }), 4_000)
       this.store.flushEvents(taskId)
       return persistenceWarning ? { ok: true, warning: persistenceWarning } : { ok: true }
     } finally {
@@ -2922,6 +2989,10 @@ export class TaskRunner {
       await this.awaitCleanup(() => s.stop())
       await this.awaitCleanup(() => s.close())
     }
+    await Promise.all([...this.worktreeSessionReleases].map(([session, entry]) => {
+      const promise = entry.failed ? this.trackSessionRelease(session, entry.workdir, entry.release) : entry.promise
+      return this.awaitCleanup(() => promise, 4_000)
+    }))
     this.sessions.clear()
     // 会话清空必须连带清目录绑定：sessionWorkdirs 的键值只在随会话安装/关闭时增删，
     // 留着旧 taskId→workdir 就是悬空脏数据，下个生命周期读到的是上个生命周期的 cwd

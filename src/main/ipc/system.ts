@@ -35,6 +35,7 @@ export function registerSystemIpc(ctx: IpcContext) {
     for (const repoDir of dirs) {
       const report = await pruneWorktrees(repoDir, (owner, worktree) => shouldKeepTaskWorktree(ctx.store.list(), repoDir, owner, worktree), {
         maxAgeMs,
+        beforeReclaim: (workdir) => ctx.runner.releaseWorktreeSessions(workdir),
         claimWorktree: (owner, merge) => {
           const claim = ctx.store.claimWorktreeCleanup(repoDir, owner, merge)
           return claim ? { release: () => { try { ctx.store.releaseGitOperation(claim) } catch {} } } : undefined
