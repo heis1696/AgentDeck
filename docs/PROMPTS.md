@@ -52,7 +52,7 @@ AgentDeck 的提示词不只是文案：它们是运行时解析器（`<delegate
 | 咨询往返 | 请求 `consultRequestPrompt`（进对方办公室会话）→ 回复 `consultReplyFeedback`（回发起方） |
 | 调查结果 | `investigationFeedback` |
 | 目标模式同会话续轮 | `goalRoundRecap` |
-| 会议发言 | `reportPrompt` / `challengePrompt` / `defensePrompt` / `synthPrompt` / `forcedSynthesisPrompt`（都以 `meetingPriority` 开头） |
+| 会议发言 | `reportPrompt` / `challengePrompt` / `defensePrompt` / `reviewPrompt` / `synthPrompt` / `forcedSynthesisPrompt`（都以 `meetingPriority` 开头） |
 | 用户点「接力下一阶段」 | `HANDOFF_CUE` +（重启后有未确认派单时）`delegateRecoveryNotice` |
 | 自动重命名 | `RETITLE_PROMPT`（隐藏回合） |
 
@@ -71,6 +71,10 @@ AgentDeck 的提示词不只是文案：它们是运行时解析器（`<delegate
 
 **会议内部还要再分一层**：`speak()` 的 `opts.investigate` 默认放行（常规发言轮），强制综合显式传 `false`——它的提示词已写明「不要发起调查」，运行时必须同口径，否则模型越界输出会被当成合法回合照发。
 
+**会议讨论闭环**：汇报 → 其他与会者（包括设计人）依次质疑 → 汇报人答辩 → 原反对者复核；未通过时在 `maxInnerTurns` 内继续答辩与复核。每次发言都收到本轮截至当前的完整讨论、表态依据和反对登记，综合人也收到原始方案与修订内容。答辩纪要的 `resolved=true` 只是解决提议，只有反对作者明确 agree 且没有继续提出反对，系统才关闭其反对；每次发言各自最多登记 3 条，不会在全局截掉其他人的反对。
+
+综合后清除旧表态，其他与会者通过 `reviewPrompt` 重新确认最终纪要；必须有有效综合纪要、全员针对它明确同意、反对全部解决才能散会并创建待批准行动项。不同意见随纪要和未决反对进入下一轮，没有反对标记的 disagree/abstain 依据也写入 `openQuestions`；强制综合不能通过空数组抹掉未决反对或表态依据。Issue 时间线剥离反对标记的语法但保留正文与出处，避免质疑发言显示为空。
+
 ## 3. 协议标记与解析器契约
 
 | 标记 | 解析器 | 要点 |
@@ -82,7 +86,7 @@ AgentDeck 的提示词不只是文案：它们是运行时解析器（`<delegate
 | `<investigate to="队员名" …>指令</investigate>` | `parseInvestigates` | 只在会议发言里教，且只对名下有队员的发言人教；**运行时只在 `meetingTurn` 回合受理**（见 §2.3） |
 | `<continue start="auto\|parked">简报</continue>` | `parseContinue` | 末尾锚定为主（起点取末尾闭合标签之前的**最后一个**开标记，标记后只允许空白）；缺省/写错按 parked；与示例指纹同源的简报视为复述。「什么时候用」列表以**收尾前主动性检查**开头：每完成一个阶段、收尾之前先主动检查有无后续阶段（原文分阶段描述、提到的计划文档、简报阶段号），有明确后续阶段才在收尾回复末行交接并写明阶段号，没有或原文未分阶段就正常收尾——判断必须主动做，结论仍保守（拿不准不接力，主动检查不等于鼓励接力） |
 | `<stance verdict="agree\|disagree\|abstain" grounds="…"/>` | `parseStance` | 必须是整条回复最后一行；判定对象见 `STANCE_MEANING` |
-| `<objection ref="…" priority="high">…</objection>` | `parseObjections` | ref 必填；每轮最多 3 条；只认 priority="high" |
+| `<objection ref="…" priority="high">…</objection>` | `parseObjections` | ref 必填；每次发言最多 3 条；只认 priority="high" |
 | 纪要 JSON（`ENVELOPE_SCHEMA`） | `parseEnvelope` | 整段 / ```json 块 / 首尾花括号三路尝试。**实例必须是空数组骨架**（字段含义另由 `ENVELOPE_FIELDS` 文字说明）：属性位置给非空示例时模型会照抄，示例反对被 `mergeEnvelopeObjections` 登记成真反对、示例行动项被强制综合分支直接采用 |
 | checkpoint JSON（`GOAL_BLOCK`） | `parseCheckpoint` | 围栏块**从后往前**尝试；停止条件按原文子串识别 |
 
