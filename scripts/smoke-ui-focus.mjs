@@ -224,6 +224,7 @@ const setGeometry = (element, { scrollHeight, clientHeight }) => {
 const emitTaskEvent = (taskId, event) => act(async () => {
   const subscription = bridgeCalls.calls.filter((call) => call.path === 'tasks.onEvent').at(-1)
   subscription?.args[0]?.(taskId, event)
+  await new Promise((resolve) => setTimeout(resolve, 32))
 })
 
 /* ------------------------------------------------- 1. 关键缺陷：模态 autoFocus */

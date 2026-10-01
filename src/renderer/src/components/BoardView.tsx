@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { Goal, Issue, IssueStatus, Task } from '../../../shared/types'
 import type { Meeting } from '../../../shared/meeting'
 import { bridge, fmtDuration } from '../api'
+import { createDeltaList } from '../data-store'
+import type { DeltaList } from '../data-store'
 import { ISSUE_STATUS_LABELS, TASK_STATUS_LABELS, isParkedQueued, PARKED_QUEUED_LABEL } from '../labels'
 import { taskService } from '../task-service'
 import { ui } from '../ui/interaction-center'
@@ -138,7 +140,12 @@ function elapsed(task: Task, now: number) { return task.startedAt ? fmtDuration(
 function descendants(node: BoardNode): BoardNode[] { return node.children.flatMap((child) => [child, ...descendants(child)]) }
 
 export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: string) => void }) {
-  const [issues, setIssues] = useState<Issue[]>([])
+  // Issue 数据面：广播自带完整对象 → 按 updatedAt 降序增量落位（稳态零拉取）；
+  // 全量快照只在装载/显式重试。读期间到达的广播由 data-store 缓冲重放，旧快照盖不掉新广播。
+  const storeRef = useRef<DeltaList<Issue> | null>(null)
+  if (storeRef.current === null) storeRef.current = createDeltaList<Issue>((issue) => issue.id, (left, right) => right.updatedAt - left.updatedAt)
+  const issuesStore = storeRef.current
+  const issues = useSyncExternalStore(issuesStore.subscribe, issuesStore.get)
   const [loading, setLoading] = useState(true)
   const [issuesLoaded, setIssuesLoaded] = useState(false)
   const [issuesError, setIssuesError] = useState<string | null>(null)
@@ -159,24 +166,28 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
   const issuesRequestRef = useRef(0)
   // 统一浮层：卡片右键菜单的外点关闭 / 最上层 Escape（原 window click+keydown 监听已收敛）
   useInteractionLayer<HTMLDivElement>({ open: menu !== null, onClose: () => setMenu(null), kind: 'popover', name: 'board-card-menu', closeOnOutside: true, autoFocus: false, layerRef: menuRef })
+  // loading 只跟踪显式全量读取（装载/重试）：增量广播不再闪「正在同步…」
   const refreshIssues = useCallback(async () => {
     const request = ++issuesRequestRef.current
     setLoading(true)
     try {
-      const next = await bridge.issues.list()
-      if (request !== issuesRequestRef.current) return
-      setIssues(next)
-      setIssuesLoaded(true)
-      setIssuesError(null)
+      const next = await issuesStore.read(() => bridge.issues.list())
+      if (next && request === issuesRequestRef.current) {
+        setIssuesLoaded(true)
+        setIssuesError(null)
+      }
     } catch (cause) {
       if (request === issuesRequestRef.current) setIssuesError(cause instanceof Error ? cause.message : String(cause))
     } finally {
       if (request === issuesRequestRef.current) setLoading(false)
     }
-  }, [])
+  }, [issuesStore])
   useEffect(() => {
     void refreshIssues()
-    const off = bridge.issues.onUpdated(() => { void refreshIssues() })
+    const off = bridge.issues.onUpdated((payload) => {
+      if (payload.issue) issuesStore.upsert(payload.issue)
+      else issuesStore.remove(payload.issueId)
+    })
     const offTasks = bridge.tasks.onDeleted(() => { void refreshIssues() })
     const offGoals = bridge.goals.onUpdated((goal) => setGoals((cur) => cur.some((g) => g.id === goal.id) ? cur.map((g) => g.id === goal.id ? goal : g) : [...cur, goal]))
     const offGoalDeleted = bridge.goals.onDeleted((id) => setGoals((cur) => cur.filter((g) => g.id !== id)))
@@ -185,8 +196,13 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
     const offMeetingDeleted = bridge.meetings.onDeleted((id) => setMeetings((cur) => cur.filter((m) => m.id !== id)))
     void bridge.meetings.list().then(setMeetings).catch(() => {})
     const timer = window.setInterval(() => setNow(Date.now()), 30_000)
-    return () => { issuesRequestRef.current++; off(); offTasks(); offGoals(); offGoalDeleted(); offMeetings(); offMeetingDeleted(); window.clearInterval(timer) }
-  }, [refreshIssues])
+    return () => {
+      off(); offTasks(); offGoals(); offGoalDeleted(); offMeetings(); offMeetingDeleted(); window.clearInterval(timer)
+      // 卸载/StrictMode 清理：作废在途读，旧装载的响应整份返回 null，不再碰状态
+      issuesStore.invalidateReads()
+      ++issuesRequestRef.current
+    }
+  }, [refreshIssues, issuesStore])
   useEffect(() => {
     if (!menu) return
     // 窗口失焦收起（外点/Escape 已由统一交互层负责）
@@ -225,7 +241,7 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
     try {
       const result = await bridge.issues.update(issue.id, { status: next })
       if (!result) ui.toast.error('更新 Issue 失败')
-      else { setIssues((cur) => cur.map((item) => item.id === result.id ? result : item)); ui.toast.success(`已移到「${ISSUE_STATUS_LABELS[next]}」`) }
+      else { issuesStore.upsert(result); ui.toast.success(`已移到「${ISSUE_STATUS_LABELS[next]}」`) }
     } catch { ui.toast.error('更新 Issue 失败') }
   }
   const startTask = async (taskId: string) => {

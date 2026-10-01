@@ -174,7 +174,6 @@ export class IssueStore {
 
   syncTaskEventually(task: Task, parent?: Task) {
     const latest = this.latestTasks.get(task.issueId ?? 'iss_' + task.id)
-    this.lastTaskFingerprint = ''
     this.syncEventually([...(latest && latest.id !== task.id ? [latest] : []), task, ...(parent ? [parent] : [])])
   }
 
@@ -223,6 +222,79 @@ export class IssueStore {
     const deleted = new Set(data.deletedIssueIds ?? [])
     const deletedTasks = new Set(data.deletedTaskIds ?? [])
     const latestByIssue = new Map<string, Task>()
+    type IndexedIssue = { issue: Issue; order: number }
+    const issuesById = new Map<string, IndexedIssue>()
+    const taskIdHeaps = new Map<string, IndexedIssue[]>()
+    const pushTaskIdCandidate = (entry: IndexedIssue) => {
+      const key = entry.issue.taskId
+      if (key === undefined) return
+      const heap = taskIdHeaps.get(key) ?? []
+      let index = heap.length
+      heap.push(entry)
+      while (index > 0) {
+        const parent = Math.floor((index - 1) / 2)
+        if (heap[parent].order <= entry.order) break
+        heap[index] = heap[parent]
+        index = parent
+      }
+      heap[index] = entry
+      taskIdHeaps.set(key, heap)
+    }
+    const firstIssueByTaskId = (taskId: string) => {
+      const heap = taskIdHeaps.get(taskId)
+      while (heap?.length && heap[0].issue.taskId !== taskId) {
+        const tail = heap.pop()!
+        if (!heap.length) break
+        let index = 0
+        while (true) {
+          const left = index * 2 + 1
+          const right = left + 1
+          if (left >= heap.length) break
+          const child = right < heap.length && heap[right].order < heap[left].order ? right : left
+          if (heap[child].order >= tail.order) break
+          heap[index] = heap[child]
+          index = child
+        }
+        heap[index] = tail
+      }
+      return heap?.[0]
+    }
+    const findProjectionIssue = (taskId: string, issueId?: string, includeEmptyIssueId = false) => {
+      const byTask = firstIssueByTaskId(taskId)
+      const byId = issueId !== undefined && (includeEmptyIssueId || !!issueId) ? issuesById.get(issueId) : undefined
+      return byTask && byId ? (byTask.order <= byId.order ? byTask : byId) : byTask ?? byId
+    }
+    const addIssueIndex = (issue: Issue, order: number) => {
+      const entry = { issue, order }
+      if (!issuesById.has(issue.id)) issuesById.set(issue.id, entry)
+      pushTaskIdCandidate(entry)
+      return entry
+    }
+    for (let index = 0; index < data.issues.length; index++) addIssueIndex(data.issues[index], index)
+
+    const runsById = new Map<string, Run>()
+    for (const run of data.runs) if (!runsById.has(run.id)) runsById.set(run.id, run)
+    const taskById = new Map<string, Task>()
+    for (const task of tasks) if (!taskById.has(task.id)) taskById.set(task.id, task)
+
+    const reportKey = (issueId: string, runId: string) => JSON.stringify([issueId, runId])
+    const legacyReportKey = (issueId: string, authorId: string, content: string, createdAt: number) => JSON.stringify([issueId, authorId, content, String(createdAt)])
+    const reportsByRun = new Map<string, Comment>()
+    const legacyReportsByMatch = new Map<string, Comment[]>()
+    for (const comment of data.comments) {
+      if (comment.author.type !== 'agent') continue
+      if (comment.runId !== undefined) {
+        const key = reportKey(comment.issueId, comment.runId)
+        if (!reportsByRun.has(key)) reportsByRun.set(key, comment)
+      }
+      if (!comment.runId) {
+        const key = legacyReportKey(comment.issueId, comment.author.id, comment.content, comment.createdAt)
+        const matching = legacyReportsByMatch.get(key) ?? []
+        matching.push(comment)
+        legacyReportsByMatch.set(key, matching)
+      }
+    }
+
     for (const task of tasks) {
       if (task.suppressIssue) continue
       const key = task.issueId ?? `iss_${task.id}`
@@ -235,10 +307,11 @@ export class IssueStore {
       const issueId = task.issueId ?? `iss_${task.id}`
       if (deleted.has(issueId) || deletedTasks.has(task.id)) continue
 
-      const existing = data.issues.find((issue) => issue.taskId === task.id || (!!task.issueId && issue.id === task.issueId))
+      const existingEntry = findProjectionIssue(task.id, task.issueId)
+      const existing = existingEntry?.issue
       const isDelegated = !!task.parentTaskId
       const derivedStatus = taskStatusToIssueStatus(task.status)
-      const status = existingStatus(data.issues, task.id, task.status, derivedStatus, task.issueId)
+      const status = existingStatus(existing, task.status, derivedStatus)
       const isLatest = latestByIssue.get(issueId)?.id === task.id
 
       if (!existing) {
@@ -257,6 +330,7 @@ export class IssueStore {
           taskId: task.id
         }
         if (task.agentId) issue.assignee = { type: 'agent', id: task.agentId }
+        addIssueIndex(issue, data.issues.length)
         data.issues.push(issue)
       } else {
         const patch: Partial<Issue> = {}
@@ -267,37 +341,41 @@ export class IssueStore {
         if (isLatest && task.agentId && existing.assignee?.id !== task.agentId) patch.assignee = { type: 'agent', id: task.agentId }
         if (isDelegated && existing.createdBy !== 'agent') patch.createdBy = 'agent'
         if (isDelegated && !existing.labels.includes('委派')) patch.labels = [...existing.labels, '委派']
-        if (Object.keys(patch).length) Object.assign(existing, patch, { updatedAt: Date.now() })
+        if (Object.keys(patch).length) {
+          const previousTaskId = existing.taskId
+          Object.assign(existing, patch, { updatedAt: Date.now() })
+          if (previousTaskId !== existing.taskId && existingEntry) pushTaskIdCandidate(existingEntry)
+        }
       }
 
-      const issue = data.issues.find((item) => item.taskId === task.id) ?? data.issues.find((item) => item.id === issueId)
+      const issue = firstIssueByTaskId(task.id)?.issue ?? issuesById.get(issueId)?.issue
       if (!issue || (task.status === 'queued' && !task.runId)) continue
 
       const execution = executionRecordFromTask(task)
       const run: Run = { ...execution, issueId: issue.id }
-      const currentRun = data.runs.find((item) => item.id === run.id)
+      const currentRun = runsById.get(run.id)
       if (currentRun) Object.assign(currentRun, run)
-      else data.runs.push(run)
+      else {
+        data.runs.push(run)
+        runsById.set(run.id, run)
+      }
 
       if (task.status !== 'done' && task.status !== 'failed') continue
       const reportText = task.status === 'done' ? task.result?.trim() : task.error?.trim()
       const reportContent = task.status === 'done'
         ? reportText
         : reportText ? `Agent execution error: ${reportText}` : 'Agent execution error'
-      const report = data.comments.find((item) => item.issueId === issue.id && item.author.type === 'agent' && item.runId === run.id)
+      const runReportKey = reportKey(issue.id, run.id)
+      const report = reportsByRun.get(runReportKey)
       const expectedAuthorId = task.agentId ?? task.backend
       // Legacy comments have no runId. Claim one only when the producing
       // agent and the terminal timestamp both prove that it belongs to this
       // execution. Multiple matching comments are ambiguous and remain
       // untouched; this run receives its own report instead.
-      const legacyReports = !report && reportContent && typeof task.endedAt === 'number'
-        ? data.comments.filter((item) => item.issueId === issue.id
-          && item.author.type === 'agent'
-          && item.author.id === expectedAuthorId
-          && !item.runId
-          && item.content === reportContent
-          && item.createdAt === task.endedAt)
-        : []
+      const legacyKey = !report && reportContent && typeof task.endedAt === 'number'
+        ? legacyReportKey(issue.id, expectedAuthorId, reportContent, task.endedAt)
+        : undefined
+      const legacyReports = legacyKey ? legacyReportsByMatch.get(legacyKey) ?? [] : []
       const legacyReport = legacyReports.length === 1 ? legacyReports[0] : undefined
       if (report) {
         if (reportContent !== report.content) report.content = reportContent ?? ''
@@ -305,8 +383,10 @@ export class IssueStore {
         // A legacy report can only be claimed by this one execution. Once it
         // has a runId, an identical later run receives its own report.
         legacyReport.runId = run.id
+        legacyReportsByMatch.delete(legacyKey!)
+        reportsByRun.set(runReportKey, legacyReport)
       } else if ((task.status === 'done' || task.status === 'failed') && reportContent) {
-        data.comments.push({
+        const comment: Comment = {
           id: this.id('com'),
           issueId: issue.id,
           author: { type: 'agent', id: task.agentId ?? task.backend },
@@ -314,7 +394,9 @@ export class IssueStore {
           reactions: [],
           runId: run.id,
           createdAt: task.endedAt ?? Date.now()
-        })
+        }
+        data.comments.push(comment)
+        reportsByRun.set(runReportKey, comment)
       }
     }
 
@@ -322,9 +404,9 @@ export class IssueStore {
     // scheduling source of truth.
     for (const task of tasks) {
       if (task.suppressIssue || !task.parentTaskId) continue
-      const child = data.issues.find((item) => item.taskId === task.id || item.id === task.issueId)
-      const parent = tasks.find((item) => item.id === task.parentTaskId)
-      const parentIssue = parent && data.issues.find((item) => item.taskId === parent.id || item.id === parent.issueId)
+      const child = findProjectionIssue(task.id, task.issueId)?.issue
+      const parent = taskById.get(task.parentTaskId)
+      const parentIssue = parent && findProjectionIssue(parent.id, parent.issueId, true)?.issue
       if (child && parentIssue && child.parentIssueId !== parentIssue.id) {
         child.parentIssueId = parentIssue.id
         child.updatedAt = Date.now()
@@ -342,7 +424,6 @@ export class IssueStore {
       task,
       ...(parent ? [parent] : [])
     ]
-    this.lastTaskFingerprint = ''
     this.sync(candidates)
   }
 
@@ -461,8 +542,7 @@ export class IssueStore {
   }
 }
 
-function existingStatus(issues: Issue[], taskId: string, taskStatus: Task['status'], derived: IssueStatus, issueId?: string): IssueStatus {
-  const issue = issues.find((item) => item.taskId === taskId || (!!issueId && item.id === issueId))
+function existingStatus(issue: Issue | undefined, taskStatus: Task['status'], derived: IssueStatus): IssueStatus {
   // A human workflow choice is durable. An active execution is the only
   // transient state allowed to surface over it.
   if (issue?.statusOverride && taskStatus !== 'running') return issue.statusOverride

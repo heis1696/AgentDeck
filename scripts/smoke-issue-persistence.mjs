@@ -489,6 +489,54 @@ try {
     console.log('  PASS real missing-issue comment degrades end-to-end via persisted task event + push')
   }
 
+  console.log('[scenario] ordered projection indexes preserve earliest array matches')
+  {
+    const dir = makeDir('ordered-index-matches')
+    fs.mkdirSync(path.join(dir, 'issues'), { recursive: true })
+    fs.writeFileSync(path.join(dir, 'issues', 'index.json'), JSON.stringify({
+      issues: [
+        { id: 'iss_ordered', identifier: 'YOU-1', title: 'earliest id match', description: '', status: 'todo', priority: 'none', labels: [], position: 1, createdBy: 'user', createdAt: 1, updatedAt: 1, taskId: 'unrelated-task' },
+        { id: 'iss_other', identifier: 'YOU-2', title: 'earliest task match', description: '', status: 'todo', priority: 'none', labels: [], position: 2, createdBy: 'user', createdAt: 2, updatedAt: 2, taskId: 'ordered-task' }
+      ],
+      runs: [],
+      comments: [],
+      nextIdentifier: 3
+    }))
+    const store = new IssueStore(dir)
+    const first = task('ordered-task', { issueId: 'iss_ordered', status: 'done', createdAt: 100, runId: 'run-ordered-first', endedAt: 110, result: 'first' })
+    const latest = task('latest-task', { issueId: 'iss_ordered', status: 'done', createdAt: 200, runId: 'run-ordered-latest', endedAt: 210, result: 'latest' })
+    store.sync([first, latest])
+    const persisted = JSON.parse(fs.readFileSync(path.join(dir, 'issues', 'index.json'), 'utf8'))
+    assert.equal(persisted.issues[0].title, 'Task latest-task')
+    assert.equal(persisted.issues[0].taskId, 'latest-task')
+    assert.equal(persisted.issues[1].title, 'earliest task match')
+    assert.equal(persisted.runs.find((run) => run.id === 'run-ordered-first')?.issueId, 'iss_other')
+    assert.equal(persisted.runs.find((run) => run.id === 'run-ordered-latest')?.issueId, 'iss_ordered')
+    console.log('  PASS OR-match order, taskId rewrite, and legacy run-resolution precedence')
+  }
+
+  console.log('[scenario] same-fingerprint sync preserves another instance changes and tombstones')
+  {
+    const dir = makeDir('same-fingerprint-instances')
+    const first = new IssueStore(dir)
+    const second = new IssueStore(dir)
+    const source = task('same-fingerprint', { issueId: 'iss_same_fingerprint' })
+    first.sync([source])
+    second.sync([source])
+
+    const issueFile = path.join(dir, 'issues', 'index.json')
+    const external = JSON.parse(fs.readFileSync(issueFile, 'utf8'))
+    external.issues[0].title = 'changed by another process'
+    fs.writeFileSync(issueFile, JSON.stringify(external))
+    first.syncTaskEventually(source)
+    assert.equal(new IssueStore(dir).get('iss_same_fingerprint')?.title, 'changed by another process')
+
+    assert.equal(second.deleteIssue('iss_same_fingerprint'), true)
+    first.syncTaskEventually(source)
+    assert.equal(new IssueStore(dir).get('iss_same_fingerprint'), undefined)
+    console.log('  PASS equal task fingerprints still reread external edits and deletion tombstones')
+  }
+
   console.log('SMOKE ISSUE PERSISTENCE PASSED')
 } finally {
   fs.rmSync(tempRoot, { recursive: true, force: true })

@@ -298,12 +298,12 @@ export class TaskStore {
   stagePendingEvents(id: string, turnId: string, runId: string, events: readonly Omit<TaskEvent, 'seq'>[], expected: TaskExpectation, openedAt = Date.now()): boolean {
     const durable = events.filter(isTaskEventDurable)
     if (!durable.length) return true
-    return this.transaction((tx) => {
+    return this.transactionWithCountScope((tx) => {
       const task = tx.get(id)
       if (!task || !matchesTask(task, expected)) return false
       atomicWriteJson(this.pendingEventFile(id, turnId), { version: 1, taskId: id, runId, turnId, openedAt, events: durable })
       return true
-    })
+    }, false)
   }
 
   clearPendingEvents(id: string, turnId: string): void {
@@ -355,10 +355,11 @@ export class TaskStore {
     }
   }
 
-  private readDocument(deriveCounts = true): TaskIndexDocument {
+  private readDocument(deriveCounts: boolean | string = true): TaskIndexDocument {
     const raw = readJsonFile<unknown>(this.indexFile(), undefined)
     const document = raw === undefined ? { schemaVersion: TASK_INDEX_SCHEMA_VERSION, tasks: [] } : migrateTaskIndex(raw, Date.now(), { recoverRunning: false, trustedOfficeAgentIds: this.trustedOfficeAgentIds })
     if (deriveCounts) for (const task of document.tasks) {
+      if (typeof deriveCounts === 'string' && task.id !== deriveCounts) continue
       const count = this.eventLog(task.id).count()
       if (task.eventCount !== count) {
         task.eventCount = count
@@ -422,9 +423,13 @@ export class TaskStore {
 
   /** Every mutation starts with committed state; the view expires on return. */
   transaction<T>(action: SynchronousAction<T, TaskTransaction>): T {
+    return this.transactionWithCountScope(action, true)
+  }
+
+  private transactionWithCountScope<T>(action: SynchronousAction<T, TaskTransaction>, deriveCounts: boolean | string): T {
     assertSynchronousAction(action)
     const work = ((token: TransactionToken) => {
-      const document = this.readDocument()
+      const document = this.readDocument(deriveCounts)
       const tasks = new Map(document.tasks.map((task) => [task.id, task]))
       const touched = new Set<string>()
       const removed = new Set<string>()
@@ -568,7 +573,7 @@ export class TaskStore {
 
   create(input: TaskCreateRecord): Task { return this.transaction((tx) => tx.create(input)) }
 
-  get(id: string): Task | undefined { return this.readDocument().tasks.find((task) => task.id === id) }
+  get(id: string): Task | undefined { return this.readDocument(id).tasks.find((task) => task.id === id) }
 
   list(): Task[] { return this.readDocument().tasks.sort((a, b) => b.createdAt - a.createdAt) }
 
@@ -711,11 +716,11 @@ export class TaskStore {
   deleteIf(id: string, expected: TaskExpectation): boolean { return this.transaction((tx) => tx.delete(id, expected)) }
 
   appendEvent(id: string, event: Omit<TaskEvent, 'seq'>, expected: TaskExpectation = {}): TaskEvent | null {
-    return this.transaction((tx) => tx.appendEvent(id, event, expected))
+    return this.transactionWithCountScope((tx) => tx.appendEvent(id, event, expected), id)
   }
 
   appendEvents(id: string, events: readonly Omit<TaskEvent, 'seq'>[], expected: TaskExpectation = {}): TaskEvent[] {
-    return this.transaction((tx) => tx.appendEvents(id, events, expected))
+    return this.transactionWithCountScope((tx) => tx.appendEvents(id, events, expected), id)
   }
 
   flush() {
