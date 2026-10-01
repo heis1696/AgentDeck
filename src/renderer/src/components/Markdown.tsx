@@ -3,7 +3,7 @@
 //   <delegate to reason>派单</delegate>、<continue start>硬切简报</continue>、
 //   <round outcome reason/>自评、<review of verdict note/>审核
 // 围栏代码块走内置高亮器（零依赖）+ 语言标签 + 一键复制卡片
-import { isValidElement, useMemo, useState, type ReactNode } from 'react'
+import { isValidElement, memo, useMemo, useState, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
@@ -512,6 +512,9 @@ function renderSegments(text: string): ReactNode[] {
   return nodes
 }
 
-export function Markdown({ text }: { text: string }) {
-  return <div className="md">{renderSegments(text)}</div>
+const MarkdownView = ({ text }: { text: string }) => {
+  const segments = useMemo(() => renderSegments(text), [text])
+  return <div className="md">{segments}</div>
 }
+
+export const Markdown = memo(MarkdownView, (previous, next) => previous.text === next.text)
