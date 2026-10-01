@@ -5,6 +5,7 @@ import type { TaskService } from './task-service'
 import {
   reportPrompt,
   challengePrompt,
+  reviewPrompt,
   defensePrompt,
   synthPrompt,
   forcedSynthesisPrompt,
@@ -14,7 +15,6 @@ import {
 } from './prompts/meeting'
 import {
   canTransitionMeeting,
-  DEFAULT_MEETING_MAX_INNER_TURNS,
   type Meeting,
   type MeetingActionItem,
   type MeetingCreateInput,
@@ -84,7 +84,7 @@ export function parseStance(text: string): Stance | null {
 export function stripMeetingTags(text: string): string {
   return text
     .replace(/<stance\b[^>]*\/>/gi, '')
-    .replace(/<objection\b[^>]*>[\s\S]*?<\/objection>/gi, '')
+    .replace(/<objection\b([^>]*)>([\s\S]*?)<\/objection>/gi, (_match, attrs: string, body: string) => `反对[${attr(attrs, 'ref') ?? '未注明出处'}]：${body.trim()}`)
     .trim()
 }
 
@@ -162,11 +162,11 @@ function isCaptain(agent: AgentLike): boolean {
 function uniqueObjections(rows: MeetingObjection[]): MeetingObjection[] {
   const seen = new Set<string>()
   return rows.filter((row) => {
-    const key = `${row.ref}\n${row.text}`
+    const key = `${row.raisedBy}\n${row.ref}\n${row.text}`
     if (seen.has(key)) return false
     seen.add(key)
     return true
-  }).slice(0, 3)
+  })
 }
 
 export class MeetingController {
@@ -359,43 +359,70 @@ export class MeetingController {
     const stances = new Map<string, Stance>()
     const owners = this.ownerNames(meeting)
     const reporter = meeting.participants.find((participant) => participant.role === 'reporter')!
-    const reportPromptText = reportPrompt(this.chairNotes(meeting), meeting.round, meeting.topic, this.investigatorNames(reporter.agentId))
-    const reportText = await this.speak(meeting, reporter, 'report', reportPromptText, turns)
-    const reportStance = parseStance(reportText)
-    if (reportStance) stances.set(reporter.agentId, reportStance)
-    let objections: MeetingObjection[] = []
+    const previous = meeting.minutes[meeting.minutes.length - 1]
+    const previousData = previous ? meetingData(`上一轮纪要与未决意见：\n${JSON.stringify(previous)}`) : ''
+    const discussion: string[] = previous ? [`上一轮纪要与未决意见：\n${JSON.stringify(previous)}`] : []
+    let objections: MeetingObjection[] = previous?.objections.filter((objection) => !objection.resolved).map((objection) => ({ ...objection })) ?? []
     let envelope: Envelope | null = null
-    const critics = meeting.participants.filter((participant) => participant.role === 'critic')
     const designer = meeting.participants.find((participant) => participant.role === 'designer')!
-    for (let inner = 0; inner < Math.max(1, meeting.maxInnerTurns); inner++) {
-      for (const critic of critics) {
-        const prompt = challengePrompt(this.chairNotes(meeting), meeting.round, meeting.topic, meetingData(stripMeetingTags(reportText)), this.investigatorNames(critic.agentId))
-        const text = await this.speak(meeting, critic, 'challenge', prompt, turns)
-        const stance = parseStance(text)
-        if (stance) stances.set(critic.agentId, stance)
-        objections = uniqueObjections([...objections, ...parseObjections(text, critic.agentId)])
+    const reviewers = meeting.participants.filter((participant) => participant.agentId !== reporter.agentId)
+    const speak = async (participant: MeetingParticipant, phase: MeetingTurnPhase, prompt: string) => {
+      const text = await this.speak(meeting, participant, phase, prompt, turns)
+      const stance = parseStance(text)
+      stances.delete(participant.agentId)
+      if (stance) stances.set(participant.agentId, stance)
+      const name = this.getAgents().find((agent) => agent.id === participant.agentId)?.name ?? participant.agentId
+      discussion.push(`【${name}·${PHASE_LABEL[phase]}】\n${stripMeetingTags(text)}${stance ? `\n表态：${stance.verdict}；依据：${stance.grounds}` : ''}`)
+      return text
+    }
+    const discussionData = () => {
+      const register = objections.map((objection) => {
+        const state = objection.resolved ? '已复核解决' : '待复核'
+        const resolution = objection.resolution ? `；解决提议：${objection.resolution}` : ''
+        return `- ${objection.id} [${objection.ref}] ${objection.text}（提出者：${objection.raisedBy}；${state}${resolution}）`
+      }).join('\n')
+      return meetingData(`${discussion.join('\n\n')}\n\n反对登记：\n${register}`)
+    }
+    const recordReview = (participant: MeetingParticipant, text: string, targetAgentId: string) => {
+      const raised = parseObjections(text, participant.agentId, targetAgentId)
+      const confirmed = stances.get(participant.agentId)?.verdict === 'agree' && !raised.length
+      objections = objections.map((objection) => objection.raisedBy === participant.agentId && !objection.resolved && confirmed
+        ? { ...objection, resolved: true, resolution: objection.resolution ?? stances.get(participant.agentId)!.grounds }
+        : objection)
+      for (const objection of raised) {
+        const existing = objections.findIndex((candidate) => candidate.raisedBy === objection.raisedBy && candidate.ref === objection.ref && candidate.text === objection.text)
+        if (existing >= 0) objections[existing] = { ...objections[existing], resolved: false }
+        else objections.push({ ...objection, id: `obj_${objections.length + 1}` })
       }
-      if (!objections.length) break
-      const objectionText = objections.map((objection) => `- ${objection.id} [${objection.ref}] ${objection.text}`).join('\n')
-      // 答辩必须由被质疑的汇报人执行：designer 无权解决针对汇报的反对，只会输出空 envelope，resolved 永远为 false（iss_t_mu420e1e 死循环根因）
-      const defensePromptText = defensePrompt(this.chairNotes(meeting), meeting.round, meeting.topic, meetingData(objectionText), this.investigatorNames(reporter.agentId), owners)
-      const defenseText = await this.speak(meeting, reporter, 'defense', defensePromptText, turns)
-      const defenseStance = parseStance(defenseText)
-      if (defenseStance) stances.set(reporter.agentId, defenseStance)
+    }
+    const review = async (participant: MeetingParticipant, prompt: string, targetAgentId: string) => {
+      recordReview(participant, await speak(participant, 'challenge', prompt), targetAgentId)
+    }
+    const reportText = await speak(reporter, 'report', reportPrompt(this.chairNotes(meeting), meeting.round, meeting.topic, this.investigatorNames(reporter.agentId), previousData))
+    recordReview(reporter, reportText, reporter.agentId)
+    for (const critic of reviewers) {
+      await review(critic, challengePrompt(this.chairNotes(meeting), meeting.round, meeting.topic, discussionData(), this.investigatorNames(critic.agentId)), reporter.agentId)
+    }
+    const readyForSynthesis = () => objections.every((objection) => objection.resolved) && reviewers.every((participant) => stances.get(participant.agentId)?.verdict === 'agree')
+    for (let inner = 0; inner < meeting.maxInnerTurns && !readyForSynthesis(); inner++) {
+      const defenseText = await speak(reporter, 'defense', defensePrompt(this.chairNotes(meeting), meeting.round, meeting.topic, discussionData(), this.investigatorNames(reporter.agentId), owners))
+      recordReview(reporter, defenseText, reporter.agentId)
       envelope = parseEnvelope(defenseText)
       if (envelope) objections = this.mergeEnvelopeObjections(objections, envelope, reporter.agentId)
-      if (objections.every((objection) => objection.resolved)) break
+      for (const critic of reviewers) {
+        await review(critic, reviewPrompt(this.chairNotes(meeting), meeting.round, meeting.topic, discussionData(), this.investigatorNames(critic.agentId), 'defense'), reporter.agentId)
+      }
     }
-    if ((!objections.length || objections.every((objection) => objection.resolved)) && designer) {
-      // 综合轮：反对清零后由设计者把共识固化为 decisions/actionItems（conclude 依赖有效 envelope）
-      const resolutionText = objections.length
-        ? objections.map((objection) => `- [${objection.ref}] ${objection.resolved ? '已解决' : '未决'}：${objection.text}${objection.resolution ? ' → ' + objection.resolution : ''}`).join('\n')
-        : '（本轮没有反对）'
-      const synthPromptText = synthPrompt(this.chairNotes(meeting), meeting.round, meeting.topic, meetingData(resolutionText), this.investigatorNames(designer.agentId), owners)
-      const synthText = await this.speak(meeting, designer, 'synthesis', synthPromptText, turns)
-      const synthStance = parseStance(synthText)
-      if (synthStance) stances.set(designer.agentId, synthStance)
-      envelope = parseEnvelope(synthText) ?? envelope
+    if (readyForSynthesis()) {
+      stances.clear()
+      const synthText = await speak(designer, 'synthesis', synthPrompt(this.chairNotes(meeting), meeting.round, meeting.topic, discussionData(), this.investigatorNames(designer.agentId), owners))
+      envelope = parseEnvelope(synthText)
+      if (envelope) {
+        objections = this.mergeEnvelopeObjections(objections, envelope, designer.agentId)
+        for (const participant of meeting.participants.filter((candidate) => candidate.agentId !== designer.agentId)) {
+          await review(participant, reviewPrompt(this.chairNotes(meeting), meeting.round, meeting.topic, discussionData(), this.investigatorNames(participant.agentId), 'minutes'), designer.agentId)
+        }
+      }
     }
     return { reportText, stances, objections, envelope, turns }
   }
@@ -442,25 +469,29 @@ export class MeetingController {
     const rows = existing.map((objection) => {
       const match = envelope.objections.find((candidate) => candidate.ref === objection.ref || candidate.text === objection.text)
       if (!match) return objection
-      return { ...objection, resolved: match.resolved, resolution: match.resolution, targetAgentId: match.targetAgentId ?? objection.targetAgentId ?? defender }
+      return { ...objection, resolved: objection.resolved && match.resolved, resolution: match.resolution ?? objection.resolution }
     })
     for (const candidate of envelope.objections) {
       if (!candidate.ref || !candidate.text) continue
       if (rows.some((row) => row.ref === candidate.ref && row.text === candidate.text)) continue
-      rows.push({ id: `obj_${rows.length + 1}`, text: candidate.text, ref: candidate.ref, raisedBy: defender, targetAgentId: candidate.targetAgentId ?? defender, priority: candidate.priority === 'high' ? 'high' : 'normal', resolved: candidate.resolved, resolution: candidate.resolution })
+      rows.push({ id: `obj_${rows.length + 1}`, text: candidate.text, ref: candidate.ref, raisedBy: defender, targetAgentId: candidate.targetAgentId ?? defender, priority: candidate.priority === 'high' ? 'high' : 'normal', resolved: false, resolution: candidate.resolution })
     }
     return uniqueObjections(rows)
   }
 
   private minutesFromRound(round: number, result: RoundRun): MeetingMinutes {
     const envelope = result.envelope
+    const dissent = [...result.stances].filter(([, stance]) => stance.verdict !== 'agree').map(([agentId, stance]) => {
+      const name = this.getAgents().find((agent) => agent.id === agentId)?.name ?? agentId
+      return `${name}尚未同意：${stance.grounds || stance.verdict}`
+    })
     return {
       round,
       summary: stripMeetingTags(result.reportText).slice(0, 500),
       decisions: envelope?.decisions ?? [],
       objections: result.objections,
       actionItems: (envelope?.actionItems ?? []).map((item) => ({ title: item.title, ownerAgentId: this.resolveOwner(item.owner), acceptance: item.acceptance, approval: 'pending' as const })),
-      openQuestions: envelope?.openQuestions ?? [],
+      openQuestions: [...new Set([...(envelope?.openQuestions ?? []), ...dissent])],
       provenance: 'consensus:advisory'
     }
   }
@@ -511,23 +542,25 @@ export class MeetingController {
       }
     }
     for (const turn of turns) this.store.appendTurn(turn)
-    const unresolved = (synthesis?.objections ?? last?.objections ?? []).map((objection, index) => ({
-      id: `obj_forced_${index + 1}`,
-      text: objection.text,
-      ref: objection.ref,
-      raisedBy: designer?.agentId ?? 'meeting',
-      targetAgentId: objection.targetAgentId,
-      priority: objection.priority === 'high' ? 'high' as const : 'normal' as const,
-      resolved: false,
-      resolution: undefined
-    }))
+    const unresolved = uniqueObjections([
+      ...(last?.objections.filter((objection) => !objection.resolved) ?? []),
+      ...(synthesis?.objections ?? []).filter((objection) => !last?.objections.some((existing) => existing.ref === objection.ref && existing.text === objection.text)).map((objection, index) => ({
+        id: `obj_forced_${index + 1}`,
+        text: objection.text,
+        ref: objection.ref,
+        raisedBy: designer?.agentId ?? 'meeting',
+        targetAgentId: objection.targetAgentId,
+        priority: objection.priority === 'high' ? 'high' as const : 'normal' as const,
+        resolved: false
+      }))
+    ])
     const forced: MeetingMinutes = {
       round: meeting.round,
       summary: `强制综合：${message}`,
       decisions: synthesis?.decisions ?? last?.decisions ?? [],
       objections: unresolved,
       actionItems: (synthesis?.actionItems ?? []).map((item) => ({ title: item.title, ownerAgentId: this.resolveOwner(item.owner), acceptance: item.acceptance, approval: 'pending' as const })),
-      openQuestions: [...(synthesis?.openQuestions ?? last?.openQuestions ?? []), message],
+      openQuestions: [...new Set([...(last?.openQuestions ?? []), ...(synthesis?.openQuestions ?? []), message])],
       provenance: 'consensus:advisory'
     }
     const minutes = last?.summary?.startsWith('强制综合：') ? meeting.minutes : [...meeting.minutes, forced]
