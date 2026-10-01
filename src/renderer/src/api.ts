@@ -3,6 +3,8 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import type { AgentDeckApi, AgentInfo, AgentModelCatalog, FileDiffResult, PresetInfo, PermissionRequest } from '../../shared/contracts'
 import type { Task, TaskEvent, AppSettings, Issue, Run, Comment, Automation, RuntimeSnapshot, AnalyticsSummary, IssuePriority, IssueStatus, RunTrigger } from '../../shared/types'
 import type { PackAssets, PetSayPayload, PetStateSnapshot } from '../../shared/pet'
+import { createDeltaList } from './data-store'
+import type { DeltaList } from './data-store'
 
 /** 队员（agent 身份）——与主进程 agents.ts 的 Agent 对齐 */
 export type { AgentInfo, AgentModelCatalog }
@@ -23,41 +25,67 @@ export function fileDiff(taskId: string, file: string): Promise<FileDiffResult> 
 }
 
 /** 任务列表 + 实时更新。
- *  refresh 用单调请求序号防响应乱序：主进程事件密集时多次 list 并发在途，先发后至的旧快照
- *  直接丢弃，只有最新一次请求的响应会落地——否则草稿创建后，一份创建前发出的旧列表快照
- *  会把新任务从目录里抹掉（详情页随之丢 selected 弹回列表）。
+ *  广播自带完整 Task（task:updated）/id（task:deleted），直接增量落位——稳态零 list 拉取；
+ *  全量快照只在首次装载与显式 refresh 发生（单调序号最新读获胜 + 读期间广播缓冲重放，
+ *  先发后至的旧快照整份作废、显式刷新绝不排队等旧读）。
+ *  兜底对账（微任务合并，稳态不触发）：①首份快照落地前，事件兼作重试触发器——增量目录
+ *  不完整，不能一直卡在未就绪；②issues:create「稍后创建」只广播 issues:updated、不广播
+ *  task:updated（waitForTaskListed 注释即此），目录缺失该 taskId 才补一次全量。
  *  ready 标记目录是否拿到过第一份真实列表：false = 目录未加载，宿主不应把空目录喂给交互中心。 */
 export function useTasks() {
   const [tasks, setTasks] = useState<Task[]>([])
   const [ready, setReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const seqRef = useRef(0)
-  const latestRequest = useRef<Promise<Task[] | null>>(Promise.resolve(null))
+  const storeRef = useRef<DeltaList<Task> | null>(null)
+  const readySeenRef = useRef(false)
+  if (storeRef.current === null) storeRef.current = createDeltaList<Task>((task) => task.id)
   const refresh = useCallback(async () => {
-    const seq = ++seqRef.current
-    const request: Promise<Task[] | null> = bridge.tasks.list().then((list) => {
-      if (seq !== seqRef.current) return latestRequest.current
-      setTasks(list)
-      setReady(true)
-      setError(null)
+    try {
+      const list = await storeRef.current!.read(() => bridge.tasks.list())
+      if (list) {
+        readySeenRef.current = true
+        setReady(true)
+        setError(null)
+      }
       return list
-    }).catch((cause: unknown) => {
-      if (seq !== seqRef.current) return latestRequest.current
+    } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
       return null
-    })
-    latestRequest.current = request
-    return request
+    }
   }, [])
   useEffect(() => {
-    refresh()
-    const off1 = bridge.tasks.onUpdated(() => refresh())
-    const off2 = bridge.tasks.onDeleted(() => refresh())
+    const store = storeRef.current!
+    let disposed = false
+    let reconciling = false
+    const unsubscribe = store.subscribe((items) => { if (!disposed) setTasks(items) })
+    const reconcile = () => {
+      if (reconciling || disposed) return
+      reconciling = true
+      queueMicrotask(() => {
+        reconciling = false
+        if (!disposed) void refresh()
+      })
+    }
+    const off1 = bridge.tasks.onUpdated((task) => {
+      store.upsert(task)
+      if (!readySeenRef.current) reconcile()
+    })
+    const off2 = bridge.tasks.onDeleted((id) => {
+      store.remove(id)
+      if (!readySeenRef.current) reconcile()
+    })
+    const offIssues = bridge.issues.onUpdated((payload) => {
+      // 停泊建单（startNow=false）只有 issues 广播：目录缺失该任务才对账，同批合并为一次
+      if (!payload.issue || store.has(payload.issue.taskId)) return
+      reconcile()
+    })
+    void refresh()
     return () => {
-      seqRef.current++
-      latestRequest.current = Promise.resolve(null)
+      disposed = true
+      unsubscribe()
       off1()
       off2()
+      offIssues()
     }
   }, [refresh])
   return { tasks, refresh, ready, error }
@@ -89,16 +117,37 @@ export async function getTaskWhenReady(id: string, opts: { attempts?: number; de
   return null
 }
 
-/** Issue is the durable user-facing unit; tasks remain an execution detail. */
+/** Issue is the durable user-facing unit; tasks remain an execution detail.
+ *  广播自带完整 Issue（issue:null = 删除），增量落位；全量快照只在装载/显式 refresh。
+ *  对账兜底：保留窗 GC 删除 Issue 不广播（主进程仅 deleteIssue 落盘），但 GC 会级联删
+ *  任务并逐个广播 task:deleted——借此低频触发一次全量刷新，防止 GC 残影长期滞留。 */
 export function useIssues() {
   const [issues, setIssues] = useState<Issue[]>([])
+  const storeRef = useRef<DeltaList<Issue> | null>(null)
+  if (storeRef.current === null) storeRef.current = createDeltaList<Issue>((issue) => issue.id)
   const refresh = useCallback(async () => {
-    setIssues(await bridge.issues.list())
+    try {
+      return await storeRef.current!.read(() => bridge.issues.list())
+    } catch {
+      return null
+    }
   }, [])
   useEffect(() => {
-    refresh()
-    const off = bridge.issues.onUpdated(() => refresh())
-    return off
+    const store = storeRef.current!
+    let disposed = false
+    const unsubscribe = store.subscribe((items) => { if (!disposed) setIssues(items) })
+    const off = bridge.issues.onUpdated((payload) => {
+      if (payload.issue) store.upsert(payload.issue)
+      else store.remove(payload.issueId)
+    })
+    const offTasks = bridge.tasks.onDeleted(() => { void refresh() })
+    void refresh()
+    return () => {
+      disposed = true
+      unsubscribe()
+      off()
+      offTasks()
+    }
   }, [refresh])
   return { issues, refresh }
 }
