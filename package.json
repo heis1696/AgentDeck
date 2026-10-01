@@ -59,6 +59,7 @@
     "smoke:model": "node scripts/smoke-model.mjs",
     "smoke:continue": "node scripts/smoke-continue.mjs",
     "smoke:board-retention": "node scripts/smoke-board-retention.mjs",
+    "smoke:renderer-data": "node scripts/smoke-renderer-data.mjs",
     "smoke:edit-meta": "node scripts/smoke-edit-meta.mjs",
     "smoke:file-diff": "node scripts/smoke-file-diff.mjs",
     "smoke:orchestration-matrix": "node scripts/smoke-orchestration-matrix.mjs",

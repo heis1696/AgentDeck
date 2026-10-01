@@ -426,9 +426,11 @@ section('结构回归：导入环 / DOM 事件 / pet 路由')
 
   // 目录就绪门控与草稿创建后的导航（本轮 Review Follow-up：先见目录再路由 + 防刷新乱序）
   const apiSource = read('src/renderer/src/api.ts')
+  const dataStoreSource = read('src/renderer/src/data-store.ts')
   const center = read('src/renderer/src/ui/interaction-center.ts')
   ok(/if \(ready\) ui\.setTasks/.test(app) && /waitForTaskListed/.test(app), 'App 只在目录就绪后喂目录；草稿创建后等目录可见再导航')
-  ok(/const seq = \+\+seqRef\.current/.test(apiSource) && /seq [!=]== seqRef\.current/.test(apiSource), 'useTasks 刷新带单调请求序号：先发后至的旧列表快照直接丢弃')
+  ok(/seq !== readSeq/.test(dataStoreSource) && /for \(const op of replay\) apply\(op/.test(dataStoreSource), '读竞态由 data-store 单调序号兜底：先发后至的旧快照整份作废，读期间广播按到达序重放')
+  ok(/store\.upsert\(task\)/.test(apiSource) && !/onUpdated\(\(\) => \{? ?void refresh|onUpdated\(\(\) => refresh/.test(apiSource), 'useTasks 广播增量落位（稳态零全量重拉），全量快照只在装载/显式刷新')
   ok(/topModal\(\)/.test(center) && !/overlay: layers\.topName\(\)/.test(center), '快捷键 overlay 只看最上层模态（topModal），非模态浮窗/菜单不封锁')
 
   // 全量渲染层导入环检测（相对导入，.ts/.tsx 双扩展名解析）

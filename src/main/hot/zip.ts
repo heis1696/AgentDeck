@@ -125,7 +125,7 @@ export function extractZipStore(zipPath: string, destDir: string): ExtractedEntr
     const localOff = zip.readUInt32LE(ptr + 42)
     const name = zip.toString('utf8', ptr + 46, ptr + 46 + nameLen)
     // zip-slip：拒绝绝对路径与 .. 段
-    if (name.startsWith('/') || /^[a-zA-Z]:/.test(name) || name.split('/').includes('..')) {
+    if (name.startsWith('/') || name.includes('\\') || /^[a-zA-Z]:/.test(name) || name.split('/').includes('..')) {
       throw new Error(`zip: unsafe entry path ${name}`)
     }
     // 本地头：跳过其 extra 字段

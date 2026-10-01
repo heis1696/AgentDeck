@@ -136,6 +136,7 @@ export class EventLog {
    * parsed incrementally; a line still missing its newline holds the
    * watermark back so a torn write is never half-indexed. */
   private indexedSize = 0
+  private indexedFileIdentity?: string
   /** True when unconsumed bytes exist past the watermark (a trailing
    * fragment without its newline). Re-checked before any append, because
    * writing after it would concatenate onto the fragment. */
@@ -154,10 +155,12 @@ export class EventLog {
    * the duplicate-seq mode seen on restart reconciliation. */
   private ensureFresh() {
     if (!this.indexed) return this.rebuild()
-    let size = -1
+    let stat: fs.BigIntStats
     // A missing file (e.g. retention purging the task dir from another
     // process) must drop the cached events, not serve ghosts forever.
-    try { size = fs.statSync(this.file).size } catch { return this.rebuild() }
+    try { stat = fs.statSync(this.file, { bigint: true }) } catch { return this.rebuild() }
+    if (`${stat.dev}:${stat.ino}` !== this.indexedFileIdentity) return this.rebuild()
+    const size = Number(stat.size)
     if (size === this.indexedSize) return
     if (size < this.indexedSize) return this.rebuild()
     this.consumeFrom(this.indexedSize)
@@ -169,9 +172,17 @@ export class EventLog {
     this.maxSeq = 0
     this.pendingTail = false
     this.sequenceDivergence = undefined
+    this.indexedFileIdentity = undefined
     let bytes: Buffer
     try {
-      bytes = fs.readFileSync(this.file)
+      const fd = fs.openSync(this.file, 'r')
+      try {
+        const stat = fs.fstatSync(fd, { bigint: true })
+        bytes = fs.readFileSync(fd)
+        this.indexedFileIdentity = `${stat.dev}:${stat.ino}`
+      } finally {
+        fs.closeSync(fd)
+      }
     } catch {
       this.indexedSize = 0
       this.indexed = true
@@ -213,7 +224,9 @@ export class EventLog {
     try {
       const fd = fs.openSync(this.file, 'r')
       try {
-        const length = fs.fstatSync(fd).size - start
+        const stat = fs.fstatSync(fd, { bigint: true })
+        if (`${stat.dev}:${stat.ino}` !== this.indexedFileIdentity) return this.rebuild()
+        const length = Number(stat.size) - start
         if (length <= 0) return
         bytes = Buffer.alloc(length)
         let read = 0
@@ -454,7 +467,11 @@ export class EventLog {
   }
 
   private fileSize() {
-    try { return fs.statSync(this.file).size } catch { return 0 }
+    try {
+      const stat = fs.statSync(this.file, { bigint: true })
+      this.indexedFileIdentity = `${stat.dev}:${stat.ino}`
+      return Number(stat.size)
+    } catch { return 0 }
   }
 
   truncate(keepThroughSeq: number): TaskEvent[] | null {
