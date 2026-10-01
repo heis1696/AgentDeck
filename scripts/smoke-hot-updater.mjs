@@ -23,6 +23,9 @@
  *   G 不兼容 L2：minMainVersion / minShellVersion 门禁不过 → check 按该通道无更新；apply 失败且零触碰
  *   H 损坏 L2：产物 sha 不符（传输损坏）/ zip CRC 坏（如实签名的坏产物）/ manifest 被篡改（验签不过）
  *     → apply（或 check）拦下，指针与生效面零触碰、无 staging 残留
+ *   H4 zip-slip：签名合法且 sha 如实描述的 zip 携 `..\x` 反斜杠逃逸条目（win32 path.join 把 `\`
+ *     当分隔符归一化，split('/') 与 includes('..') 双双失明的形态）→ 直连解压必拒绝、逃逸文件
+ *     不得落 destDir 之外；端到端 apply 拦下且零触碰；正斜杠 .. 段/盘符路径/正常条目对照齐备
  *   I L1 升级会清掉已是最新的 L2 指针：applyAll 后 L2 重新收敛，不留重复提示
  *   J L1/L2 feed 同版：L1 应用后同版 L2 不再重复下载（不产生 failed 状态）
  *   K 有效 L2 的 minMainVersion 高于壳但被生效 L1 满足（门禁基准 = 生效主进程版本）→ 提示、应用、生效
@@ -60,6 +63,7 @@ const L2_BAD_SHELL = `${SHELL}-hot.33` // 不兼容：minShellVersion 高于壳�
 const L2_CORRUPT_SHA = `${SHELL}-hot.34` // 损坏：feed 字节与 manifest 声明的 sha256 不符
 const L2_CORRUPT_CRC = `${SHELL}-hot.35` // 损坏：manifest 如实描述坏产物（sha 门过、解压 CRC 门拦）
 const L2_TAMPERED = `${SHELL}-hot.36` // 损坏：签名后篡改 manifest（验签不过）
+const L2_ZIPSLIP = `${SHELL}-hot.37` // 恶意：zip 条目名携 .. 段路径逃逸（zip-slip，win32 反斜杠形态）
 const L2_BY_L1_GATE = `${SHELL}-hot.41` // 有效 L2：minMainVersion 高于壳、但被生效 L1 主进程满足
 
 let failed = 0
@@ -138,7 +142,7 @@ const { HotUpdater } = await loadTs('src/main/hot/updater.ts')
 const { resolveHotState } = await loadTs('src/main/hot/resolve.ts')
 const { channelRoot, clearPointer, pointerFilePath, readPointer, writePointerAtomic } = await loadTs('src/main/hot/pointer.ts')
 const { compareSemver } = await loadTs('src/main/hot/verifier.ts')
-const { createZipStore } = await loadTs('src/main/hot/zip.ts')
+const { createZipStore, extractZipStore } = await loadTs('src/main/hot/zip.ts')
 const { canonicalJson } = await loadTs('src/main/hot/canonical.ts')
 
 // ---------- 本地 feed 组装 ----------
@@ -200,13 +204,16 @@ const signManifest = (payload) =>
  * corrupt：'sha' = feed 字节被改而 manifest 仍声明原始 sha（传输损坏）；
  *          'crc' = manifest 如实声明坏字节（sha 门过，解压 CRC 门拦）；
  * tamper：签名之后改 manifest.version（伪造/被改 → 验签必不过）。
+ * slipPath：往 zip 里追加一个 manifest.files 不含的逃逸条目（产物 sha 如实描述 → 完整性门可过，
+ * 只剩解压器 zip-slip 防护一道闸；模拟持钥攻击者的路径逃逸产物）。
  */
 function publish(channel, version, opts = {}) {
-  const { minMainVersion = SHELL, minShellVersion = SHELL, corrupt = null, tamper = false } = opts
+  const { minMainVersion = SHELL, minShellVersion = SHELL, corrupt = null, tamper = false, slipPath = null } = opts
   const treeDir = writeTree(path.join(treesDir, channel, version), versionFiles(channel, version))
   const entries = walkTree(treeDir).map(({ rel, abs }) => ({ path: rel, data: fs.readFileSync(abs) }))
-  const zip = Buffer.from(createZipStore(entries))
   const files = entries.map((e) => ({ path: e.path, sha256: sha256(e.data), size: e.data.length }))
+  if (slipPath) entries.push({ path: slipPath, data: Buffer.from('zip-slip probe\n') })
+  const zip = Buffer.from(createZipStore(entries))
   let served = zip
   let declared = zip
   if (corrupt === 'sha') served = flipFirstEntryByte(zip)
@@ -616,6 +623,50 @@ async function main() {
   const appliedH3 = await h3.updater.apply('renderer')
   eq(appliedH3.ok, false, `H3 apply 拦下验签不过的 manifest（error=${show(appliedH3.error)}）`)
   assertUntouched('H3', { effBefore: effBeforeH, pointers: pointersH })
+
+  // —— H4 zip-slip：解压器路径逃逸防护（直连 extractZipStore 断言 + 端到端 apply 拦截）。
+  // 持钥攻击者的产物：签名合法、artifact.sha256 如实描述含逃逸条目的 zip（完整性门全过），
+  // 唯一的闸是解压器的条目名校验——win32 上 `..\x` 反斜杠形态 split('/') 拆不开、includes('..')
+  // 判不中，path.join 却把 `\` 当分隔符归一化，修复前会把文件真实写到版本目录之外。
+  console.log('\n[scenario] H4 zip-slip 产物回退（反斜杠逃逸形态 / 正斜杠 .. 段 / 盘符路径 / 正常条目对照）')
+  const slipDest = path.join(work, 'slip-dest')
+  const slipCases = [
+    [['..', 'escaped-back.txt'].join('\\'), 'escaped-back.txt', 'win32 反斜杠逃逸形态'],
+    ['../escaped-fwd.txt', 'escaped-fwd.txt', '正斜杠 .. 段'],
+    ['C:/escaped-drive.txt', 'escaped-drive.txt', '盘符绝对路径']
+  ]
+  for (const [slipRel, escapedName, label] of slipCases) {
+    fs.rmSync(slipDest, { recursive: true, force: true })
+    fs.mkdirSync(slipDest, { recursive: true })
+    const slipZipPath = path.join(work, `slip-${escapedName}.zip`)
+    fs.writeFileSync(slipZipPath, Buffer.from(createZipStore([{ path: slipRel, data: Buffer.from('x\n') }])))
+    const slip = await attempt(() => extractZipStore(slipZipPath, slipDest))
+    ok(!!slip.threw && slip.threw.includes('unsafe entry path'),
+      `H4 直连解压拒绝${label}（实际 ${show(slip.threw ?? JSON.stringify(slip.value))}）`)
+    eq(fs.existsSync(path.join(work, escapedName)), false, `H4 ${label} 无文件落到 destDir 之外`)
+  }
+  fs.rmSync(slipDest, { recursive: true, force: true })
+  fs.mkdirSync(slipDest, { recursive: true })
+  const benignZipPath = path.join(work, 'benign.zip')
+  fs.writeFileSync(benignZipPath, Buffer.from(createZipStore([
+    { path: 'out/renderer/index.html', data: Buffer.from('<html></html>') },
+    { path: 'out/renderer/assets/app.js', data: Buffer.from('console.log(1)') }
+  ])))
+  const benign = await attempt(() => extractZipStore(benignZipPath, slipDest))
+  eq(benign.value?.length, 2, `H4 对照：正常正斜杠条目照常解出（实际 ${show(benign.threw ?? benign.value)}）`)
+  ok(fs.existsSync(path.join(slipDest, 'out', 'renderer', 'index.html')), 'H4 对照：正常条目内容真实落位')
+
+  // 解压根是 <hot-renderer>/.staging-<ts>/payload：三级 .. 才翻出 userData——真逃逸形态。
+  publish('renderer', L2_ZIPSLIP, { slipPath: ['..', '..', '..', 'escaped-e2e.txt'].join('\\') })
+  const h4 = restart()
+  const stateH4 = await h4.updater.check()
+  eq(stateH4.available?.renderer, L2_ZIPSLIP, 'H4 manifest 合法且 sha 门可过 → check 仍提示（逃逸只能到解压时拦）')
+  const appliedH4 = await h4.updater.apply('renderer')
+  eq(appliedH4.ok, false, `H4 apply 拦下 zip-slip 产物（error=${show(appliedH4.error)}）`)
+  ok(!!appliedH4.error && appliedH4.error.includes('unsafe entry path'),
+    `H4 失败原因指向解压器路径逃逸防护（error=${show(appliedH4.error)}）`)
+  eq(fs.existsSync(path.join(userData, 'escaped-e2e.txt')), false, 'H4 逃逸文件未落 userData（hot-renderer 之外）')
+  assertUntouched('H4', { effBefore: effBeforeH, pointers: pointersH, notInstalled: { channel: 'renderer', name: L2_ZIPSLIP } })
 
   // —— 收尾：整场结束后 L1 仍生效
   console.log('\n[scenario] Z 收尾对账（L1 全程保持生效）')

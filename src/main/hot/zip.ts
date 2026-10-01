@@ -124,8 +124,10 @@ export function extractZipStore(zipPath: string, destDir: string): ExtractedEntr
     const commentLen = zip.readUInt16LE(ptr + 32)
     const localOff = zip.readUInt32LE(ptr + 42)
     const name = zip.toString('utf8', ptr + 46, ptr + 46 + nameLen)
-    // zip-slip：拒绝绝对路径与 .. 段
-    if (name.startsWith('/') || /^[a-zA-Z]:/.test(name) || name.split('/').includes('..')) {
+    // zip-slip：拒绝绝对路径与 .. 段。反斜杠条目名整名拒绝（fail-closed）：ZIP 规范只允许正斜杠
+    // 分隔符，而 win32 的 path.join 会把条目名里的 `\` 当分隔符归一化——`..\x` 形态 split('/')
+    // 拆不开、includes('..') 判不中，却会真实落到 destDir 之外（本仓库发布链产物全为正斜杠名）。
+    if (name.startsWith('/') || name.includes('\\') || /^[a-zA-Z]:/.test(name) || name.split('/').includes('..')) {
       throw new Error(`zip: unsafe entry path ${name}`)
     }
     // 本地头：跳过其 extra 字段
