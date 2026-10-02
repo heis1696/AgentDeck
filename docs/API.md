@@ -684,7 +684,11 @@ usage、`session.error`、compaction/fork 状态是 durable 事件。若 server 
 
 自动验证：`smoke:meeting-public-store`、`smoke:meeting-public`、`smoke:meeting-public-ipc`（均纳入 `smoke:all`）。真实联调显式运行 `npm run smoke:meeting-real -- --backend codex --run-real`（或 `claude`），默认仅探测，不纳入自动全量冒烟。Codex 仅向临时 `CODEX_HOME` 复制所选模型/提供方路由及必要认证，使用 read-only 沙箱、临时会话，禁用 shell/browser/plugins/MCP 等能力并拒绝观测到的非文本工具项；Claude 移除权限绕过和 resume，强制空工具/MCP、禁用 hooks/skills，并核验每次调用的工具目录为空。两者逐回合保留宿主完整公共输入，不伪装 provider 会话恢复；临时 workdir 不等于 OS 读权限沙箱，不访问生产会议、不更新安装程序。失败、预算耗尽与超时仍失败，未确认退出时保留夹具证据。
 
+- 公共上下文没有宿主字符限额、软目标或自动摘录/省略；每次投递包含全部已完成公开发言的完整正文、用户插话、质疑、待确认稿和上一轮纪要。既有 `compression` 审计字段保留兼容，新投递的原始/保留长度相同，`compressions` 与 `omittedTurnIds` 为空；历史压缩记录仍可读取。模型自身窗口由真实后端约束，宿主不凭字符数预判失败；正文缺失仍明确报错，不用摘要伪造事实。
+
 ### 8.2 独立会议页面与执行日志（阶段 3）
+
+会议概要轮次与权威发言轮次取较新值，避免概要暂落后而仍显示第一轮。会议侧栏的执行回合显示所选正式发言的会议轮次/阶段，不使用精确过滤后重新从 1 编号的局部执行序号；普通任务的执行回合编号不变。侧栏默认折叠关联审计与内部调查，执行记录至少保留 320px 高度并独立滚动，小窗口可滚动外层而不挤压正文。
 
 - 公开页面使用 `meeting:<meetingId>` 稳定界面根；会议容器、专属 Issue、会议 ID 与旧容器别名汇入同一根。界面目录别名不改持久 Task 的父子关系、不创建执行任务，也不会把合成 ID 送入普通任务操作。`ownsIssue:false` 的附加会议只走显式会议入口，不取代普通 Issue。
 - `MeetingTurnsController` 首次读取全量固定水位分页，全部页面成功后原子提交；随后仅按 `afterVersion` 增量读取，按稳定发言 ID 与版本合并。分页失败保留成功记录和水位，不降级解析兼容评论标题。

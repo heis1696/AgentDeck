@@ -192,7 +192,7 @@ const runDiscussion = async (respond, options = {}) => {
       get: (agentId) => ({ id: `office_${agentId}` }),
       followUp: async (agentId, prompt, opts) => {
         const marker = prompt.match(/【系统·会议·第 (\d+) 轮\/([^】]+)】/)
-        const call = { agentId, prompt, opts, round: Number(marker?.[1] ?? 0), phase: marker?.[2] ?? 'forced' }
+        const call = { agentId, prompt, opts, round: Number(marker?.[1] ?? 0), persistedRound: store.get(opts.meetingId)?.round, phase: marker?.[2] ?? 'forced' }
         calls.push(call)
         return { ok: true, finalText: await respond(call, calls) }
       }
@@ -264,6 +264,7 @@ const followThrough = await runDiscussion((call) => {
   return defaults(call)
 }, { maxRounds: 2 })
 check(followThrough.result.meeting?.status === 'concluded' && followThrough.result.meeting.round === 2, 'final feedback can be addressed and ratified in a later round')
+check(followThrough.calls.filter((call) => call.round === 2).every((call) => call.persistedRound === 2), 'round two is persisted before its report and review dispatches, not only after completion')
 check(followThrough.calls.some((call) => call.phase === '汇报轮' && call.round === 2 && call.prompt.includes('final plan needs revision') && call.prompt.includes('上一轮纪要')), 'next-round reporter receives the actual prior minutes and dissent')
 check(followThrough.calls.some((call) => call.agentId === 'beta' && call.phase === '质疑轮' && call.round === 2 && call.prompt.includes('final plan needs revision')), 'unresolved objections survive the round boundary until author confirmation')
 

@@ -3,6 +3,11 @@ import type { Issue, Task, TaskStatus } from '../../../../shared/types'
 
 export function meetingRootId(meetingId: string): string { return `meeting:${meetingId}` }
 
+export function currentMeetingRound(meeting: Meeting, turns: readonly MeetingTurn[]): number {
+  return turns.reduce((round, turn) => turn.meetingId === meeting.id && Number.isSafeInteger(turn.round)
+    ? Math.max(round, turn.round) : round, Math.max(1, meeting.round || 0))
+}
+
 export function isMeetingInternalTask(task: Pick<Task, 'meetingTaskRole' | 'suppressIssue' | 'trigger' | 'officeAgentId'>): boolean {
   return task.meetingTaskRole === 'member' || task.meetingTaskRole === 'investigation'
     || (task.meetingTaskRole !== 'container' && !!task.suppressIssue && task.trigger === 'meeting' && !task.officeAgentId)

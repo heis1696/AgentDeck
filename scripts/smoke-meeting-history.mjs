@@ -21,7 +21,7 @@ const check = (condition, label) => {
 try {
   const outfile = path.join(temporary, 'meeting-context.cjs')
   await build({ entryPoints: [path.join(root, 'src/main/meeting-context.ts')], outfile, bundle: true, platform: 'node', format: 'cjs', external: ['electron'], logLevel: 'silent' })
-  const { assembleMeetingContext, chairTurnIds, MeetingContextLimitError, publicTurns, publicVersion } = await import(pathToFileURL(outfile).href)
+  const { assembleMeetingContext, chairTurnIds, publicTurns, publicVersion } = await import(pathToFileURL(outfile).href)
   const storeOut = path.join(temporary, 'meeting-store.cjs')
   await build({ entryPoints: [path.join(root, 'src/main/meeting-store.ts')], outfile: storeOut, bundle: true, platform: 'node', format: 'cjs', external: ['electron'], logLevel: 'silent' })
   const { MeetingStore } = await import(pathToFileURL(storeOut).href)
@@ -72,7 +72,6 @@ try {
   const draft = { version: 'draft-confirmation-8', envelope: { decisions: ['pending \u786e\u8ba4'], objections: [], actionItems: [], openQuestions: [] } }
   const originalBodies = new Map(benchmarkDetails.map((turn) => [turn.id, turn.body]))
   const inputBodyCodeUnits = benchmarkDetails.reduce((sum, turn) => sum + turn.body.length, 0)
-  const limit = 800_000
   const fullPacketCounts = []
   const elapsed = []
   let baseline
@@ -87,7 +86,7 @@ try {
     const started = performance.now()
     let result
     try {
-      result = assembleMeetingContext(fixture.store, meeting, objections, draft, limit)
+      result = assembleMeetingContext(fixture.store, meeting, objections, draft)
     } finally {
       elapsed.push(performance.now() - started)
       JSON.stringify = nativeStringify
@@ -111,7 +110,7 @@ try {
   fs.writeFileSync(path.join(data, 'meetings/index.json'), JSON.stringify({ schemaVersion: 1, meetings: [{ ...meeting, turnVersion: 1001, publicVersion: 9001 }], turns: indexed }))
   const realStore = new MeetingStore(data)
   const realStarted = performance.now()
-  const realContext = assembleMeetingContext(realStore, meeting, objections, draft, limit)
+  const realContext = assembleMeetingContext(realStore, meeting, objections, draft)
   const realElapsedMs = performance.now() - realStarted
   check(realContext.text === baseline.text, 'real filesystem-backed store assembles the same 1000-turn public packet')
   let page = realStore.readTurns(meeting.id, { limit: 200 })
@@ -125,13 +124,13 @@ try {
   check(pagedIds.length === 1001 && new Set(pagedIds).size === 1001 && pages === 6, 'fixed-watermark real-store pagination includes every indexed turn exactly once')
   const indexBytes = JSON.stringify(realStore.turns(meeting.id)).length
   check(!JSON.stringify(realStore.list()).includes('quote=') && indexBytes < inputBodyCodeUnits / 8, 'list and broadcast metadata exclude multi-megabyte authoritative bodies')
-  let defaultLimitError
   const boundedStarted = performance.now()
-  try { assembleMeetingContext(realStore, meeting, objections, draft) } catch (error) { defaultLimitError = error }
-  check(defaultLimitError instanceof MeetingContextLimitError && defaultLimitError.delivery.sourceTurnIds.length === 1000, 'default 32000-character budget rejects oversized history metadata explicitly with complete delivery audit')
-  console.log(JSON.stringify({ realStoreAssemblyMs: realElapsedMs, defaultBudgetRefusalMs: performance.now() - boundedStarted, indexBytes, inputBodyCodeUnits, pages }))
+  const defaultContext = assembleMeetingContext(realStore, meeting, objections, draft)
+  check(defaultContext.text.length > 4_000_000 && defaultContext.delivery.sourceTurnIds.length === 1000, 'default assembly permits all multi-megabyte history and retains complete source audit')
+  check(defaultContext.text === baseline.text && defaultContext.delivery.compression.keptLength === defaultContext.delivery.compression.originalLength, 'default path has no hidden character target or automatic truncation')
+  console.log(JSON.stringify({ realStoreAssemblyMs: realElapsedMs, defaultAssemblyMs: performance.now() - boundedStarted, indexBytes, inputBodyCodeUnits, pages }))
   const historyById = new Map(benchmarkPacket.history.map((turn) => [turn.id, turn]))
-  check(baseline.text.length <= limit, 'the assembled context obeys its exact character limit')
+  check(baseline.text.length === baseline.delivery.compression.originalLength, 'the entire original packet is delivered without a host character limit')
   check(baseline.delivery.sourceTurnIds.length === 1000 && baseline.delivery.sourceTurnIds.every((id, index) => id === sourceIds[index]), 'source IDs include all done turns in stable sequence order')
   check(baseline.delivery.publicVersion === 9001 && publicVersion(fixture.store, meeting.id) === 9001, 'one public version includes the maximum version across indexed turns')
   check(baseline.delivery.chairTurnIds.length === 1 && baseline.delivery.chairTurnIds[0] === 'turn_0996' && chairTurnIds(fixture.store, meeting.id).join() === 'turn_0996', 'chair IDs remain available and stable')
@@ -139,41 +138,36 @@ try {
   check(protectedIds.every((id) => historyById.get(id)?.body === originalBodies.get(id)), 'chair, latest report/defense/synthesis, and unresolved objection turns stay complete')
   check(protectedIds.every((id) => !baseline.delivery.compressions.some((entry) => entry.source === id) && !baseline.delivery.omittedTurnIds.includes(id)), 'protected turns never enter compression or omission audit')
   check(baseline.text.includes(draft.version) && baseline.text.includes(draft.envelope.decisions[0]), 'pending confirmation draft remains in the assembled context')
-  check(baseline.delivery.compressions.length > 0 && baseline.delivery.omittedTurnIds.length > 0, 'long-history fixture exercises both summary and omission paths')
+  check(baseline.delivery.compressions.length === 0 && baseline.delivery.omittedTurnIds.length === 0, 'long-history assembly neither excerpts nor omits any public turn')
   check(benchmarkDetails.every((turn) => fixture.byId.get(turn.id).body === originalBodies.get(turn.id)), 'assembly never mutates stored source bodies')
 
   const compressionBySource = new Map(baseline.delivery.compressions.map((entry) => [entry.source, entry]))
-  const auditConsistent = baseline.delivery.compressions.every((entry) => {
-    const original = originalBodies.get(entry.source)
-    const packed = historyById.get(entry.source)
-    return original !== undefined && packed && entry.originalLength === original.length && entry.keptLength === (packed.representation === 'omitted' ? 0 : packed.body.length)
-  })
-  check(auditConsistent && baseline.delivery.omittedTurnIds.every((id) => historyById.get(id)?.representation === 'omitted'), 'compression ledger lengths and omitted IDs match their serialized history')
-  check(fullPacketCounts.every((count) => count === 2), 'each assembly serializes the full packet only for initial sizing and final output')
+  const auditConsistent = benchmarkDetails.every((turn) => historyById.get(turn.id)?.representation === 'complete' && historyById.get(turn.id)?.body === originalBodies.get(turn.id))
+  check(auditConsistent, 'all 1000 bodies, including old non-protected turns, are complete in the actual serialized payload')
+  check(fullPacketCounts.every((count) => count === 1), 'each assembly serializes the full packet once without a quadratic truncation loop')
 
   console.log('\n[escaping, missing-body, and overflow compatibility]')
   const specialBody = 'quote=" backslash=\\ newline\n tab\t nul\u0000 unicode=\u4e2d\u6587\ud83d\ude42'
   const specialFixture = makeFixture([makeTurn('special_chair', 1, specialBody, { purpose: 'chair', agentId: 'user' })])
-  const special = assembleMeetingContext(specialFixture.store, meeting, [], undefined, 100_000)
+  const special = assembleMeetingContext(specialFixture.store, meeting, [])
   check(packetOf(special.text).history[0].body === specialBody, 'JSON escapes and Unicode round-trip without changing the source body')
 
   const missingFixture = makeFixture([makeTurn('missing_public_body', 1, undefined)])
   let missingRejected = false
-  try { assembleMeetingContext(missingFixture.store, meeting, [], undefined, 100_000) } catch { missingRejected = true }
+  try { assembleMeetingContext(missingFixture.store, meeting, []) } catch { missingRejected = true }
   check(missingRejected, 'a public version with unavailable body fails explicitly instead of fabricating text')
 
   const legacyFixture = makeFixture([makeTurn('legacy_without_body', 1, undefined, { publicVersion: undefined, summary: 'legacy index summary' })])
-  const legacy = packetOf(assembleMeetingContext(legacyFixture.store, meeting, [], undefined, 100_000).text).history[0]
+  const legacy = packetOf(assembleMeetingContext(legacyFixture.store, meeting, []).text).history[0]
   check(legacy.bodyAvailable === false && legacy.historicalSummary === 'legacy index summary', 'legacy records without bodies retain only their explicit historical summary')
 
   const overflowFixture = makeFixture([
     makeTurn('protected_chair_overflow', 1, 'chair-protected-'.repeat(100), { purpose: 'chair', agentId: 'user' }),
     makeTurn('protected_latest_overflow', 2, 'latest-protected-'.repeat(100), { phase: 'report' })
   ])
-  let overflowError
-  try { assembleMeetingContext(overflowFixture.store, meeting, [], undefined, 1) } catch (error) { overflowError = error }
-  check(overflowError instanceof MeetingContextLimitError, 'oversized protected material fails with the explicit context-limit error')
-  check(overflowError?.delivery.protectedTurnIds.includes('protected_chair_overflow') && overflowError?.delivery.protectedTurnIds.includes('protected_latest_overflow') && overflowError.delivery.omittedTurnIds.length === 0, 'overflow audit preserves protected IDs without silently omitting them')
+  const overflowContext = assembleMeetingContext(overflowFixture.store, meeting, [])
+  check(overflowContext.text.includes('chair-protected-'.repeat(100)) && overflowContext.text.includes('latest-protected-'.repeat(100)), 'protected material remains complete with no host context limit')
+  check(overflowContext.delivery.protectedTurnIds.includes('protected_chair_overflow') && overflowContext.delivery.protectedTurnIds.includes('protected_latest_overflow') && overflowContext.delivery.omittedTurnIds.length === 0, 'overflow audit preserves protected IDs without silently omitting them')
 
   const sortedTimes = elapsed.slice(1).sort((first, second) => first - second)
   const medianMs = sortedTimes[Math.floor(sortedTimes.length / 2)]

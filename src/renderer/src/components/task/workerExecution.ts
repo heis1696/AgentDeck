@@ -3,6 +3,7 @@ import { isTaskStatus, type TaskEvent, type TaskStatus } from '../../../../share
 export interface WorkerExecution {
   runId: string
   turnId?: string
+  contextLabel?: string
   status?: TaskStatus
   startedAt?: number
   endedAt?: number

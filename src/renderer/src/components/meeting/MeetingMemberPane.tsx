@@ -202,8 +202,9 @@ export function MeetingMemberPane({ meeting, tasks, turns }: MemberPaneProps) {
       {executionsLoading && <div className="mtd-pane-label" role="status">正在读取成员执行…</div>}
       {executionsError && <div className="mtd-note" data-tone="error" role="alert" data-member-executions-error>{executionsError}</div>}
     </div>
-    {requestedTurnId && <div>
-      <span className="mtd-pane-label">选定发言</span>
+    {requestedTurnId && <div className="mtd-pane-execution">
+      <details className="mtd-execution-metadata" open={!!turnError || !!turnGone || !!taskMissing || (!!selectedTurn && !executionExact)}>
+      <summary>发言关联与投递审计 · {selectedTurn ? meetingTurnContextLabel(selectedTurn) : '正在读取'}</summary>
       <dl className="mtd-exec-detail" data-execution-detail>
         <dt>发言</dt><dd><code>{requestedTurnId}</code></dd>
         <dt>Task</dt><dd><code data-execution-task>{associatedTaskId || '关联缺失'}</code></dd>
@@ -218,15 +219,17 @@ export function MeetingMemberPane({ meeting, tasks, turns }: MemberPaneProps) {
         {turnGone && <>选定发言在权威记录中已不存在（可能被整场删除），不替换为其他发言。</>}
         {turnError && <>读取失败：{turnError}</>}
       </div>
+      </details>
       {executionExact && resolvedTask && selectedTurn && <WorkerPane key={`${resolvedTask.id}:${selectedTurn.runId}:${selectedTurn.executionTurnId}`} taskId={resolvedTask.id} tasks={[resolvedTask]} onOpen={() => {}} readOnly dockRootId={rootId} execution={{
         runId: selectedTurn.runId!, turnId: selectedTurn.executionTurnId!,
+        contextLabel: meetingTurnContextLabel(selectedTurn),
         status: ({ pending: 'queued', speaking: 'running', done: 'done', failed: 'failed', cancelled: 'cancelled', skipped: 'cancelled' } as Record<string, TaskStatus>)[selectedTurn.status],
         startedAt: selectedTurn.startedAt, endedAt: selectedTurn.endedAt, error: selectedTurn.error
       }} />}
       {!selectedTurn && !turnError && <div className="mtd-pane-label">该发言尚未建立可定位的执行。</div>}
     </div>}
-    <section className="mtd-pane-section" data-investigations-section>
-      <h2>内部调查 · 与公开发言分开</h2>
+    <details className="mtd-pane-section" data-investigations-section>
+      <summary>内部调查 · {investigations.length} 条 · 与公开发言分开</summary>
       {!investigations.length && <div className="mtd-pane-label">该成员没有内部调查。</div>}
       {investigations.map((investigation) => (
         <button key={investigation.taskId} type="button" className="mtd-investigation" data-investigation={investigation.taskId} onClick={() => openInvestigation(investigation)}>
@@ -235,7 +238,7 @@ export function MeetingMemberPane({ meeting, tasks, turns }: MemberPaneProps) {
           <span>{investigation.status === 'running' ? '执行中' : investigation.status}{investigation.runId ? ` · ${investigation.runId}` : ''}</span>
         </button>
       ))}
-    </section>
+    </details>
     <div className="mtd-pane-foot">会话任务 {memberSessionTaskId ?? '关联缺失'} · 内部过程不发布到公开讨论，也不跳转普通任务页。执行日志仅限所选 Run/Turn。</div>
   </div>
 }

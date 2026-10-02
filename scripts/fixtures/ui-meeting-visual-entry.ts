@@ -65,6 +65,9 @@ api.tasks.events = async (taskId) => taskId === 'visual_member_b' ? [
   { taskId, seq: 2, ts: now - 118000, kind: 'text', text: '精确历史执行日志：只属于这条质疑发言。', execution: { runId: 'run_2', turnId: 'execution_2' } },
   { taskId, seq: 3, ts: now - 100000, kind: 'final', text: '精确历史执行日志：两个边界已明确，等待答辩。', execution: { runId: 'run_2', turnId: 'execution_2' } },
   { taskId, seq: 4, ts: now, kind: 'text', text: 'OTHER_RUN_SECRET', execution: { runId: 'run_new', turnId: 'execution_new' } }
+] : taskId === 'visual_member_a' ? [
+  { taskId, seq: 1, ts: now, kind: 'user', text: '开始第二轮汇报。', execution: { runId: 'run_1', turnId: 'execution_4' } },
+  { taskId, seq: 2, ts: now, kind: 'text', text: '第二轮的确切执行记录。', execution: { runId: 'run_1', turnId: 'execution_4' } }
 ] : []
 let settings = { ...DEFAULT_SETTINGS, theme: 'dark' as const }
 const settingsListeners = new Set<(settings: typeof DEFAULT_SETTINGS) => void>()
@@ -76,7 +79,7 @@ Object.assign(window, { __meetingVisual: {
   ui, readQueries,
   advance: () => {
     turns[0] = { ...turns[0], version: 4, body: `${turns[0].body}\n\n**旧序号记录已增量更新。**` }
-    turns.push({ ...turns[0], id: 'visual_speech_4', sequence: 4, version: 5, status: 'speaking', body: undefined, endedAt: undefined, startedAt: Date.now(), executionTurnId: 'execution_4' })
+    turns.push({ ...turns[0], id: 'visual_speech_4', round: 2, sequence: 4, version: 5, status: 'speaking', body: undefined, endedAt: undefined, startedAt: Date.now(), executionTurnId: 'execution_4' })
     meeting = { ...meeting, turnVersion: 5, currentTurn: { agentId: 'agent_c1', role: 'reporter', phase: 'report', startedAt: Date.now() } }
     broadcast()
   },

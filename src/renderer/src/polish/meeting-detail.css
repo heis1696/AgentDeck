@@ -231,7 +231,15 @@
 .meeting-detail .mtd-delivery[data-tone='live'] { color: var(--accent); }
 
 /* ---------- 6. 右侧成员执行分栏（SideDock renderTask 面板内） ---------- */
-.meeting-detail .mtd-pane { display: flex; flex-direction: column; gap: 14px; min-width: 0; height: 100%; overflow: auto; padding: 14px; scrollbar-width: thin; }
+.meeting-detail .mtd-pane { display: flex; flex: 1; flex-direction: column; gap: 14px; min-width: 0; min-height: 0; overflow: auto; padding: 14px; scrollbar-width: thin; }
+.meeting-detail .mtd-pane > * { flex-shrink: 0; }
+.meeting-detail .mtd-pane-execution { display: flex; flex: 1 0 360px; flex-direction: column; min-height: 360px; gap: 10px; }
+.meeting-detail .mtd-pane .worker-pane { flex: 1 0 320px; min-height: 320px; }
+.meeting-detail .mtd-execution-metadata > summary,
+.meeting-detail .mtd-pane-section > summary { cursor: pointer; color: var(--text-dim); font-size: var(--text-caption); overflow-wrap: anywhere; }
+.meeting-detail .mtd-execution-metadata > summary:focus-visible,
+.meeting-detail .mtd-pane-section > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.meeting-detail .mtd-pane-section[open] > summary { margin-bottom: 10px; }
 .meeting-detail .mtd-pane-person { display: flex; align-items: center; gap: 10px; }
 .meeting-detail .mtd-pane-person div { min-width: 0; }
 .meeting-detail .mtd-pane-person strong { display: block; font-weight: 600; overflow-wrap: anywhere; }

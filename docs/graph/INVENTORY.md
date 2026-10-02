@@ -492,6 +492,8 @@ package.json：61 条直连脚本 + 4 条聚合（`smoke:stage6`、`smoke:stage7
 
 ## 附录 A：smoke 脚本 → src 直连清单（esbuild entryPoints）
 
+> 2026-10-02 会议反馈修订：`smoke-meeting-public`、`smoke-meeting-history` 直连 `main/meeting-context.ts` 的 `assembleMeetingContext`、`publicTurns`、`publicVersion`、`chairTurnIds`，这些导出继续受公共 API 保护；按用户明确要求撤销宿主字符限额/自动摘录，相关限制常量与错误类型退出契约，回归改为验证全部正文完整投递、旧投递审计兼容、千条历史单次序列化。不是按“src 内部零引用”删除测试导出。
+
 > 2026-10-01 增补：`smoke-hot-transaction` 直连消费 `runner.ts` 的 `TaskRunner`（`isIdle` / `sessionCount` / 任务与停机入口）和 `store.ts` 的 `TaskStore`，覆盖已完成缓存会话、追问回合与更新门禁，以及完成任务后的真实 Electron 停机重启；这些导出同样受本附录公共 API 保护规则约束。
 
 > 2026-10-01 性能回归增补：`smoke-renderer-data` 直连 `renderer/src/data-store.ts` 的 `createDeltaList`，并通过夹具渲染 `api.ts` 的 `useTasks` / `useIssues` 与 `BoardView`；`smoke-renderer-events` 直连 `hooks/taskEventsController.ts` 的 `TaskEventsController` / `TASK_EVENT_BATCH_MAX_ITEMS` 及 `Markdown.tsx` 的 `Markdown`；`smoke-store-performance` 的 esbuild stdin 入口直连 `main/store.ts` 的 `TaskStore` 与 `main/event-log.ts` 的 `EventLog`；`smoke-issue-performance` 直连 `main/issue-store.ts` 的 `IssueStore`。这些导出受本附录公共 API 保护规则约束，汇总入口为 `npm run smoke:performance`。

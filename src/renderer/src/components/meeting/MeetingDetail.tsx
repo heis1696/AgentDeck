@@ -30,7 +30,7 @@ import { useMeetingTurns } from '../../hooks/useMeetingTurns'
 import { PageHeader } from '../../ui/PageHeader'
 import { Markdown } from '../Markdown'
 import { SideDock } from '../../ui/SideDock'
-import { currentMeetingSpeech, meetingPresentation, meetingRootId } from './meetingViewState'
+import { currentMeetingRound, currentMeetingSpeech, meetingPresentation, meetingRootId } from './meetingViewState'
 import { useMeetingSelection } from './meetingSelection'
 import {
   MeetingInvestigationPane, MeetingMemberPane,
@@ -71,6 +71,7 @@ export function MeetingDetail({ meeting, tasks, onDeleted }: {
   const dockOpen = !!bucket && bucket.items.length > 0
   const presentation = meetingPresentation(meeting)
   const speech = currentMeetingSpeech(meeting, turns)
+  const round = currentMeetingRound(meeting, turns)
   const latestMinutes = meeting.minutes.length ? meeting.minutes[meeting.minutes.length - 1] ?? null : null
   const memberItemId = meetingMemberItemId(meetingId)
 
@@ -223,7 +224,7 @@ export function MeetingDetail({ meeting, tasks, onDeleted }: {
           <span className="meta-group meta-identity"><span className="detail-eyebrow">会议主 Issue · 所有公开发言在这里</span></span>
           <code className="meta-chip mono">{meeting.issueId}</code>
           <span className="meta-group meta-status"><span className={`status-chip status-${presentation.status}`} data-meeting-status={presentation.label}>{presentation.label}</span></span>
-          <span className="meta-chip">第 {meeting.round || 1} / {meeting.maxRounds} 轮 · 公开讨论</span>
+          <span className="meta-chip" data-meeting-round={round}>第 {round} / {meeting.maxRounds} 轮 · 公开讨论</span>
           <span className="meta-chip">{meeting.participants.length} 位成员</span>
           <span className="meta-chip">发言水位 v{latestVersion ?? 0}</span>
         </div>}

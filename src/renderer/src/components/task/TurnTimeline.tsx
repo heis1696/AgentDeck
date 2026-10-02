@@ -247,7 +247,7 @@ function LogLine({ event }: { event: TaskEvent }) {
  * - 「贴底跟随」是**宿主受控状态**（审查项 2）：following / onFollowLatest 由宿主传入，
  *   宿主在滚动与流式事件到达时更新它——本组件只是视图，不再自己算一份（否则两套判定会打架）。
  */
-export function TurnTimeline({ task, turns, activeNav, following, onFollowLatest, onNavigate, onRewind, logRef, onScroll, dockRootId, snapshotOnly = false }: { task: Task; turns: Turn[]; activeNav: number; following: boolean; onFollowLatest: () => void; onNavigate: (index: number) => void; onRewind: (index: number) => void; logRef: RefObject<HTMLDivElement>; onScroll: () => void; dockRootId?: string; snapshotOnly?: boolean }) {
+export function TurnTimeline({ task, turns, activeNav, following, onFollowLatest, onNavigate, onRewind, logRef, onScroll, dockRootId, snapshotOnly = false, contextLabel }: { task: Task; turns: Turn[]; activeNav: number; following: boolean; onFollowLatest: () => void; onNavigate: (index: number) => void; onRewind: (index: number) => void; logRef: RefObject<HTMLDivElement>; onScroll: () => void; dockRootId?: string; snapshotOnly?: boolean; contextLabel?: string }) {
   const active = !snapshotOnly && task.status === 'running'
 
   return (
@@ -272,7 +272,7 @@ export function TurnTimeline({ task, turns, activeNav, following, onFollowLatest
           turn.items.forEach((item, itemIndex) => { if (item.type === 'work') lastWorkIndex = itemIndex; else lastBubbleIndex = itemIndex })
           return <div className="turn" id={`turn-${index}`} key={index}>
             <div className="turn-head">
-              <span className="turn-index">#{index + 1}</span>
+              <span className="turn-index">{snapshotOnly && contextLabel ? contextLabel : `#${index + 1}`}</span>
               {startedAt > 0 && <time className="turn-time" title={fmtTime(startedAt)}>{fmtTime(startedAt)}</time>}
               <span className={`turn-state${turn.done ? ' is-done' : streaming || pending ? ' is-live' : ''}`}>
                 {turn.done ? '已完成' : streaming ? '回复中' : pending ? (task.parked ? PARKED_QUEUED_LABEL : '排队中') : '—'}

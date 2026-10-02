@@ -335,6 +335,7 @@ try {
   await mount('meeting_a', taskList())
   await settle(10)
   check(turnArticles().length === 8, `初次全量分页（每页 3 条）读全 8 条记录（实际 ${turnArticles().length}）`)
+  check(host.querySelector('[data-meeting-round]')?.getAttribute('data-meeting-round') === '2', '会议概要暂落后时，轮次仍以权威第二轮发言对账，不停留第一轮')
   check(callLog.readTurns.every(({ query }) => query.afterVersion === undefined && !Object.hasOwn(query, 'afterSequence')),
     '初次分页不带版本或序号下界')
   check(text().includes('报告队长') && text().includes('质疑队长') && text().includes('综合队长'), '实名快照显示发言人姓名')
@@ -388,11 +389,13 @@ try {
   check(callLog.getTurn.at(-1)?.turnId === 'sp_3' && pane() === AGENT_B, '点击旧发言按该发言定位成员与执行')
   check(execText('task') === 'task_member_b' && execText('run') === 'run_b_2' && execText('turn') === 'et_3', '显示该发言确切的 Task / Run / Turn')
   check(host.querySelector('[data-execution-audit]')?.getAttribute('data-exact') === 'true', '关联完整时标记按确切关联读取')
+  check(!host.querySelector('.mtd-execution-metadata')?.open, '默认折叠关联审计，执行正文优先占用阅读空间')
   check(text().includes('EXACT_OLD_SPEECH_LOG') && !text().includes('WRONG_LATEST_RUN_LOG'), '真实 WorkerPane 仅显示旧发言确切 Run/Turn 日志')
   check(!host.querySelector('.worker-pane-stop, .worker-pane-open-text, .permission-prompt'), '成员执行只读隐藏普通任务和权限操作')
   await click(host.querySelector('[data-execution-link="sp_6"]'))
   await settle()
   check(execText('run') === '尚未建立 / 关联缺失' && execText('run') !== 'run_b_3', '旧发言缺 Run 时明确缺失，不回退成员最新 Run')
+  check(!!host.querySelector('.mtd-execution-metadata')?.open, '执行关联缺失时自动展开诊断，不因正常折叠策略隐藏失败信息')
   check(host.querySelector('[data-execution-audit]')?.getAttribute('data-exact') === 'false'
     && text().includes('不替换为最新一次'), '关联不完整时审计说明不替换')
   await click(host.querySelector('[data-execution-link="sp_7"]'))

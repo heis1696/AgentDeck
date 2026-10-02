@@ -157,7 +157,7 @@ function WorkerDetail({ task, onOpen, readOnly, dockRootId, execution }: { task:
     {readOnly && !executionView?.locatable && <div className="data-state-banner" role="status">未提供有效的 Run 标识，无法安全定位会议执行记录；为避免显示其他历史日志，已隐藏日志。</div>}
     {readOnly && executionView?.locatable && executionView.missingAssociationCount > 0 && <div className="data-state-banner" role="status">有 {executionView.missingAssociationCount} 条事件缺少可验证的执行关联，未纳入本次记录。</div>}
     {readOnly && executionView?.locatable && events.length === 0 && executionView.missingAssociationCount === 0 && <div className="data-state-banner" role="status">所选 Run/Turn 没有可验证的事件记录。</div>}
-    {executionView?.locatable !== false && <div className="worker-pane-timeline"><TurnTimeline task={task} turns={turns} activeNav={activeNav} following={following} onFollowLatest={followLatest} onNavigate={navigate} onRewind={noRewind} logRef={logRef} onScroll={onScroll} dockRootId={dockRootId} snapshotOnly={readOnly} /></div>}
+    {executionView?.locatable !== false && <div className="worker-pane-timeline"><TurnTimeline task={task} turns={turns} activeNav={activeNav} following={following} onFollowLatest={followLatest} onNavigate={navigate} onRewind={noRewind} logRef={logRef} onScroll={onScroll} dockRootId={dockRootId} snapshotOnly={readOnly} contextLabel={readOnly ? execution?.contextLabel : undefined} /></div>}
     {!readOnly && interrupting && <InterruptDialog title={task.title} busy={stopBusy} onConfirm={(reason) => void confirmInterrupt(reason)} onClose={() => setInterrupting(false)} />}
   </section>
 }

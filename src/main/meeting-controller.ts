@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { assembleMeetingContext, publicVersion, chairTurnIds, MeetingContextLimitError, MEETING_PUBLIC_CONTEXT_LIMIT } from './meeting-context'
+import { assembleMeetingContext, publicVersion, chairTurnIds } from './meeting-context'
 import type { AgentLike } from './delegate'
 import { AgentSessionRegistry } from './agent-sessions'
 import { MeetingStore } from './meeting-store'
@@ -52,7 +52,6 @@ export interface MeetingControllerOptions {
   deleteMeetingComments?: (meetingId: string) => void
   stopTimeoutMs?: number
   now?: () => number
-  contextLimit?: number
 }
 
 export interface MeetingResult {
@@ -225,7 +224,6 @@ export class MeetingController {
   private readonly deleteMeetingComments?: MeetingControllerOptions['deleteMeetingComments']
   private readonly stopTimeoutMs: number
   private readonly now: () => number
-  private readonly contextLimit?: number
   private readonly running = new Set<string>()
   private readonly runs = new Map<string, { abort: AbortController; done: Promise<void>; finish: () => void }>()
   private readonly stopping = new Map<string, Promise<MeetingResult>>()
@@ -251,7 +249,6 @@ export class MeetingController {
     this.deleteMeetingComments = options.deleteMeetingComments
     this.stopTimeoutMs = options.stopTimeoutMs ?? 5_000
     this.now = options.now ?? Date.now
-    this.contextLimit = options.contextLimit
   }
 
   list() { return this.store.list() }
@@ -749,7 +746,7 @@ export class MeetingController {
     this.save(meeting.id, { currentTurn: { agentId: participant.agentId, role: participant.role, phase, startedAt: turn.startedAt! } })
     this.notifyTurns(meeting.id)
     try {
-      const context = assembleMeetingContext(this.store, meeting, opts?.objections ?? meeting.objections ?? [], opts?.draft, (this.contextLimit ?? MEETING_PUBLIC_CONTEXT_LIMIT) - prompt.length)
+      const context = assembleMeetingContext(this.store, meeting, opts?.objections ?? meeting.objections ?? [], opts?.draft)
       this.store.updateTurn(meeting.id, turn.id, { contextVersion: context.delivery.publicVersion, delivery: context.delivery, deliveryState: 'prepared' })
       this.notifyTurns(meeting.id)
       this.assertActive(meeting.id, epoch)
@@ -781,7 +778,7 @@ export class MeetingController {
       const current = this.get(meeting.id)
       const cancelled = !current || current.status === 'cancelled' || !!current.stopState || !!current.deleting || current.executionEpoch !== epoch
       if (current) {
-        this.store.updateTurn(meeting.id, turn.id, { status: cancelled ? 'cancelled' : 'failed', endedAt: this.now(), error: error instanceof Error ? error.message : String(error), ...(error instanceof MeetingContextLimitError ? { contextVersion: error.delivery.publicVersion, delivery: error.delivery } : {}), deliveryState: 'failed', mirror: { state: 'skipped' } })
+        this.store.updateTurn(meeting.id, turn.id, { status: cancelled ? 'cancelled' : 'failed', endedAt: this.now(), error: error instanceof Error ? error.message : String(error), deliveryState: 'failed', mirror: { state: 'skipped' } })
         this.notifyTurns(meeting.id)
       }
       throw error

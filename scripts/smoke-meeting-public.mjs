@@ -1,5 +1,5 @@
 // 公开发言事实源专项（阶段2）：会议公开快照的版本/来源一致性、跨轮质疑稳定ID、
-// 用户插话落盘与重新确认、压缩账本与显式超限、Issue 镜像去重、取消交错与 resume 闸门。
+// 用户插话落盘与重新确认、完整无限额公共上下文、Issue 镜像去重、取消交错与 resume 闸门。
 // 独立运行：node scripts/smoke-meeting-public.mjs（未注册进 package.json，由领队决定是否接入 smoke:all）。
 // 只新增本文件，不改 src/package.json/既有测试；全部使用临时 fixture，不访问生产数据。
 import fs from 'node:fs'
@@ -68,7 +68,7 @@ const stableIdOf = (content) => /"objections":\[\{"id":"(obj_[A-Za-z0-9-]+)"/.ex
 
 // 各场景共用替身：三个队长挂不同后端；followUp 在进入时记录具名占位，
 // 必须调用 onExecution 并当场核对回写身份（runId/执行回合/会话任务/投递状态）。
-function makeFixture(label, { respond, gates = {}, contextLimit, cancelTask, addIssueComment, issueExists, issueId, maxRounds, maxInnerTurns } = {}) {
+function makeFixture(label, { respond, gates = {}, cancelTask, addIssueComment, issueExists, issueId, maxRounds, maxInnerTurns } = {}) {
   const directory = path.join(temporary, label)
   fs.mkdirSync(directory, { recursive: true })
   const store = new MeetingStore(directory)
@@ -111,7 +111,7 @@ function makeFixture(label, { respond, gates = {}, contextLimit, cancelTask, add
     issueExists: issueExists ?? (() => true),
     addIssueComment: addIssueComment ?? (() => {}),
     cancelTask: cancelTask ?? (async (taskId) => { cancelCalls.push(taskId); return { ok: true } }),
-    stopTimeoutMs: 200, ...(contextLimit ? { contextLimit } : {})
+    stopTimeoutMs: 200
   })
   const meeting = controller.create({
     issueId: issueId ?? `iss_${label}`, topic: `公开发言事实源·${label}`, maxRounds: maxRounds ?? 1, ...(maxInnerTurns ? { maxInnerTurns } : {}),
@@ -380,8 +380,8 @@ try {
   check(!!round2Report && round2Report.content.includes(defenseBodyL) && round2Report.content.includes('TAIL_OF_DEFENSE_答辩尾部完整'), 'the round-2 reporter packet embeds the complete round-1 defense including its tail beyond 500 chars')
   check(!!round2Report && round2Report.content.includes('R1共识'), 'the round-2 packet also carries the round-1 minutes decisions')
 
-  // ---------- 场景 M1：压缩旧历史有来源账本；保护内容不截断；仍超限显式失败 ----------
-  scenario('compression ledger, protected content and explicit overflow failure')
+  // ---------- 场景 M1：所有公共历史保持完整，不设宿主字符限额或自动摘录 ----------
+  scenario('complete public history without host limits, excerpts or omissions')
   const storeM1 = new MeetingStore(path.join(temporary, 'm1-context'))
   const meetingM1 = storeM1.create({ issueId: 'iss_m1', topic: '压缩账本', participants: [{ agentId: 'alpha', role: 'reporter' }] })
   const phasesM1 = ['challenge', 'challenge', 'defense', 'challenge', 'report', 'challenge', 'synthesis', 'challenge', 'report', 'challenge', 'challenge', 'defense', 'report', 'synthesis']
@@ -395,48 +395,42 @@ try {
   }
   const objectionM1 = { id: 'obj_m1', text: '未决质疑正文', ref: 'doc:spec', raisedBy: 'beta', targetAgentId: 'alpha', priority: 'high', resolved: false, sourceTurnId: 'turn_m1_00', replyTurnId: 'turn_m1_02' }
   const draftM1 = { version: 'draft_v_m1', envelope: { decisions: ['M1共识'], objections: [], actionItems: [], openQuestions: [] } }
-  const assembleM1 = (limit) => assembleMeetingContext(storeM1, meetingM1, [objectionM1], draftM1, limit)
-  const originalLengthM1 = assembleM1(10_000_000).delivery.compression.originalLength
-  const limitM1 = Math.ceil(originalLengthM1 * 0.8)
-  const packed1 = assembleM1(limitM1)
-  const packed2 = assembleM1(limitM1)
-  check(packed1.text === packed2.text && packed1.delivery.publicVersion === packed2.delivery.publicVersion, 'compressed assembly is deterministic for the same snapshot')
-  check(packed1.text.length <= limitM1 && packed1.delivery.compressions.length >= 1, 'history is compressed under the limit with a non-empty source ledger')
+  const assembleM1 = () => assembleMeetingContext(storeM1, meetingM1, [objectionM1], draftM1)
+  const packed1 = assembleM1()
+  const packed2 = assembleM1()
+  check(packed1.text === packed2.text && packed1.delivery.publicVersion === packed2.delivery.publicVersion, 'full assembly is deterministic for the same snapshot')
+  check(packed1.delivery.compressions.length === 0 && packed1.delivery.omittedTurnIds.length === 0, 'host neither compresses nor omits any public history')
   const protectedIdsM1 = ['turn_m1_00', 'turn_m1_02', 'turn_m1_10', 'turn_m1_11', 'turn_m1_12', 'turn_m1_13']
   check(protectedIdsM1.every((id) => packed1.text.includes(bodiesM1[Number(id.slice(-2))])), 'chair note, unresolved-objection source/reply and latest report/defense/synthesis keep their full bodies')
   check(!packed1.delivery.compressions.some((entry) => protectedIdsM1.includes(entry.source)) && packed1.delivery.omittedTurnIds.every((id) => !protectedIdsM1.includes(id)), 'the ledger never lists a protected turn as compressed or omitted')
-  check(packed1.text.includes('draft_v_m1') && packed1.text.includes('M1共识'), 'the pending-confirmation draft survives compression intact')
+  check(packed1.text.includes('draft_v_m1') && packed1.text.includes('M1共识'), 'the pending-confirmation draft is included intact')
   check(packed1.delivery.chairTurnIds.includes('turn_m1_10') && packed1.delivery.publicVersion === 14, 'delivery metadata keeps the chair id and snapshot version')
-  const ledgerEntryM1 = packed1.delivery.compressions[0]
-  const ledgerBodyM1 = bodiesM1[Number(ledgerEntryM1.source.slice(-2))]
-  check(ledgerEntryM1.originalLength === ledgerBodyM1.length && ledgerEntryM1.keptLength > 0 && ledgerEntryM1.keptLength < ledgerEntryM1.originalLength, 'ledger entries record true original and kept lengths')
-  check(packed1.text.includes(ledgerBodyM1.slice(0, 256)) && packed1.text.includes(ledgerBodyM1.slice(-256)) && packed1.text.includes('[宿主摘录；完整原文按发言ID读取]'), 'compressed entries keep head+tail excerpts with a pointer to the full source, never a silent front-truncation')
-  check(storeM1.getTurn(meetingM1.id, 'turn_m1_05').body === bodiesM1[5], 'compression never rewrites the authoritative stored body')
-  let overflowM1 = null
-  try { assembleM1(900) } catch (error) { overflowM1 = error }
-  check(!!overflowM1 && /公共上下文超限/.test(overflowM1.message) && overflowM1.message.includes('turn_m1_10'), 'when protected content alone exceeds the limit the assembly fails loudly and names the protected turns')
+  check(packed1.delivery.compression.originalLength === packed1.text.length && packed1.delivery.compression.keptLength === packed1.text.length, 'legacy size audit reports identical original and delivered lengths')
+  check(bodiesM1.every((body) => packed1.text.includes(body)) && !packed1.text.includes('[宿主摘录'), 'every old and new public body is sent in full, not merely protected bodies')
+  check(storeM1.getTurn(meetingM1.id, 'turn_m1_05').body === bodiesM1[5], 'assembly never rewrites the authoritative stored body')
+  check(packed1.delivery.sourceTurnIds.length === bodiesM1.length, 'source audit accounts for every complete public body')
   storeM1.appendTurn({ id: 'turn_m1_host_minutes', meetingId: meetingM1.id, round: 1, phase: 'synthesis', purpose: 'minutes', agentId: 'meeting', officeTaskId: '', status: 'pending' })
   storeM1.updateTurn(meetingM1.id, 'turn_m1_host_minutes', { status: 'done', publicVersion: 15 }, JSON.stringify(draftM1.envelope))
-  const afterMinutesM1 = assembleM1(limitM1)
+  const afterMinutesM1 = assembleM1()
   check(afterMinutesM1.delivery.protectedTurnIds.includes('turn_m1_13'), 'publishing host minutes never displaces the latest formal synthesis from protection')
   check(afterMinutesM1.text.includes(bodiesM1[13]) && afterMinutesM1.delivery.sourceTurnIds.includes('turn_m1_host_minutes'), 'the next round can still receive full synthesis and the separate canonical minutes fact')
   check(!afterMinutesM1.delivery.compressions.some((entry) => entry.source === 'turn_m1_13') && !afterMinutesM1.delivery.omittedTurnIds.includes('turn_m1_13'), 'a later host minute cannot make the latest synthesis eligible for excerpting or omission')
 
-  // ---------- 场景 M2：控制器上下文超限：显式失败，不发出请求 ----------
-  scenario('controller-level context overflow fails explicitly before dispatch')
-  const m2 = makeFixture('m2-overflow', { contextLimit: 8_000, respond: converged })
+  // ---------- 场景 M2：长公共输入完整投递，不因宿主人为限额失败 ----------
+  scenario('controller dispatches full long public context without ending the meeting')
+  const m2 = makeFixture('m2-unbounded', { respond: converged })
   m2.store.appendTurn({ id: 'turn_chair_big', meetingId: m2.meeting.id, round: 1, phase: 'challenge', purpose: 'chair', agentId: 'user', officeTaskId: '', status: 'pending', speaker: { name: '用户', role: '主席', platform: 'user' }, executionEpoch: 1 })
-  m2.store.updateTurn(m2.meeting.id, 'turn_chair_big', { status: 'done', publicVersion: 1, summary: '超长用户要求' }, '用户要求正文。' + '必须完整保留的用户指示'.repeat(1700))
+  m2.store.updateTurn(m2.meeting.id, 'turn_chair_big', { status: 'done', publicVersion: 1, summary: '超长用户要求' }, '用户要求正文。' + '必须完整保留的用户指示'.repeat(7000))
   const resultM2 = await m2.controller.start(m2.meeting.id)
-  check(!resultM2.ok && resultM2.meeting?.status === 'failed' && /公共上下文超限/.test(resultM2.meeting?.blockedReason ?? ''), 'the meeting fails with an explicit overflow reason instead of silently truncating')
-  check((resultM2.meeting?.blockedReason ?? '').includes('turn_chair_big'), 'the failure names the protected turn that could not be dropped')
-  check(m2.sends.length === 0, 'no provider request was dispatched under an unsendable context')
-  const failedTurnM2 = m2.store.turns(m2.meeting.id).find((turn) => turn.agentId === 'alpha')
-  check(failedTurnM2?.status === 'failed' && failedTurnM2.deliveryState === 'failed', 'the blocked speech turn records the delivery failure')
-  const failedDeliveryM2 = m2.store.getTurn(m2.meeting.id, failedTurnM2.id)?.delivery
-  check(failedDeliveryM2?.publicVersion === 1 && failedDeliveryM2.sourceTurnIds.includes('turn_chair_big'), 'overflow keeps the actual attempted public version and source range')
-  check(failedDeliveryM2?.protectedTurnIds.includes('turn_chair_big') && failedDeliveryM2.compression.originalLength > 8000, 'overflow persists the protected source and true input size audit')
-  check(!failedDeliveryM2?.attempts?.length && !failedTurnM2.deliveredAt, 'blocked input never claims an actual dispatch')
+  check(resultM2.ok && resultM2.meeting?.status === 'concluded', 'oversized public context does not terminate a meeting that providers can successfully complete')
+  check(!resultM2.meeting?.blockedReason, 'no host character-limit error is invented')
+  check(m2.sends.length > 0 && m2.sends.every((call) => call.content.includes('必须完整保留的用户指示'.repeat(7000))), 'every provider receives the entire long user instruction')
+  const deliveredTurnM2 = m2.store.turns(m2.meeting.id).find((turn) => turn.agentId === 'alpha' && turn.phase === 'report')
+  check(deliveredTurnM2?.status === 'done' && deliveredTurnM2.deliveryState === 'accepted', 'the oversized speech records real successful dispatch and acceptance')
+  const deliveredContextM2 = m2.store.getTurn(m2.meeting.id, deliveredTurnM2.id)?.delivery
+  check(deliveredContextM2?.publicVersion === 1 && deliveredContextM2.sourceTurnIds.includes('turn_chair_big'), 'oversized dispatch keeps its actual public version and source range')
+  check(deliveredContextM2?.protectedTurnIds.includes('turn_chair_big') && deliveredContextM2.compression.originalLength === deliveredContextM2.compression.keptLength && deliveredContextM2.compression.keptLength > 32000, 'delivery audit proves the long context was delivered without a cap or compression')
+  check(deliveredContextM2?.attempts?.length === 1 && deliveredTurnM2.deliveredAt, 'oversized input records actual execution identity and dispatch time')
 
   scenario('minutes revision invalidates earlier confirmations and returns the uniquely accepted draft')
   let revisedOnce = false
