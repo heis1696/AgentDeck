@@ -1,6 +1,6 @@
 # 团队会议：单一 Issue、公开讨论与成员侧栏方案
 
-> 状态：**阶段 1、2、3、4 已完成；阶段 4 源码门禁、完整 smoke:all 和隔离打包/热更/安装副本核验全部通过，原子创建 P2 已由独立只读复核关闭，无新增阻塞，两项 P3 建议留档。后续用户已授权主干推送及服务器发包，0.23.1 三层 feed 已发布并核验**。阶段 3 独立 v0 已获用户确认，不重复确认；证据及历史失败边界见 §16，§13 保留当时失败记录。本次未直接更新现用安装目录或手工迁移生产数据；真实模型验收仍仅为阶段 2 的 Codex 成功，Claude 超时/预算失败不转为通过。
+> 状态：**阶段 1、2、3、4 已完成；阶段 4 源码门禁、完整 smoke:all 和隔离打包/热更/安装副本核验全部通过，原子创建 P2 已由独立只读复核关闭，无新增阻塞，两项 P3 建议留档。用户已授权主干推送及服务器发包；0.23.1 历史发布及 0.23.2 使用反馈补丁均已发布并核验，后者完全移除宿主公共上下文限额/自动裁剪，并修复成员记录空间及轮次显示**。阶段 3 独立 v0 已获用户确认，不重复确认；证据及失败边界见 §16、§17，§13 保留当时失败记录。本次未直接更新现用安装目录或手工迁移生产数据；真实模型验收仍仅为阶段 2 的 Codex 成功，Claude 超时/预算失败不转为通过。
 > 日期：2026-10-02。当前门禁与隔离核验依据为 §16；2026-10-01 约 20:23（Asia/Shanghai）的初始运行数据快照仅作历史依据，不代表现在的生产状态。
 > 提交及发布授权补记（2026-10-02）：用户先授权主干本地提交，随后授权补漏、推送全部主干提交及服务器发包，均已执行；不重复合并历史隔离队员分支。下文“不提交/不部署”保留为各施工轮次的历史边界；最新授权与发布结果见 §16，不扩大为直接执行安装程序或手工操作生产会议数据的许可。
 > 目标：一个会议对应一个公开 Issue；各成员在同一时间线上实名轮番发言；内部执行在右侧查看；停止和删除覆盖整场会议。
@@ -560,6 +560,14 @@
 - 长历史：临时夹具 1000 条发言、4106740 正文字符，公共包原始/最终均为 5045171 字符，摘录与省略均为 0，整包仅序列化一次，专项 28/28；本次单机中位数 14.78ms，不作为性能保证。公共通信专项 103 项、独立浏览器 22 项已通过，后者不连接生产 Electron 或真实模型。证据 out/feedback-unbounded-smoke-meeting-history.log、out/feedback-unbounded-smoke-meeting-public.log、out/feedback-unbounded-smoke-ui-meeting-browser.log。
 - 全量初跑的并发事件日志夹具出现 [0,1]：B 在真实 owner 探测约 159/160ms 后触发 250ms 取锁期限，owner 仍存活；这是事件锁超时路径，不是会议上下文路径。尚未确定探测/锁释放变慢的外部来源，保留 out/feedback-unbounded-smoke-all-initial-failed.log；不改锁门限或退出证明。原源码原样复跑事件日志三次均退出 0，含慢 owner 期限回归，证据 out/feedback-unbounded-event-log-repro-1/2/3.log；完整全量另行记录最终结果，不用专项通过替代全量结果。
 
-本次仍不直接替换现用安装目录、不手工修改生产会议数据、不扩大真实模型验收结论。源码使用 0.23.2，以免覆盖已经发布的 0.23.1 壳的不可变绑定；正式发布须在最终门禁及隔离副本核验完成后另记。
+本次仍不直接替换现用安装目录、不手工修改生产会议数据、不扩大真实模型验收结论。源码使用 0.23.2，以免覆盖已经发布的 0.23.1 壳的不可变绑定；正式发布结果见下节。
 
 最终源码门禁：typecheck、build、smoke:stage6、完整 smoke:all、smoke:meeting-release、graph:index 均退出 0。会议详情 86 项、公共通信 103 项、历史 28 项及 WorkerPane/导航/生命周期/退出证明专项随全量通过；最终隔离安装副本包含三个入口版本/页面/IPC、热更指针跨重启与迁移备份核验，现场 agentdeck-meeting-stage4-release-3CjgUb。日志 out/feedback-unbounded-*-final.log；CodeGraph static 为 204 文件、5463 符号。全量初跑的锁超时记录继续保留，不以重跑成功抹去该次失败。
+
+### 0.23.2 正式发布核验
+
+- 源码提交 6399100 已推送 origin/main；三层签名包为 renderer/payload 0.23.2-hot.1、shell/portable 0.23.2，seq=1、ad-2026-09-r2。默认内置信任锚独立验签通过，没有用 smoke 信任覆盖替代生产验证。三包与全部逐文件哈希一致，asar 五个运行入口与最终构建一致，out 仅包含 main/preload/renderer；main/index.js SHA256 为 16e585c07a85fb87a9ef4d21c2a902ae7b75c01121751b9082ade1101e645a4f。
+- 服务器沿用 118.31.43.156:/var/www/agentdeck-feed 与 nginx stable 根，只发布本次独立 feed 的 13 个文件。首轮 SCP 连接关闭、第二轮上传完毕后 SSH 建连超时、连接恢复尝试又发生 banner 超时，均未进入正式清单切换；失败日志全部留证。最终复用同一已完整上传的暂存现场，逐个校验全部源哈希与已有不可变目标，再在单条 SSH 连接按既有 planDeployment 发布顺序执行；包/历史先发布，三个 stable 清单最后原子替换，未改服务器配置或重生成冻结产物。生成的执行计划为 out/feedback-release-audit/publication-plan.sh，最终发布退出 0。
+- 公开核验 completed=true（UTC 2026-10-02T16:04:03.975Z）：当前 13 个服务器文件完整 SHA256 与本地一致，另核对 0.23.1 六个不可变历史文件未被覆盖。三个 HTTP 清单逐字节匹配并通过内置信任锚验签；三包 HEAD=200、Range=206、前 65536 字节匹配。renderer/payload 全量 HTTP 下载哈希通过；329275027 字节壳包复核服务器完整哈希及公开 Range，没有声称重复全量 HTTP 下载。
+- 证据 out/feedback-release-audit/production-artifacts.json、server-verification.json、production-release.log、production-validation.log、production-deploy.log、server-verification-final.log。补充 asar 校验调用曾因 Windows 路径分隔符错误退出，修正校验器调用后通过，没有据此重打包或提前发布；原日志也保留。
+- 便携包 http://118.31.43.156/shell/shell-0.23.2.zip，本地 dist/agentdeck-0.23.2-portable-win-x64.zip。用户可在当前任务空闲后检查更新；现用安装副本尚未由本轮直接更换，不把服务器发包或隔离副本通过宣称为用户现用程序已完成升级。

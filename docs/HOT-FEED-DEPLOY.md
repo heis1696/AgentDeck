@@ -1,5 +1,5 @@
 # 热更 feed 部署指南（阿里云 118.31.43.156）
-> ✅ 运维复核于 2026-10-02：v0.23.1 / v0.23.1-hot.1，源码发布提交 2a23320；服务器三通道已核验，nginx stable 根、r2 信任密钥及原子部署流程与本文一致。2026-09-19 的 6b2f038 / v0.22.0-hot.19 审计仅作历史记录。
+> ✅ 当前已核验 v0.23.2 / v0.23.2-hot.1，源码发布提交 6399100；三个使用反馈修复已发包，宿主公共上下文限额与自动裁剪已完全移除。服务器三通道、nginx stable 根、r2 信任密钥及不可变历史均核验；0.23.1 与 2026-09-19 的旧审计保留为历史记录。
 
 
 > 配套设计：`docs/HOT-UPDATE-IMPL-DESIGN.md` §6.2/§9.1、`docs/archive/INSTALLER-FREE-HOT-UPDATE.md`。
@@ -78,3 +78,13 @@ npm run deploy:hot          # 等价 FEED_HOST/FEED_USER/FEED_REMOTE_DIR 可用 
 三清单签名使用内置信任锚 ad-2026-09-r2 复核；stable 与 versions 共 12 个服务器文件完整 SHA256 相符。三包 HEAD=200、Range=206；renderer/payload 全量 HTTP 下载验哈希，壳包核验服务端完整哈希及公开首段字节，没有重复全量 HTTP 下载。便携包入口为 http://118.31.43.156/shell/shell-0.23.1.zip；Ed25519 清单签名不等同于 Windows Authenticode 签名，本次没有配置后者。
 
 发布细节与验收边界见 docs/plan/team-meeting-issue-v2.md §16；日志和 JSON 证据位于 out/server-release-audit/。用户授权的是主干推送及服务器发包，本次未执行安装程序、直接更新现用安装目录或手工迁移生产数据。
+
+## 七、0.23.2 使用反馈补丁发布
+
+| 通道 | 版本 | 字节数 | ZIP SHA256 |
+| --- | --- | --- | --- |
+| renderer | 0.23.2-hot.1 | 4725900 | e20b5afb2c0756770ee47e8a57cc6ad1bf4098cbfafbb9764b96843e176b6f1a |
+| payload | 0.23.2-hot.1 | 5970118 | 0006d79f620f5564d418ea32c247acb69d34cf1d2ff75da79f4d28d7bd4e1088 |
+| shell / portable | 0.23.2 | 329275027 | f14862c9b969ae9b159384a248cb81cf6b3de026cb70e6e5a1ace1cdf9dd664c |
+
+默认内置信任锚 ad-2026-09-r2 验签，当前 13 个服务器文件与 0.23.1 六个不可变历史文件完整 SHA256 均匹配。三包 HEAD=200、Range=206；renderer/payload 全量 HTTP 下载验哈希，壳包复核服务器完整哈希及公开首段字节。便携包入口 http://118.31.43.156/shell/shell-0.23.2.zip；源码与全量/隔离副本门禁、暂存复用与单连接原子发布、连接超时失败留证详见 docs/plan/team-meeting-issue-v2.md §17，证据在 out/feedback-release-audit/。没有直接替换用户现用安装目录或手工迁移生产会议数据。
