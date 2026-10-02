@@ -1,5 +1,5 @@
 # 热更 feed 部署指南（阿里云 118.31.43.156）
-> ✅ 校验于 `6b2f038` / v0.22.0-hot.19（2026-09-19 文档审计）——`release:hot` / `deploy:hot` 脚本与 `DEFAULT_FEED_BASE`（`src/main/hot/trust.ts`）均与本文一致，为热更现行运维手册。
+> ✅ 运维复核于 2026-10-02：v0.23.1 / v0.23.1-hot.1，源码发布提交 2a23320；服务器三通道已核验，nginx stable 根、r2 信任密钥及原子部署流程与本文一致。2026-09-19 的 6b2f038 / v0.22.0-hot.19 审计仅作历史记录。
 
 
 > 配套设计：`docs/HOT-UPDATE-IMPL-DESIGN.md` §6.2/§9.1、`docs/archive/INSTALLER-FREE-HOT-UPDATE.md`。
@@ -66,3 +66,15 @@ npm run deploy:hot          # 等价 FEED_HOST/FEED_USER/FEED_REMOTE_DIR 可用 
 - **zip 便携版为主渠道**（GA）：`dist/agentdeck-<版本>-portable-win-x64.zip`，解压即用，支持全三层热更。
 - **NSIS 保留 4-8 周并行期**作为桥接版：Release Notes 引导存量用户迁移到 zip 渠道（安装版无法壳自替换，人工迁移一次性）；zip 渠道稳定运行 ≥2 个版本且无分发类缺陷后停发 NSIS。
 - zip 首次运行的 SmartScreen/MOTW 摩擦：文档引导"右键属性解除锁定"；根治靠代码签名证书（§9.4，不晚于对外分发规模扩大前购入）。
+
+## 六、2026-10-02 正式发布记录
+
+| 通道 | 版本 | 字节数 | ZIP SHA256 |
+| --- | --- | --- | --- |
+| renderer | 0.23.1-hot.1 | 4724287 | bb40ea40255b09b9db0091f00c0c108fcd8091b5dfa5bbab6eb50a4f2cd2b5a2 |
+| payload | 0.23.1-hot.1 | 5971361 | ae09ba722087f1baeefc9e8d3352b5fc8f203d71c3dcc0f6d0733aca5a4c618e |
+| shell / portable | 0.23.1 | 329276270 | c1594e38a4bc75bd65a5a3d2d76f21dfb550964f4fce789004b481484812e304 |
+
+三清单签名使用内置信任锚 ad-2026-09-r2 复核；stable 与 versions 共 12 个服务器文件完整 SHA256 相符。三包 HEAD=200、Range=206；renderer/payload 全量 HTTP 下载验哈希，壳包核验服务端完整哈希及公开首段字节，没有重复全量 HTTP 下载。便携包入口为 http://118.31.43.156/shell/shell-0.23.1.zip；Ed25519 清单签名不等同于 Windows Authenticode 签名，本次没有配置后者。
+
+发布细节与验收边界见 docs/plan/team-meeting-issue-v2.md §16；日志和 JSON 证据位于 out/server-release-audit/。用户授权的是主干推送及服务器发包，本次未执行安装程序、直接更新现用安装目录或手工迁移生产数据。
