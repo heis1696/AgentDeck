@@ -34,9 +34,12 @@ export function registerIssueIpc(ctx: IpcContext) {
   ipcMain.handle('issues:add-comment', (_e, id: unknown, content: unknown) => {
     const issue = ctx.issueStore.get(parseId(id, 'issueId'))
     const text = parseContent(content, '评论')
-    const comment = issue ? ctx.issueStore.addComment(issue.id, text) : null
+    const meeting = issue ? ctx.meetingController?.forIssue?.(issue.id) : null
+    const comment = issue ? ctx.issueStore.addComment(issue.id, text, undefined, meeting ? { meetingId: meeting.id } : undefined) : null
     let executionTask: Task | undefined
-    if (issue && comment) {
+    if (meeting && comment) {
+      if (meeting.status === 'active') ctx.meetingController.interject(meeting.id, text)
+    } else if (issue && comment) {
       const mention = text.match(/@([^\s@]+)/)?.[1]?.replace(/[),.;:!?]+$/, '').toLowerCase()
       const agent = mention ? ctx.agents.find((item) => item.name.toLowerCase() === mention || item.id.toLowerCase() === mention) : undefined
       if (agent) {

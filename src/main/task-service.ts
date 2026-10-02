@@ -34,6 +34,8 @@ export interface TaskCreateInput {
   dispatchHold?: boolean
   /** 办公室会话标记：只由 AgentSessionRegistry 写入（不暴露在公开建单 IPC 白名单里） */
   officeAgentId?: string
+  meetingId?: string
+  meetingTaskRole?: Task['meetingTaskRole']
   /** Durable idempotency key for replayed creation requests. */
   dedupeKey?: string
   /** Public request id accepted by the Task IPC boundary. */
@@ -207,6 +209,8 @@ export class TaskService {
         ...(input.worktree ? { worktree: input.worktree } : {}),
         ...(input.dispatchHold ? { dispatchHold: true } : {}),
         ...(input.officeAgentId ? { officeAgentId: input.officeAgentId } : {}),
+        ...(input.meetingId ? { meetingId: input.meetingId } : {}),
+        ...(input.meetingTaskRole ? { meetingTaskRole: input.meetingTaskRole } : {}),
         ...(input.titleAuto ? { titleAuto: true } : {}),
         ...(dedupeKey ? { dedupeKey } : {}),
         ...(delegateSourceRunId ? { delegateSourceRunId } : {})
@@ -220,6 +224,7 @@ export class TaskService {
   }
 
   createChildTask(input: ChildTaskCreateInput): Task {
+    const parent = this.store.get(input.parentTaskId)
     return this.createTask({
       title: input.title,
       prompt: input.prompt,
@@ -232,7 +237,8 @@ export class TaskService {
       unavailableReason: input.unavailableReason,
       worktree: input.worktree,
       dispatchHold: input.dispatchHold,
-      suppressIssue: input.suppressIssue,
+      suppressIssue: parent?.meetingId ? true : input.suppressIssue,
+      ...(parent?.meetingId ? { meetingId: parent.meetingId, meetingTaskRole: 'investigation' as const } : {}),
       titleAuto: true
     }, input.trigger ?? 'assignment', input.delegateSourceRunId)
   }

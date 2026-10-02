@@ -24,6 +24,17 @@ export function officeTaskKeyCandidates(agentId: string): string[] {
 }
 
 /**
+ * 会议成员会话键的候选序列：键形同时携带会议与成员双重身份，与共享咨询办公室
+ * （`office:v2:<agentId>`）及旧键形（`office_<agentId>`）的键空间互不相交。
+ * 同办公室键一样，键形只防误撞不防伪造（dedupeKey 是用户可构造的自由串）；
+ * 真正的判据是复用时的身份核验（见 isOwnMeetingTask）。
+ */
+export function officeMeetingTaskKeyCandidates(meetingId: string, agentId: string): string[] {
+  const base = `${OFFICE_TASK_KEY_V2_PREFIX}meeting:${meetingId}:${agentId}`
+  return [base, `${base}#2`]
+}
+
+/**
  * 办公室会话任务（会议发言/咨询应答专用）：runner 据此不注入派发与接力协议、不受理派单。
  * 判据只认创建侧写入的 officeAgentId——公开建单入口（parseTaskCreate 的键白名单）拿不到它，
  * 因此用户任务无法自称办公室会话。
@@ -43,10 +54,11 @@ export interface OfficeFollowUpResult {
   ok: boolean
   error?: string
   finalText?: string
+  /** 本次操作实际使用的会话任务（共享办公室或会议成员会话）。 */
+  taskId?: string
 }
 
 export interface OfficeDeliveryResult extends OfficeFollowUpResult {
-  taskId?: string
   created?: boolean
 }
 
@@ -57,6 +69,22 @@ export interface TurnProtocolOptions {
   meetingTurn?: boolean
   collectFinal?: boolean
   consultDepth?: number
+  onExecution?: (identity: { taskId: string; runId: string; turnId: string }) => void
+}
+
+/** 会话范围选项：`meetingId` 把操作切到该会议的成员会话（与共享咨询办公室互不复用、
+ *  互不收养）；`signal` 让取锁/建单/入队/首回合等待/回合发送全程可取消——中止后的
+ *  请求绝不调用 runner.followUp 把已取消的会话恢复起来。这三项都是注册表内部范围，
+ *  绝不透传给 runner 的公开回合协议。 */
+export interface OfficeSessionOptions {
+  meetingId?: string
+  workdir?: string
+  signal?: AbortSignal
+}
+
+/** 取消检查：signal 已中止就抛出（排队/建单/入队/等待/发送前后共用同一道闸）。 */
+function throwIfAborted(signal: AbortSignal | undefined, message: string): void {
+  if (signal?.aborted) throw new Error(message)
 }
 
 export interface OfficeRunner {
@@ -102,25 +130,42 @@ export class AgentSessionRegistry {
     this.waitTimeoutMs = Math.max(this.waitPollMs, options.waitTimeoutMs ?? 10 * 60 * 1000)
   }
 
-  /** 身份核验：这张记录是否确实是该队长的办公室会话。 */
+  /** 身份核验：这张记录是否确实是该队长的**共享办公室**会话。
+   *  meetingId 必须缺席——带会议归属的成员会话即便 officeAgentId 相同，
+   *  也绝不能被办公室查询/建单路径复用（普通办公室查询不能撞上会议会话）。 */
   private isOwnOfficeTask(found: Task | null, agentId: string): boolean {
-    return !!found && found.officeAgentId === agentId && (found.agentId === undefined || found.agentId === agentId)
+    return !!found && found.officeAgentId === agentId && found.meetingId === undefined
+      && (found.agentId === undefined || found.agentId === agentId)
   }
 
-  /** 按候选序列找一个可用的键位：
-   *  - `existing`：身份匹配的办公室单（复用）
+  /** 身份核验：这张记录是否确实是该会议该成员的成员会话（键位占用者必须逐项对上）。 */
+  private isOwnMeetingTask(found: Task | null, meetingId: string, agentId: string): boolean {
+    return !!found && found.meetingId === meetingId && found.meetingTaskRole === 'member'
+      && found.officeAgentId === agentId && (found.agentId === undefined || found.agentId === agentId)
+  }
+
+  /** 按候选序列找一个可用的键位（查询与建单共用这一处，避免两条路径对"键能不能用"判断不一致）：
+   *  - `existing`：身份匹配的会话单（复用）
    *  - `free`：既无占用、也无身份冲突的键位（建单用）
-   *  两者都可能为 null（候选用尽）。查询与建单共用这一处，避免两条路径对"键能不能用"判断不一致。 */
-  private pickKey(agentId: string): { existing: Task | null; free: string | null; collision: Task | null } {
+   *  两者都可能为 null（候选用尽）。 */
+  private pickSessionKey(candidates: string[], own: (found: Task | null) => boolean): { existing: Task | null; free: string | null; collision: Task | null } {
     let collision: Task | null = null
-    for (const key of officeTaskKeyCandidates(agentId)) {
+    for (const key of candidates) {
       const found = this.taskService.deduped(key)
       if (!found) return { existing: null, free: key, collision }
-      if (this.isOwnOfficeTask(found, agentId)) return { existing: found, free: null, collision }
-      // 键被非办公室任务占用：换下一个候选，绝不复用这张记录
+      if (own(found)) return { existing: found, free: null, collision }
+      // 键被其他任务占用：换下一个候选，绝不复用这张记录
       collision = found
     }
     return { existing: null, free: null, collision }
+  }
+
+  private pickKey(agentId: string): { existing: Task | null; free: string | null; collision: Task | null } {
+    return this.pickSessionKey(officeTaskKeyCandidates(agentId), (found) => this.isOwnOfficeTask(found, agentId))
+  }
+
+  private pickMeetingKey(meetingId: string, agentId: string): { existing: Task | null; free: string | null; collision: Task | null } {
+    return this.pickSessionKey(officeMeetingTaskKeyCandidates(meetingId, agentId), (found) => this.isOwnMeetingTask(found, meetingId, agentId))
   }
 
   /** 旧键形的历史办公室单：仅当身份核验通过时收养。
@@ -133,58 +178,103 @@ export class AgentSessionRegistry {
     return this.isOwnOfficeTask(found, agentId) ? found : null
   }
 
-  /** Return a persisted office task without creating or starting anything. */
-  get(agentId: string): Task | null {
+  /** Return a persisted office task without creating or starting anything.
+   *  带 meetingId：查该会议的成员会话；不带：查共享咨询办公室（含旧键收养）。
+   *  办公室查询绝不返回会议成员会话，会议查询也不复用办公室或旧键记录。 */
+  get(agentId: string, meetingId?: string): Task | null {
+    if (meetingId) return this.pickMeetingKey(meetingId, agentId).existing
     return this.pickKey(agentId).existing ?? this.legacyLookup(agentId)
   }
 
-  /** Create/recover an office task and make sure its bootstrap turn finished. */
-  async ensure(agentId: string, options?: { workdir?: string }): Promise<Task> {
+  /** Create/recover a session task and make sure its bootstrap turn finished.
+   *  不带 meetingId：共享咨询办公室，含旧键迁移收养（行为与历史版本一致）。
+   *  带 meetingId：该会议的成员会话——suppressIssue + officeAgentId（沿用办公室执行协议）
+   *  + meetingTaskRole:'member'，刻意不设 parentTaskId（会议归属与普通执行父子解耦），
+   *  且绝不收养共享旧办公室；signal 在取锁、建单、入队与首回合等待全程生效。 */
+  async ensure(agentId: string, options?: OfficeSessionOptions): Promise<Task> {
     if (this.disposed) throw new Error('办公室会话注册表已关闭')
     const agent = this.resolveAgent(agentId)
-    const picked = this.pickKey(agent.id)
-    let task = picked.existing
-    if (!task && picked.collision) this.noteKeyCollision(agent.id, picked.collision)
-    if (!task) {
-      // 旧键形的历史办公室单优先收养：迁移（store.ts 的三重键判定）已为它补上 officeAgentId，
-      // 这里把它的键改写成新键形，续聊历史与任务时间线都留在原单上。
-      const legacy = this.legacyLookup(agent.id)
-      // 收养需要改写键位：只挑本次选定的空闲键，避免覆盖别的队长/任务正在用的键
-      if (legacy && picked.free && legacy.dedupeKey !== picked.free) {
-        const migrated = this.store.update(legacy.id, { dedupeKey: picked.free })
-        if (migrated) {
-          task = migrated
-          this.note(legacy.id, `办公室会话已迁移到键空间隔离后的新键（${legacy.dedupeKey ?? '（无）'} → ${picked.free}）`)
+    const meetingId = options?.meetingId?.trim() || undefined
+    const signal = options?.signal
+    throwIfAborted(signal, `会话操作已取消（${agent.name}）`)
+    let task: Task | null
+    if (meetingId) {
+      // 会议成员会话：键位候选与身份核验和办公室同构，但与共享办公室的键空间、
+      // 旧键迁移互不相通——会议会话不得收养共享旧办公室。
+      const picked = this.pickMeetingKey(meetingId, agent.id)
+      task = picked.existing
+      if (!task && picked.collision) this.noteKeyCollision(agent.id, picked.collision, meetingId)
+      if (!task) {
+        throwIfAborted(signal, `会话操作已取消（${agent.name}）`)
+        const key = picked.free ?? officeMeetingTaskKeyCandidates(meetingId, agent.id)[0]
+        const input: TaskCreateInput = {
+          title: `${agent.name}·会议成员`,
+          prompt: this.officePrompt(agent),
+          backend: agent.backend,
+          agentId: agent.id,
+          workdir: options?.workdir ?? '',
+          trigger: 'meeting' as RunTrigger,
+          suppressIssue: true,
+          titleAuto: false,
+          officeAgentId: agent.id,
+          meetingId,
+          meetingTaskRole: 'member',
+          dedupeKey: key
         }
-      } else if (legacy) {
-        task = legacy
+        const created = this.taskService.createTask(input, 'meeting')
+        // 建单路径同样核验：占键竞态（并发建单）下 createTask 可能"键命中即复用"别的记录，
+        // 拿回的不是本会议本成员的会话单就绝不当成成员会话用。
+        if (!this.isOwnMeetingTask(created, meetingId, agent.id)) {
+          throw new Error(`会议成员会话建单失败：键 ${key} 被其他任务占用（${created.id}）`)
+        }
+        task = created
       }
-    }
-    if (!task) {
-      // 键位是候选序列里挑出的空闲键；createTask 仍是"键命中即复用"，
-      // 所以建单后必须核验身份——占键竞态（并发建单）下它可能返回别的记录。
-      const key = picked.free ?? officeTaskKeyCandidates(agent.id)[0]
-      const input: TaskCreateInput = {
-        title: `${agent.name}·办公室`,
-        prompt: this.officePrompt(agent),
-        backend: agent.backend,
-        agentId: agent.id,
-        workdir: options?.workdir ?? '',
-        trigger: 'meeting' as RunTrigger,
-        suppressIssue: true,
-        titleAuto: false,
-        officeAgentId: agent.id,
-        dedupeKey: key
+    } else {
+      const picked = this.pickKey(agent.id)
+      task = picked.existing
+      if (!task && picked.collision) this.noteKeyCollision(agent.id, picked.collision)
+      if (!task) {
+        // 旧键形的历史办公室单优先收养：迁移（store.ts 的三重键判定）已为它补上 officeAgentId，
+        // 这里把它的键改写成新键形，续聊历史与任务时间线都留在原单上。
+        const legacy = this.legacyLookup(agent.id)
+        // 收养需要改写键位：只挑本次选定的空闲键，避免覆盖别的队长/任务正在用的键
+        if (legacy && picked.free && legacy.dedupeKey !== picked.free) {
+          const migrated = this.store.update(legacy.id, { dedupeKey: picked.free })
+          if (migrated) {
+            task = migrated
+            this.note(legacy.id, `办公室会话已迁移到键空间隔离后的新键（${legacy.dedupeKey ?? '（无）'} → ${picked.free}）`)
+          }
+        } else if (legacy) {
+          task = legacy
+        }
       }
-      const created = this.taskService.createTask(input, 'meeting')
-      // 建单路径同样核验：拿回的不是本队长的办公室单就说明键被抢占了，绝不当成办公室会话用
-      if (!this.isOwnOfficeTask(created, agent.id)) {
-        throw new Error(`办公室会话建单失败：键 ${key} 被其他任务占用（${created.id}）`)
+      if (!task) {
+        throwIfAborted(signal, `会话操作已取消（${agent.name}）`)
+        // 键位是候选序列里挑出的空闲键；createTask 仍是"键命中即复用"，
+        // 所以建单后必须核验身份——占键竞态（并发建单）下它可能返回别的记录。
+        const key = picked.free ?? officeTaskKeyCandidates(agent.id)[0]
+        const input: TaskCreateInput = {
+          title: `${agent.name}·办公室`,
+          prompt: this.officePrompt(agent),
+          backend: agent.backend,
+          agentId: agent.id,
+          workdir: options?.workdir ?? '',
+          trigger: 'meeting' as RunTrigger,
+          suppressIssue: true,
+          titleAuto: false,
+          officeAgentId: agent.id,
+          dedupeKey: key
+        }
+        const created = this.taskService.createTask(input, 'meeting')
+        if (!this.isOwnOfficeTask(created, agent.id)) {
+          throw new Error(`办公室会话建单失败：键 ${key} 被其他任务占用（${created.id}）`)
+        }
+        task = created
       }
-      task = created
     }
 
     if (task.status === 'queued') {
+      throwIfAborted(signal, `会话操作已取消（${agent.name}）`)
       if (task.parked) {
         // An office task is controlled by this registry, never by the parked
         // UI queue. Clear a stale flag before handing it to the runner.
@@ -194,24 +284,36 @@ export class AgentSessionRegistry {
       this.runner.enqueue(task)
     }
 
-    task = await this.waitForTerminal(task.id)
+    task = await this.waitForTerminal(task.id, signal)
     return task
   }
 
-  /** Serialize one office agent while leaving other agents and normal tasks free. */
-  async followUp(agentId: string, content: string, opts?: TurnProtocolOptions): Promise<OfficeFollowUpResult> {
+  /** Serialize one session (per agent, or per meeting+agent) while leaving other
+   *  agents/meetings and normal tasks free. 取消在取锁、发送前、发送后全程把关：
+   *  中止后的请求绝不调用 runner.followUp 把已取消的会话恢复起来；
+   *  发送期间收到的中止让晚到的结果不作数。 */
+  async followUp(agentId: string, content: string, opts?: TurnProtocolOptions & OfficeSessionOptions): Promise<OfficeFollowUpResult> {
+    const meetingId = opts?.meetingId?.trim() || undefined
+    const signal = opts?.signal
+    throwIfAborted(signal, '会话回合已取消')
     const agent = this.resolveAgent(agentId)
-    return this.withLock(agent.id, async () => {
-      const task = await this.ensure(agent.id)
-      return this.runner.followUp(task.id, content, {
+    return this.withLock(meetingId ? `meeting:${meetingId}:${agent.id}` : agent.id, async () => {
+      throwIfAborted(signal, `排队等待期间已取消（${agent.name}）`)
+      const task = await this.ensure(agent.id, { meetingId, workdir: opts?.workdir, signal })
+      throwIfAborted(signal, `会话回合已取消（${task.id}）：收到中止信号，不得恢复会话`)
+      // 只传回合协议开关：meetingId/workdir/signal 是注册表内部范围，不进入 runner 协议
+      const result = await this.runner.followUp(task.id, content, {
         collectFinal: opts?.collectFinal ?? true,
         consultDepth: opts?.consultDepth ?? 0,
+        ...(opts?.onExecution ? { onExecution: opts.onExecution } : {}),
         ...(opts?.meetingTurn ? { meetingTurn: true } : {})
       })
+      throwIfAborted(signal, `会话回合已取消（${task.id}）：发送期间收到中止信号，结果不作数`)
+      return { ...result, taskId: task.id }
     })
   }
 
-  async ensureOffice(agentId: string, options?: { workdir?: string }): Promise<Task> { return this.ensure(agentId, options) }
+  async ensureOffice(agentId: string, options?: { workdir?: string; signal?: AbortSignal }): Promise<Task> { return this.ensure(agentId, options) }
 
   async deliver(agentId: string, content: string): Promise<OfficeDeliveryResult> {
     const existing = this.get(agentId)
@@ -254,8 +356,11 @@ export class AgentSessionRegistry {
   }
 
   /** 键碰撞留痕（时间线可见）：说明为什么另建了单、以及被占用的记录没被动过。 */
-  private noteKeyCollision(agentId: string, holder: Task): void {
-    this.note(holder.id, `⚠ 办公室键 ${holder.dedupeKey ?? '（无）'} 已被非办公室任务占用，未复用该记录，改为另建办公室会话（队长 ${agentId}）`)
+  private noteKeyCollision(agentId: string, holder: Task, meetingId?: string): void {
+    const text = meetingId
+      ? `⚠ 会议成员键 ${holder.dedupeKey ?? '（无）'} 已被非会议会话任务占用，未复用该记录，改为另建会议成员会话（会议 ${meetingId}，队长 ${agentId}）`
+      : `⚠ 办公室键 ${holder.dedupeKey ?? '（无）'} 已被非办公室任务占用，未复用该记录，改为另建办公室会话（队长 ${agentId}）`
+    this.note(holder.id, text)
   }
 
   /** 任务时间线留痕（办公室会话的边界事件不能被静默吞掉）。 */
@@ -273,9 +378,10 @@ export class AgentSessionRegistry {
     return agent
   }
 
-  private async waitForTerminal(taskId: string): Promise<Task> {
+  private async waitForTerminal(taskId: string, signal?: AbortSignal): Promise<Task> {
     const deadline = Date.now() + this.waitTimeoutMs
     for (;;) {
+      throwIfAborted(signal, `会话首回合等待已取消: ${taskId}`)
       const task = this.store.get(taskId)
       if (!task) throw new Error(`办公室任务已消失: ${taskId}`)
       if (task.status === 'done' || task.status === 'failed' || task.status === 'cancelled') return task

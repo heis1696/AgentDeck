@@ -229,9 +229,9 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
           void bridge.meetings.start(meeting.id)
             .then((result) => { if (!result.ok) ui.toast.error(result.error ?? '会议启动失败') })
             .catch((e) => ui.toast.error('会议启动失败: ' + (e instanceof Error ? e.message : String(e))))
-          ui.toast.success('会议已创建，正在开始——在 Issue 详情侧栏跟进')
+          ui.toast.success('会议已创建，正在开始——在独立会议页跟进')
         } else {
-          ui.toast.success('会议已创建为草稿——在 Issue 详情侧栏可开始')
+          ui.toast.success('会议已创建为草稿——在独立会议页可开始')
         }
       } else if (!startNow) {
         ui.toast.info('已创建，暂不启动——在任务详情点「开始执行」')

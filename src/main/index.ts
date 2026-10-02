@@ -27,7 +27,7 @@ import { createDshBackend } from './backends/dsh'
 import type { AgentBackend } from './backends/types'
 import type { AppSettings, Task, RunTrigger } from '../shared/types'
 import { ensureSharedDir } from './skills'
-import { shouldKeepTaskWorktree, setWorktreeOwner, sweepReportCopies, sweepWorktrees, uniquePathsByKey } from './git'
+import { deleteReportCopies, reclaimWorktree, resolveRepositoryRoot, shouldKeepTaskWorktree, setWorktreeOwner, sweepReportCopies, sweepWorktrees, uniquePathsByKey } from './git'
 import { relayIssueCommentOrEvent, type IssueRelayChannels } from './issue-relay'
 import { registerIpcHandlers, type CreateTaskInput } from './ipc/register'
 import { SidecarManager } from './sidecar'
@@ -419,9 +419,64 @@ const initMain = async (): Promise<void> => {
       runner.enqueue(started)
     },
     issueExists: (issueId) => !!issueStore.get(issueId),
-    addIssueComment: (issueId, content, authorId) => { issueStore.addComment(issueId, content, { type: 'agent', id: authorId ?? 'meeting' }) },
-    cancelTask: (taskId) => runner.cancel(taskId)
+    taskStore: store,
+    getIssueTask: (issueId) => {
+      const issue = issueStore.get(issueId)
+      return issue ? store.get(issue.taskId) : undefined
+    },
+    isFreshIssue: (issueId) => {
+      const issue = issueStore.get(issueId)
+      const task = issue ? store.get(issue.taskId) : undefined
+      return !!task && task.status === 'queued' && task.parked === true && !task.startedAt && !task.runId
+        && (task.eventCount ?? 0) === 0 && issueStore.comments(issueId).length === 0
+        && issueStore.runs(issueId).length === 0
+    },
+    onTaskUpdated: (task) => runner.pushTask(task.id),
+    addIssueComment: (issueId, content, authorId, meetingId, sourceTurnId) => {
+      const comment = issueStore.addComment(issueId, content, { type: authorId === 'user' ? 'user' : 'agent', id: authorId ?? 'meeting' }, { meetingId, sourceTurnId })
+      if (!comment) throw new Error('会议评论镜像未写入')
+    },
+    cancelTask: (taskId) => runner.terminateTask(taskId),
+    deleteTaskData: async (meeting, tasks) => {
+      const matchesStoppedTask = (task: Task): boolean => {
+        const current = store.get(task.id)
+        return !!current && current.meetingId === meeting.id && !current.gitOperation
+          && ['done', 'failed', 'cancelled'].includes(current.status)
+          && store.matches(task.id, { runId: task.runId, executionOwner: task.executionOwner })
+      }
+      if (!tasks.every(matchesStoppedTask)) return { ok: false, error: '会议执行归属已变化，未清理任务与日志' }
+      if (meeting.ownsIssue && store.list().some((task) => task.issueId === meeting.issueId && task.meetingId !== meeting.id)) {
+        return { ok: false, error: 'Issue 存在不属于会议的执行，已保留历史，不能整单删除' }
+      }
+      const roots = new Set<string>()
+      for (const task of tasks) {
+        if (task.worktree?.repoDir) roots.add(task.worktree.repoDir)
+        else if (task.workdir) {
+          const root = await resolveRepositoryRoot(task.workdir)
+          if (root) roots.add(root)
+        }
+        if (task.worktree) {
+          const reclaimed = await reclaimWorktree(task.worktree.path, {
+            deleteBranch: true,
+            expectedOwnerTaskId: task.worktree.ownerTaskId,
+            expectedGenerationId: task.worktree.generationId,
+            beforeReclaim: async (workdir) => matchesStoppedTask(task)
+              && await runner.releaseWorktreeSessions(workdir) && matchesStoppedTask(task)
+          })
+          if (!reclaimed.ok) return { ok: false, error: `会议工作树尚未安全回收：${task.worktree.path}` }
+        }
+      }
+      const deleted = await taskService.deleteTerminalCascade(tasks.map((task) => task.id), (taskId) => runner.forget(taskId),
+        (current) => current.every((task) => tasks.some((captured) => captured.id === task.id && matchesStoppedTask(captured))))
+      if (!deleted) return { ok: false, error: '会议任务状态或归属已变化，请重试删除' }
+      deleteReportCopies([...roots], deleted)
+      for (const taskId of deleted) mainWindow?.webContents.send('task:deleted', taskId)
+      return { ok: true }
+    },
+    deleteMeetingComments: (meetingId) => issueStore.deleteMeetingComments(meetingId),
+    deleteIssue: (issueId) => { issueStore.deleteIssue(issueId) }
   })
+  runner.attachMeetingGuard((task: Task) => meetingController.canRunTask(task))
   meetingController.recover()
   meetingController.subscribe((meeting) => mainWindow?.webContents.send('meetings:updated', meeting))
   // Issue 评论统一中继（全文层统一降级出口）：评论未送达（Issue 不存在）= warn + 任务事件 + 推送，

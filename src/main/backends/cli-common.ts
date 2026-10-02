@@ -45,7 +45,7 @@ export function killProcessTree(child: ChildProcess): Promise<KillProcessResult>
       resolve(result)
     }
     const complete = () => {
-      if (childClosed && killCompleted) finish({ ok: true, code: child.exitCode })
+      if (childClosed && killCompleted) finish(killError ?? { ok: true, code: child.exitCode })
     }
     const onClose = () => { childClosed = true; complete() }
     const onKillClose = (code: number | null) => {

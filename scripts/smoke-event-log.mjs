@@ -352,6 +352,15 @@ for (const replacementMode of ['same-size', 'larger']) {
     let eventFd
     let paused = false
     let reported = false
+    const childProcess = require('node:child_process')
+    const originalExec = childProcess.execFileSync
+    childProcess.execFileSync = function(...args) {
+      const delay = Number(process.env.EVENT_LOG_PROBE_DELAY_MS || 0)
+      const started = Date.now()
+      if (reported && role === 'T' && delay > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay)
+      try { return originalExec.apply(this, args) }
+      finally { if (reported) process.send({ kind: 'owner-probe', elapsedMs: Date.now() - started }) }
+    }
     fs.openSync = function(target, flags, ...args) {
       const fd = originalOpen.call(fs, target, flags, ...args)
       if (target === file && flags === 'a') eventFd = fd
@@ -390,18 +399,21 @@ for (const replacementMode of ['same-size', 'larger']) {
   const launch = (role) => {
     const child = spawn(process.execPath, ['-e', writerScript, logOutfile, file, role, release], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
     const messages = []
+    const timeline = []
+    const startedAt = Date.now()
     let stderr = ''
     child.stderr.on('data', (chunk) => { stderr += chunk })
-    child.on('message', (message) => messages.push(message))
+    child.on('message', (message) => { messages.push(message); timeline.push({ elapsedMs: Date.now() - startedAt, ...message }) })
     const exited = new Promise((resolve) => child.once('exit', (code) => resolve(code)))
+    const evidence = () => ({ role, pid: child.pid, exitCode: child.exitCode, signalCode: child.signalCode, elapsedMs: Date.now() - startedAt, timeline, stderr })
     const waitMessage = async (kinds) => {
       const deadline = Date.now() + 10_000
       while (!messages.some((message) => kinds.includes(message.kind))) {
-        if (child.exitCode !== null || Date.now() > deadline) throw new Error(`writer ${role}: ${stderr || 'no expected message'}`)
+        if (child.exitCode !== null || Date.now() > deadline) throw new Error(JSON.stringify(evidence()))
         await new Promise((resolve) => setTimeout(resolve, 5))
       }
     }
-    return { child, exited, waitMessage }
+    return { child, exited, waitMessage, evidence }
   }
   const a = launch('A')
   let b
@@ -413,7 +425,7 @@ for (const replacementMode of ['same-size', 'larger']) {
     b = launch('B')
     await b.waitMessage(['contended', 'done'])
     fs.writeFileSync(release, '')
-    assert.deepEqual(await Promise.all([a.exited, b.exited]), [0, 0])
+    assert.deepEqual(await Promise.all([a.exited, b.exited]), [0, 0], JSON.stringify([a.evidence(), b.evidence()]))
     const disk = fs.readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse)
     assert.deepEqual(disk.map((event) => event.seq), [1, 2], 'concurrent single/batch append allocates unique cursors')
     assert.deepEqual(new Set(new EventLog(file).read().map((event) => event.text)), new Set(['A', 'B']), 'both process events survive replay')
@@ -433,8 +445,9 @@ for (const replacementMode of ['same-size', 'larger']) {
     await appending.waitMessage(['paused'])
     truncating = launch('T')
     await truncating.waitMessage(['contended', 'done'])
+    if (process.env.EVENT_LOG_RELEASE_DELAY_MS) await new Promise((resolve) => setTimeout(resolve, Number(process.env.EVENT_LOG_RELEASE_DELAY_MS)))
     fs.writeFileSync(release, '')
-    assert.deepEqual(await Promise.all([appending.exited, truncating.exited]), [0, 0])
+    assert.deepEqual(await Promise.all([appending.exited, truncating.exited]), [0, 0], JSON.stringify([appending.evidence(), truncating.evidence()]))
     assert.deepEqual(new EventLog(file).read().map((event) => event.text), ['seed'], 'truncate serializes after an active append')
   } finally {
     fs.writeFileSync(release, '')

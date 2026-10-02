@@ -2,11 +2,12 @@ import { build } from 'esbuild'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { EventEmitter } from 'node:events'
+import assert from 'node:assert/strict'
 
 const root = path.resolve(import.meta.dirname, '..')
 const outfile = path.join(root, 'out', 'smoke-opencode-server.cjs')
 await build({ entryPoints: [path.join(root, 'src/main/backends/opencode-server.ts')], outfile, bundle: true, platform: 'node', format: 'cjs', target: 'node18' })
-const { createOpencodeServerBackend } = await import(pathToFileURL(outfile).href)
+const { createOpencodeServerBackend, OpencodeServerClient } = await import(pathToFileURL(outfile).href)
 const wrapperOutfile = path.join(root, 'out', 'smoke-opencode-wrapper.cjs')
 await build({ entryPoints: [path.join(root, 'src/main/backends/opencode.ts')], outfile: wrapperOutfile, bundle: true, platform: 'node', format: 'cjs', target: 'node18' })
 const { createOpencodeBackend } = await import(pathToFileURL(wrapperOutfile).href)
@@ -130,3 +131,61 @@ if (serverStarts !== 1 || serverStops !== 0) throw new Error(`resume acquired a 
 await wrappedSecond.close()
 if (serverStops !== 1) throw new Error(`final close did not release exactly one production server lease (${serverStops})`)
 console.log('PASS production OpenCode wrapper transfers one local-server lease across detach/resume')
+
+for (const refusal of [false, { ok: false }]) {
+  const client = new OpencodeServerClient({ baseUrl: 'http://fake', fetch: async () => new Response(JSON.stringify(refusal)) })
+  await assert.rejects(() => client.interrupt('refused'), /refused/)
+  await assert.rejects(() => client.close('refused'), /refused/)
+}
+console.log('PASS OpenCode false acknowledgements cannot confirm stop or close')
+
+let exists = true
+const missingEndpoint = new OpencodeServerClient({
+  baseUrl: 'http://fake',
+  fetch: async (_input, init = {}) => init.method === 'GET' && exists
+    ? new Response(JSON.stringify({ id: 'existing' }))
+    : new Response('', { status: 404 })
+})
+await assert.rejects(() => missingEndpoint.close('existing'), /HTTP 404/)
+exists = false
+await missingEndpoint.close('existing')
+console.log('PASS missing close endpoints only confirm deletion when the session is absent')
+
+let stopAttempts = 0
+let closeAttempts = 0
+const retryable = await createOpencodeServerBackend({
+  baseUrl: 'http://fake',
+  fetch: async (input, init = {}) => {
+    const url = new URL(input)
+    if (url.pathname.endsWith('/abort')) return new Response(JSON.stringify(++stopAttempts > 1))
+    if (init.method === 'DELETE') return new Response(JSON.stringify(++closeAttempts > 1))
+    return fakeFetch(input, init)
+  }
+}).start({ prompt: 'retry stop and close', workdir: 'D:/smoke', mode: 'build', events: { onEvent() {}, onTurnEnd() {} } })
+await assert.rejects(() => retryable.stop(), /refused/)
+await retryable.stop()
+await assert.rejects(() => retryable.close(), /refused/)
+await retryable.close()
+await retryable.close()
+assert.equal(stopAttempts, 2)
+assert.equal(closeAttempts, 2)
+console.log('PASS OpenCode adapter propagates failures and retries cleanup without deleting twice')
+
+let wrappedCloseAttempts = 0
+let wrappedServerStops = 0
+const cleanupWrapper = createOpencodeBackend({
+  required: true,
+  skipVersionProbe: true,
+  startServer: async () => ({ url: 'http://fake', child: new EventEmitter() }),
+  stopServer: async () => { wrappedServerStops++ },
+  fetch: async (input, init = {}) => init.method === 'DELETE'
+    ? new Response(JSON.stringify(++wrappedCloseAttempts > 1))
+    : fakeFetch(input, init)
+})
+const wrappedRetry = await cleanupWrapper.start({ prompt: 'wrapper close retry', workdir: 'D:/smoke', mode: 'build', events: { onEvent() {}, onTurnEnd() {} } })
+await assert.rejects(() => wrappedRetry.close(), /refused/)
+assert.equal(wrappedServerStops, 0)
+await Promise.all([wrappedRetry.close(), wrappedRetry.close()])
+assert.equal(wrappedCloseAttempts, 2)
+assert.equal(wrappedServerStops, 1)
+console.log('PASS production wrapper retains failed-close leases and coalesces successful retries')

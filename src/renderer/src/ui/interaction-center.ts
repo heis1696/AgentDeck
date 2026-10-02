@@ -22,7 +22,7 @@ export const TOAST_TTL_MS = 4200
 export const MAX_VISIBLE_TOASTS = 4
 
 /** 中心只需要任务目录里的这三列（与 shared/types 的 Task 结构兼容） */
-export interface CenterTask { id: string; title: string; parentTaskId?: string | null }
+export interface CenterTask { id: string; title: string; parentTaskId?: string | null; viewRootId?: string; hidden?: boolean }
 
 /* ---------------------------------------------------------------- dock */
 
@@ -44,7 +44,7 @@ export interface DockFileDiff {
   binary?: boolean
 }
 export type DockItem =
-  | { id: string; kind: 'task'; title: string; payload: { taskId: string } }
+  | { id: string; kind: 'task'; title: string; payload: { taskId: string; execution?: { runId: string } } }
   | { id: string; kind: 'file'; title: string; payload: DockEditMetadata & { taskId: string } & DockFileDiff }
 export interface DockItemPatch {
   title?: string
@@ -193,6 +193,9 @@ export function resolveRootIn(catalog: ReadonlyMap<string, CenterTask>, id: stri
   const seen = new Set<string>()
   let current = first
   let depth = 0
+  if (current.viewRootId && catalog.has(current.viewRootId)) {
+    return { rootId: current.viewRootId, isRoot: true, broken: false, depth: 1 }
+  }
   while (current.parentTaskId) {
     if (seen.has(current.id)) return { rootId: current.id, isRoot: false, broken: true, depth }
     seen.add(current.id)
@@ -200,6 +203,9 @@ export function resolveRootIn(catalog: ReadonlyMap<string, CenterTask>, id: stri
     if (!parent) return { rootId: current.id, isRoot: false, broken: true, depth }
     current = parent
     depth++
+    if (current.viewRootId && catalog.has(current.viewRootId)) {
+      return { rootId: current.viewRootId, isRoot: true, broken: false, depth: depth + 1 }
+    }
   }
   return { rootId: current.id, isRoot: true, broken: false, depth }
 }
@@ -222,7 +228,7 @@ function dockRouteRootIdIn(catalog: ReadonlyMap<string, CenterTask>, id: string)
  */
 export function rootTabsOf(tasks: readonly CenterTask[], tabs: readonly string[]): string[] {
   const catalog = taskCatalogOf(tasks)
-  return tabs.filter((id) => dockRouteRootIdIn(catalog, id) === null)
+  return tabs.filter((id) => !catalog.get(id)?.hidden && !catalog.get(id)?.viewRootId && dockRouteRootIdIn(catalog, id) === null)
 }
 
 export interface InteractionCenter {
@@ -359,6 +365,14 @@ export function createInteractionCenter(options: InteractionCenterOptions = {}):
 
   const openTask = (id: string): OpenTaskRoute => {
     if (!id) return 'ignored'
+    const task = catalog.get(id)
+    if (task?.hidden) return 'ignored'
+    if (task?.viewRootId && catalog.has(task.viewRootId)) {
+      pendingOpens.delete(id)
+      activateTab(task.viewRootId)
+      emit({ view: 'detail' })
+      return 'tab'
+    }
     const routeRootId = dockRouteRootId(id)
     if (routeRootId) {
       // 祖先链完整且根不是自己 → 子任务不开顶部页签：路由到根详情并在其 dock 桶里打开
@@ -407,6 +421,14 @@ export function createInteractionCenter(options: InteractionCenterOptions = {}):
   const setTasks = (tasks: readonly CenterTask[]): void => {
     catalog = new Map(tasks.map((task) => [task.id, task]))
     catalogReady = true
+    const tabs = [...new Set(state.tabs.filter((id) => !catalog.get(id)?.hidden).map((id) => {
+      const rootId = catalog.get(id)?.viewRootId
+      return rootId && catalog.has(rootId) ? rootId : id
+    }))]
+    const activeTask = state.activeId ? catalog.get(state.activeId) : undefined
+    const activeId = activeTask?.hidden ? tabs[tabs.length - 1] ?? null
+      : activeTask?.viewRootId && catalog.has(activeTask.viewRootId) ? activeTask.viewRootId : state.activeId
+    if (tabs.length !== state.tabs.length || tabs.some((id, index) => id !== state.tabs[index]) || activeId !== state.activeId) emit({ tabs, activeId })
     migrateDockBuckets()
     reconcilePendingOpens()
     pruneByCatalog()
@@ -421,7 +443,8 @@ export function createInteractionCenter(options: InteractionCenterOptions = {}):
   const migrateDockBuckets = (): void => {
     const moves = new Map<string, string>()
     for (const key of Object.keys(state.docks)) {
-      const routeRootId = dockRouteRootIdIn(catalog, key)
+      const resolved = resolveRootIn(catalog, key)
+      const routeRootId = catalog.get(key)?.viewRootId && !resolved.broken ? resolved.rootId : dockRouteRootIdIn(catalog, key)
       if (routeRootId) moves.set(key, routeRootId)
     }
     if (!moves.size) return

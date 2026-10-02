@@ -148,15 +148,18 @@ export function withFileLock<T>(lockPath: string, action: SynchronousAction<T>, 
     fs.writeFileSync(path.join(candidate, ownerFile), JSON.stringify({ ...identity, nonce }), { flag: 'wx', mode: 0o600 })
     const started = performance.now()
     let lastOwnerState: OwnerState = 'unknown'
-    for (;;) {
+    const checkDeadline = () => {
       if (performance.now() - started >= (options.timeoutMs ?? 1000)) {
-        throw new Error(`Timed out acquiring ${kind} lock: ${absolute} (owner ${lastOwnerState}; inspect ownership before manual cleanup)`)
+         throw new Error(`Timed out acquiring ${kind} lock: ${absolute} (owner ${lastOwnerState}; inspect ownership before manual cleanup)`)
       }
+    }
+    for (;;) {
       // Windows rename may replace a regular file with a directory. Legacy
       // file locks are a different protocol and must never be overwritten.
       try {
         const target = fs.lstatSync(absolute)
         if (!target.isDirectory() || target.isSymbolicLink()) {
+          checkDeadline()
           Atomics.wait(pause, 0, 0, 5)
           continue
         }
@@ -167,6 +170,7 @@ export function withFileLock<T>(lockPath: string, action: SynchronousAction<T>, 
         break
       } catch (error) {
         if (!['EEXIST', 'ENOTEMPTY', 'EPERM', 'EACCES', 'EISDIR', 'ENOTDIR'].includes(errorCode(error) ?? '')) throw error
+        checkDeadline()
         try {
           const names = fs.readdirSync(absolute)
           if (names.length === 0) {

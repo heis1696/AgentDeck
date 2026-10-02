@@ -186,7 +186,7 @@ section('目标模式 / 团队会议「稍后」创建：同样先见目录再�
   await mount()
   await composeLater('评审本迭代的技术方案取舍', 'meeting')
   const meetingTask = bridge.store.tasks[0]
-  ok(ui.getState().view === 'detail' && ui.getState().activeId === meetingTask.id && byQuery('.detail-page')?.textContent.includes(meetingTask.title), '团队会议「稍后」创建后进入详情')
+  ok(ui.getState().view === 'detail' && ui.getState().activeId === `meeting:${meetingTask.meetingId}` && byQuery('.meeting-detail')?.textContent.includes(meetingTask.title), '团队会议「稍后」创建后进入独立会议详情')
   await unmount()
 }
 

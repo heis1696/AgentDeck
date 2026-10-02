@@ -29,15 +29,25 @@ await new Promise((resolve) => setTimeout(resolve, 50))
 assert(lateClosed, 'late session is closed after the start race is abandoned')
 
 const abandoned = new Executor()
+let launched = false
+try {
+  await abandoned.start(async () => { launched = true; throw new Error('unexpected launch') }, new Promise(() => {}), () => false)
+} catch {}
+assert(!launched, 'a failed preflight guard never launches an unowned backend')
 const began = Date.now()
 let closeCalled = false
+let lateAccepted = true
 const closed = await Promise.race([
-  abandoned.start(async () => ({
-    send: async () => {}, stop: async () => {},
-    close: () => { closeCalled = true; return new Promise(() => {}) }
-  }), new Promise(() => {}), () => false).then(() => false, () => true),
+  abandoned.start(async () => {
+    lateAccepted = false
+    return {
+      send: async () => {}, stop: async () => {},
+      close: () => { closeCalled = true; return new Promise(() => {}) }
+    }
+  }, new Promise(() => {}), () => lateAccepted).then(() => false, () => true),
   new Promise((resolve) => setTimeout(() => resolve(false), 2600))
 ])
 assert(closed && closeCalled && Date.now() - began < 2600, 'rejected late session cannot hold the scheduler slot through a hanging close')
+assert(!abandoned.isIdle(), 'an unconfirmed late-session close stays tracked for strict termination')
 
 console.log('\nEXECUTION SERVICES SMOKE PASSED')

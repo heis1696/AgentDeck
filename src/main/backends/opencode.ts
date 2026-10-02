@@ -298,6 +298,7 @@ export function createOpencodeBackend(config: OpencodeBackendOptions = {}): Agen
           sessionLeases.set(session.sessionId, lease)
         }
         let disposition: 'attached' | 'detached' | 'closed' = 'attached'
+        let closing: Promise<void> | undefined
         const close = session.close
         const detach = session.detach
         session.detach = async () => {
@@ -308,13 +309,18 @@ export function createOpencodeBackend(config: OpencodeBackendOptions = {}): Agen
         session.close = async () => {
           if (disposition === 'closed') return
           if (disposition === 'detached' && lease?.holder !== holder) return
-          disposition = 'closed'
-          try { await close() } finally {
+          if (closing) return closing
+          const completion = (async () => {
+            await close()
+            disposition = 'closed'
             if (lease && sessionLeases.get(session.sessionId) === lease && lease.holder === holder) {
               sessionLeases.delete(session.sessionId)
               await releaseSidecar(state)
             }
-          }
+          })()
+          closing = completion
+          try { await completion }
+          finally { if (closing === completion) closing = undefined }
         }
         return session
       } catch (error) {

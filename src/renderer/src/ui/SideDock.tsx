@@ -19,12 +19,12 @@
  * file 项 payload：事件参数快照（DockEditMetadata）+ 可选 git 权威 diff（diff/additions/deletions/diffNote）。
  * items 清空 → 整体卸载，主内容自动占回全宽。
  */
-import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { FileCode2, ListTodo, X, XCircle } from 'lucide-react'
 import type { Task } from '../../../shared/types'
 import { CodeViewer } from './CodeViewer'
 import { WorkerPane } from '../components/task/WorkerPane'
-import { ui, isComposingKey, type DockHandle, type DockItem } from './interaction-center'
+import { ui, isComposingKey, type DockHandle, type DockItem, type DockEntry } from './interaction-center'
 import { useInteractionSelector } from '../hooks/useInteraction'
 
 export type { DockEditMetadata, DockFileDiff, DockItem } from './interaction-center'
@@ -45,7 +45,7 @@ export function closeDockItem(id: string): boolean {
   return ui.dock.close(id)
 }
 
-export function SideDock({ taskId, tasks, onOpen }: { taskId: string; tasks: Task[]; onOpen: (id: string) => void }) {
+export function SideDock({ taskId, tasks, onOpen, renderTask }: { taskId: string; tasks: Task[]; onOpen: (id: string) => void; renderTask?: (entry: Extract<DockEntry, { kind: 'task' }>) => ReactNode }) {
   // 分页桶按根任务隔离：子任务详情页与其领队共享同一桶，切走再回来不丢
   const rootId = ui.rootTaskId(taskId)
   const bucket = useInteractionSelector((state) => state.docks[rootId])
@@ -188,7 +188,7 @@ export function SideDock({ taskId, tasks, onOpen }: { taskId: string; tasks: Tas
       <div className="dock-panel" role="tabpanel" id={`${prefix}-panel`} aria-labelledby={`${prefix}-tab-${activeIndex < 0 ? 0 : activeIndex}`}>
         {active.kind === 'file'
           ? <CodeViewer key={active.id} {...active.payload} />
-          : <WorkerPane key={active.payload.taskId} taskId={active.payload.taskId} tasks={tasks} onOpen={onOpen} />}
+          : renderTask ? renderTask(active) : <WorkerPane key={active.payload.taskId} taskId={active.payload.taskId} tasks={tasks} onOpen={onOpen} />}
       </div>
     </div>
   </aside>

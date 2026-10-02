@@ -18,6 +18,13 @@ export type ApiPresetInfo = PresetInfo
 /** 模型目录（agents:models 返回）：zcode 有本地 catalog，其余平台 freeform */
 export const bridge: AgentDeckApi = (window as unknown as { agentdeck: AgentDeckApi }).agentdeck
 
+export const meetingPublicApi = {
+  readTurns: (id: string, query?: import('../../shared/meeting').MeetingTurnReadQuery) => bridge.meetings.readTurns(id, query),
+  getTurn: (id: string, turnId: string) => bridge.meetings.getTurn(id, turnId),
+  memberExecutions: (id: string, agentId: string) => bridge.meetings.memberExecutions(id, agentId),
+  retryMirrors: (id: string) => bridge.meetings.retryMirrors(id)
+}
+
 /** 编辑详情：单文件的 git 权威未提交 diff（工作区 + 暂存对 HEAD）；失败返回 ok:false + code，不抛。
  *  文件无改动时 ok:true 且 note:'clean'（回退事件里的 +/- 快照）。 */
 export function fileDiff(taskId: string, file: string): Promise<FileDiffResult> {

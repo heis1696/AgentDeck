@@ -8,19 +8,30 @@ import type { Turn } from '../../hooks/turnModel'
 import { classifyTool, navSummary } from '../../hooks/turnModel'
 import { isComposingKey, ui, type DockEditMetadata } from '../../ui/interaction-center'
 
-const TimelineTaskId = createContext('')
+interface TimelineOptions {
+  taskId: string
+  dockRootId?: string
+  snapshotOnly: boolean
+}
+
+const TimelineOptionsContext = createContext<TimelineOptions>({ taskId: '', snapshotOnly: false })
 /** 贴底阈值：与宿主 activeNav 判定同源，滚动只剩不到一行半就算「跟随最新」 */
 export const FOLLOW_EPSILON = 40
 
 function EditBadge({ edit, seq }: { edit: DockEditMetadata; seq: number }) {
-  const taskId = useContext(TimelineTaskId)
+  const { taskId, dockRootId, snapshotOnly } = useContext(TimelineOptionsContext)
   if (!edit || typeof edit.file !== 'string' || !edit.file) return null
   const name = edit.file.split(/[\\/]/).pop() || edit.file
   const dockId = `file:${taskId}:${seq}:${edit.file}`
-  // 二段式：先以工具入参快照立即开页（流式即可点），git 权威 diff 回来后凭打开请求标识回写——
-  // token 只认这一次打开：页签被关掉（或另开一次）后旧结果直接作废，绝不重开分页
   const open = () => {
-    const handle = ui.dock.open({ id: dockId, kind: 'file', title: name, payload: { ...edit, taskId, diffNote: '工具入参快照，正在读取 git 改动…' } })
+    const payload = {
+      ...edit,
+      taskId,
+      diffNote: snapshotOnly ? '历史执行：仅显示工具参数快照，未读取当前工作区改动' : '工具入参快照，正在读取 git 改动…'
+    }
+    const item = { id: dockId, kind: 'file' as const, title: name, payload }
+    const handle = dockRootId ? ui.dock.open(item, { rootId: dockRootId }) : ui.dock.open(item)
+    if (snapshotOnly) return
     void bridge.tasks.fileDiff(taskId, edit.file).then((r) => {
       if (!r) { ui.dock.update(handle, { payload: { diffNote: 'git diff 未返回数据，当前为工具入参快照' } }); return }
       const patch = r.ok
@@ -236,11 +247,11 @@ function LogLine({ event }: { event: TaskEvent }) {
  * - 「贴底跟随」是**宿主受控状态**（审查项 2）：following / onFollowLatest 由宿主传入，
  *   宿主在滚动与流式事件到达时更新它——本组件只是视图，不再自己算一份（否则两套判定会打架）。
  */
-export function TurnTimeline({ task, turns, activeNav, following, onFollowLatest, onNavigate, onRewind, logRef, onScroll }: { task: Task; turns: Turn[]; activeNav: number; following: boolean; onFollowLatest: () => void; onNavigate: (index: number) => void; onRewind: (index: number) => void; logRef: RefObject<HTMLDivElement>; onScroll: () => void }) {
-  const active = task.status === 'running'
+export function TurnTimeline({ task, turns, activeNav, following, onFollowLatest, onNavigate, onRewind, logRef, onScroll, dockRootId, snapshotOnly = false }: { task: Task; turns: Turn[]; activeNav: number; following: boolean; onFollowLatest: () => void; onNavigate: (index: number) => void; onRewind: (index: number) => void; logRef: RefObject<HTMLDivElement>; onScroll: () => void; dockRootId?: string; snapshotOnly?: boolean }) {
+  const active = !snapshotOnly && task.status === 'running'
 
   return (
-    <TimelineTaskId.Provider value={task.id}><div className={`chat-wrap${following ? ' is-following' : ' is-reading'}`}>
+    <TimelineOptionsContext.Provider value={{ taskId: task.id, dockRootId, snapshotOnly }}><div className={`chat-wrap${following ? ' is-following' : ' is-reading'}`}>
       <TurnMinimap turns={turns} activeNav={activeNav} onNavigate={onNavigate} />
       <div
         className="log chat"
@@ -251,7 +262,7 @@ export function TurnTimeline({ task, turns, activeNav, following, onFollowLatest
       >
         {turns.map((turn, index) => {
           const streaming = index === turns.length - 1 && active
-          const pending = index === turns.length - 1 && task.status === 'queued'
+          const pending = !snapshotOnly && index === turns.length - 1 && task.status === 'queued'
           const lastItem = turn.items[turn.items.length - 1]
           const endsWithOpenText = lastItem?.type === 'text' && !lastItem.closed
           const finalIndex = turn.items.findIndex((item) => item.type === 'final')
@@ -266,7 +277,7 @@ export function TurnTimeline({ task, turns, activeNav, following, onFollowLatest
               <span className={`turn-state${turn.done ? ' is-done' : streaming || pending ? ' is-live' : ''}`}>
                 {turn.done ? '已完成' : streaming ? '回复中' : pending ? (task.parked ? PARKED_QUEUED_LABEL : '排队中') : '—'}
               </span>
-              {index > 0 && <button className="turn-rewind-inline" type="button" title="回退到这里（删除本回合及其之后的记录）" onClick={() => onRewind(index)}><Undo2 size={12} aria-hidden="true" /> 回退</button>}
+              {!snapshotOnly && index > 0 && <button className="turn-rewind-inline" type="button" title="回退到这里（删除本回合及其之后的记录）" onClick={() => onRewind(index)}><Undo2 size={12} aria-hidden="true" /> 回退</button>}
             </div>
             {turn.userText != null && <div className="bubble user"><pre>{turn.userText}</pre><BubbleTools text={turn.userText} label="提问" /></div>}
             {turn.sysNotes.length > 0 && <div className="sys-strip">{turn.sysNotes.map((note, noteIndex) => <div key={noteIndex} className="sys-note">⚡ {note}</div>)}</div>}
@@ -285,6 +296,6 @@ export function TurnTimeline({ task, turns, activeNav, following, onFollowLatest
         <ArrowDown size={13} aria-hidden="true" /> 回到最新
         <span className="chat-latest-hint"><ChevronDown size={11} aria-hidden="true" /></span>
       </button>}
-    </div></TimelineTaskId.Provider>
+    </div></TimelineOptionsContext.Provider>
   )
 }

@@ -477,7 +477,7 @@ export class IssueStore {
     return this.data.comments.filter((comment) => comment.issueId === issueId).sort((a, b) => a.createdAt - b.createdAt)
   }
 
-  addComment(issueId: string, content: string, author: { type: 'agent' | 'user'; id: string } = { type: 'user', id: 'user' }): Comment | null {
+  addComment(issueId: string, content: string, author: { type: 'agent' | 'user'; id: string } = { type: 'user', id: 'user' }, source?: { meetingId?: string; sourceTurnId?: string }): Comment | null {
     if (!content.trim()) return null
     return withStorageTransaction(this.userDataDir, () => {
       const current = this.readDataLocked()
@@ -489,9 +489,11 @@ export class IssueStore {
         this.data = current
         return null
       }
+      const duplicate = source?.meetingId && source.sourceTurnId ? current.comments.find((comment) => comment.issueId === issue.id && comment.meetingId === source.meetingId && comment.sourceTurnId === source.sourceTurnId) : undefined
+      if (duplicate) { this.data = current; return duplicate }
       const next = clonePersisted(current)
       const nextIssue = this.findIssue(next, issue.id)!
-      const comment: Comment = { id: this.id('com'), issueId: nextIssue.id, author, content: content.trim(), reactions: [], createdAt: Date.now() }
+      const comment: Comment = { id: this.id('com'), issueId: nextIssue.id, author, content: content.trim(), reactions: [], createdAt: Date.now(), ...(source?.meetingId ? { meetingId: source.meetingId, sourceTurnId: source.sourceTurnId } : {}) }
       next.comments.push(comment)
       nextIssue.updatedAt = comment.createdAt
       atomicWriteJson(this.file, next)
@@ -539,6 +541,16 @@ export class IssueStore {
     if (patch.priority) issue.priority = priorityForIssue(patch.priority)
     if (patch.labels) issue.labels = [...new Set(patch.labels.map((label) => label.trim()).filter(Boolean))].slice(0, 20)
     if (patch.dueDate !== undefined) issue.dueDate = patch.dueDate > 0 ? patch.dueDate : undefined
+  }
+
+  deleteMeetingComments(meetingId: string): void {
+    withStorageTransaction(this.userDataDir, () => {
+      const current = this.readDataLocked()
+      const next = clonePersisted(current)
+      next.comments = next.comments.filter((comment) => comment.meetingId !== meetingId)
+      atomicWriteJson(this.file, next)
+      this.data = next
+    })
   }
 }
 

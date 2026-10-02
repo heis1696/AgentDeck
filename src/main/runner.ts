@@ -308,6 +308,18 @@ class SessionTurnRouter {
   }
 }
 
+interface TerminationTarget {
+  task: Task
+  session?: BackendSession
+  workdir: string
+  launch?: { stop: () => void | Promise<unknown> }
+  launchCleanup?: Promise<void>
+  launchStopped: boolean
+  sessionClosed: boolean
+  activeRun?: Promise<unknown>
+  activeTurn?: Promise<unknown>
+}
+
 export class TaskRunner {
   private store: TaskStore
   private backends: Map<string, AgentBackend>
@@ -317,6 +329,7 @@ export class TaskRunner {
     maxRetryAttempts?: number; retryBackoffMs?: number; maxHandoffChain?: number
     delegateMaxRounds?: number; delegateMaxTotalRounds?: number; delegateMaxDepth?: number
     doomLoopThreshold?: number
+    terminationTimeoutMs?: number
   }
   private sessions = new Map<string, BackendSession>()
   /** 会话绑定的工作目录（安装该会话时 backend.start 用的 cwd）。续链换基线后
@@ -331,6 +344,7 @@ export class TaskRunner {
   private sessionTurns = new WeakMap<BackendSession, SessionTurnRouter>()
   /** Turn sequence for stamp ids (monotonic across sessions of one runner). */
   private turnSeq = 0
+  private readonly turnStartObservers = new Map<string, (identity: { taskId: string; runId: string; turnId: string }) => void>()
   /** 启动即注册的中止句柄（一次性 CLI 在 session 返回前就要能取消） */
   private launchHandles = new Map<string, { stop: () => void | Promise<unknown> }>()
   /** Delayed provider retries must be cancellable and must not outlive shutdown. */
@@ -359,6 +373,12 @@ export class TaskRunner {
   private spawnCreatesInFlight = new Map<string, Promise<Task | null>>()
   private shuttingDown = false
   private cancellationDrains = new Map<string, number>()
+  private meetingGuard: ((task: Task) => boolean) | null = null
+  private terminating = new Map<string, Promise<{ ok: boolean; error?: string; warning?: string }>>()
+  private activeRuns = new Map<string, Promise<unknown>>()
+  private activeTurns = new Map<string, Promise<unknown>>()
+  private terminationTargets = new Map<string, TerminationTarget>()
+  private retiredProviderSessions = new Map<string, { taskId: string; session: BackendSession; closing?: Promise<void>; closed: boolean }>()
   private readonly onTaskChanged?: (task: Task) => void
   /** 流式派单嗅探：领队会话期间逐条 text 事件累计扫描，闭合一个 <delegate> 即提前建单入队。
    *  回灌仍只在回合末（委派循环）发生，不会打断领队正在进行的主运行。 */
@@ -418,9 +438,11 @@ export class TaskRunner {
     }, () => this.opts().permissionTimeoutMs ?? 5 * 60 * 1000, (taskId) => this.workVersion(taskId))
     this.finalizer = new TaskFinalizer(store, (taskId) => this.pushTask(taskId))
     this.scheduler = new Scheduler(
-      () => this.store.list(),
+      () => this.store.list().filter((task) => this.meetingGuardAllows(task)),
       () => ({ concurrency: this.opts().concurrency, workerConcurrency: this.opts().workerConcurrency }),
-      (taskId) => this.run(taskId)
+      (taskId) => this.trackMap(this.activeRuns, taskId, this.run(taskId).catch((error) => {
+        console.error('[Scheduler] Task launch failed', error)
+      }))
     )
   }
 
@@ -513,6 +535,7 @@ export class TaskRunner {
     let terminalStarted = false
     let persistenceProblem = ''
     const turnOpenedAt = Date.now()
+    const meetingExecution = this.store.get(taskId)?.meetingId ? { runId: claim.runId, turnId: stamp.id } : undefined
     const stagePending = (events: readonly RunnerEvent[]) => {
       for (const event of events) {
         if (!hasStableEventIdentity(event)) event.eventId = `${STAGED_BATCH_ID_PREFIX}${stamp.id}:${++eventSequence}`
@@ -596,7 +619,7 @@ export class TaskRunner {
         // Legacy zcode, dsh ACP, and OpenCode CLI fallback text events are
         // durable by contract. Explicit provider live markers stay live, but
         // ordinary text is merged without changing its persistence semantics.
-        let e = { ...incoming }
+        let e = { ...incoming, ...(meetingExecution ? { execution: meetingExecution } : {}) }
         if (!active(e.kind)) {
           // 标题回合的普通事件被静默，但线级进展照样给看门狗续命
           if (life.gate.state.titleMode && life.accepts(token)) this.touchWatchdog(taskId)
@@ -698,7 +721,8 @@ export class TaskRunner {
       onLaunch: (handle) => {
         const record = router.current()
         if (!record || !this.isCurrentRun(record.claim) || !this.lifecycle(record.taskId).accepts(record.token)) {
-          void Promise.resolve(handle.stop()).catch(() => {})
+          const claim = record?.claim ?? router.lastClaim
+          this.executor.registerCleanup(claim ? `${claim.taskId}:${claim.runId}` : undefined, () => this.checkedCleanup(() => handle.stop()))
           return
         }
         this.launchHandles.set(record.taskId, handle)
@@ -726,6 +750,8 @@ export class TaskRunner {
     const record: TurnRecord = { taskId, seq, stamp, generation, claim, token, events }
     router.lastClaim = claim
     router.openTurn(record)
+    const observer = this.turnStartObservers.get(claim.runId)
+    observer?.({ taskId, runId: claim.runId, turnId: stamp.id })
     return record
   }
 
@@ -849,6 +875,7 @@ export class TaskRunner {
       budgetMs,
       expire: () => {
         if (this.turnWatchdogs.get(taskId) !== record) return
+        clearTimeout(record.timer)
         this.turnWatchdogs.delete(taskId)
         // Invalidate callbacks from the abandoned turn before stopping it. A
         // late terminal event must never settle a later retry or follow-up.
@@ -919,9 +946,17 @@ export class TaskRunner {
    * owns. It was never installed in memory, so it is stopped directly instead
    * of going through the task-keyed session map.
    */
-  private async closeLateSession(session: BackendSession) {
-    await this.awaitCleanup(() => session.stop())
-    await this.awaitCleanup(() => session.close())
+  private async closeLateSession(session: BackendSession, claim?: RunClaim | null) {
+    let closed = false
+    const cleanup = this.executor.registerCleanup(claim ? `${claim.taskId}:${claim.runId}` : undefined, async () => {
+      if (closed) return
+      let stopError: unknown
+      try { await this.checkedCleanup(() => session.stop()) } catch (error) { stopError = error }
+      await this.checkedCleanup(() => session.close())
+      closed = true
+      if (stopError) throw stopError
+    })
+    await this.awaitCleanup(() => cleanup)
   }
 
   /** 关闭并移除内存会话（容错）：防止放弃的会话继续在后台跑、往任务日志里交错写事件 */
@@ -932,18 +967,23 @@ export class TaskRunner {
     if (expected && (!claim || claim.runId !== expected.runId || !sameExecutionOwner(claim.owner, expected.executionOwner))) return
     await this.closeEventBatches(taskId)
     if (this.sessions.get(taskId) !== s) return
+    const latestClaim = this.claims.get(taskId) ?? (s && this.sessionTurns.get(s)?.lastClaim)
+    if (expected && (!latestClaim || latestClaim.runId !== expected.runId || !sameExecutionOwner(latestClaim.owner, expected.executionOwner))) return
     this.clearRetry(taskId)
     this.bumpTurnGen(taskId)
     this.earlySpawns.delete(taskId)
     this.delegateRejections.delete(taskId)
     this.lastTerminalResponses.delete(taskId)
     if (!s) return
+    if (preserveProviderSession && s.detach && this.store.get(taskId)?.meetingId) {
+      this.retiredProviderSessions.set(`${taskId}:${s.sessionId ?? claim?.runId}`, { taskId, session: s, closed: false })
+    }
     this.sessions.delete(taskId)
     this.sessionWorkdirs.delete(taskId)
     this.retireSession(s)
     await this.awaitCleanup(() => this.trackSessionRelease(s, workdir, async () => {
       await this.awaitCleanup(() => s.stop())
-      await (preserveProviderSession && s.detach ? s.detach() : s.close())
+      await this.checkedCleanup(() => preserveProviderSession && s.detach ? s.detach() : s.close())
     }), 4_000)
   }
 
@@ -1063,6 +1103,7 @@ export class TaskRunner {
   }
 
   enqueue(task: Task) {
+    if (!this.enforceMeetingGuard(task)) return
     this.pushTask(task.id)
     this.scheduler.enqueue()
   }
@@ -1093,6 +1134,33 @@ export class TaskRunner {
 
   attachInvestigate(handler: InvestigateHandler) {
     this.onInvestigate = handler
+  }
+
+  attachMeetingGuard(guard: (task: Task) => boolean) {
+    this.meetingGuard = guard
+  }
+
+  private meetingGuardAllows(task: Task): boolean {
+    const guard = this.meetingGuard
+    return !guard || guard(task)
+  }
+
+  private enforceMeetingGuard(task: Task): boolean {
+    if (this.meetingGuardAllows(task)) return true
+    const current = this.store.get(task.id)
+    if (current?.meetingTaskRole === 'container') {
+      if (current.status === 'queued' && !current.parked
+        && this.store.updateIf(current.id, { status: 'queued' }, { parked: true })) this.pushTask(current.id)
+      return false
+    }
+    if (current?.meetingId && current.status === 'queued'
+      && this.store.updateIf(current.id, { status: 'queued', runId: current.runId, executionOwner: current.executionOwner }, { status: 'cancelled', endedAt: Date.now() })) {
+      this.clearRetry(current.id)
+      this.claims.delete(current.id)
+      this.lifecycle(current.id).dispose()
+      this.pushTask(current.id)
+    }
+    return false
   }
 
   private taskCreator: TaskCreator | null = null
@@ -1393,6 +1461,7 @@ export class TaskRunner {
   private async spawnDelegateChildExclusive(taskId: string, call: DelegateCall, expectedRunId: string | undefined): Promise<Task | null> {
     const task = this.store.get(taskId)
     if (!task) return null
+    if (!this.enforceMeetingGuard(task)) return null
     const claim = this.claimForRun(taskId, expectedRunId)
     // Only a committed claim may drive a running parent. A parent that is not
     // running yet (queued/parked) has no Run to invalidate, so the observed
@@ -1661,6 +1730,7 @@ export class TaskRunner {
         // Standalone runner smoke harnesses predate TaskService. Production
         // always attaches the creator above, so this preserves that legacy API.
         ...childInput,
+        ...(task.meetingId ? { meetingId: task.meetingId, meetingTaskRole: 'investigation' as const, suppressIssue: true } : {}),
         titleAuto: true
       })
     if (worktree) {
@@ -1765,6 +1835,7 @@ export class TaskRunner {
   async spawnInvestigateChild(taskId: string, call: InvestigateCall): Promise<Task | null> {
     const task = this.store.get(taskId)
     if (!task || task.parentTaskId) return null
+    if (!this.enforceMeetingGuard(task)) return null
     // Investigation runs on behalf of one claimed Run; round accounting must not
     // be charged to a run that replaced it (or that this runner never owned).
     const claim = this.claimForRun(taskId)
@@ -1796,7 +1867,10 @@ export class TaskRunner {
     }
     const child = this.taskCreator
       ? (typeof this.taskCreator === 'function' ? this.taskCreator(childInput) : this.taskCreator.createChildTask(childInput))
-      : this.store.create(childInput)
+      : this.store.create({
+        ...childInput,
+        ...(task.meetingId ? { meetingId: task.meetingId, meetingTaskRole: 'investigation' as const } : {})
+      })
     this.note(taskId, `⚡ 已接单（调查）：${target.name} ← ${call.prompt.slice(0, 60).replace(/\n/g, ' ')}`, expected)
     this.enqueue(this.store.get(child.id)!)
     return child
@@ -2200,17 +2274,18 @@ export class TaskRunner {
           events: channel
         }),
         sentinel.timeout,
-        () => this.isCurrentRun(claim) && life.accepts(turn.token)
+        () => this.isCurrentRun(claim) && life.accepts(turn.token) && this.meetingGuardAllows(task),
+        `${taskId}:${claim.runId}`
       )
       let bound: Task | undefined
       try {
         bound = this.store.updateIf(taskId, runCondition(claim), session.sessionId ? { sessionId: session.sessionId } : {})
       } catch (error) {
-        await this.closeLateSession(session)
+        await this.closeLateSession(session, claim)
         throw error
       }
       if (!bound) {
-        await this.closeLateSession(session)
+        await this.closeLateSession(session, claim)
         return { ok: false, response: '', error: 'Task execution is no longer active' }
       }
       life.gate.setSessionOwner(session.sessionId)
@@ -2352,6 +2427,7 @@ export class TaskRunner {
   private async run(taskId: string) {
     const task = this.store.get(taskId)
     if (!task || task.status !== 'queued') return
+    if (!this.enforceMeetingGuard(task)) return
     this.toolWindows.delete(taskId)
     const backend = this.backends.get(task.backend)
     if (!backend) {
@@ -2447,7 +2523,8 @@ export class TaskRunner {
         // after an external replacement (another instance, explicit cancel)
         // must be rejected, not installed under the newer Run.
         () => this.isCurrentRun(claim)
-          && this.lifecycle(taskId).accepts(firstTurn.token)
+          && this.lifecycle(taskId).accepts(firstTurn.token) && this.meetingGuardAllows(task),
+        `${taskId}:${claim.runId}`
       )
       // The durable session binding is the commit point. Only a session whose
       // conditional write succeeded may be installed in memory: a start whose
@@ -2457,11 +2534,11 @@ export class TaskRunner {
       try {
         bound = this.store.updateIf(taskId, runCondition(claim), session.sessionId ? { sessionId: session.sessionId } : {})
       } catch (error) {
-        await this.closeLateSession(session)
+        await this.closeLateSession(session, claim)
         throw error
       }
       if (!bound) {
-        await this.closeLateSession(session)
+        await this.closeLateSession(session, claim)
         if (!this.isCurrentRun(claim)) return
         throw new Error('会话绑定失败：执行归属已变化')
       }
@@ -2533,6 +2610,7 @@ export class TaskRunner {
   private maybeAutoRetry(taskId: string, claim?: RunClaim) {
     const task = this.store.get(taskId)
     if (!task || task.status !== 'failed') return
+    if (!this.meetingGuardAllows(task)) return
     const failure = task.failure
     const maxAttempts = this.opts().maxRetryAttempts ?? 2
     const decision = decideRetry(task, failure, maxAttempts, this.opts().retryBackoffMs)
@@ -2547,6 +2625,8 @@ export class TaskRunner {
       : { status: 'failed', runId: task.runId, executionOwner: task.executionOwner }
     const schedule = () => {
       this.retryTimers.delete(taskId)
+      const current = this.store.get(taskId)
+      if (!current || !this.meetingGuardAllows(current)) return
       const requeued = this.store.updateIf(taskId, failedRun, {
         status: 'queued',
         endedAt: undefined,
@@ -2598,11 +2678,12 @@ export class TaskRunner {
 
   /** 续聊：在已完成任务的会话上追加消息，任务回到 running。
    *  opts.relay 仅由「⇥ 接力下一阶段」按钮传入（显式人工入口）；自由追问不再按关键词猜测接力意图。 */
-  async followUp(taskId: string, content: string, opts?: { relay?: boolean; collectFinal?: boolean; consultDepth?: number; wait?: boolean; meetingTurn?: boolean }): Promise<{ ok: boolean; error?: string; finalText?: string }> {
+  async followUp(taskId: string, content: string, opts?: { relay?: boolean; collectFinal?: boolean; consultDepth?: number; wait?: boolean; meetingTurn?: boolean; onExecution?: (identity: { taskId: string; runId: string; turnId: string }) => void }): Promise<{ ok: boolean; error?: string; finalText?: string }> {
     const task = this.store.get(taskId)
     if (!task) return { ok: false, error: '任务不存在' }
     const message = content.trim()
     if (!message) return { ok: false, error: '追问不能为空' }
+    if (!this.enforceMeetingGuard(task)) return { ok: false, error: '会议已停止或删除，会话不再恢复' }
     if (task.status === 'running') return { ok: false, error: '任务正在运行（长时间无输出时可先「停止」再「重新运行」）' }
     // cancelled 也放行：目标模式停止/用户取消后的任务仍可追问续聊，别把 Issue 卡死在"任务尚未完成"
     if (task.status !== 'done' && task.status !== 'failed' && task.status !== 'cancelled') return { ok: false, error: '任务尚未完成' }
@@ -2687,6 +2768,7 @@ export class TaskRunner {
     try { claim = await beginRun() }
     catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) } }
     if (!claim) return { ok: false, error: '任务已开始新的执行，本次追问未生效' }
+    if (opts?.onExecution) this.turnStartObservers.set(claim.runId, opts.onExecution)
     const acknowledgeRecovery = () => {
       if (!recoveryNotice || !this.isCurrentRun(claim)) return
       for (const child of pendingChildren.slice(0, recoveryLines.length)) {
@@ -2705,6 +2787,7 @@ export class TaskRunner {
     // 锁整轮，否则「停止」会禁用到回合结束。默认（goal/meeting/sidecar 等自动化
     // 调用方）仍等整轮结束以拿 finalText。
     const runTurn = async (): Promise<{ ok: boolean; error?: string; finalText?: string }> => {
+      if (!this.isCurrentRun(claim) || !this.meetingGuardAllows(task)) return { ok: false, error: '会议执行已终止' }
       // 1) 内存会话健在：直接续聊
       let liveSession = this.sessions.get(taskId)
       // M2 会话绑定工作目录：内存会话跑在安装时的 cwd 上。集成后续链换基线
@@ -2726,6 +2809,7 @@ export class TaskRunner {
       }
       if (liveSession) {
         try {
+          if (!this.isCurrentRun(claim) || !this.meetingGuardAllows(task)) return { ok: false, error: '会议执行已终止' }
           const r = await this.sendTurn(taskId, liveSession, turnContent, claim)
           if (!this.isCurrentRun(claim)) return { ok: false, error: '回合已失效' }
           if (!r.ok) throw new Error(r.error || '续聊回合失败')
@@ -2799,7 +2883,8 @@ export class TaskRunner {
           // Same captured-claim accept as the first run: a resume that resolves
           // after a replacement is closed instead of installed.
           () => this.isCurrentRun(claim)
-            && this.lifecycle(taskId).accepts(turnRecord.token)
+            && this.lifecycle(taskId).accepts(turnRecord.token) && this.meetingGuardAllows(task),
+          `${taskId}:${claim.runId}`
         )
         // Bind the resumed session to this Run before installing anything in
         // memory; a failed binding closes the exact session and writes no map.
@@ -2807,11 +2892,11 @@ export class TaskRunner {
         try {
           bound = this.store.updateIf(taskId, runCondition(claim), resumeSession.sessionId ? { sessionId: resumeSession.sessionId } : {})
         } catch (error) {
-          await this.closeLateSession(resumeSession)
+          await this.closeLateSession(resumeSession, claim)
           throw error
         }
         if (!bound) {
-          await this.closeLateSession(resumeSession)
+          await this.closeLateSession(resumeSession, claim)
           if (!this.isCurrentRun(claim)) return { ok: false, error: '回合已失效' }
           throw new Error('会话绑定失败：执行归属已变化')
         }
@@ -2848,16 +2933,17 @@ export class TaskRunner {
       }
     }
 
+    const executeTurn = () => runTurn().finally(() => this.turnStartObservers.delete(claim.runId))
     if (opts?.wait === false) {
       // 后台回合自身失败已走 failTask→pushTask 广播显错；这里只兜意外抛出，防静默挂 running
-      void runTurn().catch((e) => {
+      void this.trackMap(this.activeTurns, taskId, executeTurn()).catch((e) => {
         const msg = e instanceof Error ? e.message : String(e)
         this.failTask(taskId, msg, claim)
         this.pushTask(taskId)
       })
       return { ok: true }
     }
-    return runTurn()
+    return this.trackMap(this.activeTurns, taskId, executeTurn())
   }
 
   /** 用户打断回执文案：note 存在 = 用户主动打断（reason 非空带原因，空 = 未填写）；
@@ -2953,9 +3039,223 @@ export class TaskRunner {
     }
   }
 
+  private trackMap<T>(map: Map<string, Promise<unknown>>, taskId: string, promise: Promise<T>): Promise<T> {
+    map.set(taskId, promise)
+    void promise.catch(() => {}).then(() => {
+      if (map.get(taskId) === promise) map.delete(taskId)
+    })
+    return promise
+  }
+
+  private strictCleanup(action: () => Promise<unknown> | unknown, label: string, problems: string[], timeoutMs = 4_000): Promise<void> {
+    return new Promise((resolve) => {
+      let settled = false
+      const timer = setTimeout(() => {
+        if (settled) return
+        settled = true
+        problems.push(`${label}: 超时（${Math.round(timeoutMs / 1000)}s）`)
+        resolve()
+      }, timeoutMs)
+      Promise.resolve().then(action).then((value) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        if (value === false || value && typeof value === 'object' && (value as { ok?: unknown }).ok === false) {
+          problems.push(`${label}: ${String((value as { error?: unknown }).error ?? '操作未成功')}`)
+        }
+        resolve()
+      }, (error) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        problems.push(`${label}: ${error instanceof Error ? error.message : String(error)}`)
+        resolve()
+      })
+    })
+  }
+
+  private async awaitExit(promise: Promise<unknown> | undefined, label: string, problems: string[], timeoutMs: number): Promise<void> {
+    if (!promise) return
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => { problems.push(`${label}: 超时`); resolve() }, timeoutMs)
+      void promise.then(() => { clearTimeout(timer); resolve() }, (error) => {
+        clearTimeout(timer)
+        problems.push(`${label}: ${String(error)}`)
+        resolve()
+      })
+    })
+  }
+
+  private async checkedCleanup(action: () => Promise<unknown> | unknown): Promise<void> {
+    const value = await action()
+    if (value === false || value && typeof value === 'object' && (value as { ok?: unknown }).ok === false) {
+      throw new Error(value && typeof value === 'object' ? String((value as { error?: unknown }).error ?? '退出未确认') : '退出未确认')
+    }
+  }
+
+  private retireExecutionState(taskId: string) {
+    this.turnWatchdogs.get(taskId)?.expire()
+    this.bumpTurnGen(taskId)
+    this.clearRetry(taskId)
+    this.claims.delete(taskId)
+    this.launchHandles.delete(taskId)
+    const session = this.sessions.get(taskId)
+    if (session) this.retireSession(session)
+    this.permissionBroker.cancelTask(taskId)
+    this.toolWindows.delete(taskId)
+    this.earlySpawns.delete(taskId)
+    this.delegateRejections.delete(taskId)
+    this.lastTerminalResponses.delete(taskId)
+    this.lifecycle(taskId).dispose()
+  }
+
+  private async terminateSession(taskId: string, target: TerminationTarget, problems: string[]): Promise<void> {
+    if (target.sessionClosed) return
+    const session = target.session ?? this.sessions.get(taskId)
+    if (!session) return
+    const claim = this.sessionTurns.get(session)?.lastClaim
+    if (claim && (claim.runId !== target.task.runId || !sameExecutionOwner(claim.owner, target.task.executionOwner))) {
+      problems.push('会话已属于替换执行，未关闭')
+      return
+    }
+    target.session = session
+    if (this.sessions.get(taskId) === session) {
+      this.sessions.delete(taskId)
+      this.sessionWorkdirs.delete(taskId)
+    }
+    this.retireSession(session)
+    await this.strictCleanup(() => this.trackSessionRelease(session, target.workdir, async () => {
+      let stopError: unknown
+      const stopProblems: string[] = []
+      await this.strictCleanup(() => this.checkedCleanup(() => session.stop()), '会话中止', stopProblems, this.opts().terminationTimeoutMs ?? 4_000)
+      if (stopProblems.length) stopError = new Error(stopProblems.join('；'))
+      await this.checkedCleanup(() => session.close())
+      target.sessionClosed = true
+      if (stopError) throw stopError
+    }), '会话关闭', problems, this.opts().terminationTimeoutMs ?? 8_000)
+  }
+
+  async terminateTask(taskId: string): Promise<{ ok: boolean; error?: string; warning?: string }> {
+    const pending = this.terminating.get(taskId)
+    if (pending) return pending
+    const task = this.store.get(taskId)
+    if (!task) return { ok: false, error: '任务不存在' }
+    const execution = this.terminateTaskExclusive(taskId)
+    this.terminating.set(taskId, execution)
+    void execution.finally(() => {
+      if (this.terminating.get(taskId) === execution) this.terminating.delete(taskId)
+    }).catch(() => {})
+    return execution
+  }
+
+  private async terminateTaskExclusive(taskId: string): Promise<{ ok: boolean; error?: string; warning?: string }> {
+    const current = this.store.get(taskId)
+    if (!current) return { ok: false, error: '任务不存在' }
+    let target = this.terminationTargets.get(taskId)
+    if (target && !this.store.matches(taskId, { runId: target.task.runId, executionOwner: target.task.executionOwner })) {
+      return { ok: false, error: '任务已被替换执行接手，旧终止请求未触碰替换执行' }
+    }
+    const claim = current.status === 'running' ? this.claims.get(taskId) : undefined
+    if (current.status === 'running' && (!claim || !this.isCurrentRun(claim))) {
+      return { ok: false, error: '执行归属不在当前运行器，终止未生效' }
+    }
+    const registered = this.claims.get(taskId)
+    const knownRelease = [...this.worktreeSessionReleases.keys()].some((session) => {
+      const owner = this.sessionTurns.get(session)?.lastClaim
+      return owner?.taskId === taskId && owner.runId === current.runId && sameExecutionOwner(owner.owner, current.executionOwner)
+    })
+    if (!target && current.meetingId && current.runId && current.terminatedRunId !== current.runId
+      && !(registered?.runId === current.runId && sameExecutionOwner(registered.owner, current.executionOwner))
+      && !this.sessions.has(taskId) && !this.activeRuns.has(taskId) && !this.activeTurns.has(taskId) && !knownRelease) {
+      return { ok: false, error: '历史会议执行退出未确认，已保留任务与日志' }
+    }
+    if (!target) {
+      target = {
+        task: { ...current }, session: this.sessions.get(taskId),
+        workdir: this.sessionWorkdirs.get(taskId) ?? current.workdir,
+        launch: this.launchHandles.get(taskId), launchStopped: false, sessionClosed: false,
+        activeRun: this.activeRuns.get(taskId), activeTurn: this.activeTurns.get(taskId)
+      }
+      this.terminationTargets.set(taskId, target)
+    }
+    const task = target.task
+    const problems: string[] = []
+    const warnings: string[] = []
+    if (current.status === 'running' && claim) {
+      this.cancellationDrains.set(taskId, (this.cancellationDrains.get(taskId) ?? 0) + 1)
+      try {
+        if (!await this.closeEventBatches(taskId)) warnings.push('部分事件日志写入失败，已保存的恢复副本将在重启时回放')
+        if (!this.store.updateIf(taskId, runCondition(claim), { status: 'cancelled', endedAt: Date.now() })) {
+          const latest = this.store.get(taskId)
+          if (!latest || latest.status === 'running' || !this.store.matches(taskId, { runId: task.runId, executionOwner: task.executionOwner })) {
+            return { ok: false, error: '任务已被替换执行接手，终止未生效；替换执行未受影响' }
+          }
+        }
+      } finally {
+        const remaining = (this.cancellationDrains.get(taskId) ?? 1) - 1
+        if (remaining) this.cancellationDrains.set(taskId, remaining)
+        else this.cancellationDrains.delete(taskId)
+      }
+    } else if (current.status === 'queued' || (current.status === 'failed' && this.retryTimers.has(taskId))) {
+      const observed: TaskExpectation = { status: current.status, runId: task.runId, executionOwner: task.executionOwner }
+      if (!this.store.updateIf(taskId, observed, { status: 'cancelled', endedAt: Date.now() })) {
+        return { ok: false, error: '任务状态已变化，终止未生效' }
+      }
+    }
+    target.session ??= this.sessions.get(taskId)
+    target.launch ??= this.launchHandles.get(taskId)
+    this.retireExecutionState(taskId)
+    this.pushTask(taskId)
+    if (target.launch && !target.launchStopped) {
+      const captured = target
+      captured.launchCleanup ??= this.checkedCleanup(() => captured.launch!.stop()).then(() => {
+        captured.launchStopped = true
+      }, (error) => { captured.launchCleanup = undefined; throw error })
+      await this.strictCleanup(() => captured.launchCleanup, '初始化中止', problems, this.opts().terminationTimeoutMs ?? 4_000)
+    }
+    await this.terminateSession(taskId, target, problems)
+    for (const child of this.store.list().filter((item) => item.parentTaskId === taskId)) {
+      if (task.meetingId && child.meetingId !== task.meetingId) {
+        problems.push(`${child.id}: 后代会议归属不一致，已保留`)
+        continue
+      }
+      const result = await this.terminateTask(child.id)
+      if (!result.ok) problems.push(`${child.title || child.id}: ${result.error ?? '终止未确认'}`)
+    }
+    for (const tracked of [target.activeRun, target.activeTurn]) {
+      await this.awaitExit(tracked, '执行退出确认', problems, this.opts().terminationTimeoutMs ?? 15_000)
+    }
+    for (const [session, entry] of this.worktreeSessionReleases) {
+      if (this.sessionTurns.get(session)?.lastClaim?.taskId !== taskId) continue
+      if (session === target.session && target.sessionClosed) { this.worktreeSessionReleases.delete(session); continue }
+      await this.strictCleanup(() => entry.failed ? this.trackSessionRelease(session, entry.workdir, entry.release) : entry.promise,
+        '已移除会话退出确认', problems, this.opts().terminationTimeoutMs ?? 8_000)
+    }
+    for (const [key, entry] of this.retiredProviderSessions) {
+      if (entry.taskId !== taskId) continue
+      entry.closing ??= this.checkedCleanup(() => entry.session.close()).then(() => { entry.closed = true }, (error) => {
+        entry.closing = undefined
+        throw error
+      })
+      await this.strictCleanup(() => entry.closing, '已断开平台会话关闭', problems, this.opts().terminationTimeoutMs ?? 8_000)
+      if (entry.closed && this.retiredProviderSessions.get(key) === entry) this.retiredProviderSessions.delete(key)
+    }
+    await this.strictCleanup(() => this.executor.drain(`${taskId}:${task.runId}`), '晚到会话回收', problems, this.opts().terminationTimeoutMs ?? 5_000)
+    if (problems.length) return { ok: false, error: problems.join('；') }
+    if (!this.store.updateIf(taskId, { runId: task.runId, executionOwner: task.executionOwner }, { terminatedRunId: task.runId })) {
+      return { ok: false, error: '退出确认时任务已被替换，未清除诊断记录' }
+    }
+    if (target.session && target.sessionClosed) this.worktreeSessionReleases.delete(target.session)
+    if (this.terminationTargets.get(taskId) === target) this.terminationTargets.delete(taskId)
+    if (warnings.length) return { ok: true, warning: warnings.join('；') }
+    return { ok: true }
+  }
+
   /** 空闲判定（热更 L1 apply 门控，设计 §7.4）：无在跑会话、无启动竞态句柄、store 无 running 任务。 */
   isIdle(): boolean {
     return this.launchHandles.size === 0 && this.eventBatchers.size === 0
+      && this.terminationTargets.size === 0 && this.executor.isIdle()
+      && this.retiredProviderSessions.size === 0
       && this.store.list().every((task) => task.status !== 'running')
   }
 
@@ -2994,6 +3294,8 @@ export class TaskRunner {
       return this.awaitCleanup(() => promise, 4_000)
     }))
     this.sessions.clear()
+    this.activeRuns.clear()
+    this.activeTurns.clear()
     // 会话清空必须连带清目录绑定：sessionWorkdirs 的键值只在随会话安装/关闭时增删，
     // 留着旧 taskId→workdir 就是悬空脏数据，下个生命周期读到的是上个生命周期的 cwd
     this.sessionWorkdirs.clear()

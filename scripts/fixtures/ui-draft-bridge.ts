@@ -72,6 +72,7 @@ const store = {
 }
 
 const calls = { list: 0, get: 0, start: 0, agentSave: 0, presetSave: 0 }
+const meetingRows: Meeting[] = []
 let listDelayMs = 0
 const listScript: Array<{ snapshot?: Task[]; delayMs?: number; error?: string }> = []
 
@@ -155,6 +156,7 @@ const bridgeMock: DraftBridge = {
     for (const listener of listeners.taskDeleted) listener(id)
   },
   reset() {
+    meetingRows.length = 0
     store.tasks = []
     store.issues = []
     seq = 0
@@ -258,12 +260,25 @@ const api = {
     onDeleted: never
   },
   meetings: {
-    list: (): Promise<Meeting[]> => settle([]),
-    get: () => settle(null),
-    create: (input: { issueId: string; topic: string }) => settle({
-      id: nextId('meet'), issueId: input.issueId, topic: input.topic, status: 'draft',
-      participants: [], rounds: [], createdAt: Date.now()
-    } as unknown as Meeting),
+    list: (): Promise<Meeting[]> => settle(meetingRows.map((meeting) => ({ ...meeting }))),
+    get: (id: string) => settle(meetingRows.find((meeting) => meeting.id === id) ?? null),
+    create: (input: { issueId: string; topic: string; participants: Meeting['participants'] }) => {
+      const task = store.tasks.find((item) => item.issueId === input.issueId)
+      const meeting: Meeting = {
+        id: nextId('meet'), issueId: input.issueId, topic: input.topic, status: 'draft',
+        ownsIssue: true, containerTaskId: task?.id, participants: input.participants,
+        minutes: [], pendingChairNotes: [], round: 0, maxDurationMs: 600000,
+        noProgress: 0, noProgressCap: 3, failures: 0,
+        maxRounds: 3, maxInnerTurns: 10, createdAt: Date.now(), updatedAt: Date.now(), turnVersion: 0
+      }
+      if (task) { task.meetingId = meeting.id; task.meetingTaskRole = 'container' }
+      meetingRows.push(meeting)
+      return settle(meeting)
+    },
+    readTurns: (id: string) => settle({ meetingId: id, turns: [], latestVersion: 0, hasMore: false }),
+    getTurn: () => settle(null),
+    memberExecutions: () => settle(null),
+    retryMirrors: () => settle({ ok: true }),
     start: () => settle({ ok: true }),
     pause: () => settle({ ok: true }),
     resume: () => settle({ ok: true }),

@@ -1,5 +1,6 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
+import { atomicWriteJson } from './persistence'
 import path from 'node:path'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createServer } from 'node:net'
@@ -95,10 +96,7 @@ function readJson(file: string): PersistedState | null {
 }
 
 function writeJson(file: string, value: unknown) {
-  fs.mkdirSync(path.dirname(file), { recursive: true })
-  const tmp = `${file}.tmp-${process.pid}`
-  fs.writeFileSync(tmp, JSON.stringify(value, null, 2), 'utf8')
-  fs.renameSync(tmp, file)
+  atomicWriteJson(file, value)
   try { fs.chmodSync(file, 0o600) } catch {}
 }
 
@@ -140,6 +138,7 @@ export class SidecarManager {
   private readonly diagnosticFile: string
   private child: ChildProcess | null = null
   private ownsSidecar = false
+  private cleanupPending = false
   private state: SidecarState | null = null
   private orphanRuns: string[] = []
   private readonly diagnostics: SidecarDiagnostic[] = []
@@ -328,14 +327,43 @@ export class SidecarManager {
   }
 
   async start(): Promise<SidecarSnapshot> {
-    if (this.state && this.status === 'ready') return this.snapshot!
     if (this.startPromise) return this.startPromise
+    if (this.state && this.status === 'ready') return this.snapshot!
     this.startPromise = this.startInternal().finally(() => { this.startPromise = null })
     return this.startPromise
   }
 
   private async startInternal(): Promise<SidecarSnapshot> {
+    if (this.cleanupPending) await this.stop()
     this.setStatus('starting')
+    const retainedChild = this.child
+    const retainedState = this.state
+    if (retainedChild) {
+      try {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          if (retainedChild.exitCode !== null || retainedChild.signalCode !== null) break
+          if (!retainedState) throw new SidecarProtocolError('Live sidecar handle has no connection state', 503)
+          const ready = await this.probe(retainedState.port, retainedState.token)
+          if (ready) {
+            if (ready.instanceId !== retainedState.instanceId || (retainedChild.pid && ready.pid !== retainedChild.pid)) {
+              this.state = retainedState
+              throw new SidecarProtocolError('Owned sidecar identity mismatch', 409)
+            }
+            writeJson(this.stateFile, this.persistedState())
+            return ready
+          }
+          if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 50))
+        }
+        if (retainedChild.exitCode === null && retainedChild.signalCode === null) {
+          throw new SidecarProtocolError('Sidecar is unreachable but exit was not confirmed; process handle retained', 503)
+        }
+        if (this.child === retainedChild) this.child = null
+        this.ownsSidecar = false
+      } catch (error) {
+        this.setStatus('degraded')
+        throw error
+      }
+    }
     const persisted = this.loadPersisted()
     if (persisted) {
       try {
@@ -363,11 +391,12 @@ export class SidecarManager {
     this.child = child
     this.ownsSidecar = true
     let bootFailure: string | null = null
+    let initializing = true
     this.attachDiagnostics(child, token, (evidence) => { bootFailure = evidence })
     child.once('exit', () => {
       if (this.child === child) {
         this.child = null
-        if (this.status !== 'stopping') {
+        if (!initializing && this.status !== 'stopping') {
           this.setStatus('reconnecting')
           // A sidecar crash must not require an Electron restart. Reconnect in
           // the background; queued renderer calls are flushed in order once
@@ -377,25 +406,30 @@ export class SidecarManager {
       }
     })
     this.state = { protocolVersion: SIDECAR_PROTOCOL_VERSION, port, token, instanceId, startedAt: Date.now(), status: 'starting', ...(child.pid ? { pid: child.pid } : {}) }
-    writeJson(this.stateFile, this.persistedState())
     let lastError = ''
-    for (let attempt = 0; attempt < 50; attempt++) {
+    let persistenceFailed = false
+    try { writeJson(this.stateFile, this.persistedState()) }
+    catch (error) { persistenceFailed = true; lastError = error instanceof Error ? error.message : String(error) }
+    for (let attempt = 0; !persistenceFailed && attempt < 50; attempt++) {
       if (bootFailure) break
       try {
         const ready = await this.probe(port, token)
         if (ready) {
           writeJson(this.stateFile, this.persistedState())
+          initializing = false
           return ready
         }
       } catch (error) { lastError = error instanceof Error ? error.message : String(error) }
       await new Promise((resolve) => setTimeout(resolve, 50 + Math.min(250, attempt * 10)))
-    }    this.setStatus('degraded')
-    const failedChild = this.child
-    this.child = null
-    this.ownsSidecar = false
-    if (failedChild && failedChild.exitCode === null) {
-      try { failedChild.kill() } catch {}
     }
+    this.setStatus('stopping')
+    const exited = await this.terminateChild(child)
+    this.cleanupPending = !exited
+    if (exited) {
+      if (this.child === child) this.child = null
+      this.ownsSidecar = false
+    }
+    this.setStatus('degraded')
     // probe 内部吞错返回 null（ECONNREFUSED 等）不进 lastError——末条错误从 lastProbeError 补
     const detail = [bootFailure, lastError || this.lastProbeError].filter(Boolean).join('; ')
     // 末条错误补记（漏记末条错误的收口）：启动终败的原因此前只进抛出异常——挂死
@@ -532,6 +566,22 @@ export class SidecarManager {
 
   async claimOrphans() { return this.recoverOrphans() }
 
+  private async terminateChild(child: ChildProcess): Promise<boolean> {
+    if (child.exitCode !== null || child.signalCode !== null) return true
+    return new Promise<boolean>((resolve) => {
+      const finish = (exited: boolean) => {
+        clearTimeout(timer)
+        child.removeListener('exit', onExit)
+        resolve(exited)
+      }
+      const onExit = () => finish(true)
+      const timer = setTimeout(() => finish(false), 1000)
+      child.once('exit', onExit)
+      try { child.kill() } catch {}
+      if (child.exitCode !== null || child.signalCode !== null) finish(true)
+    })
+  }
+
   async stop() {
     if (!this.state) return
     const previous = this.state
@@ -540,12 +590,14 @@ export class SidecarManager {
       try { await this.request('/shutdown', { method: 'POST', body: '{}' , headers: { 'content-type': 'application/json' } }) } catch {}
     }
     const child = this.child
-    if (child && child.exitCode === null) {
-      try { child.kill() } catch {}
-      await new Promise<void>((resolve) => { const timer = setTimeout(resolve, 500); child.once('exit', () => { clearTimeout(timer); resolve() }) })
+    if (child && !await this.terminateChild(child)) {
+      this.cleanupPending = true
+      this.setStatus('degraded')
+      throw new SidecarProtocolError('Sidecar exit was not confirmed; process handle retained', 503)
     }
     this.child = null
     this.ownsSidecar = false
+    this.cleanupPending = false
     this.state = null
     this.orphanRuns = []
     this.rejectRpcQueue(new SidecarProtocolError('Sidecar stopped', 503))

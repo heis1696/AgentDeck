@@ -1,0 +1,294 @@
+/* ============================================================
+   会议详情页（MeetingDetail / MeetingMemberPane 专属文件）
+   职责：会议主 Issue 页头之下的状态横幅、成员栏、实名公开时间线、
+   最新纪要、插话输入区，以及右侧成员执行分栏（SideDock 面板内）
+   的视觉层级。视觉基线 = docs/preview/team-meeting-v0.html（已确认）。
+   约定：颜色/圆角/间距/字体一律引用 tokens.css 令牌；选择器全部
+   收在 .meeting-detail 作用域内，不与 MeetingPanel 浮窗（detail.css
+   的 meeting-* 类）共享类名，互不覆盖。
+   ============================================================ */
+
+/* ---------- 1. 状态横幅：整场会议的真实状态（stopState 优先于普通终态） ---------- */
+.meeting-detail .mtd-banner {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  margin: 0 28px;
+  padding: 10px 14px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-caption);
+}
+.meeting-detail .mtd-banner strong { color: var(--text); white-space: nowrap; font-weight: 500; }
+.meeting-detail .mtd-banner span { color: var(--text-dim); min-width: 0; overflow-wrap: anywhere; }
+.meeting-detail .mtd-banner[data-state='running'] { border-color: var(--status-running); }
+.meeting-detail .mtd-banner[data-state='queued'] { border-color: var(--status-queued); }
+.meeting-detail .mtd-banner[data-state='failed'] { border-color: var(--status-failed); }
+.meeting-detail .mtd-banner[data-state='cancelled'] { border-color: var(--status-cancelled); }
+.meeting-detail .mtd-banner[data-state='done'] { border-color: var(--status-done); }
+
+/* ---------- 2. 成员栏：实名 + 角色 + 平台；点击固定/打开右侧 ---------- */
+.meeting-detail .mtd-members {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  padding: 14px 28px;
+  border-bottom: 1px solid var(--border);
+}
+.meeting-detail .mtd-member {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 7px 10px;
+  min-height: 32px;
+  text-align: left;
+}
+.meeting-detail .mtd-member[aria-pressed='true'] { border-color: var(--accent); background: var(--accent-soft); }
+.meeting-detail .mtd-avatar {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border-radius: var(--radius-sm);
+  background: var(--bg-selected);
+  color: var(--text);
+  font-size: var(--text-caption);
+  font-weight: 600;
+}
+.meeting-detail .mtd-turn .mtd-avatar { margin-top: 2px; }
+.meeting-detail .mtd-member-label { display: flex; flex-direction: column; line-height: 1.4; min-width: 0; }
+.meeting-detail .mtd-member-label strong { font-size: var(--text-caption); font-weight: 500; }
+.meeting-detail .mtd-member-label span {
+  color: var(--text-dim);
+  font-size: 10px;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.meeting-detail .mtd-member-state { font-size: 10px; color: var(--text-dim); margin-left: var(--space-1); }
+.meeting-detail .mtd-member-state.is-current { color: var(--accent); }
+
+/* ---------- 3. 时间线：实名气泡（准备/执行/完成/失败/取消） ---------- */
+.meeting-detail .mtd-timeline-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 12px 28px;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--text-caption);
+  color: var(--text-dim);
+}
+.meeting-detail .mtd-timeline-head strong { color: var(--text); font-weight: 500; }
+.meeting-detail .mtd-reopen { margin-left: auto; font-size: var(--text-micro); }
+.meeting-detail .mtd-timeline {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 20px 28px;
+  scrollbar-width: thin;
+}
+.meeting-detail .mtd-turns[aria-busy='true'] { opacity: 0.6; }
+.meeting-detail .mtd-turn { display: flex; gap: var(--space-3); margin-bottom: 20px; }
+.meeting-detail .mtd-turn-main { flex: 1; min-width: 0; }
+.meeting-detail .mtd-speaker {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-bottom: 7px;
+  font-size: var(--text-micro);
+  color: var(--text-dim);
+}
+.meeting-detail .mtd-speaker strong { color: var(--text); font-weight: 600; font-size: var(--text-label); }
+.meeting-detail .mtd-speaker time { margin-left: auto; font-size: 10px; }
+.meeting-detail .mtd-bubble {
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  box-shadow: var(--bubble-inset);
+}
+.meeting-detail .mtd-turn.is-selected .mtd-bubble { border-color: var(--accent); }
+.meeting-detail .mtd-turn[data-status='speaking'] .mtd-bubble { border-color: var(--status-running); }
+.meeting-detail .mtd-turn[data-status='pending'] .mtd-bubble { border-color: var(--status-queued); }
+.meeting-detail .mtd-turn[data-status='failed'] .mtd-bubble { border-left: 3px solid var(--status-failed); }
+.meeting-detail .mtd-turn[data-status='cancelled'] .mtd-bubble,
+.meeting-detail .mtd-turn[data-status='skipped'] .mtd-bubble { opacity: 0.75; }
+.meeting-detail .mtd-body { line-height: 1.65; min-width: 0; overflow-wrap: anywhere; }
+.meeting-detail .mtd-body[data-body='missing'] { color: var(--text-dim); font-size: var(--text-caption); }
+.meeting-detail .mtd-turn-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  font-size: 10px;
+  color: var(--text-dim);
+  flex-wrap: wrap;
+}
+.meeting-detail .mtd-chip {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: var(--radius-xs);
+  font-size: 10px;
+  background: var(--bg-hover);
+  color: var(--text-dim);
+}
+.meeting-detail .mtd-chip[data-state='speaking'] { color: var(--status-running); background: var(--status-running-bg); }
+.meeting-detail .mtd-chip[data-state='pending'] { color: var(--status-queued); background: var(--status-queued-bg); }
+.meeting-detail .mtd-chip[data-state='done'] { color: var(--status-done); background: var(--status-done-bg); }
+.meeting-detail .mtd-chip[data-state='failed'] { color: var(--status-failed); background: var(--status-failed-bg); }
+.meeting-detail .mtd-chip[data-state='cancelled'],
+.meeting-detail .mtd-chip[data-state='skipped'] { color: var(--status-cancelled); background: var(--status-cancelled-bg); }
+.meeting-detail .mtd-exec-link {
+  padding: 0;
+  min-height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font-size: var(--text-micro);
+  cursor: pointer;
+}
+.meeting-detail .mtd-exec-link:hover { text-decoration: underline; }
+/* 失败原因等状态正文：不能用正文样式冒充正式发言 */
+.meeting-detail .mtd-body[data-body='state'] { color: var(--text-dim); }
+
+/* 读取状态/空态：明确缺失，不用兼容评论顶替 */
+.meeting-detail .mtd-note {
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-caption);
+  color: var(--text-dim);
+}
+.meeting-detail .mtd-note[data-tone='error'] { border-color: var(--status-failed); color: var(--text); }
+.meeting-detail .mtd-note[data-tone='error'] .btn { margin-top: var(--space-2); }
+
+/* ---------- 4. 最新纪要：实际版本 + 真实同版本票数 ---------- */
+.meeting-detail .mtd-minutes {
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  border-radius: var(--radius-md);
+  padding: 14px;
+  margin-left: 40px;
+}
+.meeting-detail .mtd-minutes-head { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+.meeting-detail .mtd-minutes-head strong { font-weight: 500; }
+.meeting-detail .mtd-minutes p { margin: var(--space-2) 0 0; color: var(--text-dim); font-size: var(--text-caption); }
+.meeting-detail .mtd-minutes code { font-size: var(--text-micro); overflow-wrap: anywhere; }
+.meeting-detail .mtd-action-item {
+  border-top: 1px solid var(--border-subtle);
+  margin-top: var(--space-2);
+  padding-top: var(--space-2);
+  display: flex;
+  gap: var(--space-2);
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  font-size: var(--text-caption);
+}
+.meeting-detail .mtd-action-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.meeting-detail .mtd-action-copy strong { font-weight: 500; overflow-wrap: anywhere; }
+.meeting-detail .mtd-action-copy span { color: var(--text-dim); }
+
+/* ---------- 5. 插话输入区（底部）：草稿保护 + 送达状态 ---------- */
+.meeting-detail .mtd-composer { padding: 14px 28px 16px; border-top: 1px solid var(--border); }
+.meeting-detail .mtd-composer-box {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+  padding: var(--space-3);
+}
+.meeting-detail .mtd-composer label { display: block; color: var(--text-dim); font-size: var(--text-micro); margin-bottom: 6px; }
+.meeting-detail .mtd-composer textarea {
+  width: 100%;
+  min-height: 48px;
+  resize: vertical;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  outline: none;
+  font: inherit;
+}
+.meeting-detail .mtd-composer textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.meeting-detail .mtd-composer-foot {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text-dim);
+  font-size: var(--text-micro);
+  flex-wrap: wrap;
+}
+.meeting-detail .mtd-composer-foot .btn { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.meeting-detail .mtd-delivery { min-height: 18px; margin-top: var(--space-2); color: var(--text-dim); font-size: var(--text-micro); }
+.meeting-detail .mtd-delivery[data-tone='error'] { color: var(--status-failed); }
+.meeting-detail .mtd-delivery[data-tone='live'] { color: var(--accent); }
+
+/* ---------- 6. 右侧成员执行分栏（SideDock renderTask 面板内） ---------- */
+.meeting-detail .mtd-pane { display: flex; flex-direction: column; gap: 14px; min-width: 0; height: 100%; overflow: auto; padding: 14px; scrollbar-width: thin; }
+.meeting-detail .mtd-pane-person { display: flex; align-items: center; gap: 10px; }
+.meeting-detail .mtd-pane-person div { min-width: 0; }
+.meeting-detail .mtd-pane-person strong { display: block; font-weight: 600; overflow-wrap: anywhere; }
+.meeting-detail .mtd-pane-person span { color: var(--text-dim); font-size: var(--text-micro); }
+.meeting-detail .mtd-pane-mode {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  color: var(--text-dim);
+  font-size: var(--text-micro);
+}
+.meeting-detail .mtd-pane-mode label { display: flex; gap: 6px; align-items: center; margin-left: auto; cursor: pointer; }
+.meeting-detail .mtd-pane-mode input[type='checkbox'] { accent-color: var(--accent); }
+.meeting-detail .mtd-pane-label { color: var(--text-dim); font-size: var(--text-micro); }
+.meeting-detail .mtd-exec-select { width: 100%; font-size: var(--text-micro); margin-top: 6px; }
+.meeting-detail .mtd-exec-detail { margin: 12px 0; display: grid; grid-template-columns: 46px 1fr; gap: 6px var(--space-2); }
+.meeting-detail .mtd-exec-detail dt { color: var(--text-dim); font-size: var(--text-micro); }
+.meeting-detail .mtd-exec-detail dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.meeting-detail .mtd-audit {
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+  padding: 10px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-micro);
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+.meeting-detail .mtd-audit strong { color: var(--text); font-weight: 500; }
+.meeting-detail .mtd-pane-section { border-top: 1px solid var(--border); padding-top: 14px; }
+.meeting-detail .mtd-pane-section h2 { font-size: var(--text-caption); font-weight: 500; margin: 0 0 10px; }
+.meeting-detail .mtd-investigation {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  text-align: left;
+  font-size: var(--text-caption);
+  margin-bottom: var(--space-2);
+}
+.meeting-detail .mtd-investigation code { font-size: var(--text-micro); overflow-wrap: anywhere; }
+.meeting-detail .mtd-investigation span { color: var(--text-dim); font-size: 10px; margin-left: auto; flex-shrink: 0; }
+.meeting-detail .mtd-pane-foot { border-top: 1px solid var(--border); padding-top: 10px; color: var(--text-dim); font-size: var(--text-micro); }
+
+/* ---------- 7. 窄详情列：优先保留正文可读性 ---------- */
+@container detail-left (max-width: 640px) {
+  .meeting-detail .mtd-banner { margin: 0 20px; }
+  .meeting-detail .mtd-members { padding: 12px 20px; }
+  .meeting-detail .mtd-timeline-head { padding: 12px 20px; }
+  .meeting-detail .mtd-timeline { padding: 16px 20px; }
+  .meeting-detail .mtd-composer { padding: 12px 20px 14px; }
+  .meeting-detail .mtd-minutes { margin-left: 0; }
+}

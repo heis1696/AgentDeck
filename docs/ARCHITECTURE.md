@@ -387,3 +387,36 @@ delegate 标记 → 目标解析（限 subordinates，名字/平台 id 忽略大
 真实 e2e：`npm run e2e:delegate`（GLM 领队自发派 Claude/OpenCode + 集成分支）。
 
 打包：`npm run dist`（NSIS）；开发：`npm run dev`；类型：`npm run typecheck`。
+
+## 9. 会议执行隔离与删除屏障（阶段 1 源码增补）
+
+实施方案见 `docs/plan/team-meeting-issue-v2.md`。以下只描述阶段 1 的执行层，不把未发布源码或尚未实现的会议页面当成现行安装版。
+
+- **可信归属**：`Task.meetingId` 与 `meetingTaskRole` 独立于委派父子关系，随任务索引落盘。成员会话按 `(meetingId, agentId)` 在 `AgentSessionRegistry` 中隔离，工作目录来自会议容器；普通咨询办公室和不同会议不共享执行会话。
+- **公开投影**：`src/shared/task-visibility.ts` 统一过滤看板、Issue 列表与命令面板。容器可见，办公室、成员和调查内部单保留在执行目录供侧栏和调度查询，但不会投影成额外公开卡片；普通委派子单保持可见。
+- **控制器边界**：会议容器只镜像状态，不运行普通 assignment。停止先持久化状态和执行代数、撤销调度，再调用 `TaskRunner.terminateTask`；晚到发言不得发布评论或启动下一位成员。普通任务 IPC 与 scheduler 共用会议 guard，避免停止后的续聊、排队和自动重试复活执行。
+- **严格退出证明**：终止目标固定到捕获的 Run、执行 owner、启动句柄与会话。等待后代、在飞执行和按 Run 范围登记的晚到会话回收；失败或超时保持可重试句柄，不把清空内存映射当成已退出。`terminatedRunId` 只在确认退出后落盘，重启发现没有退出证明的历史会议执行时保留记录并报错。
+- **平台关闭**：OpenCode 单会话 abort/delete 的拒绝结果必须传播；关闭失败不能提前消费本地 server 租约，重试并发合并。共享服务和独立咨询不能被某场会议的停止操作误杀。
+- **数据清理**：删除意图先落盘，停止成功后才清理；回收工作树校验捕获的任务执行与 owner/generation，事务删除再次核验。仅清除带可信会议来源的评论；共享历史不强删，部分删除在重启后继续完成，Issue tombstone 防止晚到投影复活。
+
+新测试 `smoke:meeting-lifecycle` 与 `smoke:meeting-termination` 已加入 `smoke:all`，分别验证归属/停止/删除恢复与平台退出屏障。既有委派、worktree、咨询和普通 runner 回归仍需同时通过。
+
+### 9.1 独立会议阅读模型（阶段 3 源码）
+
+`MeetingDetail` 组合共享 PageHeader、Markdown、SideDock 和只读 WorkerPane；它不复制 TaskDetail，也不读取兼容评论拼装正式讨论。`useMeetingTurns` 用全量固定水位分页初始化，之后仅按版本追增量；`MeetingTurnsController` 原子提交分页结果，以稳定发言 ID 合并旧序号的状态/正文更新。
+
+公开界面目录通过 `meetingViewState` 汇入稳定 `meeting:<id>` 根，连通创建、搜索、Issue 最近/已打开、看板、页签及容器 focus；容器删除的历史仍可按权威会议与 Issue 显示。目录中的显示用 Task/别名只用于导航，不落库、不执行、不改普通委派父子关系。会议列表读取失败时仍维护普通任务拓扑、隐藏新旧内部 focus，并保留未解析会议入口供宿主重试；独立咨询办公室不吸入会议。
+
+`meetingSelection` 按会议保存成员、旧发言与固定/跟随模式；手动选择退出跟随，正式发言才能驱动跟随，广播不会打开用户关闭的侧栏。执行区必须使用权威 Task/Run/Turn；Run-only 调查只在精确匹配任务快照时展示其状态，未知历史状态不由单个回合的最终消息推断。宿主为会议回调事件捕获并写入 execution 身份戳，提供方不能改写这一关联；日志和工具预览在所选范围内只读，不读取当前工作树 diff。
+
+本节描述未发布的工作区源码；迁移、性能、安装版和发布核验仍属于阶段 4，不表示生产版本已经更新。
+
+
+## 12. 会议旧数据迁移、长历史及隔离发布（阶段 4）
+
+- 索引继续使用 schema 1，旧发言的 sequence/version/publicVersion 保持缺省读取为 0；会议级缺失水位物化为 0，部分升级数据则从权威发言取最大水位。不改变旧办公室、调查、容器或 Issue 的归属，不因缺容器创建普通执行或默认恢复旧 active 会议。
+- 第一次迁移写入前原字节备份到 meetings/index.pre-migration.json，经独立临时文件和同目录原子链接发布；不覆盖既有备份，并校验备份可读。备份或迁移失败保留旧数据可读、禁止全部索引/正文/删除写入，修复故障后 reload 重入。未知 schema 不用陈旧 .bak 自愈覆盖，失败 reload 同样阻止后续写入。
+- 备份是会议索引的升级前证据，不是全应用回退快照。schema 1 可解析不等于旧执行/退出屏障兼容；实际升级前须停机并备份完整 userData（会议正文、任务/Run、Issue、事件、设置及热更指针）。回退需单独验证目标版本和该快照，不只翻旧 hot 指针，也不直接用旧索引覆盖已推进的正文。
+- 公共包装配只完整序列化两次，中间精确核算 JSON 转义后的正文与审计增量；完整正文不被压缩结果改写。列表/广播保留轻量索引，正文继续分页加载。1000 条历史即使正文略去，其元数据也可能超过默认 32000 字符预算；明确报超限并保留来源审计，不扩大生产配额或无声丢掉来源。
+- EventLog 锁争用的同步 owner 探测可能跨过 250ms 期限；返回后先重试一次已释放锁，仍争用才按原期限拒绝。不扩大期限，不把 live/unknown 当成 dead。sidecar 使用既有原子 JSON 写入；启动持久化失败等待子进程退出，未确认保留句柄并阻止再次启动。普通重连握手失败也不能替换仍存活的自有子进程：只重探原端口/token，保留句柄和所有权；身份不匹配或未确认退出则降级拒绝，不调用会拒绝全部 RPC 排队的公共 stop。普通崩溃重连队列保持有效。
+- smoke:meeting-release 将三入口构建复制到临时快照，隔离生成 NSIS、提取其实际应用载荷而不运行安装程序；用临时 Ed25519 密钥、本地 feed 验证 asar/manifest/zip 哈希、真实 preload IPC、会议页面和 payload/renderer 重启。启动前检查 executable、userData、workspaceDir、sharedDir、HOME/USERPROFILE、APPDATA/LOCALAPPDATA、TEMP/TMP 均在独立临时根内，并拒绝重解析路径逃逸。测试守护器用 STARTUPINFOEX / PROC_THREAD_ATTRIBUTE_JOB_LIST 在 CreateProcess 时原子加入专属 Windows Job，仍 suspended 创建，经 IsProcessInJob 核验后才 resume；接口不支持或证明缺失即闭锁，不回退到先创建再绑定。禁用 breakaway，壳演练的 feed 与应用根进程同样原子加入该 Job。清理只终止所持 Job 句柄，不通过裸 PID 或 ParentProcessId 推导终止对象；核验原生活动数和成员表都为空、根进程退出及守护器成功退出，任一失败均留证并阻止下一次启动。所有者管道断开时终止 Job，守护器关闭句柄也触发 kill-on-close；夹具覆盖创建成功但核验/状态发布前守护器崩溃与管道断开，确认未执行的挂起根身份消失；CIM 路径扫描只作附加诊断，不作为后代退出证明。此容器只服务于无模型、无外部服务代启动的隔离发布夹具，不替代真实会议的持久退出证明，也不宣称通用 OS 沙箱。守护器仅测试使用，主进程不新增运行时依赖；源码通过不代表现用安装版修复。

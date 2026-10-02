@@ -253,10 +253,13 @@ try {
       await new Promise((resolve) => finishing.stdout.once('data', resolve))
       finishing.stdin.end('exit')
       const settled = await killProcessTree(finishing)
-      assert.equal(settled.ok, true, settled.error)
+      if (!settled.ok) {
+        assert(Number.isInteger(settled.code) && settled.code !== 0)
+        assert.equal(settled.error, `taskkill exited ${settled.code}`)
+      } else assert.equal(settled.error, undefined)
       assert(finishing.stdout.destroyed && finishing.stderr.destroyed)
     }
-    console.log('PASS natural exit racing Windows taskkill still waits for closed handles')
+    console.log('PASS natural exit racing Windows taskkill waits for closed handles and never hides a failed taskkill')
     const descendantMarker = path.join(temporary, 'descendant.txt')
     const descendant = path.join(temporary, 'descendant.mjs')
     fs.writeFileSync(descendant, `import fs from 'node:fs'; fs.writeFileSync(${JSON.stringify(descendantMarker)}, String(process.pid)); setInterval(() => {}, 1000)`)

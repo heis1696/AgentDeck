@@ -1,0 +1,444 @@
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { build } from 'esbuild'
+import { pathToFileURL } from 'node:url'
+import { EventEmitter } from 'node:events'
+import childProcess from 'node:child_process'
+
+const root = path.resolve(import.meta.dirname, '..')
+const bundleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-term-bundles-'))
+const bundle = async (source, name) => {
+  const outfile = path.join(bundleDir, name)
+  await build({ entryPoints: [path.join(root, source)], outfile, bundle: true, platform: 'node', format: 'cjs', target: 'node18', external: ['electron'] })
+  return import(pathToFileURL(outfile).href)
+}
+const [{ TaskRunner }, { TaskStore }, { TaskService }, { MeetingController }, { MeetingStore }, { AgentSessionRegistry }, { Executor }, { killProcessTree }] = await Promise.all([
+  bundle('src/main/runner.ts', 'runner.cjs'),
+  bundle('src/main/store.ts', 'store.cjs'),
+  bundle('src/main/task-service.ts', 'task-service.cjs'),
+  bundle('src/main/meeting-controller.ts', 'meeting-controller.cjs'),
+  bundle('src/main/meeting-store.ts', 'meeting-store.cjs'),
+  bundle('src/main/agent-sessions.ts', 'agent-sessions.cjs'),
+  bundle('src/main/executor.ts', 'executor.cjs'),
+  bundle('src/main/backends/cli-common.ts', 'cli-common.cjs')
+])
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+const check = (condition, label) => {
+  console.log(`  ${condition ? 'OK' : 'FAIL'} ${label}`)
+  if (!condition) process.exitCode = 1
+}
+const waitFor = async (predicate, label, timeoutMs = 4_000) => {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (predicate()) return
+    if (Date.now() > deadline) throw new Error(`waitFor timeout: ${label}`)
+    await sleep(5)
+  }
+}
+const defer = () => {
+  let resolve
+  const promise = new Promise((r) => { resolve = r })
+  return { promise, resolve }
+}
+const observeTimerCancellation = async (observed, action) => {
+  const original = globalThis.clearTimeout
+  let cleared = false
+  globalThis.clearTimeout = (timer) => {
+    if (observed && timer === observed) cleared = true
+    original(timer)
+  }
+  try { return { result: await action(), cleared } }
+  finally { globalThis.clearTimeout = original }
+}
+
+function makeBackend(cfg, log) {
+  let seq = 0
+  const stopMemos = new Map()
+  const closeMemos = new Map()
+  const respond = (agent, content) => {
+    const agree = (grounds = 'verified') => `<stance verdict="agree" grounds="${grounds}"/>`
+    if (agent === 'gamma') return `${content && content.includes('综合轮') ? '{"decisions":["ship"],"objections":[],"actionItems":[],"openQuestions":[]}' : '{"decisions":["hold"],"objections":[],"actionItems":[],"openQuestions":[]}'}\n${agree('accepted')}`
+    return agree()
+  }
+  return {
+    id: 'fake-term',
+    label: 'Fake term',
+    supportsResume: true,
+    async probe() { return { ok: true, detail: 'fake' } },
+    async start({ prompt, events, turn }) {
+      const id = `s${++seq}`
+      const agent = prompt.includes('Beta') ? 'beta' : prompt.includes('Gamma') ? 'gamma' : prompt.includes('Alpha') ? 'alpha' : 'worker'
+      log.launches.push({ id, agent })
+      events.onLaunch?.({ stop: async () => { log.launchStops.push(id) } })
+      if (cfg.holdStart) await cfg.startGate.promise
+      const emitTurn = async (content, stamp) => {
+        const gate = cfg.turnGates?.[agent]
+        if (gate) await gate.promise
+        if (cfg.failFirst && seq === 1) {
+          events.onTurnEnd({ ok: false, response: '', error: 'HTTP 429 too many requests' }, stamp)
+          return
+        }
+        const text = content === undefined ? `${agent} first turn done` : respond(agent, content)
+        events.onEvent({ ts: Date.now(), kind: 'final', text }, stamp)
+        events.onTurnEnd({ ok: true, response: text }, stamp)
+      }
+      setTimeout(() => { void emitTurn(undefined, turn).catch(() => {}) }, 5)
+      const session = {
+        sessionId: id,
+        turnScoped: true,
+        async send(content, stamp) {
+          await emitTurn(content, stamp)
+        },
+        stop() {
+          if (!stopMemos.has(id)) {
+            stopMemos.set(id, (async () => { log.stops.push(id); if (cfg.stopDelay) await sleep(cfg.stopDelay); if (cfg.stopGate) await cfg.stopGate.promise })())
+          }
+          return stopMemos.get(id)
+        },
+        close() {
+          if (!closeMemos.has(id)) {
+            closeMemos.set(id, (async () => { log.closes.push(id); if (cfg.closeGate) await cfg.closeGate.promise; if (cfg.closeFails) throw new Error('close rejected') })())
+          }
+          return closeMemos.get(id)
+        }
+      }
+      return session
+    }
+  }
+}
+
+function makeHarness(backendCfg = {}, runnerOpts = {}) {
+  const data = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-term-data-'))
+  const store = new TaskStore(data)
+  const service = new TaskService({ store })
+  const log = { launches: [], launchStops: [], stops: [], closes: [] }
+  const cfg = { holdStart: false, startGate: null, stopGate: null, stopDelay: 0, closeGate: null, closeFails: false, failFirst: false, turnGates: {}, ...backendCfg }
+  const backend = makeBackend(cfg, log)
+  const runner = new TaskRunner(store, new Map([[backend.id, backend]]), () => ({
+    concurrency: 4, workerConcurrency: 4, mode: 'yolo', notify: false,
+    maxRetryAttempts: 2, retryBackoffMs: 400, ...runnerOpts
+  }))
+  const createTask = (patch = {}) => service.createTask({ title: patch.title ?? 'task', prompt: patch.prompt ?? 'do things', backend: backend.id, ...patch })
+  return { data, store, service, runner, log, cfg, backend, createTask, backendId: backend.id }
+}
+
+console.log('--- terminal task idle-session barrier ---')
+{
+  const h = makeHarness({ closeGate: defer() })
+  const task = h.createTask()
+  h.runner.enqueue(h.store.get(task.id))
+  await waitFor(() => h.store.get(task.id)?.status === 'done', 'task done')
+  const resultText = h.store.get(task.id).result
+  let settled = false
+  const closing = h.runner.terminateTask(task.id).then((r) => { settled = true; return r })
+  await sleep(40)
+  check(!settled, 'termination waits for the idle session close before resolving')
+  h.cfg.closeGate.resolve()
+  const result = await closing
+  check(result.ok === true, 'terminal task termination reports success')
+  check(h.log.closes.length === 1, 'idle session closed exactly once')
+  check(h.runner.sessionCount() === 0, 'no session remains after termination')
+  check(h.store.get(task.id).status === 'done' && h.store.get(task.id).result === resultText, 'completed result is untouched by the sweep')
+  const again = await h.runner.terminateTask(task.id)
+  check(again.ok === true && h.log.closes.length === 1, 'repeated termination neither re-closes nor fails')
+  await h.runner.shutdown()
+}
+
+console.log('--- running task strict stop/close barrier ---')
+{
+  const h = makeHarness({ stopGate: defer(), closeGate: defer() })
+  h.cfg.turnGates.worker = defer()
+  const task = h.createTask()
+  h.runner.enqueue(h.store.get(task.id))
+  await waitFor(() => h.runner.sessionCount() === 1, 'session installed')
+  const [first, second] = [h.runner.terminateTask(task.id), h.runner.terminateTask(task.id)]
+  let settled = false
+  const watching = Promise.all([first, second]).then((rs) => { settled = true; return rs })
+  await sleep(40)
+  check(!settled, 'termination waits for provider stop and close to finish')
+  check(h.store.get(task.id).status === 'cancelled', 'running task is cancelled while termination is in flight')
+  h.cfg.stopGate.resolve()
+  await sleep(20)
+  check(!settled, 'termination still waits for session close after stop settles')
+  h.cfg.closeGate.resolve()
+  const results = await watching
+  check(results.every((r) => r.ok === true), 'concurrent duplicate terminations both confirm exit')
+  check(h.log.stops.length === 1 && h.log.closes.length === 1, 'stop and close each run exactly once across duplicate calls')
+  check(h.runner.sessionCount() === 0, 'session map is empty after termination')
+  await h.runner.shutdown()
+}
+
+console.log('--- start race: initializing launch and late session ---')
+{
+  const h = makeHarness({ holdStart: true })
+  h.cfg.startGate = defer()
+  const task = h.createTask()
+  h.runner.enqueue(h.store.get(task.id))
+  await waitFor(() => h.log.launches.length === 1, 'backend start entered')
+  await sleep(10)
+  const stopping = observeTimerCancellation(h.runner.turnWatchdogs.get(task.id)?.timer, () => h.runner.terminateTask(task.id))
+  await sleep(30)
+  check(h.log.launchStops.length >= 1, 'initializing launch handle is stopped')
+  check(h.store.get(task.id).status === 'cancelled', 'task cancelled while its start is still initializing')
+  h.cfg.startGate.resolve()
+  const { result, cleared } = await stopping
+  check(cleared, 'forced watchdog expiry clears its timer before retiring the record')
+  check(result.ok === true, 'termination absorbs the late backend start')
+  check(h.log.closes.length === 1, 'late session is closed instead of being installed')
+  check(h.runner.sessionCount() === 0, 'late session never enters the session map')
+  check(h.store.get(task.id).status === 'cancelled', 'late start cannot revive the cancelled task')
+  await h.runner.shutdown()
+}
+
+console.log('--- failed task pending retry barrier ---')
+{
+  const h = makeHarness({ failFirst: true })
+  const task = h.createTask()
+  h.runner.enqueue(h.store.get(task.id))
+  await waitFor(() => h.store.get(task.id)?.status === 'failed', 'task failed')
+  check(h.store.get(task.id)?.failure?.retryable === true, 'failure is retryable and a retry is pending')
+  const result = await h.runner.terminateTask(task.id)
+  check(result.ok === true, 'failed task with pending retry terminates')
+  check(h.store.get(task.id).status === 'cancelled', 'failed task flips to cancelled')
+  await sleep(600)
+  check(h.store.get(task.id).status === 'cancelled', 'retry backoff never fires after termination')
+  check(h.log.launches.length === 1, 'no retry session was started')
+  await h.runner.shutdown()
+}
+
+console.log('--- descendants: queued, retry-pending and running children ---')
+{
+  const h = makeHarness({ failFirst: true })
+  const parent = h.createTask({ title: 'parent', parked: true })
+  const childA = h.createTask({ title: 'childA', parentTaskId: parent.id, parked: true })
+  const childB = h.createTask({ title: 'childB', parentTaskId: parent.id })
+  h.runner.enqueue(h.store.get(childB.id))
+  await waitFor(() => h.store.get(childB.id)?.status === 'failed', 'childB failed with retry pending')
+  const result = await h.runner.terminateTask(parent.id)
+  check(result.ok === true, 'parent termination covers queued and retry-pending descendants')
+  await sleep(600)
+  check(h.store.get(parent.id).status === 'cancelled', 'queued parent cancelled')
+  check(h.store.get(childA.id).status === 'cancelled', 'queued descendant cancelled')
+  check(h.store.get(childB.id).status === 'cancelled', 'retry-pending descendant cancelled without retrying')
+  check(h.log.launches.length === 1, 'descendant retry never launched')
+  await h.runner.shutdown()
+}
+{
+  const h = makeHarness({})
+  h.cfg.turnGates.worker = defer()
+  const parent = h.createTask({ title: 'parent' })
+  const child = h.createTask({ title: 'child', parentTaskId: parent.id })
+  h.runner.enqueue(h.store.get(parent.id))
+  h.runner.enqueue(h.store.get(child.id))
+  await waitFor(() => h.runner.sessionCount() === 2, 'both sessions running')
+  const result = await h.runner.terminateTask(parent.id)
+  check(result.ok === true, 'running parent termination waits for running descendant')
+  check(h.store.get(parent.id).status === 'cancelled' && h.store.get(child.id).status === 'cancelled', 'parent and running descendant both cancelled')
+  check(h.log.stops.length === 2 && h.log.closes.length === 2, 'every descendant session stopped and closed')
+  check(h.runner.sessionCount() === 0, 'no descendant session leaks')
+  await h.runner.shutdown()
+}
+
+console.log('--- replaced run is never killed ---')
+{
+  const h = makeHarness({})
+  h.cfg.turnGates.worker = defer()
+  const task = h.createTask()
+  h.runner.enqueue(h.store.get(task.id))
+  await waitFor(() => h.runner.sessionCount() === 1, 'session running')
+  h.store.updateIf(task.id, {}, { executionOwner: { pid: process.pid, instance: 'foreign-host', token: 'foreign-token' } })
+  const result = await h.runner.terminateTask(task.id)
+  check(result.ok === false && /执行归属/.test(result.error ?? ''), 'termination refuses a run this runner no longer owns')
+  check(h.store.get(task.id).status === 'running', 'replaced run keeps its running state')
+  check(h.log.stops.length === 0 && h.log.closes.length === 0, 'replaced run session is not stopped or closed')
+  h.cfg.turnGates.worker.resolve()
+  await h.runner.shutdown()
+}
+
+console.log('--- meeting guard regression: stop, delete-intent, revival and natural end ---')
+{
+  const data = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-term-meeting-'))
+  const store = new TaskStore(data)
+  const service = new TaskService({ store })
+  const log = { launches: [], launchStops: [], stops: [], closes: [] }
+  const cfg = { holdStart: false, startGate: null, stopGate: null, stopDelay: 0, closeGate: null, closeFails: false, failFirst: false, turnGates: {} }
+  const backend = makeBackend(cfg, log)
+  const runner = new TaskRunner(store, new Map([[backend.id, backend]]), () => ({ concurrency: 4, workerConcurrency: 4, mode: 'yolo', notify: false }))
+  const agents = [
+    { id: 'alpha', name: 'Alpha', backend: backend.id, role: '队长' },
+    { id: 'beta', name: 'Beta', backend: backend.id, role: '队长' },
+    { id: 'gamma', name: 'Gamma', backend: backend.id, role: '队长' }
+  ]
+  runner.attachTeam(() => agents)
+  const offices = new AgentSessionRegistry({ store, taskService: service, runner, getAgents: () => agents, waitPollMs: 5, waitTimeoutMs: 5_000 })
+  const meetingStore = new MeetingStore(data)
+  const controller = new MeetingController({
+    store: meetingStore, offices, getAgents: () => agents, taskService: service,
+    issueExists: () => true, taskStore: store,
+    cancelTask: (taskId) => runner.terminateTask(taskId),
+    addIssueComment: () => {}
+  })
+  runner.attachMeetingGuard((task) => controller.canRunTask(task))
+
+  const meeting = controller.create({
+    issueId: 'iss_stop', topic: 'stop barrier', maxRounds: 2,
+    participants: [
+      { agentId: 'alpha', role: 'reporter' }, { agentId: 'beta', role: 'critic' }, { agentId: 'gamma', role: 'designer' }
+    ]
+  })
+  cfg.turnGates.alpha = defer()
+  const started = controller.start(meeting.id)
+  await waitFor(() => store.list().some((t) => t.meetingId === meeting.id && t.status === 'running'), 'member execution in flight')
+  const stopped = await controller.cancel(meeting.id)
+  check(stopped.ok === true, 'meeting stop confirms every member execution exit via terminateTask')
+  const membersAfterStop = store.list().filter((t) => t.meetingId === meeting.id)
+  check(membersAfterStop.length >= 1 && membersAfterStop.every((t) => t.status === 'cancelled'), 'in-flight member is cancelled')
+  check(runner.sessionCount() === 0, 'member session is stopped and closed after stop')
+
+  const revival = await runner.followUp(membersAfterStop[0].id, 'continue anyway')
+  check(revival.ok === false, 'stopped meeting member session cannot be revived by follow-up')
+  let registryRefused = false
+  try { registryRefused = (await offices.followUp('beta', 'hello', { meetingId: meeting.id })).ok !== true } catch { registryRefused = true }
+  check(registryRefused, 'registry follow-up on a stopped meeting is refused')
+  const zombie = service.createTask({
+    title: 'Beta·会议成员', prompt: 'session bootstrap', backend: backend.id, agentId: 'beta',
+    trigger: 'meeting', suppressIssue: true, titleAuto: false, officeAgentId: 'beta',
+    meetingId: meeting.id, meetingTaskRole: 'member'
+  })
+  runner.enqueue(store.get(zombie.id))
+  await sleep(20)
+  check(store.get(zombie.id)?.status === 'cancelled', 'guard cancels freshly enqueued member tasks of the stopped meeting')
+  const investigation = await runner.spawnInvestigateChild(membersAfterStop[0].id, { to: 'Gamma', prompt: 'look into it' })
+  check(investigation === null, 'stopped meeting cannot spawn new investigations')
+  const container = service.createTask({ title: 'container', prompt: 'c', backend: backend.id, meetingId: meeting.id, meetingTaskRole: 'container' })
+  runner.enqueue(store.get(container.id))
+  await sleep(20)
+  const containerAfter = store.get(container.id)
+  check(containerAfter.status === 'queued' && containerAfter.parked === true, 'meeting container is re-parked instead of executed or cancelled')
+  const after = await started
+  check(after.meeting?.status === 'cancelled' && controller.get(meeting.id)?.stopState === undefined, 'meeting run settles into cancelled without a stuck stop state')
+  delete cfg.turnGates.alpha
+
+  const meeting2 = controller.create({
+    issueId: 'iss_end', topic: 'natural end', maxRounds: 1,
+    participants: [
+      { agentId: 'alpha', role: 'reporter' }, { agentId: 'beta', role: 'critic' }, { agentId: 'gamma', role: 'designer' }
+    ]
+  })
+  const concluded = await controller.start(meeting2.id)
+  check(concluded.ok === true && concluded.meeting?.status === 'concluded', 'natural conclusion gathers internal execution through terminateTask')
+  const members2 = store.list().filter((t) => t.meetingId === meeting2.id)
+  check(members2.length === 3 && members2.every((t) => t.status === 'done' && !!t.result), 'concluded member results are preserved verbatim')
+  check(runner.sessionCount() === 0, 'idle member sessions are closed after natural conclusion')
+  await runner.shutdown()
+}
+
+if (process.exitCode) process.exit(1)
+console.log('--- parent exit can depend on descendant termination ---')
+{
+  const h = makeHarness({ turnGates: { worker: defer() } }, { terminationTimeoutMs: 50 })
+  const parent = h.createTask({ title: 'delegating parent', parked: true })
+  const child = h.createTask({ title: 'dependent child', parentTaskId: parent.id })
+  h.runner.enqueue(h.store.get(child.id))
+  await waitFor(() => h.runner.sessions.has(child.id), 'dependent child session ready')
+  const waiting = defer()
+  h.runner.activeRuns.set(parent.id, waiting.promise)
+  const session = h.runner.sessions.get(child.id)
+  const originalClose = session.close.bind(session)
+  session.close = async () => { await originalClose(); waiting.resolve() }
+  const result = await h.runner.terminateTask(parent.id)
+  check(result.ok && h.store.get(child.id).status === 'cancelled', 'children stop before the parent exit barrier waits on their completion')
+  check(h.log.closes.length === 1, 'dependent child closes exactly once')
+  await h.runner.shutdown()
+}
+console.log('--- rejected close is retained and retried ---')
+{
+  const h = makeHarness({}, { terminationTimeoutMs: 40 })
+  const task = h.createTask()
+  h.runner.enqueue(h.store.get(task.id))
+  await waitFor(() => h.store.get(task.id)?.status === 'done', 'idle task done')
+  const session = h.runner.sessions.get(task.id)
+  let attempts = 0
+  session.close = async () => { attempts++; return attempts > 1 ? undefined : false }
+  const rejected = await h.runner.terminateTask(task.id)
+  check(!rejected.ok && /退出未确认/.test(rejected.error), 'primitive false close cannot become successful termination')
+  check(!h.runner.isIdle(), 'failed termination keeps an observable cleanup target')
+  const retried = await h.runner.terminateTask(task.id)
+  check(retried.ok && attempts === 2, 'retry closes the retained session instead of ignoring a missing session map')
+  check(h.store.get(task.id).terminatedRunId === h.store.get(task.id).runId, 'verified exit is durably tied to its run')
+  await h.runner.shutdown()
+}
+
+console.log('--- pending close is not forgotten after timeout ---')
+{
+  const h = makeHarness({ closeGate: defer() }, { terminationTimeoutMs: 30 })
+  const task = h.createTask({ meetingId: 'timeout-scope', meetingTaskRole: 'member', suppressIssue: true })
+  h.runner.enqueue(h.store.get(task.id))
+  await waitFor(() => h.store.get(task.id)?.status === 'done', 'timeout task done')
+  check(!(await h.runner.terminateTask(task.id)).ok, 'hung close reports a timeout')
+  check(!(await h.runner.terminateTask(task.id)).ok, 'a second stop cannot claim success while the same close is pending')
+  check(h.log.closes.length === 1, 'pending close is not issued twice')
+  const restored = new TaskRunner(new TaskStore(h.data), new Map([[h.backend.id, h.backend]]), () => ({ concurrency: 1, mode: 'yolo', notify: false }))
+  const unknown = await restored.terminateTask(task.id)
+  check(!unknown.ok && /历史会议执行退出未确认/.test(unknown.error), 'restart without exit proof retains unconfirmed historical execution')
+  await restored.shutdown()
+  h.cfg.closeGate.resolve()
+  await sleep(10)
+  check((await h.runner.terminateTask(task.id)).ok, 'stop succeeds only after the pending close actually finishes')
+  const confirmed = new TaskRunner(new TaskStore(h.data), new Map([[h.backend.id, h.backend]]), () => ({ concurrency: 1, mode: 'yolo', notify: false }))
+  check((await confirmed.terminateTask(task.id)).ok, 'persisted exit proof permits idempotent cleanup after restart')
+  await confirmed.shutdown()
+  await h.runner.shutdown()
+}
+
+console.log('--- scoped late-start cleanup never drops failure ---')
+{
+  const executor = new Executor()
+  const start = defer()
+  const timeout = defer()
+  const unrelated = defer()
+  let accepted = true
+  let rejectClose = true
+  let closeCalls = 0
+  const opening = executor.start(() => start.promise, timeout.promise, () => accepted, 'meeting-a')
+  accepted = false
+  timeout.resolve({ ok: false, response: '', error: 'cancelled start' })
+  await opening.catch(() => {})
+  executor.registerCleanup('meeting-b', () => unrelated.promise)
+  let settled = false
+  const draining = executor.drain('meeting-a').then(() => { settled = true; return true }, () => { settled = true; return false })
+  await sleep(2_050)
+  check(!settled, 'late session remains pending beyond the old two-second cleanup window')
+  start.resolve({ async close() { closeCalls++; if (rejectClose) throw new Error('late close rejected') } })
+  check(!await draining, 'late session close rejection propagates through the strict drain')
+  check(closeCalls === 1 && !executor.isIdle(), 'failed late cleanup remains registered for retry')
+  rejectClose = false
+  await executor.drain('meeting-a')
+  check(closeCalls === 2, 'late close failure can retry without restarting the backend')
+  check(!executor.isIdle(), 'scoped drain does not consume another meeting cleanup')
+  unrelated.resolve()
+  await executor.drain('meeting-b')
+  check(executor.isIdle(), 'all cleanup records disappear only after verified completion')
+  await executor.shutdown()
+}
+
+if (process.platform === 'win32') {
+  console.log('--- process tree exit does not hide taskkill failure ---')
+  const child = Object.assign(new EventEmitter(), { pid: 123456, exitCode: null, signalCode: null })
+  const killer = new EventEmitter()
+  const originalSpawn = childProcess.spawn
+  childProcess.spawn = () => killer
+  try {
+    const killing = killProcessTree(child)
+    child.exitCode = 0
+    child.emit('close', 0)
+    killer.emit('close', 1)
+    check(!(await killing).ok, 'a closed root process cannot turn a failed tree kill into success')
+    check((await killProcessTree(child)).ok, 'a failed kill result is retryable after verified process exit')
+  } finally { childProcess.spawn = originalSpawn }
+}
+
+if (process.exitCode) throw new Error('meeting termination regression failed')
+console.log('\n✅ MEETING TERMINATION SMOKE PASSED')

@@ -1,7 +1,7 @@
 import type { AcceptanceCriterion, Automation, AppSettings, AnalyticsSummary, Comment, Goal, GoalApprovalSnapshot, GoalCheckpoint, GoalEvolutionPatch, GoalSpecDecision, GoalSpecSnapshot, GoalRun, Issue, IssuePriority, IssueStatus, Run, RunTrigger, RuntimeSnapshot, Task, TaskEvent, ThinkingLevel } from './types'
 import type { SkillDetail, SkillMeta, SkillTarget, SyncState } from './skills'
 import type { AgentDraft, DraftResult, ExportResult, ImproveResult, ImportResult, EvaluateResult } from './forge'
-import type { Meeting, MeetingCreateInput } from './meeting'
+import type { Meeting, MeetingCreateInput, MeetingTurnDetail, MeetingTurnReadQuery, MeetingTurnPage, MeetingMemberExecutions } from './meeting'
 import type { PackAssets, PetGenDone, PetGenProgress, PetGenStartInput } from './pet'
 import type { PetDragPosition, PetSayPayload, PetStateSnapshot, PetThrowVelocity, PetWindowEvent } from './pet'
 export type { MeetingCreateInput } from './meeting'
@@ -268,6 +268,10 @@ export interface AgentDeckApi {
   meetings: {
     list: () => Promise<Meeting[]>
     get: (id: string) => Promise<Meeting | null>
+    readTurns: (id: string, query?: MeetingTurnReadQuery) => Promise<MeetingTurnPage>
+    getTurn: (id: string, turnId: string) => Promise<MeetingTurnDetail | null>
+    memberExecutions: (id: string, agentId: string) => Promise<MeetingMemberExecutions | null>
+    retryMirrors: (id: string) => Promise<IpcResult>
     create: (input: MeetingCreateInput) => Promise<Meeting>
     start: (id: string) => Promise<IpcResult>
     pause: (id: string) => Promise<IpcResult>

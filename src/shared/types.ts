@@ -237,6 +237,8 @@ export interface Comment {
   reactions: string[]
   /** The execution that produced an agent report, when applicable. */
   runId?: string
+  meetingId?: string
+  sourceTurnId?: string
   createdAt: number
 }
 
@@ -403,6 +405,9 @@ export interface Task {
   issueId?: string
   /** Run-only automation executions stay in task logs without creating an Issue. */
   suppressIssue?: boolean
+  meetingId?: string
+  meetingTaskRole?: 'container' | 'member' | 'investigation'
+  terminatedRunId?: string
   /** Unique execution instance used to preserve Run history across retries/follow-ups. */
   runId?: string
   /** OS process identity and runner token; an expired lease is not death evidence. */
@@ -479,6 +484,7 @@ export interface Task {
 export interface TaskEvent {
   seq: number
   ts: number
+  execution?: { runId: string; turnId: string }
   /** Persisted event schema version. `v` is the wire/on-disk spelling. */
   v?: number
   /** Read-side alias accepted for callers that use a descriptive name. */

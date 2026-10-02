@@ -12,12 +12,14 @@
  * 临时目录 + AGENTDECK_HOT_TRUST_HEX 临时密钥。SMOKE_HOT_EXE 指定打包产物目录（默认
  * release/win-unpacked，被占用时用 release/win-unpacked-hot/win-unpacked）。
  */
-import { spawn, spawnSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import { build } from 'esbuild'
 import { pathToFileURL } from 'node:url'
 import path from 'node:path'
 import fs from 'node:fs'
+import os from 'node:os'
 import crypto from 'node:crypto'
+import { isolatedEnvironment, assertStartupIsolation, IsolatedProcessFence } from './fixtures/isolated-release-processes.mjs'
 
 const root = path.resolve(import.meta.dirname, '..')
 const MARKER = 'MARKER-SHELL-NEW.txt'
@@ -60,15 +62,12 @@ const zipOut = path.join(root, 'out', 'smoke-hot-shell-zip.cjs')
 await build({ entryPoints: [path.join(root, 'src/main/hot/zip.ts')], outfile: zipOut, bundle: true, platform: 'node', format: 'cjs', target: 'node18', logLevel: 'silent' })
 const { createZipStore } = await import(pathToFileURL(zipOut).href)
 
-// —— 复制应用目录到临时区（同卷：临时区也在 D 盘时 rename 才原子；直接放 repo 同盘） ——
-// 启动清扫：失败现场只保留 1 天供排障，更早的残留工作区在此清除，避免根部无限堆积
-for (const d of fs.readdirSync(root)) {
-  if (!d.startsWith('.smoke-hot-shell-')) continue
-  try { if (Date.now() - fs.statSync(path.join(root, d)).mtimeMs > 86_400_000) fs.rmSync(path.join(root, d), { recursive: true, force: true }) } catch { /* 被占用：留给下次清扫 */ }
-}
-const tmpBase = fs.mkdtempSync(path.join(root, '.smoke-hot-shell-'))
-let keepScene = false // 断言失败时短暂保留现场（见尾部失败分支），其余退出路径一律清理
-process.on('exit', () => { if (!keepScene) { try { fs.rmSync(tmpBase, { recursive: true, force: true }) } catch { /* 被占用：留给启动清扫 */ } } })
+const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-hot-shell-'))
+let keepScene = process.env.SMOKE_HOT_KEEP_SCENE === '1'
+let cleanupConfirmed = false
+const fence = new IsolatedProcessFence(tmpBase)
+fence.assertClean()
+process.on('exit', () => { if (!keepScene && cleanupConfirmed) { try { fs.rmSync(tmpBase, { recursive: true, force: true }) } catch {} } })
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => process.exit(sig === 'SIGINT' ? 130 : 143))
 const appDir = path.join(tmpBase, 'app')
 console.log(`[step] 复制打包产物 → ${appDir}（较大，稍候）`)
@@ -117,25 +116,9 @@ const server = http.createServer((req, res) => {
 })
 server.listen(0, '127.0.0.1', () => process.stdout.write(String(server.address().port)))
 `)
-const feeder = spawn(process.execPath, [feederFile, path.join(tmpBase, 'feed')], { stdio: ['ignore', 'pipe', 'inherit'] })
-let feederPort = ''
-feeder.stdout.on('data', (d) => { feederPort += d })
-for (let i = 0; i < 50 && !feederPort.trim(); i++) await sleep(100)
-if (!feederPort.trim()) fatal('feed 服务子进程未就绪')
-await sleep(200)
-const base = `http://127.0.0.1:${feederPort.trim()}`
-
-// —— userData：预置 L1 指针（验证 §6 清指针）+ 指向本地 feed 的设置 ——
 const userData = path.join(tmpBase, 'userdata')
-fs.mkdirSync(path.join(userData, 'hot-app'), { recursive: true })
-fs.writeFileSync(path.join(userData, 'hot-app', 'current.json'), JSON.stringify({ schemaVersion: 1, channel: 'payload', version: 'stale', dir: 'hot-app/stale', manifestSha256: '0'.repeat(64), appliedAt: 1, appliedByShell: pkgVersion }))
-fs.writeFileSync(path.join(userData, 'settings.json'), JSON.stringify({ updateFeedUrl: base }))
-
-const exe = path.join(appDir, 'AgentDeck.exe')
 const env = {
-  ...process.env,
-  APPDATA: tmpBase, LOCALAPPDATA: tmpBase, USERPROFILE: tmpBase, HOME: tmpBase,
-  AGENTDECK_USER_DATA_DIR: userData,
+  ...isolatedEnvironment(tmpBase, process.env, userData),
   AGENTDECK_HOT_TRUST_HEX: process.env.AGENTDECK_HOT_TRUST_HEX,
   AGENTDECK_HOT_AUTO_APPLY_SHELL: '1',
   AGENTDECK_HOT_DEBUG_LOG: path.join(tmpBase, 'hot-debug.log')
@@ -143,13 +126,29 @@ const env = {
 delete env.ELECTRON_RUN_AS_NODE
 delete env.ELECTRON_RENDERER_URL
 delete env.AGENTDECK_DISABLE_HOT
+const feederOutput = path.join(tmpBase, 'feeder-stdout.log')
+await fence.launch(process.execPath, [feederFile, path.join(tmpBase, 'feed')], { env, cwd: tmpBase, stdout: feederOutput, stderr: path.join(tmpBase, 'feeder-stderr.log') })
+let feederPort = ''
+for (let attempt = 0; attempt < 50 && !feederPort.trim(); attempt++) {
+  try { feederPort = fs.readFileSync(feederOutput, 'utf8') } catch {}
+  if (!feederPort.trim()) await sleep(100)
+}
+if (!feederPort.trim()) fatal('feed 服务子进程未就绪')
+await sleep(200)
+const base = `http://127.0.0.1:${feederPort.trim()}`
+
+// —— userData：预置 L1 指针（验证 §6 清指针）+ 指向本地 feed 的设置 ——
+fs.mkdirSync(path.join(userData, 'hot-app'), { recursive: true })
+fs.writeFileSync(path.join(userData, 'hot-app', 'current.json'), JSON.stringify({ schemaVersion: 1, channel: 'payload', version: 'stale', dir: 'hot-app/stale', manifestSha256: '0'.repeat(64), appliedAt: 1, appliedByShell: pkgVersion }))
+fs.writeFileSync(path.join(userData, 'settings.json'), JSON.stringify({ updateFeedUrl: base, workspaceDir: path.join(tmpBase, 'workspace'), sharedDir: path.join(tmpBase, 'shared') }))
+
+const exe = path.join(appDir, 'AgentDeck.exe')
+fs.writeFileSync(path.join(tmpBase, 'isolation.json'), JSON.stringify(assertStartupIsolation(tmpBase, exe, env), null, 2))
 console.log('[step] 启动复制版（check 后将自动两段 apply：staging → rename dance → relaunch）…')
-const child = spawn(exe, [], { env, stdio: ['ignore', 'pipe', 'pipe'] })
-let exited = false
-let exitCode = null
+const child = await fence.attachRoot(exe, [], { env, cwd: appDir, stdout: path.join(tmpBase, 'app-stdout.log'), stderr: path.join(tmpBase, 'app-stderr.log') })
+let exited = child.exitCode !== null
+let exitCode = child.exitCode
 child.on('exit', (code) => { exited = true; exitCode = code })
-child.stdout.pipe(fs.createWriteStream(path.join(tmpBase, 'app-stdout.log')))
-child.stderr.pipe(fs.createWriteStream(path.join(tmpBase, 'app-stderr.log')))
 
 const deadline = Date.now() + SCENARIO_TIMEOUT_MS
 await waitFor('原进程退出（dance 后 relaunch + quit）', () => exited, deadline)
@@ -206,9 +205,16 @@ const intolerable = stagingLeft.filter((n) => !tolerated.includes(n))
 ok(stagingLeft.length === 0 || intolerable.length === 0, `staging 收尾（剩 ${stagingLeft.join(',') || '无'}${intolerable.length ? '，含不可容忍项' : '（已知降级：被占用数据文件）'}）`)
 
 // —— 清理 ——
-spawnSync('powershell', ['-NoProfile', '-Command', `Get-CimInstance Win32_Process -Filter "Name='AgentDeck.exe'" | Where-Object { $_.ExecutablePath -like '${appBaseEscape()}*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }; Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('powershell.exe','wscript.exe') -and $_.CommandLine -like '*finish-swap*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`], { stdio: 'ignore', windowsHide: true })
-feeder.kill()
-await sleep(1000)
+try {
+  const cleanup = await fence.cleanup(child)
+  fs.writeFileSync(path.join(tmpBase, 'cleanup.json'), JSON.stringify(cleanup, null, 2))
+  cleanupConfirmed = true
+} catch (error) {
+  keepScene = true
+  fs.writeFileSync(path.join(tmpBase, 'cleanup.json'), JSON.stringify(error.cleanupEvidence, null, 2))
+  console.error('[FAIL] isolated cleanup unconfirmed; scene retained: ' + tmpBase)
+  throw error
+}
 if (failed > 0) {
   keepScene = true
   console.error(`\n[FAIL] SMOKE HOT SHELL FAILED（${failed} 项）。现场保留: ${tmpBase}`)

@@ -135,6 +135,10 @@ const api: AgentDeckApi = {
   meetings: {
     list: (): Promise<import('../shared/meeting').Meeting[]> => ipcRenderer.invoke('meetings:list'),
     get: (id: string): Promise<import('../shared/meeting').Meeting | null> => ipcRenderer.invoke('meetings:get', id),
+    readTurns: (id, query) => ipcRenderer.invoke('meetings:read-turns', id, query),
+    getTurn: (id, turnId) => ipcRenderer.invoke('meetings:get-turn', id, turnId),
+    memberExecutions: (id, agentId) => ipcRenderer.invoke('meetings:member-executions', id, agentId),
+    retryMirrors: (id) => ipcRenderer.invoke('meetings:retry-mirrors', id),
     create: (input: MeetingCreateInput): Promise<import('../shared/meeting').Meeting> => ipcRenderer.invoke('meetings:create', input),
     start: (id: string) => ipcRenderer.invoke('meetings:start', id) as Promise<{ ok: boolean; error?: string }>,
     pause: (id: string) => ipcRenderer.invoke('meetings:pause', id) as Promise<{ ok: boolean; error?: string }>,

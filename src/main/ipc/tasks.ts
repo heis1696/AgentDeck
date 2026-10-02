@@ -25,6 +25,7 @@ export function collectWorktreeReclaims(items: ReadonlyArray<Pick<Task, 'id' | '
 
 export function registerTaskIpc(ctx: IpcContext) {
   const send = (channel: string, payload: unknown) => ctx.getWindow()?.webContents.send(channel, payload)
+  const meetingForTask = (taskId: string) => ctx.meetingController?.forTask?.(taskId)
   const projectTasks = () => {
     try {
       // Projection is an outbox-like side effect of the committed Task. Keep
@@ -63,6 +64,11 @@ export function registerTaskIpc(ctx: IpcContext) {
   })
   ipcMain.handle('tasks:start', (_e, id: unknown) => {
     const taskId = parseId(id)
+    const meeting = meetingForTask(taskId)
+    if (meeting) {
+      if (meeting.containerTaskId !== taskId) return { ok: false, error: '请通过会议主 Issue 启动会议' }
+      return meeting.status === 'waiting_user' ? ctx.meetingController.resume(meeting.id) : ctx.meetingController.start(meeting.id)
+    }
     const task = ctx.store.get(taskId)
     if (!task) return { ok: false, error: '任务不存在' }
     // parked 与非 parked 的 queued 都放行：非 parked 排队（如硬切后继）若因故滞留，
@@ -80,15 +86,35 @@ export function registerTaskIpc(ctx: IpcContext) {
   ipcMain.handle('tasks:cancel', async (_e, id: unknown, reason: unknown) => {
     // 契约：undefined = 系统取消不打标；string（含空串）= 用户打断（trim + 500 字符钳制）
     const note = reason === undefined ? undefined : { reason: parseCancelReason(reason) ?? '' }
-    const result = await ctx.runner.cancel(parseId(id), note)
+    const taskId = parseId(id)
+    const meeting = meetingForTask(taskId)
+    const result = meeting ? await ctx.meetingController.cancel(meeting.id) : await ctx.runner.cancel(taskId, note)
     projectTasks()
     return result
   })
-  ipcMain.handle('tasks:followup', (_e, id: unknown, content: unknown, options: unknown) => ctx.runner.followUp(parseId(id), parseContent(content, '追问'), parseFollowUpOptions(options)))
+  ipcMain.handle('tasks:followup', (_e, id: unknown, content: unknown, options: unknown) => {
+    const taskId = parseId(id)
+    const text = parseContent(content, '追问')
+    const parsedOptions = parseFollowUpOptions(options)
+    const meeting = meetingForTask(taskId)
+    if (meeting) {
+      if (meeting.containerTaskId !== taskId) return { ok: false, error: '请通过会议主 Issue 插话' }
+      return ctx.meetingController.interject(meeting.id, text)
+    }
+    return ctx.runner.followUp(taskId, text, parsedOptions)
+  })
   ipcMain.handle('tasks:permission-respond', (_e, requestId: unknown, optionId: unknown, decision: unknown, requestToken: unknown) => ctx.runner.resolvePermission(parseId(requestId, 'requestId'), parseContent(optionId, 'optionId'), parsePermissionDecision(decision), requestToken === undefined ? undefined : parseId(requestToken, 'requestToken')))
   ipcMain.handle('tasks:permission-pending', (_e, taskId: unknown) => ctx.runner.pendingPermissions(parseId(taskId)))
   ipcMain.handle('tasks:delete', async (_e, id: unknown) => {
     const taskId = parseId(id)
+    const meeting = meetingForTask(taskId)
+    if (meeting) {
+      if (meeting.containerTaskId !== taskId) return { ok: false, error: '会议内部任务不可独立删除，请操作会议主 Issue' }
+      const result = await ctx.meetingController.delete(meeting.id)
+      if (result.ok) send('meetings:deleted', meeting.id)
+      projectTasks()
+      return result
+    }
     const task = ctx.store.get(taskId)
     if (!task) return { ok: false, error: '任务不存在' }
     if (task.status === 'running') return { ok: false, error: '请先取消运行中的任务' }
@@ -133,6 +159,11 @@ export function registerTaskIpc(ctx: IpcContext) {
   })
   ipcMain.handle('tasks:retry', async (_e, id: unknown) => {
     const taskId = parseId(id)
+    const meeting = meetingForTask(taskId)
+    if (meeting) {
+      if (meeting.containerTaskId !== taskId) return { ok: false, error: '会议内部任务不可独立重跑' }
+      return ctx.meetingController.start(meeting.id)
+    }
     const task = ctx.store.get(taskId)
     if (!task) return { ok: false, error: '任务不存在' }
     if (task.status === 'running') return { ok: false, error: '任务正在运行，如长时间无输出可先「停止」再重新运行' }
@@ -208,6 +239,7 @@ export function registerTaskIpc(ctx: IpcContext) {
   ipcMain.handle('tasks:move', (_e, id: unknown, status: unknown) => {
     const taskId = parseId(id)
     const parsedStatus = parseTaskStatus(status)
+    if (meetingForTask(taskId)) return { ok: false, error: '会议状态由会议控制器管理，请使用会议开始、停止操作' }
     const task = ctx.store.get(taskId)
     if (!task) return { ok: false, error: '任务不存在' }
     const transition = validateMove(task.status, parsedStatus)

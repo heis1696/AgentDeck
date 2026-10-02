@@ -1,6 +1,6 @@
 import { ipcMain } from 'electron'
 import { parseContent, parseId, parseNonNegativeInteger } from '../ipc-validation'
-import type { MeetingCreateInput, MeetingRole } from '../../shared/meeting'
+import type { MeetingCreateInput, MeetingRole, MeetingTurnReadQuery } from '../../shared/meeting'
 import type { IpcContext } from './context'
 
 function parseMeetingCreate(value: unknown): MeetingCreateInput {
@@ -40,10 +40,38 @@ function parseMeetingCreate(value: unknown): MeetingCreateInput {
   }
 }
 
+export function parseMeetingTurnQuery(value: unknown): MeetingTurnReadQuery {
+  if (value === undefined) return {}
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('发言读取参数必须是对象')
+  const input = value as Record<string, unknown>
+  const output: MeetingTurnReadQuery = {}
+  for (const key of Object.keys(input)) {
+    if (!['afterSequence', 'afterVersion', 'limit', 'cursor'].includes(key)) throw new Error(`未知发言读取参数: ${key}`)
+  }
+  for (const key of ['afterSequence', 'afterVersion', 'limit'] as const) {
+    const value = input[key]
+    if (value === undefined) continue
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < (key === 'limit' ? 1 : 0) || key === 'limit' && value > 500) throw new Error(`无效的 ${key}`)
+    output[key] = value
+  }
+  if (input.cursor !== undefined) {
+    if (typeof input.cursor !== 'string' || !input.cursor || input.cursor.length > 2048) throw new Error('无效的 cursor')
+    output.cursor = input.cursor
+  }
+  return output
+}
+
 export function registerMeetingIpc(ctx: IpcContext) {
   const send = (channel: string, payload: unknown) => ctx.getWindow()?.webContents.send(channel, payload)
   ipcMain.handle('meetings:list', () => ctx.meetingController.list())
   ipcMain.handle('meetings:get', (_event, id: unknown) => ctx.meetingController.get(parseId(id, 'meetingId')))
+  ipcMain.handle('meetings:read-turns', (_event, id: unknown, query: unknown) => ctx.meetingController.readTurns(parseId(id, 'meetingId'), parseMeetingTurnQuery(query)))
+  ipcMain.handle('meetings:get-turn', (_event, id: unknown, turnId: unknown) => ctx.meetingController.getTurn(parseId(id, 'meetingId'), parseId(turnId, 'turnId')))
+  ipcMain.handle('meetings:member-executions', (_event, id: unknown, agentId: unknown) => ctx.meetingController.memberExecutions(parseId(id, 'meetingId'), parseId(agentId, 'agentId')))
+  ipcMain.handle('meetings:retry-mirrors', (_event, id: unknown) => {
+    const result = ctx.meetingController.retryMirrors(parseId(id, 'meetingId'))
+    return { ok: result.ok, ...(result.error ? { error: result.error } : {}) }
+  })
   ipcMain.handle('meetings:create', (_event, input: unknown) => {
     const meeting = ctx.meetingController.create(parseMeetingCreate(input))
     send('meetings:updated', meeting)
@@ -75,9 +103,9 @@ export function registerMeetingIpc(ctx: IpcContext) {
     const result = ctx.meetingController.approveAction(parseId(id, 'meetingId'), itemIndex, verdict)
     return { ok: result.ok, ...(result.error ? { error: result.error } : {}) }
   })
-  ipcMain.handle('meetings:delete', (_event, id: unknown) => {
+  ipcMain.handle('meetings:delete', async (_event, id: unknown) => {
     const meetingId = parseId(id, 'meetingId')
-    const result = ctx.meetingController.delete(meetingId)
+    const result = await ctx.meetingController.delete(meetingId)
     if (result.ok) send('meetings:deleted', meetingId)
     return result
   })

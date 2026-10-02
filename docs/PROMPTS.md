@@ -52,7 +52,7 @@ AgentDeck 的提示词不只是文案：它们是运行时解析器（`<delegate
 | 咨询往返 | 请求 `consultRequestPrompt`（进对方办公室会话）→ 回复 `consultReplyFeedback`（回发起方） |
 | 调查结果 | `investigationFeedback` |
 | 目标模式同会话续轮 | `goalRoundRecap` |
-| 会议发言 | `reportPrompt` / `challengePrompt` / `defensePrompt` / `synthPrompt` / `forcedSynthesisPrompt`（都以 `meetingPriority` 开头） |
+| 会议发言 | `reportPrompt` / `challengePrompt` / `defensePrompt` / `reviewPrompt` / `synthPrompt` / `forcedSynthesisPrompt`（都以 `meetingPriority` 开头） |
 | 用户点「接力下一阶段」 | `HANDOFF_CUE` +（重启后有未确认派单时）`delegateRecoveryNotice` |
 | 自动重命名 | `RETITLE_PROMPT`（隐藏回合） |
 
@@ -71,6 +71,10 @@ AgentDeck 的提示词不只是文案：它们是运行时解析器（`<delegate
 
 **会议内部还要再分一层**：`speak()` 的 `opts.investigate` 默认放行（常规发言轮），强制综合显式传 `false`——它的提示词已写明「不要发起调查」，运行时必须同口径，否则模型越界输出会被当成合法回合照发。
 
+**会议讨论闭环**：汇报 → 其他与会者（包括设计人）依次质疑 → 汇报人答辩 → 原反对者复核；未通过时在 `maxInnerTurns` 内继续答辩与复核。宿主从完整公开发言事实源装配版本化公共包，不依赖平台私有会话：含议题、轮次、具名历史、反对登记、用户要求及当前唯一 draft。最新报告/答辩/综合、未决质疑及其答复、用户要求和待确认稿受保护；已稳定旧历史超限时用带来源 ID 的首尾摘录或显式省略，完整正文不被改写。公共包加阶段指令默认上限 32000 字符（不是 token 配额），保护内容仍超限则拒绝派发并记录压缩账本及失败原因。答辩纪要的 `resolved=true` 只是解决提议，只有反对作者明确 agree 且没有继续提出反对，系统才关闭其反对；每次发言各自最多登记 3 条，不会在全局截掉其他人的反对。
+
+综合后清除旧表态，其他与会者通过 `reviewPrompt` 重新确认唯一纪要；版本由权威 JSON 与用户插话 ID 集合派生，确认绑定该版本。确认者修改纪要或最后确认期间新增插话，会撤销所有旧票并重新送达全员（包括原综合人）；必须有有效综合纪要、全员针对它明确同意、反对全部解决才能散会并创建待批准行动项。不同意见随纪要和未决反对进入下一轮，没有反对标记的 disagree/abstain 依据也写入 `openQuestions`；强制综合不能通过空数组抹掉未决反对或表态依据。Issue 评论仅为可重试的兼容摘要镜像，按 meetingId/sourceTurnId 去重；权威正文及投递审计按发言读取，镜像失败不会污染正式发言。末行表态严格整行解析，不能回退前文 agree；多份候选 JSON 纪要拒绝采纳。用户插话立即成为公开事实，已发出的旧请求保持其旧版本；后续成功响应及确认记录才证明成员实际收到包含该插话的版本。执行重连保留尝试链，正式发言关联最终产出正文的 Run/Turn，不把首个失败尝试当成功执行。
+
 ## 3. 协议标记与解析器契约
 
 | 标记 | 解析器 | 要点 |
@@ -82,7 +86,7 @@ AgentDeck 的提示词不只是文案：它们是运行时解析器（`<delegate
 | `<investigate to="队员名" …>指令</investigate>` | `parseInvestigates` | 只在会议发言里教，且只对名下有队员的发言人教；**运行时只在 `meetingTurn` 回合受理**（见 §2.3） |
 | `<continue start="auto\|parked">简报</continue>` | `parseContinue` | 末尾锚定为主（起点取末尾闭合标签之前的**最后一个**开标记，标记后只允许空白）；缺省/写错按 parked；与示例指纹同源的简报视为复述。「什么时候用」列表以**收尾前主动性检查**开头：每完成一个阶段、收尾之前先主动检查有无后续阶段（原文分阶段描述、提到的计划文档、简报阶段号），有明确后续阶段才在收尾回复末行交接并写明阶段号，没有或原文未分阶段就正常收尾——判断必须主动做，结论仍保守（拿不准不接力，主动检查不等于鼓励接力） |
 | `<stance verdict="agree\|disagree\|abstain" grounds="…"/>` | `parseStance` | 必须是整条回复最后一行；判定对象见 `STANCE_MEANING` |
-| `<objection ref="…" priority="high">…</objection>` | `parseObjections` | ref 必填；每轮最多 3 条；只认 priority="high" |
+| `<objection ref="…" priority="high">…</objection>` | `parseObjections` | ref 必填；每次发言最多 3 条；只认 priority="high" |
 | 纪要 JSON（`ENVELOPE_SCHEMA`） | `parseEnvelope` | 整段 / ```json 块 / 首尾花括号三路尝试。**实例必须是空数组骨架**（字段含义另由 `ENVELOPE_FIELDS` 文字说明）：属性位置给非空示例时模型会照抄，示例反对被 `mergeEnvelopeObjections` 登记成真反对、示例行动项被强制综合分支直接采用 |
 | checkpoint JSON（`GOAL_BLOCK`） | `parseCheckpoint` | 围栏块**从后往前**尝试；停止条件按原文子串识别 |
 
@@ -141,3 +145,10 @@ v3→v4 曾漏第 2 步，未编辑的 v3 副本被误判为用户编辑过、�
 
 - 咨询意见与调查报告回灌前没有走 `escapeProtocolLiterals`（委派报告走了）：对方文本里的协议字面量仍是活的。
 - 桌宠的人设与生图提示词（`src/main/pet/`）不在本目录，也不在本次重做范围。
+
+
+## 9. 会议长历史装配验证（阶段 4）
+
+公共上下文默认 32000 字符预算不变，不是 token 上限。装配仅在初始计长和最终输出时完整序列化；正文、JSON 转义、表示状态和压缩账本的长度增量须与最终输出精确相等。未解决质疑来源/答复、主席插话、最新报告/答辩/综合和待确认稿继续受保护；完整正文不被改写。
+
+1000 条历史的元数据和压缩账本本身也可能超限。smoke:meeting-history 用 800000 字符测试配额检验压缩、保护和审计，并单独验证默认 32000 配额的显式拒绝；该测试配额不改变生产配置。失败仍保留全部来源 ID 和压缩记录，不以缺正文摘要冒充完整输入，不因历史数量大而默认同意或沿用旧确认。

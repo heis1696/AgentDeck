@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { Goal, Issue, IssueStatus, Task } from '../../../shared/types'
 import type { Meeting } from '../../../shared/meeting'
+import { publicTasksOf } from '../../../shared/task-visibility'
+import { useMeetings } from '../hooks/useMeetings'
+import { meetingForNavigation, meetingNavigationTasks, meetingPresentation, meetingRootId } from './meeting/meetingViewState'
 import { bridge, fmtDuration } from '../api'
 import { createDeltaList } from '../data-store'
 import type { DeltaList } from '../data-store'
@@ -94,6 +97,7 @@ export function relativeBoardTime(ts: number, now: number): string {
 }
 
 export function boardCardKind(task: Task, issue: Issue | undefined, goalIssues: Set<string>, meetingIssues: Set<string>): CardKind {
+  if (task.id.startsWith('meeting:') && task.backend === 'meeting') return 'meeting'
   if (issue && meetingIssues.has(issue.id)) return 'meeting'
   if (task.goalId || (issue && goalIssues.has(issue.id))) return 'goal'
   if (task.trigger === 'handoff') return 'handoff'
@@ -106,20 +110,29 @@ export function buildBoardTree(tasks: Task[], issues: Issue[]): { roots: BoardNo
   const byIssue = new Map(issues.map((issue) => [issue.id, issue]))
   const byTask = new Map(issues.map((issue) => [issue.taskId, issue]))
   const issueOf = (task: Task) => byIssue.get(task.issueId ?? `iss_${task.id}`) ?? byTask.get(task.id)
+  const visibleTasks = publicTasksOf(tasks)
+  const taskById = new Map(tasks.map((task) => [task.id, task]))
   const nodes = new Map<string, BoardNode>()
-  for (const task of tasks) {
+  for (const task of visibleTasks) {
     const issue = issueOf(task)
     if (issue && issue.taskId !== task.id) continue
     if (!issue && !task.parentTaskId) continue
     nodes.set(task.id, { task, issue, children: [] })
   }
-  const aliases = new Map(tasks.map((task) => [task.id, nodes.get(issueOf(task)?.taskId ?? task.id)]))
+  const aliases = new Map(visibleTasks.map((task) => [task.id, nodes.get(issueOf(task)?.taskId ?? task.id)]))
   const roots: BoardNode[] = []
   const orphans: BoardNode[] = []
   for (const node of nodes.values()) {
-    const parentId = node.task.parentTaskId
+    let parentId = node.task.parentTaskId
     if (!parentId) { roots.push(node); continue }
-    const parent = aliases.get(parentId)
+    const parentPath = new Set([node.task.id])
+    let parent: BoardNode | undefined
+    while (parentId && !parentPath.has(parentId)) {
+      parentPath.add(parentId)
+      parent = aliases.get(parentId)
+      if (parent) break
+      parentId = taskById.get(parentId)?.parentTaskId
+    }
     const seen = new Set([node.task.id])
     let ancestor = parent
     while (ancestor && !seen.has(ancestor.task.id)) {
@@ -132,7 +145,19 @@ export function buildBoardTree(tasks: Task[], issues: Issue[]): { roots: BoardNo
   return { roots, orphans }
 }
 
+export function buildMeetingBoardTree(tasks: Task[], issues: Issue[], meetings: Meeting[]) {
+  const tree = buildBoardTree(tasks, issues)
+  const retained = (node: BoardNode) => !meetingForNavigation(node.task.id, tasks, meetings)
+  const meetingNodes = meetingNavigationTasks([], meetings, issues).map((task): BoardNode => {
+    const meeting = meetings.find((item) => meetingRootId(item.id) === task.id)!
+    const issue = meeting.ownsIssue === false ? undefined : issues.find((item) => item.id === meeting.issueId)
+    return { task, issue, children: [] }
+  })
+  return { roots: [...tree.roots.filter(retained), ...meetingNodes], orphans: tree.orphans.filter(retained) }
+}
+
 function nodeStatus(node: BoardNode): IssueStatus {
+  if (node.task.id.startsWith('meeting:')) return ({ queued: 'todo', running: 'in_progress', done: 'done', failed: 'blocked', cancelled: 'cancelled' } as const)[node.task.status]
   return node.issue?.status ?? ({ queued: 'todo', running: 'in_progress', done: 'done', failed: 'blocked', cancelled: 'cancelled' } as const)[node.task.status]
 }
 function updatedAt(node: BoardNode) { return node.issue?.updatedAt ?? node.task.endedAt ?? node.task.createdAt }
@@ -153,7 +178,7 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
   const [scope, setScope] = useState<Scope>('all')
   const [status, setStatus] = useState<IssueStatus | 'all'>('all')
   const [goals, setGoals] = useState<Goal[]>([])
-  const [meetings, setMeetings] = useState<Meeting[]>([])
+  const { meetings, error: meetingsError, refresh: refreshMeetings } = useMeetings()
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [now, setNow] = useState(Date.now)
   // 默认展示所有保留日期，避免用户首次打开看板只能看到今天。
@@ -192,12 +217,9 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
     const offGoals = bridge.goals.onUpdated((goal) => setGoals((cur) => cur.some((g) => g.id === goal.id) ? cur.map((g) => g.id === goal.id ? goal : g) : [...cur, goal]))
     const offGoalDeleted = bridge.goals.onDeleted((id) => setGoals((cur) => cur.filter((g) => g.id !== id)))
     void bridge.goals.list().then(setGoals).catch(() => {})
-    const offMeetings = bridge.meetings.onUpdated((meeting) => setMeetings((cur) => cur.some((m) => m.id === meeting.id) ? cur.map((m) => m.id === meeting.id ? meeting : m) : [...cur, meeting]))
-    const offMeetingDeleted = bridge.meetings.onDeleted((id) => setMeetings((cur) => cur.filter((m) => m.id !== id)))
-    void bridge.meetings.list().then(setMeetings).catch(() => {})
     const timer = window.setInterval(() => setNow(Date.now()), 30_000)
     return () => {
-      off(); offTasks(); offGoals(); offGoalDeleted(); offMeetings(); offMeetingDeleted(); window.clearInterval(timer)
+      off(); offTasks(); offGoals(); offGoalDeleted(); window.clearInterval(timer)
       // 卸载/StrictMode 清理：作废在途读，旧装载的响应整份返回 null，不再碰状态
       issuesStore.invalidateReads()
       ++issuesRequestRef.current
@@ -212,8 +234,8 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
   }, [menu])
   const byTask = useMemo(() => new Map(issues.map((issue) => [issue.taskId, issue])), [issues])
   const goalIssues = useMemo(() => new Set(goals.map((g) => g.issueId)), [goals])
-  const meetingIssues = useMemo(() => new Set(meetings.map((m) => m.issueId)), [meetings])
-  const tree = useMemo(() => buildBoardTree(tasks, issues), [tasks, issues])
+  const meetingIssues = useMemo(() => new Set(meetings.filter((meeting) => meeting.ownsIssue !== false).map((meeting) => meeting.issueId)), [meetings])
+  const tree = useMemo(() => buildMeetingBoardTree(tasks, issues, meetings), [tasks, issues, meetings])
   const todayFloor = boardDayFloor(now)
   // null = 全部档（反馈三轮4）：不受日期过滤，30 天保留窗内所有卡都显示
   const dayRoots = useMemo(() => selectedDay == null ? tree.roots : tree.roots.filter((node) => onBoardDay(updatedAt(node), selectedDay)), [tree, selectedDay])
@@ -245,6 +267,7 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
     } catch { ui.toast.error('更新 Issue 失败') }
   }
   const startTask = async (taskId: string) => {
+    if (!tasks.some((task) => task.id === taskId && !task.meetingId)) return
     setStarting(taskId)
     try {
       const result = await taskService.start(taskId)
@@ -275,18 +298,20 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
   </div>)}</div>
   const renderCard = (node: BoardNode) => {
     const { task, issue } = node
-    const parked = isParkedQueued(task)
+    const navigationOnly = task.id.startsWith('meeting:')
+    const meeting = navigationOnly ? meetings.find((item) => meetingRootId(item.id) === task.id) : undefined
+    const parked = !navigationOnly && isParkedQueued(task)
     const kind = boardCardKind(task, issue, goalIssues, meetingIssues)
     const workers = descendants(node)
     const done = workers.filter((child) => child.task.status === 'done').length
     const open = filtering || expanded.has(task.id)
     return <article key={task.id} className={`board-card issue-card kind-${kind} status-${task.status}${parked ? ' is-parked' : ''}${draggingTask === task.id ? ' is-dragging' : ''}`} data-card-kind={kind} data-task-id={task.id}
       onClick={(event) => { if (!(event.target as HTMLElement).closest('button, a, input, select')) onOpen(task.id) }}
-      onContextMenu={(event) => { if (!issue) return; event.preventDefault(); event.stopPropagation(); setMenu({ id: task.id, x: Math.min(event.clientX, window.innerWidth - 190), y: Math.min(event.clientY, window.innerHeight - 310) }) }}
-      draggable={!!issue} onDragStart={(event) => { setDraggingTask(task.id); event.dataTransfer.setData('text/task-id', task.id); event.dataTransfer.effectAllowed = 'move' }} onDragEnd={() => { setDraggingTask(null); setDropTarget(null) }}>
+      onContextMenu={(event) => { if (!issue || navigationOnly) return; event.preventDefault(); event.stopPropagation(); setMenu({ id: task.id, x: Math.min(event.clientX, window.innerWidth - 190), y: Math.min(event.clientY, window.innerHeight - 310) }) }}
+      draggable={!!issue && !navigationOnly} onDragStart={(event) => { if (navigationOnly) { event.preventDefault(); return }; setDraggingTask(task.id); event.dataTransfer.setData('text/task-id', task.id); event.dataTransfer.effectAllowed = 'move' }} onDragEnd={() => { setDraggingTask(null); setDropTarget(null) }}>
       <div className="board-card-head"><span className="issue-identifier">{issue?.identifier ?? task.id}</span>{issue && <IssueIdChip id={issue.id} />}{issue && issue.priority !== 'none' && <span className={`badge board-priority priority-${issue.priority}`}>{PRIORITY_LABELS[issue.priority]}</span>}</div>
       <button className="board-card-open" onClick={() => onOpen(task.id)} title={task.prompt.slice(0, 120)}><span className="board-card-title">{issue?.title ?? task.title}</span></button>
-      <div className="board-card-tags"><span className="board-kind-badge">{KIND_LABELS[kind]}</span>{parked && <span className="badge badge-parked">{PARKED_QUEUED_LABEL}</span>}{task.status === 'running' && <span className="board-running-label">运行中</span>}{issue?.labels.filter((label) => label !== '委派').slice(0, 2).map((label) => <span className="badge badge-meta" key={label}>{label}</span>)}</div>
+      <div className="board-card-tags"><span className="board-kind-badge">{KIND_LABELS[kind]}</span>{meeting && <span className="badge badge-meta" title={meetingPresentation(meeting).detail}>{meetingPresentation(meeting).label}</span>}{parked && <span className="badge badge-parked">{PARKED_QUEUED_LABEL}</span>}{!meeting && task.status === 'running' && <span className="board-running-label">运行中</span>}{issue?.labels.filter((label) => label !== '委派').slice(0, 2).map((label) => <span className="badge badge-meta" key={label}>{label}</span>)}</div>
       <div className="board-card-meta"><span className="badge board-backend">{task.backend}</span><span className="board-elapsed" title="执行耗时">{elapsed(task, now)}</span><time className="board-updated" dateTime={new Date(updatedAt(node)).toISOString()} title={new Date(updatedAt(node)).toLocaleString()}>{relativeBoardTime(updatedAt(node), now)}</time></div>
       {parked && <button className="btn board-card-start" disabled={starting === task.id} onClick={() => void startTask(task.id)}>▶ 启动</button>}
       {workers.length > 0 && <section className="board-workers">
@@ -320,6 +345,7 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
       <span className="board-retention-note" title="日期按 Issue 最后更新时间归类；仅清理超过30天、全部执行终结且无活跃目标/会议绑定的 Issue">按最后更新时间 · 终态保留 30 天</span>
     </div>
     {issuesError && <div className="data-state-banner data-state-stale" role="status"><CircleAlert size={14} /><span>{issuesLoaded ? '显示上次成功的 Issue 快照：' : '看板加载失败：'}{issuesError}</span><button className="btn" type="button" onClick={() => void refreshIssues()} disabled={loading}><RefreshCw size={13} className={loading ? 'spin' : ''} /> 重试</button></div>}
+    {meetingsError && <div className="data-state-banner" role="status"><span>会议目录读取失败：{meetingsError}</span><button className="btn" onClick={() => void refreshMeetings()}>重试会议</button></div>}
     <div className="board-day-head" data-day-key={selectedDay == null ? 'all' : boardDayKey(selectedDay)}>
       <span className="board-day-head-date">{selectedDay == null ? '最后更新：全部日期（30 天保留窗）' : `最后更新：${formatBoardDay(selectedDay, todayFloor)}`}</span>
       <span className="board-day-head-count">{loading ? '正在读取最新状态…' : dayTotal > 0 ? `共 ${dayTotal} 个 Issue` : selectedDay == null ? BOARD_EMPTY_ALL_HINT : BOARD_EMPTY_DAY_HINT}</span>

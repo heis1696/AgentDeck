@@ -11,7 +11,7 @@
 export const STANCE_MARK = '<stance verdict="agree" grounds="一句话依据"/>'
 
 /** 表态的三值。取值在属性位置只示范 agree：其余两个在此列举，避免占位符被照抄 */
-export const STANCE_MEANING = `表态针对「汇报人的方案能否作为本次会议结论」：verdict 取 agree（能）／disagree（不能，应有已提出、仍未解决的反对）／abstain（信息不足、无法判断）；grounds 写一句话依据。`
+export const STANCE_MEANING = `表态针对「当前最新方案能否作为本次会议结论」，综合后针对最终纪要而非最初汇报：verdict 取 agree（能，且你提出的反对均已解决）／disagree（不能，应有已提出、仍未解决的反对）／abstain（信息不足、无法判断）；grounds 写一句话依据。`
 
 /** 纪要 JSON 实例（答辩/综合/强制综合共用这一处；parseEnvelope 校验同一形状）。
  *  **必须是空数组实例**：属性位置给非空示例时，模型会把示例内容当真实条目照抄进纪要——
@@ -21,7 +21,7 @@ export const STANCE_MEANING = `表态针对「汇报人的方案能否作为本�
 export const ENVELOPE_SCHEMA = '{"decisions":[],"objections":[],"actionItems":[],"openQuestions":[]}'
 
 /** 纪要各字段的形状说明（与 parseEnvelope 的校验一致；三轮共用，避免形状定义漂移） */
-export const ENVELOPE_FIELDS = '字段形状：decisions 是字符串数组（每条一句话的已成立共识）；objections 是对象数组，每项含 text（反对原文）、ref（反对出处）、resolved（布尔，是否已解决）、可选 resolution（怎么解决的）；actionItems 是对象数组，每项含 title、owner（队长名）、acceptance（字符串数组，可验证的验收条件）；openQuestions 是字符串数组。没有内容的字段给空数组。'
+export const ENVELOPE_FIELDS = '字段形状：decisions 是字符串数组（每条一句话的已成立共识）；objections 是对象数组，每项含可选 id（公共登记已有反对的稳定 ID，不自行编造）、text（反对原文）、ref（反对出处）、resolved（布尔，是否已解决）、可选 resolution（怎么解决的）；actionItems 是对象数组，每项含 title、owner（队长名）、acceptance（字符串数组，可验证的验收条件）；openQuestions 是字符串数组。没有内容的字段给空数组。'
 
 /**
  * 会议优先（与会队长同时持有日常协议与会议协议，回合结束方式必须显式仲裁，否则日常协议会劫持收尾——
@@ -61,21 +61,37 @@ const ownerRule = (owners: string[]) => owners.length ? `- actionItems 的 owner
 const stanceTail = `表态说明（仅供理解，不要照抄这一行）：${STANCE_MEANING}\n照下面这个形式写，只把 verdict 与 grounds 换成本回合的实际情况：\n${STANCE_MARK}`
 
 /** 汇报轮：汇报人对议题给出判断、依据与建议 */
-export function reportPrompt(chairNotesPrefix: string, round: number, topic: string, investigators: string[]): string {
+export function reportPrompt(chairNotesPrefix: string, round: number, topic: string, investigators: string[], previousData = ''): string {
   return `${chairNotesPrefix}${meetingPriority(investigators)}【系统·会议·第 ${round} 轮/汇报轮】议题：${topic}
+${previousData}
 你是汇报人。请给出你对议题的判断、依据（尽量给出处：文件:行号、数据、文档）和建议方案。
+公共上下文由宿主按版本统一装配，包含历史来源、最新完整修订和用户要求；不要依赖平台私有会话或把旧摘要当成最新方案。如有上一轮纪要，先回应未决反对和其他人的意见，说明方案作了哪些调整，不要从头重复原来的汇报。
 ${stanceTail}`
 }
 
-/** 质疑轮：质疑者只针对汇报条目提反对（≤3 条、最关键的一条标 high、ref 必填；没有实质问题可以不提） */
+const challengeRules = `
+- 每次发言最多 3 条；没有实质问题就不提，直接表态 agree。本次发言被接受登记的只有前 3 条，多余的会静默丢弃——要提 4 条以上时，把最贴近的并进前 3 条。
+- 反对写法：<objection ref="实际出处" priority="high">缺陷与修正方向</objection>。上例只示范格式，不要把它抄进你的回复——解析器认的是你写的真实 ref。
+- 复提已有反对时，在标记增加 id 属性并复制公共登记里的稳定 ID；新反对不要自行编号。
+- ref 必填且要真实：指向代码写「文件:行号」，指向汇报论点写「汇报·第 N 点」或论点里的关键短语。
+- 最关键的 1 条加 priority="high"，其余不写 priority 属性；多条标 high 时只有第一条保留为 high，其余会被记为普通反对。`
+
 export function challengePrompt(chairNotesPrefix: string, round: number, topic: string, reportData: string, investigators: string[]): string {
   return `${chairNotesPrefix}${meetingPriority(investigators)}【系统·会议·第 ${round} 轮/质疑轮】议题：${topic}
 ${reportData}
-你是质疑人，只针对上面汇报里的具体内容提反对：
-- 每轮最多 3 条；没有实质问题就不提，直接表态 agree。被接受登记的只有前 3 条，多余的会静默丢弃——要提 4 条以上时，把最贴近的并进前 3 条。
-- 反对写法：<objection ref="实际出处" priority="high">缺陷与修正方向</objection>。上例只示范格式，不要把它抄进你的回复——解析器认的是你写的真实 ref。
-- ref 必填且要真实：指向代码写「文件:行号」，指向汇报论点写「汇报·第 N 点」或论点里的关键短语。
-- 最关键的 1 条加 priority="high"，其余不写 priority 属性；多条标 high 时只有第一条保留为 high，其余会被记为普通反对。
+你是质疑人，请针对最新方案里的具体内容提反对，并回应前面与会者的意见，不要只重复最初汇报：
+${challengeRules}
+${stanceTail}`
+}
+
+export function reviewPrompt(chairNotesPrefix: string, round: number, topic: string, discussionData: string, investigators: string[], stage: 'defense' | 'minutes'): string {
+  return `${chairNotesPrefix}${meetingPriority(investigators)}【系统·会议·第 ${round} 轮/质疑轮·${stage === 'defense' ? '答辩复核' : '最终纪要确认'}】议题：${topic}
+${discussionData}
+${stage === 'defense' ? '请逐条复核最新答辩和修订方案，回应其他人的意见。汇报人的 resolved=true 只是解决提议，不代表你的反对已经被关闭。' : '请检查最终纪要是否忠实反映讨论，以及决策和行动项是否成立。你之前同意汇报不等于同意这份纪要，必须重新表态。'}
+- 最终纪要确认针对公共上下文 draft.version 指定的唯一纪要；若修改决策或行动项，请输出一份完整新纪要 JSON，任何修改都会使所有旧确认失效。只讨论而不修改时无需重发 JSON。
+- 仍不认可的反对保留原来的稳定 id、ref 和 text，说明答辩缺在哪里；也可以针对最新内容提出新的反对。
+- 只有你提出的反对全部得到解决且没有新的反对时才表态 agree，系统才会确认关闭你自己的反对；其他人无权替你关闭。
+${challengeRules}
 ${stanceTail}`
 }
 
@@ -84,10 +100,11 @@ export function defensePrompt(chairNotesPrefix: string, round: number, topic: st
   return `${chairNotesPrefix}${meetingPriority(investigators)}【系统·会议·第 ${round} 轮/答辩轮】议题：${topic}
 ${objectionData}
 你是汇报人，请逐条回应上面的反对：接受的，在纪要里标 resolved=true 并在 resolution 写明具体改法；不接受的，标 resolved=false 并给出反驳依据。
+回应其他与会者的不同意见，给出修订后的完整方案。resolved=true 仅是你的解决提议，之后由提出反对的人复核确认，不要宣布对方已经同意。
 然后输出纪要 JSON（用 \`\`\`json 代码块包裹）。下面是空骨架，只示范字段与形状，**不要照抄它的内容**；按本回合的实际情况逐字段填写：
 ${ENVELOPE_SCHEMA}
 ${ENVELOPE_FIELDS}
-- objections 每条的 ref 和 text 照抄上面每行里方括号内的 ref 与方括号后的反对原文：ref 是方括号里面的字符串本身，**不要带上方括号**；也不要写行首的 obj_ 编号（系统按 ref 或 text 原文匹配，抄错就对应不上、该反对永远算未解决）。
+- objections 每条的 ref 和 text 照抄上面每行里方括号内的 ref 与方括号后的反对原文：ref 是方括号里面的字符串本身，**不要带上方括号**；已有反对在 id 字段复制公共登记中的稳定 ID，不要自行重编号；ref 和 text 仍须保留原文，以兼容没有编号的旧记录。
 ${ownerRule(owners)}
 ${stanceTail}`
 }
@@ -96,7 +113,7 @@ ${stanceTail}`
 export function synthPrompt(chairNotesPrefix: string, round: number, topic: string, resolutionData: string, investigators: string[], owners: string[]): string {
   return `${chairNotesPrefix}${meetingPriority(investigators)}【系统·会议·第 ${round} 轮/综合轮】议题：${topic}
 ${resolutionData}
-反对已经全部解决（或本来就没有）。你是设计人，请把本轮共识固化为最终纪要 JSON（用 \`\`\`json 代码块包裹）：decisions 收录已成立的共识；actionItems 写标题、owner 和可验证的验收条件；没解决的问题放进 openQuestions；objections 给空数组。
+你是设计人，请基于完整讨论和已经复核的答辩，把本轮共识固化为最终纪要 JSON（用 \`\`\`json 代码块包裹）：decisions 收录已成立的共识；actionItems 写标题、owner 和可验证的验收条件；没解决的问题放进 openQuestions。不要遗漏汇报的方案，也不要自行新增未经讨论的共识；如果发现新的实质问题，写入 objections 并表态 disagree，不能假定反对已经清零。纪要还要由其他与会者重新确认。只能输出一份权威纪要 JSON，不要先给旧稿再给新稿或输出多份候选；歧义输出不会被采纳。
 ${ENVELOPE_SCHEMA}
 ${ENVELOPE_FIELDS}
 ${ownerRule(owners)}

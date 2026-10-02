@@ -421,14 +421,14 @@ section('结构回归：导入环 / DOM 事件 / pet 路由')
   ok(/const closeTab = \(index: number\)/.test(sideDock) && /focusTab\(next\.id\)/.test(sideDock), 'SideDock 关页签（Delete）后焦点交给接棒页签')
 
   // App 页签条：与 openTask 同源的过滤
-  ok(/rootTabsOf\(tasks, tabs\)/.test(app) && /<TabBar tabs=\{rootTabs\}/.test(app), 'App 页签条用 rootTabsOf 过滤（与 openTask 路由同源）')
+  ok(/rootTabsOf\(catalog, tabs\)/.test(app) && /meetingNavigationCatalog\(/.test(app) && /<TabBar tabs=\{rootTabs\}/.test(app), 'App 页签条用统一公开目录的 rootTabsOf 过滤（与 openTask 路由同源）')
   ok(!/tabs\.filter\(\(id\) => !tasks\.find/.test(app), 'App 不再按 parentTaskId 一刀切过滤页签（断裂祖先任务被藏掉的根因）')
 
   // 目录就绪门控与草稿创建后的导航（本轮 Review Follow-up：先见目录再路由 + 防刷新乱序）
   const apiSource = read('src/renderer/src/api.ts')
   const dataStoreSource = read('src/renderer/src/data-store.ts')
   const center = read('src/renderer/src/ui/interaction-center.ts')
-  ok(/if \(ready\) ui\.setTasks/.test(app) && /waitForTaskListed/.test(app), 'App 只在目录就绪后喂目录；草稿创建后等目录可见再导航')
+  ok(/if \(ready\) ui\.setTasks\(catalog\)/.test(app) && /waitForTaskListed/.test(app) && /await refreshMeetings\(\)/.test(app) && /data-meetings-retry/.test(app), 'App 按任务目录就绪喂统一目录，会议失败不阻断普通任务；草稿等统一目录可见再导航')
   ok(/seq !== readSeq/.test(dataStoreSource) && /for \(const op of replay\) apply\(op/.test(dataStoreSource), '读竞态由 data-store 单调序号兜底：先发后至的旧快照整份作废，读期间广播按到达序重放')
   ok(/store\.upsert\(task\)/.test(apiSource) && !/onUpdated\(\(\) => \{? ?void refresh|onUpdated\(\(\) => refresh/.test(apiSource), 'useTasks 广播增量落位（稳态零全量重拉），全量快照只在装载/显式刷新')
   ok(/right\.createdAt - left\.createdAt/.test(apiSource), 'useTasks 增量按 createdAt 降序落位（与主进程 tasks.list 同序）')

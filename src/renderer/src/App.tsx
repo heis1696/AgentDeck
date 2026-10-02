@@ -23,6 +23,10 @@ import { PetStage } from './pet/PetStage'
 import { PetSettingsPage } from './pet/PetSettingsPage'
 import type { Task } from '../../shared/types'
 import { extendRecentWorkspaces, pushRecentWorkspace } from '../../shared/path-key'
+import { publicTasksOf } from '../../shared/task-visibility'
+import { useMeetings } from './hooks/useMeetings'
+import { MeetingDetail } from './components/meeting/MeetingDetail'
+import { isMeetingInternalTask, meetingForNavigation, meetingNavigationCatalog, meetingNavigationEntries, meetingNavigationTasks, meetingRootId } from './components/meeting/meetingViewState'
 
 type View = UiView
 /** 最近工作区列表的上限（切换器下拉里展示） */
@@ -37,10 +41,25 @@ export function App() {
   const { tasks, refresh, ready, error: tasksError } = useTasks()
   const { settings, update } = useSettings()
   const { issues } = useIssues()
+  const { meetings, ready: meetingsReady, error: meetingsError, refresh: refreshMeetings } = useMeetings()
+  const navigationEntries = useMemo(() => meetingNavigationEntries(tasks, meetings, issues), [tasks, meetings, issues])
   // 界面交互状态（视图/页签/面板/设置分区）全部来自交互中心：宿主只订阅，不再各持一份
   const view = useInteractionSelector((state) => state.view)
   const activeId = useInteractionSelector((state) => state.activeId)
   const tabs = useInteractionSelector((state) => state.tabs)
+  const unresolvedMeetingTabs = meetingsReady ? '' : tabs.filter((id) => id.startsWith('meeting:')).join('\n')
+  const navigationTasks = useMemo(() => {
+    const listed = meetingNavigationTasks(tasks, meetings, issues)
+    if (meetingsReady) return listed
+    const knownIds = new Set(listed.map((task) => task.id))
+    const unresolved = [...new Set([...unresolvedMeetingTabs.split('\n'), ...ui.tasks().map((task) => task.id)])].filter((id) => id.startsWith('meeting:') && !knownIds.has(id))
+    return [...listed, ...unresolved.map((id): Task => ({
+      id, title: ui.tasks().find((task) => task.id === id)?.title ?? '会议目录待加载',
+      prompt: '', workdir: '', backend: 'meeting', status: 'queued', createdAt: 0, eventCount: 0,
+      meetingId: id.slice('meeting:'.length), meetingTaskRole: 'container'
+    }))]
+  }, [tasks, meetings, issues, meetingsReady, unresolvedMeetingTabs])
+  const catalog = useMemo(() => meetingNavigationCatalog(navigationTasks.filter((task) => !meetings.some((meeting) => task.id === meetingRootId(meeting.id))), meetings, issues), [navigationTasks, meetings, issues])
   const paletteOpen = useInteractionSelector((state) => state.paletteOpen)
   const settingsSection = useInteractionSelector((state) => state.settingsSection)
   const [workspaceDir, setWorkspaceDir] = useState(() => localStorage.getItem('agentdeck:workspace-dir') ?? '')
@@ -52,11 +71,12 @@ export function App() {
       return Array.isArray(stored) ? extendRecentWorkspaces([], stored, MAX_RECENT_WORKSPACES) : []
     } catch { return [] }
   })
-  const selected = tasks.find((task) => task.id === activeId) ?? null
+  const selected = navigationTasks.find((task) => task.id === activeId) ?? null
+  const selectedMeeting = meetingForNavigation(activeId ?? '', tasks, meetings)
   // 顶部页签条只列「普通页签」：子任务（祖先链完整）在领队详情的右侧分页里。
   // 判定与 openTask 的路由同源（rootTabsOf）：祖先链断裂的任务是普通页签，不能再按
   // parentTaskId 一刀切过滤——那会把它们从页签条上藏掉，只剩一个看不见的激活项。
-  const rootTabs = useMemo(() => rootTabsOf(tasks, tabs), [tasks, tabs])
+  const rootTabs = useMemo(() => rootTabsOf(catalog, tabs), [catalog, tabs])
 
   useEffect(() => {
     const theme = settings?.theme ?? 'light'
@@ -70,11 +90,14 @@ export function App() {
   // 首份真实列表到达前不喂（ready 门控）：启动瞬间的空目录是「未加载」不是「没有任务」，
   // 喂进去会把待决路由乐观页签全部剪掉。
   useEffect(() => {
-    if (ready) ui.setTasks(tasks.map((task) => ({ id: task.id, title: task.title, parentTaskId: task.parentTaskId })))
-  }, [tasks, ready])
+    if (ready) ui.setTasks(catalog)
+  }, [catalog, ready])
   useEffect(() => { if (tasksError) ui.toast.error(`读取任务失败：${tasksError}`) }, [tasksError])
 
-  const openTask = (id: string) => { ui.openTask(id) }
+  const openTask = (id: string) => {
+    const meeting = meetingForNavigation(id, tasks, meetings)
+    ui.openTask(meeting ? meetingRootId(meeting.id) : id)
+  }
   /** 草稿创建只广播 Issue 更新，必须把新任务写入页面目录后再导航。 */
   const openCreatedTask = async (id: string) => {
     await waitForTaskListed(id)
@@ -83,7 +106,12 @@ export function App() {
       ui.toast.error('任务已创建，目录暂未刷新，请稍后从看板打开')
       return
     }
-    ui.setTasks(list)
+    const latestMeetings = await refreshMeetings()
+    if (!latestMeetings && list.find((task) => task.id === id)?.meetingId) {
+      ui.toast.error('会议已创建，会议目录暂未刷新，请重试打开')
+      return
+    }
+    ui.setTasks(meetingNavigationCatalog(list, latestMeetings ?? meetings, issues))
     ui.openTask(id)
   }
   /** Ctrl+N/侧栏「新建任务」：导航到 Issue 主页（新建表单即主页主体）并请求聚焦输入框 */
@@ -141,7 +169,7 @@ export function App() {
     ...[['Issue', navIssues], ['看板', () => nav('board')], ['Agent 管理', () => nav('agents')], ['自动化', () => nav('automation')], ['扩展', () => nav('skills')], ['用量', () => nav('usage')], ['设置', () => openSettings('general')], ['设置 · 运行时', () => openSettings('runtime')]].map(([label, run]) => ({ id: String(label), group: '跳转', label: String(label), run: run as () => void })),
     { id: 'new', group: '操作', label: '新建任务', hint: 'Ctrl+N', run: goWorkspace },
     { id: 'theme', group: '操作', label: '切换深浅主题', run: () => void update({ theme: (settings?.theme ?? 'light') === 'dark' ? 'light' : 'dark' }) },
-    ...tasks.map((task) => {
+    ...publicTasksOf(navigationEntries).map((task) => {
       const parked = isParkedQueued(task)
       const issue = issues.find((item) => item.taskId === task.id || item.id === task.issueId)
       return {
@@ -165,7 +193,13 @@ export function App() {
         run: () => openTask(task.id)
       }
     })
-  ], [issues, tasks, settings?.theme])
+  ], [issues, navigationEntries, settings?.theme])
+
+  const detailContent = selectedMeeting
+    ? <MeetingDetail key={selectedMeeting.id} meeting={selectedMeeting} tasks={tasks} onDeleted={(id) => ui.closeTab(meetingRootId(id))} />
+    : selected?.meetingId || (selected && isMeetingInternalTask(selected)) || activeId?.startsWith('meeting:')
+      ? <div className="data-state-banner" role="status"><span>{meetingsError ? `会议目录读取失败：${meetingsError}` : meetingsReady ? '会议记录不存在，不能替换为普通任务详情。' : '正在读取会议目录…'}</span><button className="btn" onClick={() => void refreshMeetings()}>重试</button></div>
+      : selected ? <TaskDetail task={selected} tasks={tasks} onSelect={openTask} /> : null
 
   return <div className="app" data-view={view}>
     <ToastHost /><ConfirmHost /><Palette open={paletteOpen} onClose={() => ui.palette.close()} commands={commands} />
@@ -186,7 +220,8 @@ export function App() {
       <div className="sidebar-footer"><span className="connection-dot" aria-hidden="true" /> 本地引擎就绪</div>
     </aside>
     <main className="main">
-      {view === 'agents' ? <AgentsView /> : view === 'automation' ? <AutomationView /> : view === 'skills' ? <ExtensionsView /> : view === 'settings' ? <SettingsView section={settingsSection} onSection={(section) => ui.openSettings(section)} /> : view === 'usage' ? <UsageView /> : view === 'board' ? <div className="tasks-column"><PageHeader title="看板" icon={<Kanban size={16} />} actions={<button className="command-trigger" type="button" onClick={() => ui.palette.open()} title="搜索任务（Ctrl+K）" aria-label="搜索任务" aria-keyshortcuts="Control+K Meta+K"><Search size={14} /> 搜索任务 <kbd><Command size={10} /> K</kbd></button>} /><BoardView tasks={tasks} onOpen={openTask} /></div> : view === 'detail' && selected ? <div className="tasks-column detail-page"><Chrome title={selected.title} onBack={() => ui.navigate('issues')} />{rootTabs.length > 0 && <TabBar tabs={rootTabs} tasks={tasks} activeId={activeId} onSelect={openTask} onClose={(id) => ui.closeTab(id)} />}<TaskDetail task={selected} tasks={tasks} onSelect={openTask} /></div> : <IssuesView tasks={tasks} tabs={tabs} onOpen={openTask} onClose={(id) => ui.closeTab(id)} onBrowseAll={() => ui.navigate('board')}><WorkspaceView onCreated={(task) => openCreatedTask(task.id)} workspaceDir={workspaceDir} onPickWorkspace={pickWorkspace} /></IssuesView>}
+      {meetingsError && <div className="data-state-banner" role="status"><span>会议目录读取失败，普通任务仍可使用：{meetingsError}</span><button type="button" className="btn" data-meetings-retry onClick={() => void refreshMeetings()}>重试会议目录</button></div>}
+      {view === 'agents' ? <AgentsView /> : view === 'automation' ? <AutomationView /> : view === 'skills' ? <ExtensionsView /> : view === 'settings' ? <SettingsView section={settingsSection} onSection={(section) => ui.openSettings(section)} /> : view === 'usage' ? <UsageView /> : view === 'board' ? <div className="tasks-column"><PageHeader title="看板" icon={<Kanban size={16} />} actions={<button className="command-trigger" type="button" onClick={() => ui.palette.open()} title="搜索任务（Ctrl+K）" aria-label="搜索任务" aria-keyshortcuts="Control+K Meta+K"><Search size={14} /> 搜索任务 <kbd><Command size={10} /> K</kbd></button>} /><BoardView tasks={tasks} onOpen={openTask} /></div> : view === 'detail' && (selected || selectedMeeting || activeId?.startsWith('meeting:')) ? <div className="tasks-column detail-page"><Chrome title={selected?.title ?? selectedMeeting?.topic ?? '会议'} onBack={() => ui.navigate('issues')} />{rootTabs.length > 0 && <TabBar tabs={rootTabs} tasks={navigationTasks} activeId={activeId} onSelect={openTask} onClose={(id) => ui.closeTab(id)} />}{detailContent}</div> : <IssuesView tasks={navigationEntries} tabs={tabs} onOpen={openTask} onClose={(id) => ui.closeTab(id)} onBrowseAll={() => ui.navigate('board')}><WorkspaceView onCreated={(task) => openCreatedTask(task.id)} workspaceDir={workspaceDir} onPickWorkspace={pickWorkspace} /></IssuesView>}
     </main>
   </div>
 }

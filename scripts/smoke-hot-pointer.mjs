@@ -14,17 +14,18 @@
  *   ④ 载荷 require 抛错（截断载荷 index.js，尾部追加 throw 兜底保证抛错）→ current.json.crash-<ts> 留证
  *      + 原进程退出 + 带 --agentdeck-hot-fallback 的新实例存活（§3.3 路径③：relaunch 干净重启）。
  *
- * 轮询断言：每 500ms，单场景总预算 ≤30s；结束统一杀进程（taskkill /T /F）。
+ * 轮询断言：每 500ms，单场景总预算 ≤30s；运行前绑定隔离 Job，结束核验其活动进程数为 0。
  * 任何前置缺失（非 Windows / exe 缺失 / asar 内无 bootstrap / asar main 未指向 bootstrap / out 产物缺失 /
  * src/main/hot/canonical.ts 缺失）都给出明确诊断退出，绝不静默跳过。
  */
-import { spawn, spawnSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import { build } from 'esbuild'
 import { pathToFileURL } from 'node:url'
 import path from 'node:path'
 import fs from 'node:fs'
 import os from 'node:os'
 import crypto from 'node:crypto'
+import { isolatedEnvironment, assertStartupIsolation, assertIsolatedPath, IsolatedProcessFence } from './fixtures/isolated-release-processes.mjs'
 
 const root = path.resolve(import.meta.dirname, '..')
 const EXE = process.env.SMOKE_HOT_EXE
@@ -34,8 +35,12 @@ const SCENARIO_TIMEOUT_MS = 30000
 const POLL_INTERVAL_MS = 500
 
 let failed = 0
-const spawnedPids = new Set()
 const tmpDirs = []
+let sceneRoot
+let runtimeExe
+let builtSnapshot
+let fence
+let activeChild
 function ok(cond, msg) {
   console.log(`  ${cond ? '[ok]' : '[FAIL]'} ${msg}`)
   if (!cond) failed++
@@ -176,62 +181,42 @@ async function waitFor(desc, fn, deadline) {
   return false
 }
 
-function killTree(pid) {
-  if (!pid) return false
-  const r = spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' })
-  return r.status === 0
+async function cleanupScenario(child, appData) {
+  try {
+    const evidence = await fence.cleanup(child)
+    fs.writeFileSync(path.join(appData, 'cleanup.json'), JSON.stringify(evidence, null, 2))
+  } catch (error) {
+    fs.writeFileSync(path.join(appData, 'cleanup.json'), JSON.stringify(error.cleanupEvidence, null, 2))
+    throw error
+  }
 }
 
 function listAgentDeckProcs() {
-  const exeName = path.basename(EXE)
-  const r = spawnSync(
-    'powershell',
-    ['-NoProfile', '-Command', `Get-CimInstance Win32_Process -Filter "Name='${exeName}'" | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress`],
-    { encoding: 'utf8', windowsHide: true }
-  )
-  if (r.status !== 0 || !r.stdout || !r.stdout.trim()) return []
-  let obj
-  try {
-    obj = JSON.parse(r.stdout)
-  } catch {
-    return []
-  }
-  const arr = Array.isArray(obj) ? obj : [obj]
-  return arr.filter((p) => p && p.ProcessId).map((p) => ({ pid: p.ProcessId, cmdline: String(p.CommandLine || '') }))
+  return fence.capture().filter((entry) => entry.ExecutablePath && path.resolve(entry.ExecutablePath).toLowerCase() === runtimeExe.toLowerCase()).map((entry) => ({ pid: entry.ProcessId, cmdline: String(entry.CommandLine || '') }))
 }
 
-function spawnApp(appDataDir, trustHex, extraEnv) {
-  const env = { ...process.env }
-  delete env.ELECTRON_RENDERER_URL
-  delete env.ELECTRON_RUN_AS_NODE
-  delete env.AGENTDECK_DISABLE_HOT
-  env.APPDATA = appDataDir
-  env.LOCALAPPDATA = appDataDir
-  // 连带隔离 home：应用启动期 ensureSharedDir 会写 ~/.agentdeck（app.getPath('home') ← USERPROFILE），一并圈进临时目录
-  env.USERPROFILE = appDataDir
-  env.HOME = appDataDir
+async function spawnApp(appDataDir, trustHex, extraEnv) {
+  fence.assertClean()
+  const env = isolatedEnvironment(sceneRoot, process.env, path.join(appDataDir, 'agentdeck'))
   env.AGENTDECK_HOT_TRUST_HEX = trustHex
-  // Windows 上 Electron 经系统 API 解析 appData，env APPDATA 重定向无效：
-  // 靠 bootstrap 的显式 userData 覆盖真正隔离（单实例锁也随之按 userData 隔离）
-  env.AGENTDECK_USER_DATA_DIR = path.join(appDataDir, 'agentdeck')
   Object.assign(env, extraEnv || {})
-  const child = spawn(EXE, [], { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: false })
-  child.exited = false
-  child.exitCodeSaved = null
+  fs.writeFileSync(path.join(env.AGENTDECK_USER_DATA_DIR, 'settings.json'), JSON.stringify({ sharedDir: path.join(appDataDir, 'shared'), workspaceDir: path.join(appDataDir, 'workspace'), updateFeedUrl: 'http://127.0.0.1:1' }))
+  fs.writeFileSync(path.join(appDataDir, 'isolation.json'), JSON.stringify(assertStartupIsolation(sceneRoot, runtimeExe, env), null, 2))
+  const child = await fence.launch(runtimeExe, [], { env, cwd: path.dirname(runtimeExe), stdout: path.join(appDataDir, 'app-stdout.log'), stderr: path.join(appDataDir, 'app-stderr.log') })
+  child.exited = child.exitCode !== null
+  child.exitCodeSaved = child.exitCode
   child.on('exit', (code) => {
     child.exited = true
     child.exitCodeSaved = code
   })
-  child.stdout.pipe(fs.createWriteStream(path.join(appDataDir, 'app-stdout.log')))
-  child.stderr.pipe(fs.createWriteStream(path.join(appDataDir, 'app-stderr.log')))
-  spawnedPids.add(child.pid)
+  activeChild = child
   return child
 }
 
 const isAlive = (child) => !child.exited && child.exitCode === null
 
 function mkAppData() {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-hot-smoke-'))
+  const d = fs.mkdtempSync(path.join(sceneRoot, 'scenario-'))
   tmpDirs.push(d)
   return d
 }
@@ -280,7 +265,7 @@ function truncateIndex(indexJs, ratio = 0.4) {
 function buildPayloadDir(appDataDir, productName, opts = {}) {
   const versionDir = path.join(hotAppDir(appDataDir, productName), VERSION)
   fs.mkdirSync(versionDir, { recursive: true })
-  fs.cpSync(path.join(root, 'out'), path.join(versionDir, 'out'), { recursive: true })
+  for (const entry of ['main', 'preload', 'renderer']) fs.cpSync(path.join(builtSnapshot, entry), path.join(versionDir, 'out', entry), { recursive: true })
   fs.copyFileSync(path.join(root, 'package.json'), path.join(versionDir, 'package.json'))
   fs.mkdirSync(path.join(versionDir, 'build'), { recursive: true })
   fs.copyFileSync(path.join(root, 'build', 'icon.png'), path.join(versionDir, 'build', 'icon.png'))
@@ -424,7 +409,7 @@ async function scenarioNormal(ctx) {
   const appData = mkAppData()
   const { marker } = scenarioSetup(appData, ctx.productName, { keyId: ctx.keyId, privKey: ctx.privKey, canonicalJson: ctx.canonicalJson })
   const deadline = Date.now() + SCENARIO_TIMEOUT_MS
-  const child = spawnApp(appData, ctx.trustHex, { AGENTDECK_SMOKE_MARKER: marker })
+  const child = await spawnApp(appData, ctx.trustHex, { AGENTDECK_SMOKE_MARKER: marker })
   await waitFor('① 载荷生效标记写出（载荷 main 已加载）', () => fs.existsSync(marker), deadline)
   await sleep(2000)
   ok(isAlive(child), '① 进程存活（载荷生效且未回退退出）')
@@ -432,8 +417,7 @@ async function scenarioNormal(ctx) {
   if (!fs.existsSync(marker) || !isAlive(child)) {
     console.error(`  [诊断] ① 进程${isAlive(child) ? '存活' : `已退出(码 ${child.exitCodeSaved})`}，标记${fs.existsSync(marker) ? '已写' : '未写'}；hot-app 目录: ${(() => { try { return fs.readdirSync(hotAppDir(appData, ctx.productName)).join(', ') || '(空)' } catch { return '(不存在)' } })()}\n  stderr 尾部:\n${tailOf(path.join(appData, 'app-stderr.log'))}`)
   }
-  killTree(child.pid)
-  await sleep(500)
+  await cleanupScenario(child, appData)
   return { appData, child }
 }
 
@@ -441,7 +425,7 @@ async function scenarioCorrupt(ctx) {
   const appData = mkAppData()
   const { marker } = scenarioSetup(appData, ctx.productName, { keyId: ctx.keyId, privKey: ctx.privKey, canonicalJson: ctx.canonicalJson, pointerJson: '{"schemaVersion":1,' })
   const deadline = Date.now() + SCENARIO_TIMEOUT_MS
-  const child = spawnApp(appData, ctx.trustHex, { AGENTDECK_SMOKE_MARKER: marker })
+  const child = await spawnApp(appData, ctx.trustHex, { AGENTDECK_SMOKE_MARKER: marker })
   await waitFor('② current.json.corrupt-* 留证存在', () => evidenceNames(appData, ctx.productName, 'current.json.corrupt-').length > 0, deadline)
   await sleep(2000)
   ok(isAlive(child), '② 进程存活（内置回退）')
@@ -449,8 +433,7 @@ async function scenarioCorrupt(ctx) {
   if (evidenceNames(appData, ctx.productName, 'current.json.corrupt-').length === 0) {
     console.error(`  [诊断] ② 未见 corrupt 留证。hot-app 目录内容: ${(() => { try { return fs.readdirSync(hotAppDir(appData, ctx.productName)).join(', ') || '(空)' } catch { return '(不存在)' } })()}\n  stderr 尾部:\n${tailOf(path.join(appData, 'app-stderr.log'))}`)
   }
-  killTree(child.pid)
-  await sleep(500)
+  await cleanupScenario(child, appData)
   return { appData, child }
 }
 
@@ -458,7 +441,7 @@ async function scenarioRejected(ctx) {
   const appData = mkAppData()
   const { marker, versionDir } = scenarioSetup(appData, ctx.productName, { keyId: ctx.keyId, privKey: ctx.wrongPrivKey, canonicalJson: ctx.canonicalJson })
   const deadline = Date.now() + SCENARIO_TIMEOUT_MS
-  const child = spawnApp(appData, ctx.trustHex, { AGENTDECK_SMOKE_MARKER: marker })
+  const child = await spawnApp(appData, ctx.trustHex, { AGENTDECK_SMOKE_MARKER: marker })
   await waitFor('③ current.json.rejected-* 留证存在', () => evidenceNames(appData, ctx.productName, 'current.json.rejected-').length > 0, deadline)
   await sleep(2000)
   ok(isAlive(child), '③ 进程存活（内置回退）')
@@ -471,8 +454,7 @@ async function scenarioRejected(ctx) {
   if (evidenceNames(appData, ctx.productName, 'current.json.rejected-').length === 0) {
     console.error(`  [诊断] ③ 未见 rejected 留证（若为"未知 keyId"类拒绝，检查 src/main/hot/trust.ts 是否支持 AGENTDECK_HOT_TRUST_HEX 注入 — 本 smoke 依赖该机制；若为 minShellVersion 拒绝，检查 exe 打包版本与 manifest）\n  stderr 尾部:\n${tailOf(path.join(appData, 'app-stderr.log'))}`)
   }
-  killTree(child.pid)
-  await sleep(500)
+  await cleanupScenario(child, appData)
   return { appData, child }
 }
 
@@ -480,7 +462,7 @@ async function scenarioCrash(ctx) {
   const appData = mkAppData()
   scenarioSetup(appData, ctx.productName, { truncateIndex: true, keyId: ctx.keyId, privKey: ctx.privKey, canonicalJson: ctx.canonicalJson })
   const deadline = Date.now() + SCENARIO_TIMEOUT_MS
-  const child = spawnApp(appData, ctx.trustHex, {})
+  const child = await spawnApp(appData, ctx.trustHex, {})
   await waitFor('④ 原进程退出（relaunch 干净重启）', () => child.exited, deadline)
   ok(evidenceNames(appData, ctx.productName, 'current.json.crash-').length > 0, '④ current.json.crash-* 留证存在')
   let foundFbPid = null
@@ -496,15 +478,22 @@ async function scenarioCrash(ctx) {
   if (!child.exited) {
     console.error(`  [诊断] ④ 原进程未退出（截断载荷未触发 require 抛错？检查截断点与 bootstrap try/catch，§3.2 步骤 2）\n  stderr 尾部:\n${tailOf(path.join(appData, 'app-stderr.log'))}`)
   }
-  if (foundFbPid) killTree(foundFbPid)
-  if (!child.exited) killTree(child.pid)
-  await sleep(500)
+  await cleanupScenario(child, appData)
   return { appData, child }
 }
 
 // ---------- main ----------
 async function main() {
   const { productName } = preflight()
+  sceneRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-hot-pointer-'))
+  const appDir = path.join(sceneRoot, 'app')
+  fs.cpSync(path.dirname(EXE), appDir, { recursive: true })
+  runtimeExe = path.join(appDir, path.basename(EXE))
+  builtSnapshot = path.join(sceneRoot, 'built')
+  for (const entry of ['main', 'preload', 'renderer']) fs.cpSync(path.join(root, 'out', entry), path.join(builtSnapshot, entry), { recursive: true })
+  fence = new IsolatedProcessFence(sceneRoot)
+  fence.assertClean()
+  console.log('Isolated pointer scene: ' + sceneRoot)
 
   // 临时密钥对（每次运行新生成；错密钥场景用第二把）
   const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519')
@@ -545,21 +534,25 @@ async function main() {
       console.error(`  [FAIL] ${s.name} 抛错: ${e && e.stack ? e.stack : e}`)
       failed++
     }
+    if (fence.blocked) {
+      console.error('Cleanup unconfirmed; subsequent scenarios prohibited')
+      break
+    }
+    try { await fence.cleanup(activeChild) }
+    catch (error) { failed++; console.error(error); break }
   }
 
-  // 结束统一杀进程（含 ④ 遗留 fallback 实例兜底清扫）
-  for (const pid of spawnedPids) killTree(pid)
-  for (const p of listAgentDeckProcs()) {
-    if (p.cmdline.includes('--agentdeck-hot-fallback')) killTree(p.pid)
-  }
-  await sleep(500)
+  if (!fence.blocked) fence.assertClean()
 
   if (failed > 0) {
     console.error(`\n[FAIL] SMOKE HOT POINTER FAILED (${failed} 项断言失败)。现场（APPDATA 临时目录/日志）保留于:`)
     for (const d of tmpDirs) console.error(`  ${d}`)
     process.exit(1)
   }
-  for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true })
+  if (process.env.SMOKE_HOT_KEEP_SCENE !== '1') {
+    assertIsolatedPath(os.tmpdir(), sceneRoot)
+    fs.rmSync(sceneRoot, { recursive: true, force: true })
+  }
   console.log('\n[ok] SMOKE HOT POINTER: 4/4 场景全绿（§3.3 三失败路径 + 正常路径）')
 }
 

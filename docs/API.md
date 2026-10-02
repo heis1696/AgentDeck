@@ -649,3 +649,56 @@ usage、`session.error`、compaction/fork 状态是 durable 事件。若 server 
 - resume 必须带 `runtimeModel`（模型注册表快照，从 cli config 构造：`{revision, generatedAt, model, provider}`，provider.apiKey 为 `{source:'inline', value}` 形状），否则后续 send 报 `ZCODE_RUNTIME_MODEL_UNAVAILABLE`
 - 事件：`session/event`（`model.streaming` 的 `text_delta`/`tool_input_*`、`tool.updated` 的 `started/result`、带 `response+usage` 的回合终态——每回合两种终态取首个完整版）、`state.updated`（idle↔running）、`v4/telemetry/event`（备用终态）
 - 防护：单回合文本 > 300KB 判定模型退化循环，强制 stop 并截断收尾
+
+## 8. 会议执行归属与生命周期（阶段 1 源码增补）
+
+本节描述会议改造阶段 1 的源码行为，不表示已安装版本已经更新。完整公开发言分页接口与独立会议页面分别在阶段 2、3 实施；当前 `meetings:create` 与 `meetings:start` 仍是分开的调用，默认创建即启动的交互将在页面阶段接入。
+
+- 会议使用一个公开 Issue。新建且未执行过的泊靠任务可成为 `containerTaskId`，其状态由会议控制器镜像，不能进入普通 assignment 执行；附着到已有 Issue 的会议不取得整个 Issue 的独占删除权。
+- 内部任务带可信的 `meetingId`、`meetingTaskRole`（`member` 或 `investigation`），并设置 `suppressIssue`。这些字段由宿主写入，公共任务创建 DTO 不接受调用方伪造；`parentTaskId` 继续表示委派/调查关系。
+- `meetings:cancel` 异步等待整场会议的成员、调查、启动竞态与平台会话退出。返回 `ok: false` 表示退出尚未确认，会议保留 `stopState: failed` 和错误原因，任务与日志不删除；再次调用可重试。
+- `meetings:delete` 先持久化删除意图，再完成停止屏障，最后回收所属任务、日志、工作树及带可信会议来源的评论。只有 `ownsIssue` 的会议才删除整个 Issue；失败保留诊断记录，重启恢复未完成删除。重复删除已不存在的会议返回成功。
+- 普通任务 IPC 的启动/重试、取消、删除及续聊入口遇到会议容器时转交会议控制器；成员任务不能通过普通 IPC 单独重启或删除。会议 Issue 的评论不会额外触发普通 assignment。
+- `sessionTaskId` 表示本会议内的成员会话；历史 `officeTaskId` 保持原语义，不能据此收养或清理独立咨询办公室。批准的行动项创建独立 Issue，不属于会议内部删除范围。
+
+验证入口：`npm run smoke:meeting-lifecycle`、`npm run smoke:meeting-termination`、`npm run smoke:meeting-office`；既有会议、调查与咨询套件继续保留。
+
+### 8.1 公开事实源与增量读取（阶段 2）
+
+`AgentDeckApi.meetings` / `bridge.meetings` / `meetingPublicApi` 增加：
+
+| IPC / preload 方法 | 输入 | 返回 |
+| --- | --- | --- |
+| `meetings:read-turns` / `readTurns` | meetingId, `{ afterSequence?, afterVersion?, limit?, cursor? }` | `{ meetingId, turns, latestVersion, hasMore, nextCursor? }` |
+| `meetings:get-turn` / `getTurn` | meetingId, turnId | 完整 `MeetingTurnDetail` 或 null |
+| `meetings:member-executions` / `memberExecutions` | meetingId, agentId | 本会议成员会话、逐发言 Run/执行 Turn 链接及其内部后代，非成员返回 null |
+| `meetings:retry-mirrors` / `retryMirrors` | meetingId | 镜像重试结果，不触发普通 agent 执行 |
+
+- 占位先落盘，随后更新同一稳定 ID；`sequence` 用于排序，`version` 为会议级变更水位，`publicVersion` 仅在正式正文或主席要求发布时推进。`meetings:updated` 只带轻量会议状态及 `turnVersion`/`publicVersion`，不广播正文。
+- 页内按稳定序号排序，正文和完整 `delivery` 仅在详情/分页读取时附带；默认每页 200，IPC limit 范围 1–500。cursor 校验所属会议并固定该次读取的 `latestVersion`；读完全部页后再推进本地水位。
+- 追加读取可以用 `afterSequence`；重连/状态更新必须独立用 `afterVersion`，不要再加旧序号下界，否则会排除较早气泡的完成/失败更新。分页期间变更到快照水位之外的记录由下一次 `afterVersion: latestVersion` 追回；客户端按 ID 覆盖合并，不追加重复气泡。
+- `body` 是完整正式输出；旧记录正文不足时为 undefined，不用 summary 冒充；损坏或正文/索引事务不一致时返回 `bodyError`。旧记录版本/序号可缺省为 0，必须先全量分页初始化，再增量订阅。
+- `speaker` 固定姓名/会议角色/平台快照；`sessionTaskId`、`runId`、`executionTurnId` 指向该次执行。`delivery` 留存输入公共版本、来源范围、主席要求、保护范围、逐来源压缩/省略长度和全部执行尝试。`prepared` 不等于派发，`dispatched` 不等于成功响应；`accepted` 才表示该次输入获得成功正文。重连后最后一次真实执行身份对应正文，失败尝试仍可审计。
+- 发言元数据在 `meetings/index.json`（兼容 schema 1），正文/完整投递审计在 `meetings/bodies/<meetingId>/<turnId>.json`（独立 schema 1）。原子恢复日志先发布再替换详情，索引保存稳定 `bodyVersion` 提交标识；日志清理失败不会回滚已提交正文，损坏日志隔离留证而不阻断其他会议。
+- 评论镜像有可信 `meetingId` + `sourceTurnId`；跨进程存储事务按来源去重，最多镜像 4000 字兼容摘要并注明完整正文入口。镜像写失败可独立重试，不影响事实源、不复活普通 assignment。
+
+自动验证：`smoke:meeting-public-store`、`smoke:meeting-public`、`smoke:meeting-public-ipc`（均纳入 `smoke:all`）。真实联调显式运行 `npm run smoke:meeting-real -- --backend codex --run-real`（或 `claude`），默认仅探测，不纳入自动全量冒烟。Codex 仅向临时 `CODEX_HOME` 复制所选模型/提供方路由及必要认证，使用 read-only 沙箱、临时会话，禁用 shell/browser/plugins/MCP 等能力并拒绝观测到的非文本工具项；Claude 移除权限绕过和 resume，强制空工具/MCP、禁用 hooks/skills，并核验每次调用的工具目录为空。两者逐回合保留宿主完整公共输入，不伪装 provider 会话恢复；临时 workdir 不等于 OS 读权限沙箱，不访问生产会议、不更新安装程序。失败、预算耗尽与超时仍失败，未确认退出时保留夹具证据。
+
+### 8.2 独立会议页面与执行日志（阶段 3）
+
+- 公开页面使用 `meeting:<meetingId>` 稳定界面根；会议容器、专属 Issue、会议 ID 与旧容器别名汇入同一根。界面目录别名不改持久 Task 的父子关系、不创建执行任务，也不会把合成 ID 送入普通任务操作。`ownsIssue:false` 的附加会议只走显式会议入口，不取代普通 Issue。
+- `MeetingTurnsController` 首次读取全量固定水位分页，全部页面成功后原子提交；随后仅按 `afterVersion` 增量读取，按稳定发言 ID 与版本合并。分页失败保留成功记录和水位，不降级解析兼容评论标题。
+- 所选发言通过 `getTurn` 的 `sessionTaskId/officeTaskId`、`runId`、`executionTurnId` 定位。缺失任一执行身份或任务记录时明确显示缺失；不以成员当前 Task/Run 或时间范围推断替代。内部调查的所选 Run 来自 `memberExecutions`，只在该 Run 与任务快照精确匹配时使用任务状态、起止时间和错误；单个回合 `final` 不证明整个 Run 结束。
+- `TaskEvent.execution?: { runId, turnId }` 是会议回调事件的宿主身份戳：`TaskRunner.makeTurnEvents` 捕获本次 Run/Turn，并覆盖提供方同名字段。会议只读 `WorkerPane` 仅显示精确范围内的事件；旧日志仅认可确切宿主 `agentdeck:batch:<Turn>:<数字>` 身份，未能验证的事件隐藏并提示，不按时间或最新任务信息兜底。Run-only 不接纳仅有 Turn 身份的旧事件。
+- 会议目录失败不阻断普通任务拓扑及内部 focus 隔离；宿主显示可重试错误并保留尚未解析的会议入口。旧的 `suppressIssue:true + trigger:meeting` 调查在导航中隐藏，但不据此推断归属，也不一刀切屏蔽独立咨询办公室。
+- 只读成员/调查分栏隐藏普通任务停止、完整任务导航、权限审批和回退；历史工具预览只读事件快照，不读取当前 worktree diff。固定/跟随状态按会议保存，关闭侧栏后广播和迟到响应不能重开。
+
+自动页面回归：`smoke:meeting-ui-data`、`smoke:meeting-navigation`、`smoke:worker-meeting-execution`、`smoke:ui-meeting-detail` 已纳入 `smoke:ui`，随 `smoke:all` 执行。`smoke:ui-meeting-browser` 使用真实 renderer/CSS、人工 API 夹具与独立临时 Edge profile 做明暗和窄窗验证，不连接 Electron 或生产数据，不调用真实模型；该平台相关专项不纳入无浏览器环境的自动全量串。
+
+
+## 9. 会议历史水位与迁移失败语义（阶段 4）
+
+- 历史水位 0 是有效数据，不是尚未加载。首次读必须完成全量固定水位分页；afterVersion:0 是增量查询，不会返回缺省 version 的旧发言，不能用它代替初始化。后续增量不附旧 afterSequence 下界，稳定 ID/版本合并可接收旧发言的晚到更新。
+- 历史 get-turn/read-turns 缺正文时保持 body 缺失；summary 只是摘要，缺容器/执行关联不推断普通任务、最新 Run 或平台会话。内部执行目录保留，旧 suppressIssue 调查仍走统一可见性判断，不据此迁移可信 meetingId。
+- MeetingIndexSchemaError 表示不受支持的索引 schema；不会用旧备份覆盖。备份/迁移失败及失败 reload 的实例可读但全部写入口拒绝，正文事务也不得先落盘。排除文件故障并重新 reload 后才允许继续；现有备份不可静默覆盖。
+- 升级前索引备份位于 meetings/index.pre-migration.json，区别于随已提交状态更新的 index.json.bak。完整数据回退须另备份 userData 并校验版本语义，不能把该索引备份或 schema 1 可解析当作任意旧版可安全部署。

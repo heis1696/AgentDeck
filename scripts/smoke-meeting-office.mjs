@@ -13,7 +13,7 @@ const bundle = async (source, name) => {
   return import(pathToFileURL(outfile).href)
 }
 
-const [{ AgentSessionRegistry, OFFICE_TASK_KEY_V2_PREFIX }, { TaskStore }, { TaskService }, { TaskRunner }] = await Promise.all([
+const [{ AgentSessionRegistry, OFFICE_TASK_KEY_V2_PREFIX, officeMeetingTaskKeyCandidates }, { TaskStore }, { TaskService }, { TaskRunner }] = await Promise.all([
   bundle('src/main/agent-sessions.ts', 'agent-sessions.cjs'),
   bundle('src/main/store.ts', 'store.cjs'),
   bundle('src/main/task-service.ts', 'task-service.cjs'),
@@ -25,6 +25,21 @@ const check = (condition, label) => {
   console.log(`  ${condition ? 'OK' : 'FAIL'} ${label}`)
   if (!condition) process.exitCode = 1
 }
+const expectReject = async (promise, label, needle = '取消') => {
+  try {
+    await promise
+    check(false, `${label}（预期被拒绝，但正常返回了）`)
+  } catch (error) {
+    check(String(error).includes(needle), label)
+  }
+}
+const waitUntil = async (predicate, timeoutMs = 2_000) => {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('waitUntil 超时')
+    await sleep(5)
+  }
+}
 
 let sends = 0
 let starts = 0
@@ -32,14 +47,29 @@ let activeSends = 0
 let maxActiveSends = 0
 let serial = 0
 let notifications = 0
+const startLog = []          // 每次 backend.start 的工作目录与会话 id（会话/目录隔离断言用）
+const followUpOptsLog = []   // runner 收到的回合协议键（内部范围不得透传断言用）
+let bootstrapHold = null     // { promise, resolve }：暂扣下一次 bootstrap 首回合（取消传播断言用）
+const holdNextBootstrap = () => {
+  let resolve
+  const promise = new Promise((r) => { resolve = r })
+  bootstrapHold = { promise, resolve }
+  return () => resolve()
+}
 const backend = {
   id: 'fake-office',
   label: 'Fake office',
   supportsResume: true, // 对齐真实适配器：恢复能力声明
   async probe() { return { ok: true, detail: 'fake' } },
-  async start({ events, turn }) {
+  async start({ workdir, events, turn }) {
     starts++
-    const sessionId = 'office-session'
+    const sessionId = `office-session-${starts}`
+    startLog.push({ workdir, sessionId })
+    if (bootstrapHold) {
+      const held = bootstrapHold
+      bootstrapHold = null
+      await held.promise
+    }
     // 复用门禁（hot.7/hot.8）要求会话声明 turnScoped 且回调带回合戳，
     // 否则追问一律走 resume 重建而不是同连接 send——fixture 必须跟上契约。
     const finish = (text, stamp) => {
@@ -74,7 +104,17 @@ const agents = [
 ]
 runner.attachTeam(() => agents)
 
-const registry = new AgentSessionRegistry({ store, taskService: service, runner, getAgents: () => agents, waitPollMs: 5, waitTimeoutMs: 2_000 })
+// 注册表拿到的是 runner 代理：记录它传给 runner 回合协议的键，
+// meetingId/workdir/signal 这类内部范围漏进协议即失败。
+const runnerProxy = {
+  enqueue: (task) => runner.enqueue(task),
+  followUp: (taskId, content, opts) => {
+    followUpOptsLog.push(Object.keys(opts ?? {}).sort())
+    return runner.followUp(taskId, content, opts)
+  }
+}
+
+const registry = new AgentSessionRegistry({ store, taskService: service, runner: runnerProxy, getAgents: () => agents, waitPollMs: 5, waitTimeoutMs: 2_000 })
 const first = await registry.ensure('leader')
 check(first.status === 'done', 'office task bootstrap reaches done')
 // 断言键的**归属**（该队长的键空间）而不是字面串：键形是实现细节，语义是「一位队长一张长期单」
@@ -101,6 +141,112 @@ try {
 } catch (error) {
   check(String(error).includes('DeepSeek'), 'DSH office enrollment is rejected')
 }
+
+// ===== 阶段1：会议成员会话隔离 =====
+const workdirOf = (name) => {
+  const dir = path.join(dataDir, name)
+  fs.mkdirSync(dir, { recursive: true })
+  return dir
+}
+const workdirA = workdirOf('meeting-a')
+const workdirB = workdirOf('meeting-b')
+
+const memberA = await registry.ensure('leader', { meetingId: 'mtg_AAA', workdir: workdirA })
+check(memberA.status === 'done', 'meeting member session bootstrap reaches done')
+check(memberA.id !== first.id, 'meeting member session is not the shared office task')
+check(memberA.meetingId === 'mtg_AAA' && memberA.meetingTaskRole === 'member', 'member task carries meeting scope and member role')
+check(memberA.suppressIssue === true && memberA.officeAgentId === 'leader', 'member task stays suppressed and keeps the office protocol marker')
+check(!memberA.parentTaskId, 'member task has no parentTaskId (meeting ownership decoupled from execution parentage)')
+check(memberA.workdir === workdirA, 'member task is bound to its meeting workdir')
+check(memberA.dedupeKey === officeMeetingTaskKeyCandidates('mtg_AAA', 'leader')[0], 'member task key carries meeting and member identity')
+
+const memberA2 = await registry.ensure('leader', { meetingId: 'mtg_AAA', workdir: workdirA })
+check(memberA2.id === memberA.id, 'repeated ensure reuses one member task per meeting+agent')
+
+const memberB = await registry.ensure('leader', { meetingId: 'mtg_BBB', workdir: workdirB })
+check(memberB.id !== memberA.id && memberB.id !== first.id, 'a second meeting gets its own member session')
+check(memberB.meetingId === 'mtg_BBB' && memberB.workdir === workdirB, 'the second meeting keeps its own scope and workdir')
+
+// 会话与目录互不串：三个范围各一次独立 bootstrap，会话 id 与工作目录一一对应
+check(new Set([first.sessionId, memberA.sessionId, memberB.sessionId]).size === 3, 'office and both meetings run on distinct backend sessions')
+check(starts === 3 && startLog.filter((e) => e.workdir === workdirA).length === 1 && startLog.filter((e) => e.workdir === workdirB).length === 1, 'each scope bootstrapped exactly once in its own workdir')
+
+// 查询边界：办公室查询绝不能返回会议成员会话；会议查询只认自己的成员会话
+check(registry.get('leader')?.id === first.id, 'ordinary office lookup never returns a meeting member session')
+check(registry.get('leader', 'mtg_AAA')?.id === memberA.id && registry.get('leader', 'mtg_BBB')?.id === memberB.id, 'meeting-scoped lookup returns that meeting\'s own member session')
+check(registry.get('leader', 'mtg_MISSING') === null, 'lookup for an unknown meeting returns null')
+
+// 回合路由：taskId 回执指明发言落在哪张会话上
+const consultReply = await registry.followUp('leader', '咨询', { collectFinal: true })
+const replyA = await registry.followUp('leader', '会议A发言', { meetingId: 'mtg_AAA', collectFinal: true })
+const replyB = await registry.followUp('leader', '会议B发言', { meetingId: 'mtg_BBB', collectFinal: true })
+check(consultReply.ok && consultReply.taskId === first.id, 'office follow-up lands on the shared office task')
+check(replyA.ok && replyA.taskId === memberA.id, 'meeting A follow-up lands on meeting A session')
+check(replyB.ok && replyB.taskId === memberB.id, 'meeting B follow-up lands on meeting B session')
+
+// 内部范围绝不透传给 runner 回合协议
+const allowedProtocolKeys = new Set(['collectFinal', 'consultDepth', 'meetingTurn'])
+check(followUpOptsLog.length >= 5 && followUpOptsLog.every((keys) => keys.every((k) => allowedProtocolKeys.has(k))), 'runner protocol only ever sees turn options (no meetingId/workdir/signal)')
+
+// ===== 占键防伪：用户任务抢注会议成员键，注册表必须绕开并另建 =====
+const occKey = officeMeetingTaskKeyCandidates('mtg_OCC', 'leader')[0]
+const squatter = service.createTask({ title: '抢键用户任务', prompt: '干活', backend: backend.id, agentId: 'leader', requestId: occKey, startNow: false })
+check(service.deduped(occKey)?.id === squatter.id, '占键前提成立：用户任务确实抢注了会议成员键')
+check(registry.get('leader', 'mtg_OCC') === null, 'occupied meeting key is never returned as a member session')
+const occupied = await registry.ensure('leader', { meetingId: 'mtg_OCC' })
+check(occupied.id !== squatter.id, 'ensure does not reuse the squatter record')
+check(occupied.dedupeKey === officeMeetingTaskKeyCandidates('mtg_OCC', 'leader')[1], 'ensure falls back to the next free key candidate')
+check(occupied.meetingTaskRole === 'member' && occupied.officeAgentId === 'leader' && occupied.status === 'done', 'the fallback session is a genuine, bootstrapped member session')
+const squatterNow = store.get(squatter.id)
+check(squatterNow?.officeAgentId === undefined && squatterNow?.meetingId === undefined && squatterNow?.dedupeKey === occKey, 'squatter record left untouched (no officeAgentId/meetingId written, key kept)')
+check(registry.get('leader', 'mtg_OCC')?.id === occupied.id, 'member session at the fallback key is reusable via meeting lookup')
+
+// ===== 取消传播：排队、bootstrap、回合前后的 AbortSignal =====
+// ① 预先中止：建单/入队/发送什么都不发生
+const preAborted = new AbortController()
+preAborted.abort()
+const preCounts = { starts, sends }
+await expectReject(registry.ensure('leader', { meetingId: 'mtg_PRE', signal: preAborted.signal }), 'pre-aborted ensure rejects without doing anything')
+await expectReject(registry.followUp('leader', 'x', { meetingId: 'mtg_PRE', signal: preAborted.signal }), 'pre-aborted follow-up rejects immediately')
+check(starts === preCounts.starts && sends === preCounts.sends && !store.list().some((t) => t.meetingId === 'mtg_PRE'), 'pre-aborted requests create and send nothing')
+
+// ② bootstrap 首回合等待期间中止：不发后续回合，取消不能恢复会话
+const workdirC = workdirOf('meeting-cancel')
+const releaseBootstrap = holdNextBootstrap()
+const abortInBootstrap = new AbortController()
+const pendingTurn = registry.followUp('leader', '会被取消的发言', { meetingId: 'mtg_CANCEL', workdir: workdirC, signal: abortInBootstrap.signal })
+await waitUntil(() => startLog.some((e) => e.workdir === workdirC))
+abortInBootstrap.abort()
+await expectReject(pendingTurn, 'abort during bootstrap wait rejects the turn without sending')
+const sendsAtAbort = sends
+releaseBootstrap()
+await waitUntil(() => store.list().find((t) => t.meetingId === 'mtg_CANCEL')?.status === 'done')
+check(sends === sendsAtAbort, 'cancelled turn never sends after bootstrap (no accidental session resume)')
+const resumed = await registry.followUp('leader', '重新发言', { meetingId: 'mtg_CANCEL' })
+check(resumed.ok && resumed.taskId === store.list().find((t) => t.meetingId === 'mtg_CANCEL')?.id, 'only an explicit new request resumes the session after cancel')
+
+// ③ 排队取锁期间中止：轮到它时直接取消，不发送，也不卡死会话锁
+const busy = registry.followUp('leader', '占锁回合', { meetingId: 'mtg_OCC' })
+const abortInQueue = new AbortController()
+const queuedTurn = registry.followUp('leader', '排队后被取消', { meetingId: 'mtg_OCC', signal: abortInQueue.signal })
+abortInQueue.abort()
+await expectReject(queuedTurn, 'abort while queued on the session lock rejects without sending')
+check((await busy).ok, 'the turn holding the lock completes normally')
+check((await registry.followUp('leader', '取消后的新回合', { meetingId: 'mtg_OCC' })).ok, 'session lock is not stuck after a queued cancellation')
+
+// ④ 发送期间中止：晚到的成功不作数（取消后的旧结果不能成为有效发言）
+const abortInFlight = new AbortController()
+const sendsBeforeFlight = sends
+const inFlightTurn = registry.followUp('leader', '发送期间取消', { meetingId: 'mtg_AAA', signal: abortInFlight.signal })
+await waitUntil(() => sends >= sendsBeforeFlight + 1)
+abortInFlight.abort()
+await expectReject(inFlightTurn, 'abort during an in-flight send discards the result')
+
+// 持久化：会议成员映射与办公室一样跨重启可查
+const persistedMember = restartedRegistry.get('leader', 'mtg_AAA')
+check(persistedMember?.id === memberA.id, 'meeting member mapping survives registry/store restart')
+
+check(notifications === 0, 'suppressed office and member tasks emit no notifications')
 
 await runner.shutdown()
 if (process.exitCode) process.exit(1)

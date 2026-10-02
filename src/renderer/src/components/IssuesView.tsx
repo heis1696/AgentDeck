@@ -4,6 +4,7 @@ import type { Task } from '../../../shared/types'
 import { useIssues } from '../api'
 import { isParkedQueued, PARKED_QUEUED_LABEL, TASK_STATUS_LABELS } from '../labels'
 import { PageHeader } from '../ui/PageHeader'
+import { publicTasksOf } from '../../../shared/task-visibility'
 
 /**
  * Issue 主页：共享页头（唯一主标题）+ 新建表单（WorkspaceView）即主体；
@@ -19,8 +20,9 @@ export function IssuesView({ tasks, tabs, onOpen, onClose, onBrowseAll, children
   children: ReactNode
 }) {
   const { issues } = useIssues()
+  const publicTasks = useMemo(() => publicTasksOf(tasks), [tasks])
   const opened = tabs.flatMap((id) => {
-    const task = tasks.find((item) => item.id === id)
+    const task = publicTasks.find((item) => item.id === id)
     if (!task) return []
     const issue = issues.find((item) => item.taskId === id || item.id === task.issueId)
     return [{ id: task.id, status: task.status, title: issue?.title ?? task.title }]
@@ -30,10 +32,10 @@ export function IssuesView({ tasks, tabs, onOpen, onClose, onBrowseAll, children
     const issueByTask = new Map(issues.map((issue) => [issue.taskId, issue]))
     const latest = new Map<string, Task>()
     const executionAt = (task: Task) => task.endedAt ?? task.startedAt ?? task.createdAt
-    for (const task of tasks) {
+    for (const task of publicTasks) {
       if (task.parentTaskId) continue
       const issue = issueByTask.get(task.id) ?? (task.issueId ? issueById.get(task.issueId) : undefined)
-      const key = task.issueId ?? issue?.id ?? `task:${task.id}`
+      const key = task.id.startsWith('meeting:') ? task.id : task.issueId ?? issue?.id ?? `task:${task.id}`
       const current = latest.get(key)
       if (!current || executionAt(task) > executionAt(current) || (executionAt(task) === executionAt(current) && task.createdAt > current.createdAt)) {
         latest.set(key, task)
@@ -43,7 +45,7 @@ export function IssuesView({ tasks, tabs, onOpen, onClose, onBrowseAll, children
       .sort(([, a], [, b]) => executionAt(b) - executionAt(a))
       .slice(0, 6)
       .map(([key, task]) => ({ task, title: issueById.get(key)?.title ?? issueByTask.get(task.id)?.title ?? task.title }))
-  }, [issues, tasks])
+  }, [issues, publicTasks])
   return <div className="issues-page page-surface issue-home">
     <PageHeader title="Issue" icon={<ListTodo size={16} />} count={opened.length} />
     {opened.length > 0 && <div className="issue-open-strip">
@@ -68,7 +70,7 @@ export function IssuesView({ tasks, tabs, onOpen, onClose, onBrowseAll, children
           <button type="button" className="issue-recent-all" onClick={onBrowseAll}><span>查看全部任务</span><ArrowUpRight size={13} aria-hidden="true" /></button>
         </div>
         <div className="issue-recent-list" role="list">
-          {recentRoots.map(({ task, title }) => <div className="issue-recent-task" role="listitem" key={task.issueId ?? task.id}>
+          {recentRoots.map(({ task, title }) => <div className="issue-recent-task" role="listitem" key={task.id.startsWith('meeting:') ? task.id : task.issueId ?? task.id}>
             <span className={`dot dot-${task.status}`} aria-hidden="true" />
             <span className="issue-recent-title" title={title}>{title}</span>
             <span className={`issue-recent-status issue-recent-status-${task.status}`}>{isParkedQueued(task) ? PARKED_QUEUED_LABEL : TASK_STATUS_LABELS[task.status]}</span>

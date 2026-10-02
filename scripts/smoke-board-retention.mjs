@@ -11,12 +11,20 @@ const now = Date.now()
 const DAY = 86_400_000
 let store
 try {
-  for (const [source, name] of [['src/main/store.ts', 'store'], ['src/main/issue-store.ts', 'issues'], ['src/main/task-service.ts', 'service'], ['src/main/retention.ts', 'retention'], ['src/main/event-log.ts', 'log'], ['src/renderer/src/components/BoardView.tsx', 'board']]) {
+  for (const [source, name] of [['src/main/store.ts', 'store'], ['src/main/issue-store.ts', 'issues'], ['src/main/task-service.ts', 'service'], ['src/main/retention.ts', 'retention'], ['src/main/event-log.ts', 'log'], ['src/shared/task-visibility.ts', 'visibility'], ['src/renderer/src/components/BoardView.tsx', 'board']]) {
     await build({ entryPoints: [path.join(root, source)], outfile: path.join(temp, `${name}.cjs`), bundle: true, platform: 'node', format: 'cjs', external: ['electron'], logLevel: 'silent' })
   }
   globalThis.window = { agentdeck: {} }
   const load = (name) => import(pathToFileURL(path.join(temp, `${name}.cjs`)).href)
-  const [{ TaskStore }, { IssueStore }, { TaskService }, { sweepExpiredIssues }, { EventLog }, board] = await Promise.all(['store', 'issues', 'service', 'retention', 'log', 'board'].map(load))
+  const [{ TaskStore }, { IssueStore }, { TaskService }, { sweepExpiredIssues }, { EventLog }, visibility, board] = await Promise.all(['store', 'issues', 'service', 'retention', 'log', 'visibility', 'board'].map(load))
+  const appSource = fs.readFileSync(path.join(root, 'src/renderer/src/App.tsx'), 'utf8')
+  const issuesViewSource = fs.readFileSync(path.join(root, 'src/renderer/src/components/IssuesView.tsx'), 'utf8')
+  assert.match(appSource, /\.\.\.publicTasksOf\(navigationEntries\)\.map/, 'command palette searches only public navigation entries')
+  assert.match(appSource, /meetingNavigationEntries\(tasks, meetings, issues\)/, 'public navigation entries derive from the complete task and meeting catalog')
+  assert.match(appSource, /ui\.setTasks\(catalog\)/, 'interaction center uses the unified catalog, retaining raw execution tasks for scoped sidebars')
+  const meetingNavigationSource = fs.readFileSync(path.join(root, 'src/renderer/src/components/meeting/meetingViewState.ts'), 'utf8')
+  assert.match(meetingNavigationSource, /meetingNavigationTasks\(tasks, meetings, issues\)\.map/, 'unified catalog keeps the complete raw task directory plus meeting roots')
+  assert.match(issuesViewSource, /publicTasksOf\(tasks\)/, 'Issue opened and recent task entries share public visibility')
   const data = path.join(temp, 'data')
   store = new TaskStore(data)
   const fixtureIssues = new IssueStore(data)
@@ -141,11 +149,34 @@ try {
 
   const task = (id, extra = {}) => ({ id, title: id, prompt: id, backend: 'fake', status: 'done', createdAt: now, eventCount: 0, workdir: '', ...extra })
   const issue = (id, taskId) => ({ id, taskId, identifier: id, status: 'done', updatedAt: now, createdBy: 'user' })
+  const visibilityCases = [
+    task('suppressed', { suppressIssue: true }),
+    task('office', { officeAgentId: 'agent-a' }),
+    task('member', { meetingId: 'meeting-a', meetingTaskRole: 'member' }),
+    task('investigation', { meetingId: 'meeting-a', meetingTaskRole: 'investigation' }),
+    task('container', { meetingId: 'meeting-a', meetingTaskRole: 'container' }),
+    task('delegate', { parentTaskId: 'leader' })
+  ]
+  assert.deepEqual(visibility.publicTasksOf(visibilityCases).map((item) => item.id), ['container', 'delegate'], 'public visibility hides internal markers and preserves meeting containers and ordinary delegates')
   const tree = board.buildBoardTree([task('old', { issueId: 'iss_leader' }), task('latest', { issueId: 'iss_leader', trigger: 'handoff' }), task('worker', { parentTaskId: 'old' }), task('orphan', { parentTaskId: 'deleted' })], [issue('iss_leader', 'latest'), issue('iss_worker', 'worker'), issue('iss_orphan', 'orphan')])
   assert.equal(tree.roots.length, 1)
   assert.equal(tree.roots[0].task.id, 'latest')
   assert.equal(tree.roots[0].children[0].task.id, 'worker', 'historical leader aliases latest Issue card')
   assert.equal(tree.orphans[0].task.id, 'orphan')
+  const internalRoot = task('meeting-container', { meetingId: 'meeting-a', meetingTaskRole: 'container' })
+  const hiddenParent = task('hidden-parent', { suppressIssue: true, parentTaskId: internalRoot.id })
+  const visibilityTree = board.buildBoardTree([
+    internalRoot,
+    task('meeting-member', { meetingId: 'meeting-a', meetingTaskRole: 'member', parentTaskId: internalRoot.id }),
+    task('legacy-investigation', { suppressIssue: true, parentTaskId: internalRoot.id }),
+    hiddenParent,
+    task('hidden-investigation', { meetingId: 'meeting-a', meetingTaskRole: 'investigation', parentTaskId: hiddenParent.id }),
+    task('ordinary-under-hidden-parent', { parentTaskId: hiddenParent.id }),
+    task('ordinary-delegate', { parentTaskId: 'deleted-leader' })
+  ], [issue('iss_meeting-container', internalRoot.id), issue('iss_ordinary-under-hidden-parent', 'ordinary-under-hidden-parent'), issue('iss_ordinary-delegate', 'ordinary-delegate')])
+  assert.deepEqual(visibilityTree.roots.map((node) => node.task.id), ['meeting-container'], 'meeting container remains a public root')
+  assert.deepEqual(visibilityTree.roots[0].children.map((node) => node.task.id), ['ordinary-under-hidden-parent'], 'internal children stay hidden and ordinary delegate climbs to the nearest visible ancestor')
+  assert.deepEqual(visibilityTree.orphans.map((node) => node.task.id), ['ordinary-delegate'], 'ordinary delegate retains its prior orphan visibility')
   const cycle = board.buildBoardTree([task('a', { parentTaskId: 'b' }), task('b', { parentTaskId: 'a' })], [])
   assert.equal(cycle.orphans.length, 2, 'cycles cannot recurse')
   const empty = new Set()
@@ -184,7 +215,7 @@ try {
   assert.deepEqual(board.boardDiffStat('a.ts | 2 +-\nb.ts | 3 +\n2 files changed, 4 insertions(+), 1 deletion(-)'), { files: 2, plus: 4, minus: 1 })
   assert.equal(board.boardDiffStat(undefined), undefined)
   assert.equal(board.boardDiffStat(''), undefined)
-  console.log('PASS board: five type classes, single-day filter/day-nav/over-age protection/diff badge, child folding, historical leader alias, orphan/cycle grouping')
+  console.log('PASS board: visibility, hidden-parent ancestry, container/member/investigation/delegate cases, date-nav, retention and card grouping')
 } finally {
   store?.flush()
   delete globalThis.window

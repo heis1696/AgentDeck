@@ -135,13 +135,26 @@ export class OpencodeServerClient {
   }
   async interrupt(sessionId: string, directory = this.directory || process.cwd()): Promise<void> {
     const base = `/session/${encodeURIComponent(sessionId)}`
-    try { await this.json(this.query(`${base}/abort`, directory), 'POST') }
-    catch (error) { if (!String(error).includes('HTTP 404')) throw error; await this.json(this.query(`${base}/interrupt`, directory), 'POST') }
+    let response: unknown
+    try { response = await this.json(this.query(`${base}/abort`, directory), 'POST') }
+    catch (error) { if (!String(error).includes('HTTP 404')) throw error; response = await this.json(this.query(`${base}/interrupt`, directory), 'POST') }
+    if (response === false || response && typeof response === 'object' && (response as { ok?: unknown }).ok === false) throw new Error('OpenCode refused to interrupt the session')
   }
   async close(sessionId: string, directory = this.directory || process.cwd()): Promise<void> {
     const path = this.query(`/session/${encodeURIComponent(sessionId)}`, directory)
-    try { await this.json(path, 'DELETE') }
-    catch (error) { if (!String(error).includes('HTTP 404')) throw error; await this.json(this.query(`/session/${encodeURIComponent(sessionId)}/close`, directory), 'POST') }
+    let response: unknown
+    try { response = await this.json(path, 'DELETE') }
+    catch (error) {
+      if (!String(error).includes('HTTP 404')) throw error
+      try { response = await this.json(this.query(`/session/${encodeURIComponent(sessionId)}/close`, directory), 'POST') }
+      catch (fallback) {
+        if (!String(fallback).includes('HTTP 404')) throw fallback
+        try { await this.json(path, 'GET') }
+        catch (lookup) { if (String(lookup).includes('HTTP 404')) return; throw lookup }
+        throw fallback
+      }
+    }
+    if (response === false || response && typeof response === 'object' && (response as { ok?: unknown }).ok === false) throw new Error('OpenCode refused to close the session')
   }
   async messages(sessionId: string, directory = this.directory || process.cwd()): Promise<unknown[]> {
     const value = await this.json(this.query(`/session/${encodeURIComponent(sessionId)}/message`, directory), 'GET')
@@ -432,9 +445,9 @@ export function createOpencodeServerBackend(options: OpencodeServerBackendOption
       const session: BackendSession = {
         sessionId,
         async send(content, stamp) { const result = await runTurn(content, stamp); if (!result.ok) throw new Error(result.error || 'OpenCode server turn failed') },
-        async stop() { try { await client.interrupt(sessionId, directory) } catch {} finally { finish(false, 'OpenCode session interrupted') } },
+        async stop() { try { await client.interrupt(sessionId, directory) } finally { finish(false, 'OpenCode session interrupted') } },
         detach: disconnect,
-        async close() { await disconnect(); if (!deleted) { deleted = true; await client.close(sessionId, directory).catch(() => {}) } }
+        async close() { await disconnect(); if (!deleted) { await client.close(sessionId, directory); deleted = true } }
       }
       return session
     }
