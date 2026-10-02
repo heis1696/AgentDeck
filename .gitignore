@@ -42,3 +42,5 @@ gui-test-screenshots/
 
 # 本地报错截图等杂项
 bugs/
+
+/Microsoft/Windows/PowerShell/ModuleAnalysisCache

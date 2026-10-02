@@ -4,7 +4,9 @@ directories:
   output: release
   buildResources: build
 files:
-  - out/**
+  - out/main/**
+  - out/preload/**
+  - out/renderer/**
   - package.json
   - build/icon.png
 icon: build/icon.ico

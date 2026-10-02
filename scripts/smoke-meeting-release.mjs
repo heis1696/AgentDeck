@@ -53,6 +53,10 @@ async function verifyRelease(installed, packageVersion, cleanEnv) {
   for (const channel of ['payload', 'renderer', 'shell']) {
     const manifestFile = path.join(feedRoot, 'stable', channel, 'manifest.json')
     const verdict = verifyManifest(manifestFile, channel, { mainVersion: packageVersion, shellVersion: packageVersion })
+    if (channel === 'renderer') {
+      assert.equal(JSON.parse(fs.readFileSync(manifestFile, 'utf8')).payload.minMainVersion, packageVersion)
+      assert.equal(verifyManifest(manifestFile, channel, { mainVersion: '0.18.2', shellVersion: packageVersion }).ok, false)
+    }
     assert.equal(verdict.ok, true, channel + ' manifest verification')
     const manifest = verdict.manifest
     const zip = fs.readFileSync(path.join(path.dirname(manifestFile), manifest.artifact.name))
@@ -116,6 +120,12 @@ try {
   fs.mkdirSync(path.join(snapshot, 'scripts'))
   fs.copyFileSync(path.join(root, 'scripts/release-hot.mjs'), path.join(snapshot, 'scripts/release-hot.mjs'))
   for (const entry of ['main', 'preload', 'renderer']) fs.cpSync(path.join(root, 'out', entry), path.join(snapshot, 'out', entry), { recursive: true })
+  const decoys = ['smoke-release-decoy.cjs', 'stage4-release-decoy.log', 'browser-cache/decoy.json']
+  for (const entry of decoys) {
+    const file = path.join(snapshot, 'out', entry)
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, 'release smoke decoy; must never be packaged')
+  }
   fs.symlinkSync(path.join(root, 'node_modules'), path.join(snapshot, 'node_modules'), 'junction')
   const packageVersion = JSON.parse(fs.readFileSync(path.join(snapshot, 'package.json'), 'utf8')).version
   const builder = path.join(root, 'node_modules/electron-builder/cli.js')
@@ -127,7 +137,10 @@ try {
   const asar = require('@electron/asar')
   const archive = path.join(packed, 'resources/app.asar')
   for (const entry of ['main/index.js', 'main/bootstrap.js', 'main/sidecar-server.js', 'preload/index.js', 'renderer/index.html']) assert.equal(sha(asar.extractFile(archive, path.join('out', ...entry.split('/')))), sha(fs.readFileSync(path.join(snapshot, 'out', entry))))
-  assert.equal(asar.listPackage(archive).some((name) => /stage[234].*\.log|smoke-.*\.cjs/.test(name)), false)
+  const archiveEntries = asar.listPackage(archive).map((entry) => entry.replaceAll('\\', '/'))
+  assert.equal(archiveEntries.some((name) => /stage[234].*\.log|smoke-.*\.cjs/.test(name)), false)
+  for (const entry of decoys) assert.equal(archiveEntries.includes('/out/' + entry), false)
+  checked('pack excludes injected smoke logs, bundles and browser caches')
   checked('clean isolated pack matches five executable entry artifacts', { packageVersion, asarSha256: sha(fs.readFileSync(archive)) })
   const installers = path.join(temporary, 'installers')
   run('installer-build', process.execPath, [builder, '--win', 'nsis', '--x64', '--publish', 'never', '--config.npmRebuild=false', '--config.directories.output=' + installers], snapshot, cleanEnv)

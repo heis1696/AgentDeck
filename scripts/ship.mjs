@@ -89,17 +89,17 @@ if (!has('skip-deploy')) {
 
 // ---------- 3. git ----------
 if (!has('skip-git')) {
+  const branch = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: root, encoding: 'utf8' }).stdout.trim()
   const status = spawnSync('git', ['status', '--porcelain'], { cwd: root, encoding: 'utf8' })
   if (!status.stdout.trim()) {
     console.log('\n[ship] 工作区干净，跳过 git 提交')
   } else {
-    const branch = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: root, encoding: 'utf8' }).stdout.trim()
     const pkgVersion = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version
     const message = `chore(ship): 热更发布 ${pkgVersion}-hot.${seq}${note ? ' — ' + note : ''}（三通道签名产物已${has('skip-deploy') ? '生成' : '部署'}）`
     run('git 提交', 'git', ['add', '-A'])
     run('git 提交', 'git', ['commit', '-m', message])
-    run(`git 推送 origin ${branch}`, 'git', ['push', 'origin', branch])
   }
+  run(`git 推送 origin ${branch}`, 'git', ['push', 'origin', branch])
 }
 
 console.log('\n[ship][DONE] 发布流水线完成')

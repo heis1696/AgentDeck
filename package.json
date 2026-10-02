@@ -1,6 +1,6 @@
 {
   "name": "agentdeck",
-  "version": "0.23.0",
+  "version": "0.23.1",
   "description": "本地任务看板 — 把任务派给本地 agent 执行",
   "main": "./out/main/bootstrap.js",
   "author": "agentdeck",
@@ -113,7 +113,7 @@
     "smoke:prompts": "node scripts/smoke-prompts.mjs",
     "smoke:hot-pointer": "node scripts/smoke-hot-pointer.mjs",
     "smoke:hot-payload": "node scripts/smoke-hot-payload.mjs",
-    "smoke:hot-updater": "node scripts/smoke-hot-updater.mjs && node scripts/smoke-hot-transaction.mjs && node scripts/smoke-release-isolation.mjs",
+    "smoke:hot-updater": "node scripts/smoke-hot-updater.mjs && node scripts/smoke-hot-transaction.mjs && node scripts/smoke-release-isolation.mjs && node scripts/smoke-deploy-feed.mjs",
     "smoke:pet-behavior": "node scripts/smoke-pet-behavior.mjs",
     "smoke:pet-life": "node scripts/smoke-pet-life.mjs",
     "smoke:pet-store": "node scripts/smoke-pet-store.mjs",
@@ -126,6 +126,7 @@
     "release:hot": "node scripts/release-hot.mjs",
     "smoke:hot-shell": "node scripts/smoke-hot-shell.mjs",
     "deploy:hot": "node scripts/deploy-feed.mjs",
+    "smoke:deploy-feed": "node scripts/smoke-deploy-feed.mjs",
     "graph:index": "node scripts/graph-index.mjs",
     "ship": "node scripts/ship.mjs",
     "smoke:hot-feed": "node scripts/smoke-hot-feed.mjs"

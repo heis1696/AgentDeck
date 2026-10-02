@@ -295,7 +295,7 @@ async function buildChannel(channel, ctx) {
     version,
     // 底线 = 首个具备热更链能力的壳（0.18.2，bootstrap 指针加载链诞生版）。
     // 不能写 pkg.version：旧比较器把 0.21.0-hot.4 判低于 0.21.0，会把已装 -hot 载荷的客户端困死。
-    minMainVersion: '0.18.2',
+    minMainVersion: channel === 'renderer' ? pkg.version : '0.18.2',
     minShellVersion: '0.18.2',
     releaseDate: new Date().toISOString(),
     keyId,

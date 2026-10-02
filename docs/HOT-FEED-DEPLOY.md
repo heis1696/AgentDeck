@@ -17,7 +17,7 @@ cat > /etc/nginx/conf.d/agentdeck-feed.conf <<'EOF'
 server {
     listen 80;
     server_name 118.31.43.156;
-    root /var/www/agentdeck-feed;
+    root /var/www/agentdeck-feed/stable;
     autoindex off;
     sendfile on;
     # manifest 是定点入口（服务端回滚点），必须实时；zip 不可变，尽量缓存
@@ -38,18 +38,22 @@ nginx -t && systemctl reload nginx
 
 ```bash
 # 1) 产出三层 feed（renderer/payload/shell）+ 便携分发包 dist/agentdeck-<版本>-portable-win-x64.zip
-HOT_SIGNING_KEY_PATH="C:\Users\16961\.agentdeck\hot-keys\ad-2026-09.pem" npm run release:hot -- --seq <递增序号>
+HOT_SIGNING_KEY_PATH="C:\Users\16961\.agentdeck\hot-keys\ad-2026-09-r2.pem" npm run release:hot -- --key-id ad-2026-09-r2 --seq <递增序号>
 # 2) 上传到服务器（依赖本机已配好 ssh 免密登录 root@118.31.43.156）
 npm run deploy:hot          # 等价 FEED_HOST/FEED_USER/FEED_REMOTE_DIR 可用 env 覆盖；--dry-run 只打印命令
 ```
 
-客户端（设置 → 更新 → 检查更新）即可收到新版本。
+客户端（设置 → 更新 → 检查更新）即可收到新版本。客户端入口是 /renderer/manifest.json、/payload/manifest.json、/shell/manifest.json；nginx 的根是 stable，不应再在 URL 中加 /stable。
+
+部署先上传到本次专属暂存目录并逐文件校验 SHA256，所有上传通过后才发布；版本历史及 zip 不可覆盖不同字节，stable 清单最后用原子 rename 切换。--force 只强制重传相同绑定，不允许覆盖历史。--dry-run 仅查询远端清单，不写服务器。FEED_LOCAL_DIR 可选择只含本次发布的独立 feed 根，避免同步陈旧本地历史；FEED_HOST/FEED_USER/FEED_REMOTE_DIR 仍可覆盖目标。
+
+打包只纳入 out/main、out/preload、out/renderer，不含 out 中的 smoke/log/browser 缓存。壳包以 package.json 的版本号绑定不可变历史；已发布 0.23.0 的壳后，新源码必须升版本，不能只递增热更序号。renderer 清单要求至少同版主进程，新增 IPC 不会先暴露给旧主进程；payload 保留原有升级能力底线。
 
 ## 三、运维操作
 
 - **服务端回滚（止血）**：`versions/<通道>/<版本>/manifest.json` 覆盖 `stable/<通道>/manifest.json`，再 `nginx -s reload`（或等 no-cache 生效）。版本号单调递增，回滚 = 发一个"更高版本号引用旧产物"。
 - **客户端回滚**：设置 → 更新 → 回退上一版（渲染层通道，本地保留 3 版）；壳回滚 = 应用目录旁的 `.old-<ts>` 历史目录（保留 2 个），由更新器 `rollback('shell')` 反向替换。
-- **签名密钥**：私钥绝不进仓库（当前在仓库外 `~/.agentdeck/hot-keys/ad-2026-09.pem`，开发密钥）；正式对外发布前离线重生成，公钥替换 `src/main/hot/trust.ts`（keyId 历法 `ad-YYYY-MM`），约 12 个月轮换（§9.5）。
+- **签名密钥**：私钥绝不进仓库（当前在仓库外 `~/.agentdeck/hot-keys/ad-2026-09-r2.pem`，keyId 为 ad-2026-09-r2）；发布前必须确认其导出公钥与 `src/main/hot/trust.ts` 的内置信任锚一致，不用临时 smoke 信任覆盖当成生产验签。正式对外发布前离线重生成，公钥替换 `src/main/hot/trust.ts`，约 12 个月轮换（§9.5）。
 
 ## 四、域名到位后的迁移
 

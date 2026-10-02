@@ -1,78 +1,93 @@
 #!/usr/bin/env node
-/**
- * scripts/deploy-feed.mjs — 把 dist/feed/ 上传到 feed 服务器（docs/HOT-FEED-DEPLOY.md）
- *
- * 增量上传：先经 ssh 拿远端清单（相对路径+字节数），只 scp 缺失/尺寸不同的文件
- * （314MB 壳包未变时不重传）。env 覆盖：
- *   FEED_HOST       默认 118.31.43.156（阿里云）
- *   FEED_USER       默认 root
- *   FEED_REMOTE_DIR 默认 /var/www/agentdeck-feed
- * 用法：node scripts/deploy-feed.mjs [--dry-run] [--force]
- */
+import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 import fs from 'node:fs'
+import crypto from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(import.meta.dirname, '..')
-const FEED_DIR = path.join(root, 'dist', 'feed')
-const HOST = process.env.FEED_HOST || '118.31.43.156'
-const USER = process.env.FEED_USER || 'root'
-const REMOTE = process.env.FEED_REMOTE_DIR || '/var/www/agentdeck-feed'
-const DRY = process.argv.includes('--dry-run')
-const FORCE = process.argv.includes('--force')
+const quote = (value) => "'" + value.replaceAll("'", "'\\''") + "'"
+const safeRelative = (value) => /^[A-Za-z0-9._/-]+$/.test(value) && !path.posix.isAbsolute(value) && value.split('/').every((part) => part && part !== '.' && part !== '..')
+const immutable = (relative) => relative.startsWith('versions/') || relative.endsWith('.zip')
 
-if (!fs.existsSync(path.join(FEED_DIR, 'stable'))) {
-  console.error(`[FAIL] ${path.relative(root, FEED_DIR)} 不存在 — 先 npm run ship 或 release:hot 产出 feed 树`)
-  process.exit(1)
-}
-
-const sh = (cmd) => spawnSync(cmd, { stdio: ['ignore', 'pipe', 'pipe'], shell: true, encoding: 'utf8' })
-
-// 本地清单（md5 内容哈希：纯尺寸比对会被结构同长的版本迭代骗过——hot.2 与 hot.3 的 manifest 字节数恰好相同）
-import crypto from 'node:crypto'
-const local = []
-const walk = (dir) => {
-  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-    const p = path.join(dir, e.name)
-    if (e.isDirectory()) walk(p)
-    else if (e.isFile()) local.push({ rel: path.relative(FEED_DIR, p).split(path.sep).join('/'), md5: crypto.createHash('md5').update(fs.readFileSync(p)).digest('hex') })
+export function planDeployment(local, remote, remoteDir, releaseId, force = false) {
+  assert.match(remoteDir, /^\/[A-Za-z0-9._/-]+$/)
+  assert.ok(remoteDir.split('/').filter(Boolean).length >= 2 && !remoteDir.split('/').includes('..'), 'requires a dedicated remote feed directory')
+  assert.match(releaseId, /^[A-Za-z0-9-]+$/)
+  for (const file of local) {
+    assert.ok(safeRelative(file.rel), 'unsafe feed path: ' + file.rel)
+    assert.match(file.sha256, /^[a-f0-9]{64}$/)
+    if (immutable(file.rel) && remote.has(file.rel)) assert.equal(remote.get(file.rel), file.sha256, 'immutable remote artifact differs: ' + file.rel)
   }
-}
-walk(FEED_DIR)
-
-// 远端清单（目录不存在则空）
-const remoteRaw = sh(`ssh ${USER}@${HOST} "cd ${REMOTE} 2>/dev/null && find . -type f -exec md5sum {} + || true"`)
-if (remoteRaw.status !== 0) {
-  console.error(`[FAIL] ssh 取远端清单失败（退出码 ${remoteRaw.status}）— 检查免密登录`)
-  process.exit(1)
-}
-const remote = new Map()
-for (const line of remoteRaw.stdout.split('\n')) {
-  const m = /^(\w+)  \.[\/](\S+)$/.exec(line.trim())
-  if (m) remote.set(m[2], m[1])
+  const changed = local.filter((file) => force || remote.get(file.rel) !== file.sha256)
+  const stage = path.posix.join(remoteDir, '.deploy-' + releaseId)
+  const publish = [...changed].sort((first, second) => Number(/^stable\/[^/]+\/manifest\.json$/.test(first.rel)) - Number(/^stable\/[^/]+\/manifest\.json$/.test(second.rel)) || first.rel.localeCompare(second.rel))
+  return { changed, publish, stage }
 }
 
-const changed = FORCE ? local : local.filter((f) => remote.get(f.rel) !== f.md5)
-const skipped = local.length - changed.length
-console.log(`[plan] 本地 ${local.length} 个文件：上传 ${changed.length}，跳过未变化 ${skipped}`)
-
-const commands = []
-if (!remote.size) commands.push(`ssh ${USER}@${HOST} "mkdir -p ${REMOTE}"`)
-for (const f of changed) {
-  const dir = path.posix.dirname(f.rel)
-  commands.push(`ssh ${USER}@${HOST} "mkdir -p ${REMOTE}/${dir === '.' ? '' : dir}"`)
-  commands.push(`scp -q ${JSON.stringify(path.join(FEED_DIR, ...f.rel.split('/')))} ${USER}@${HOST}:${REMOTE}/${f.rel}`)
-}
-commands.push(`ssh ${USER}@${HOST} "nginx -t 2>/dev/null && nginx -s reload || systemctl reload nginx"`)
-
-for (const cmd of commands) {
-  console.log(`[run] ${cmd.replace(JSON.stringify(FEED_DIR), 'dist/feed')}`)
-  if (DRY) continue
-  const r = sh(cmd)
-  if (r.status !== 0) {
-    console.error(r.stderr.trim().slice(0, 300))
-    console.error(`[FAIL] 命令失败（退出码 ${r.status}）。排查：ssh 免密 / nginx 配置（docs/HOT-FEED-DEPLOY.md）。`)
-    process.exit(r.status ?? 1)
+export function deployFeed({ env = process.env, dry = false, force = false, execute = (command, args) => spawnSync(command, args, { windowsHide: true, encoding: 'utf8', timeout: 600000, maxBuffer: 32 * 1024 * 1024 }), releaseId = crypto.randomUUID() } = {}) {
+  const directory = path.resolve(env.FEED_LOCAL_DIR || path.join(root, 'dist', 'feed'))
+  const host = env.FEED_HOST || '118.31.43.156'
+  const user = env.FEED_USER || 'root'
+  const remoteDir = env.FEED_REMOTE_DIR || '/var/www/agentdeck-feed'
+  assert.match(host, /^[A-Za-z0-9.-]+$/)
+  assert.match(user, /^[A-Za-z0-9_-]+$/)
+  assert.ok(fs.existsSync(path.join(directory, 'stable')), 'feed directory has no stable releases')
+  planDeployment([], new Map(), remoteDir, releaseId)
+  const target = user + '@' + host
+  const options = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10']
+  const run = (command, args, readOnly = false) => {
+    console.log('[run] ' + command + ' ' + args.join(' '))
+    if (dry && !readOnly) return { status: 0, stdout: '' }
+    const result = execute(command, args)
+    assert.equal(result.error, undefined, 'deployment command could not execute')
+    assert.equal(result.status, 0, 'deployment command failed: ' + String(result.stderr || '').slice(0, 300))
+    return result
   }
+  const ssh = (command, readOnly = false) => run('ssh', [...options, target, command], readOnly)
+  const local = []
+  const walk = (parent) => {
+    for (const entry of fs.readdirSync(parent, { withFileTypes: true })) {
+      const file = path.join(parent, entry.name)
+      if (entry.isDirectory()) walk(file)
+      else {
+        assert.ok(entry.isFile(), 'feed may not contain symlinks')
+        local.push({ rel: path.relative(directory, file).split(path.sep).join('/'), sha256: crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex') })
+      }
+    }
+  }
+  walk(directory)
+  const inventory = ssh('if test -d ' + quote(remoteDir) + '; then cd ' + quote(remoteDir) + " && find . -type f -not -path './.deploy-*/*' -exec sha256sum {} +; fi", true)
+  const remote = new Map()
+  for (const line of inventory.stdout.split('\n')) {
+    const match = /^([a-f0-9]{64})  \.\/(\S+)$/.exec(line.trim())
+    if (match) remote.set(match[2], match[1])
+  }
+  const plan = planDeployment(local, remote, remoteDir, releaseId, force)
+  console.log('[plan] upload ' + plan.changed.length + ', unchanged ' + (local.length - plan.changed.length))
+  const uploaded = new Map()
+  for (const file of plan.changed) {
+    const destination = path.posix.join(plan.stage, file.rel)
+    ssh('mkdir -p -- ' + quote(path.posix.dirname(destination)))
+    if (uploaded.has(file.sha256)) ssh('ln -- ' + quote(uploaded.get(file.sha256)) + ' ' + quote(destination))
+    else run('scp', ['-q', ...options, path.join(directory, ...file.rel.split('/')), target + ':' + destination])
+    ssh('test "$(sha256sum -- ' + quote(destination) + ' | cut -d " " -f 1)" = ' + quote(file.sha256))
+    uploaded.set(file.sha256, destination)
+  }
+  for (const file of plan.publish) {
+    const staged = path.posix.join(plan.stage, file.rel)
+    const destination = path.posix.join(remoteDir, file.rel)
+    let publish
+    if (immutable(file.rel)) publish = 'if test -e ' + quote(destination) + '; then test "$(sha256sum -- ' + quote(destination) + ' | cut -d " " -f 1)" = ' + quote(file.sha256) + '; else ln -- ' + quote(staged) + ' ' + quote(destination) + '; fi; status=$?; if test "$status" -eq 0; then rm -f -- ' + quote(staged) + '; fi; exit "$status"'
+    else publish = 'mv -f -- ' + quote(staged) + ' ' + quote(destination)
+    ssh('mkdir -p -- ' + quote(path.posix.dirname(destination)) + ' && ' + publish)
+  }
+  console.log(dry ? '[dry-run] no remote writes executed' : '[ok] staged files verified; artifacts published before atomic stable manifests')
+  return plan
 }
-console.log(DRY ? '\n[dry-run] 以上命令未执行' : `\n[ok] feed 增量部署完成（${changed.length} 个文件）。客户端（设置→更新→检查更新）即可收到。`)
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try { deployFeed({ dry: process.argv.includes('--dry-run'), force: process.argv.includes('--force') }) }
+  catch (error) { console.error('[FAIL] ' + error.message); process.exitCode = 1 }
+}
