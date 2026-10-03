@@ -88,3 +88,13 @@ npm run deploy:hot          # 等价 FEED_HOST/FEED_USER/FEED_REMOTE_DIR 可用 
 | shell / portable | 0.23.2 | 329275027 | f14862c9b969ae9b159384a248cb81cf6b3de026cb70e6e5a1ace1cdf9dd664c |
 
 默认内置信任锚 ad-2026-09-r2 验签，当前 13 个服务器文件与 0.23.1 六个不可变历史文件完整 SHA256 均匹配。三包 HEAD=200、Range=206；renderer/payload 全量 HTTP 下载验哈希，壳包复核服务器完整哈希及公开首段字节。便携包入口 http://118.31.43.156/shell/shell-0.23.2.zip；源码与全量/隔离副本门禁、暂存复用与单连接原子发布、连接超时失败留证详见 docs/plan/team-meeting-issue-v2.md §17，证据在 out/feedback-release-audit/。没有直接替换用户现用安装目录或手工迁移生产会议数据。
+
+## 八、0.23.4 发布（ZCode 经验吸收批）
+
+| 通道 | 版本 | 字节数 | ZIP SHA256 |
+| --- | --- | --- | --- |
+| renderer | 0.23.4-hot.1 | 4738806 | fac515a1642c71f4d65e390596bb37a45435f1debf48a32bd8b38a0b55f8077d |
+| payload | 0.23.4-hot.1 | 6000152 | 439cefdc792204c16f42a28b52a73d53223243e92ad4bf9c0bc7c459c20f9980 |
+| shell / portable | 0.23.4 | 329304832 | 9b6ed7447fa0a443047592a54d483d30ecdde8b43601dcf09bdc3475d2df5371 |
+
+内容：界面字号设置与相对字阶（--ui-font-size 公式化）、执行记录回合窗口化与超长 worklog 折叠、确认框影响预览与提交中安全门、设计/架构机器检查（check:design / check:architecture，架构基线已还清至零）、发布前独立审查六项修复。三通道 manifest 签名 keyId=ad-2026-09-r2，部署为暂存校验后原子切换；发布后 HTTP 拉取三通道 stable 清单核验版本与哈希一致，壳包 HEAD=200。部署过程中一次 ssh 连接超时（网络瞬断），按幂等协议重试 deploy:hot 成功。便携包入口 http://118.31.43.156/shell/shell-0.23.4.zip。
