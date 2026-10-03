@@ -233,6 +233,34 @@ html.light .detail-actions .detail-btn-ghost-danger {
 }
 .detail-body .worklog summary:hover { color: var(--text); }
 
+/* 回合窗口化：顶部「加载更早」哨兵（接近自动扩 + 按钮兜底），样式与回合页眉同语言 */
+.detail-body .log-more { display: flex; justify-content: center; }
+.detail-body .log-more-btn {
+  padding: 4px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-inset);
+  color: var(--text-dim);
+  font-size: var(--text-caption);
+  cursor: pointer;
+  transition: border-color var(--duration-base) var(--ease-in-out), color var(--duration-base) var(--ease-in-out);
+}
+.detail-body .log-more-btn:hover { border-color: var(--accent); color: var(--text); }
+
+/* 超长 worklog 的中段折叠行：一行省略条 + 点开显示全部（用户否决权） */
+.detail-body .worklog-omitted { display: flex; justify-content: center; padding: 2px 0; }
+.detail-body .worklog-expand {
+  padding: 2px 12px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-faint);
+  font-size: var(--text-caption);
+  cursor: pointer;
+  transition: color var(--duration-base) var(--ease-in-out), border-color var(--duration-base) var(--ease-in-out);
+}
+.detail-body .worklog-expand:hover { color: var(--text-dim); border-color: var(--border-strong); }
+
 .detail-body .issue-timeline { padding: 16px 24px 48px; }
 .detail-body .timeline-intro { margin-bottom: 8px; }
 .detail-body .timeline-item {

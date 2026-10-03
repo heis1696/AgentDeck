@@ -1,5 +1,5 @@
 import { ArrowDown, ChevronDown, Copy, Undo2 } from 'lucide-react'
-import { createContext, useContext, useEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from 'react'
+import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from 'react'
 import { Markdown, renderStreamingMarkers } from '../Markdown'
 import { bridge, fmtDuration, fmtTime } from '../../api'
 import { PARKED_QUEUED_LABEL } from '../../labels'
@@ -239,6 +239,33 @@ function LogLine({ event }: { event: TaskEvent }) {
   return null
 }
 
+/** worklog 行上限：头尾留窗 + 中段折叠。运行中展开的也是「尾部活动区」，
+ *  完成后自动收起（details 本身）；「显示全部」是用户的否决权，点开后不再折叠。 */
+const WORKLOG_HEAD = 12
+const WORKLOG_TAIL = 40
+function WorkLog({ work, autoOpen }: { work: TaskEvent[]; autoOpen: boolean }) {
+  const [showAll, setShowAll] = useState(false)
+  const total = work.length
+  const capped = !showAll && total > WORKLOG_HEAD + WORKLOG_TAIL + 12
+  const omitted = capped ? total - WORKLOG_HEAD - WORKLOG_TAIL : 0
+  const head = capped ? work.slice(0, WORKLOG_HEAD) : []
+  const tail = capped ? work.slice(total - WORKLOG_TAIL) : work
+  return <details className="worklog" open={autoOpen ? true : undefined}>
+    <summary>🔧 工作过程（{work.filter((event) => event.kind === 'tool').length} 次工具调用）<ToolChips work={work} /></summary>
+    <div className="worklog-body">
+      {capped ? <>
+        {head.map((event) => <LogLine key={event.seq} event={event} />)}
+        <div className="worklog-omitted"><button type="button" className="worklog-expand" onClick={() => setShowAll(true)}>⋯ 已折叠 {omitted} 行（长回合防卡顿）· 点开显示全部</button></div>
+        {tail.map((event) => <LogLine key={event.seq} event={event} />)}
+      </> : work.map((event) => <LogLine key={event.seq} event={event} />)}
+    </div>
+  </details>
+}
+
+/** 回合窗口：默认只渲染最近 WINDOW_STEP 个回合，向上渐进加载（长会话万级事件不再全量渲染）。
+ *  「历史/实时分离」：运行中回合永远在窗口内（窗口从末尾数起），流式追加不触碰未渲染的旧回合。 */
+const WINDOW_STEP = 30
+
 /**
  * 执行记录（回合时间线）：
  * - 每个回合有极简页眉（#序号 + 起始时间 + 状态），长会话里随时知道「读到第几问」；
@@ -246,13 +273,63 @@ function LogLine({ event }: { event: TaskEvent }) {
  * - 气泡右上角悬浮「复制」；工作过程摘要补上工具总耗时；
  * - 「贴底跟随」是**宿主受控状态**（审查项 2）：following / onFollowLatest 由宿主传入，
  *   宿主在滚动与流式事件到达时更新它——本组件只是视图，不再自己算一份（否则两套判定会打架）。
+ * - 回合窗口化：只渲染最近 WINDOW_STEP 个回合；.turn 带 data-turn-idx（全局索引），
+ *   宿主 activeNav 判定以它为准；跳到未渲染回合先扩窗再走宿主 onNavigate。
  */
 export function TurnTimeline({ task, turns, activeNav, following, onFollowLatest, onNavigate, onRewind, logRef, onScroll, dockRootId, snapshotOnly = false, contextLabel }: { task: Task; turns: Turn[]; activeNav: number; following: boolean; onFollowLatest: () => void; onNavigate: (index: number) => void; onRewind: (index: number) => void; logRef: RefObject<HTMLDivElement>; onScroll: () => void; dockRootId?: string; snapshotOnly?: boolean; contextLabel?: string }) {
   const active = !snapshotOnly && task.status === 'running'
+  const [visibleCount, setVisibleCount] = useState(WINDOW_STEP)
+  // 切任务/换会话重置窗口：新会话从最近回合起步
+  useEffect(() => { setVisibleCount(WINDOW_STEP) }, [task.id])
+  const firstVisible = Math.max(0, turns.length - visibleCount)
+  const hiddenBefore = firstVisible
+  const sentinelRef = useRef<HTMLDivElement>(null)
+  // 跳到未渲染回合：先扩窗，等 DOM 出现后再把全局索引交给宿主滚动
+  const pendingNavRef = useRef<number | null>(null)
+  const onNavigateRef = useRef(onNavigate)
+  onNavigateRef.current = onNavigate
+  useLayoutEffect(() => {
+    const index = pendingNavRef.current
+    if (index == null) return
+    if (logRef.current?.querySelector(`#turn-${index}`)) {
+      pendingNavRef.current = null
+      onNavigateRef.current(index)
+    }
+  }, [visibleCount, turns.length])
+  const navigateTo = (index: number) => {
+    if (index < firstVisible) {
+      pendingNavRef.current = index
+      setVisibleCount(turns.length - index + 4) // 目标回合上下各留余量
+      return // 滚动交给上面的 layout effect（DOM 就位后）
+    }
+    onNavigate(index)
+  }
+  // 接近顶部自动扩窗（IntersectionObserver 不可用的环境退化为只按按钮）
+  useEffect(() => {
+    if (hiddenBefore <= 0 || typeof IntersectionObserver === 'undefined') return
+    const root = logRef.current
+    const sentinel = sentinelRef.current
+    if (!root || !sentinel) return
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) setVisibleCount((count) => count + WINDOW_STEP)
+    }, { root, rootMargin: '320px 0px 0px 0px' })
+    observer.observe(sentinel)
+    return () => observer.disconnect()
+  }, [hiddenBefore, logRef])
+  // 向上扩窗后保持视口锚定在原内容（scrollTop 补偿高度差），读历史不被顶飞
+  const expandUp = () => {
+    const el = logRef.current
+    const before = el ? el.scrollHeight : 0
+    setVisibleCount((count) => count + WINDOW_STEP)
+    requestAnimationFrame(() => {
+      const after = logRef.current
+      if (after) after.scrollTop += after.scrollHeight - before
+    })
+  }
 
   return (
     <TimelineOptionsContext.Provider value={{ taskId: task.id, dockRootId, snapshotOnly }}><div className={`chat-wrap${following ? ' is-following' : ' is-reading'}`}>
-      <TurnMinimap turns={turns} activeNav={activeNav} onNavigate={onNavigate} />
+      <TurnMinimap turns={turns} activeNav={activeNav} onNavigate={navigateTo} />
       <div
         className="log chat"
         ref={logRef}
@@ -260,7 +337,11 @@ export function TurnTimeline({ task, turns, activeNav, following, onFollowLatest
         tabIndex={0}
         aria-label="执行记录（回合对话与工具调用）"
       >
-        {turns.map((turn, index) => {
+        {hiddenBefore > 0 && <div className="log-more" ref={sentinelRef}>
+          <button type="button" className="log-more-btn" onClick={expandUp}>↑ 加载更早 {Math.min(WINDOW_STEP, hiddenBefore)} 回合 · 前面还有 {hiddenBefore} 回合</button>
+        </div>}
+        {turns.slice(firstVisible).map((turn, offset) => {
+          const index = firstVisible + offset
           const streaming = index === turns.length - 1 && active
           const pending = !snapshotOnly && index === turns.length - 1 && task.status === 'queued'
           const lastItem = turn.items[turn.items.length - 1]
@@ -270,7 +351,7 @@ export function TurnTimeline({ task, turns, activeNav, following, onFollowLatest
           let lastBubbleIndex = -1
           let lastWorkIndex = -1
           turn.items.forEach((item, itemIndex) => { if (item.type === 'work') lastWorkIndex = itemIndex; else lastBubbleIndex = itemIndex })
-          return <div className="turn" id={`turn-${index}`} key={index}>
+          return <div className="turn" id={`turn-${index}`} data-turn-idx={index} key={index}>
             <div className="turn-head">
               <span className="turn-index">{snapshotOnly && contextLabel ? contextLabel : `#${index + 1}`}</span>
               {startedAt > 0 && <time className="turn-time" title={fmtTime(startedAt)}>{fmtTime(startedAt)}</time>}
@@ -282,7 +363,7 @@ export function TurnTimeline({ task, turns, activeNav, following, onFollowLatest
             {turn.userText != null && <div className="bubble user"><pre>{turn.userText}</pre><BubbleTools text={turn.userText} label="提问" /></div>}
             {turn.sysNotes.length > 0 && <div className="sys-strip">{turn.sysNotes.map((note, noteIndex) => <div key={noteIndex} className="sys-note">⚡ {note}</div>)}</div>}
             {turn.items.map((item, itemIndex) => {
-              if (item.type === 'work') return <details className="worklog" key={itemIndex} open={streaming && itemIndex === lastWorkIndex ? true : undefined}><summary>🔧 工作过程（{item.work.filter((event) => event.kind === 'tool').length} 次工具调用）<ToolChips work={item.work} /></summary><div className="worklog-body">{item.work.map((event) => <LogLine key={event.seq} event={event} />)}</div></details>
+              if (item.type === 'work') return <WorkLog key={itemIndex} work={item.work} autoOpen={streaming && itemIndex === lastWorkIndex} />
               if (item.type === 'final') return <div className="bubble agent is-final" key={itemIndex}><BubbleTools text={item.text} label="回复" /><Markdown text={item.text} />{turn.usage && <UsageBadge usage={turn.usage} />}</div>
               return <div className="bubble agent" key={itemIndex}>{item.closed && <BubbleTools text={item.text} label="回复" />}{item.closed ? <Markdown text={item.text} /> : <pre className="streaming">{renderStreamingMarkers(item.text)}</pre>}{streaming && !item.closed && <div className="log-running"><span className="dots"><i /><i /><i /></span>回复中…</div>}{turn.usage && finalIndex < 0 && itemIndex === lastBubbleIndex && <UsageBadge usage={turn.usage} />}</div>
             })}

@@ -54,6 +54,8 @@ const WORKFLOW_OPTIONS: Array<{ value: IssueStatus; label: string }> = [
  * 与底部追问区。所有状态机、桥调用与交互中心契约保持不变：动作仍走 taskService/ui。
  */
 export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[]; onSelect: (id: string) => void }) {
+  // 视图页签全局共享是既定决策（smoke-ui-focus 固化）：键盘用户在多个任务间保持 Git 视图与焦点。
+  // 面板状态的 owner 归属落在草稿/浮窗/SideDock/回合导航态（均按任务分槽），不含页签。
   const [tab, setTab] = useState<Tab>('log')
   // 追问草稿与 busy 按任务分槽（会话内保留，不做持久化）：切任务立即换成新任务自己的值，
   // A→B→A 取回 A 的草稿；写入带任务归属，迟到的响应不会改到新任务的界面上。
@@ -199,16 +201,17 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     if (!element) return
     const nodes = element.querySelectorAll<HTMLElement>('.turn')
     if (!nodes.length) { setActiveNav(0); return }
+    // 窗口化后 .turn 只含最近 N 个回合：索引一律取 data-turn-idx（全局回合号），不数 DOM 序
     // 滚到底（含新消息后自动跟随最新内容）时，当前回合就是最新回合——
     // 否则短的新回合在视口下半部永远够不着顶部门线，高亮会卡在上一条
     if (atBottom(element)) {
-      setActiveNav(nodes.length - 1)
+      setActiveNav(Number(nodes[nodes.length - 1].dataset.turnIdx ?? '0'))
       return
     }
     const top = element.getBoundingClientRect().top
-    let active = 0
-    nodes.forEach((node, index) => { if (node.getBoundingClientRect().top - top <= 80) active = index })
-    setActiveNav(active)
+    let activeIdx = Number(nodes[0].dataset.turnIdx ?? '0')
+    nodes.forEach((node) => { if (node.getBoundingClientRect().top - top <= 80) activeIdx = Number(node.dataset.turnIdx ?? '0') })
+    setActiveNav(activeIdx)
   }
   const onLogScroll = () => {
     // 贴底判定要立刻反映到「回到最新」按钮上，不等下一帧；activeNav 仍按帧节流
