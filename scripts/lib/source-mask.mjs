@@ -8,9 +8,11 @@
 // 行号、列号可以直接回报给用户。仓库已有 scripts 之间互相 import 的先例
 // （smoke-*.mjs ← scripts/fixtures/*.mjs），本模块同属脚本侧工具。
 
-/** CSS 块注释 → 等长空格（保留换行，偏移不失真） */
+/** CSS 块注释 → 等长空格（保留换行，偏移不失真）。
+ *  注意 out 用 split('')（UTF-16 单元）而不是 [...text]（码点）：emoji 等增补平面字符
+ *  会让码点数 < text.length，等长遮罩的偏移对齐约定就破了——行号列号会整体错位。 */
 export function maskCss(text) {
-  const out = [...text];
+  const out = text.split('');
   let i = 0;
   while (i < text.length) {
     if (text[i] === '/' && text[i + 1] === '*') {
@@ -39,7 +41,8 @@ export function maskCss(text) {
  * - `inString[i]`：第 i 个字符是否属于字符串/模板字面量（含定界符与转义序列）
  */
 export function maskTs(text) {
-  const out = [...text];
+  // 同 maskCss：UTF-16 单元数组，保证 out/inString 与 text 逐单元对齐（emoji 不再错位）
+  const out = text.split('');
   const inString = new Array(text.length).fill(false);
   const stack = []; // 模板字面量 ${} 的嵌套栈
   let mode = 'code';

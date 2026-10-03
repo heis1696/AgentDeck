@@ -34,6 +34,13 @@ export function ConfirmHost() {
   const currentSubmission = submission?.id === request.id ? submission : null
   const submitting = currentSubmission?.submitting ?? false
   const submitError = currentSubmission?.error ?? null
+  // 提交中的取消必须整路阻断（按钮/遮罩/Escape 都走这里）：已发出的 onConfirm 无法撤销，
+  // 若按取消结算 Promise，调用方会以为没做而实际操作照跑——比禁用更糟的是撒谎。
+  // 失败态（submitting=false）恢复取消/关闭入口，错误信息 + 重试承接结果。
+  const cancel = () => {
+    if (submitting) return
+    ui.confirmHost.respond(false)
+  }
   const confirm = async () => {
     if (submitting) return
     if (!request.onConfirm) {
@@ -53,7 +60,7 @@ export function ConfirmHost() {
   }
 
   return (
-    <div className="overlay" ref={layerRef} onClick={(e) => e.target === e.currentTarget && ui.confirmHost.respond(false)}>
+    <div className="overlay" ref={layerRef} onClick={(e) => e.target === e.currentTarget && cancel()}>
       <div className="dialog confirm-dialog" role="dialog" aria-modal="true" aria-label={request.title}>
         <h2>{request.title}</h2>
         {request.body && <p className="confirm-body">{request.body}</p>}
@@ -67,7 +74,7 @@ export function ConfirmHost() {
         </div>}
         {submitError && <p className="confirm-error" role="alert">{submitError}</p>}
         <div className="dialog-footer">
-          <button className="btn" onClick={() => ui.confirmHost.respond(false)}>{submitError ? '关闭' : request.cancelText ?? '取消'}</button>
+          <button className="btn" onClick={cancel} disabled={submitting} aria-disabled={submitting}>{submitError ? '关闭' : request.cancelText ?? '取消'}</button>
           <button
             ref={confirmBtnRef}
             className={`btn ${request.danger ? 'danger' : 'primary'}`}

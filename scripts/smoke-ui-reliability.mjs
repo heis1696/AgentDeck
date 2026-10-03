@@ -26,7 +26,7 @@ window.agentdeck = emptyApi
 const outfile = path.join(root, 'out/smoke-ui-reliability.cjs')
 await build({
   stdin: {
-    contents: "import './scripts/fixtures/ui-visual-bridge'; export { act, createElement, Fragment } from 'react'; export { createRoot } from 'react-dom/client'; export { AgentsView, canPersistList } from './src/renderer/src/components/AgentsView'; export { ConfirmHost } from './src/renderer/src/ui/Confirm'; export { SettingsView, validateTuningValue } from './src/renderer/src/components/SettingsView'; export { UsageView } from './src/renderer/src/components/UsageView'; export { WorkspaceView } from './src/renderer/src/components/WorkspaceView';",
+    contents: "import './scripts/fixtures/ui-visual-bridge'; export { act, createElement, Fragment } from 'react'; export { createRoot } from 'react-dom/client'; export { ui } from './src/renderer/src/ui/interaction-center'; export { AgentsView, canPersistList } from './src/renderer/src/components/AgentsView'; export { ConfirmHost } from './src/renderer/src/ui/Confirm'; export { SettingsView, validateTuningValue } from './src/renderer/src/components/SettingsView'; export { UsageView } from './src/renderer/src/components/UsageView'; export { WorkspaceView } from './src/renderer/src/components/WorkspaceView';",
     resolveDir: root,
     loader: 'tsx'
   },
@@ -39,7 +39,7 @@ await build({
   logLevel: 'silent'
 })
 
-const { act, createElement, Fragment, createRoot, AgentsView, ConfirmHost, SettingsView, UsageView, WorkspaceView, canPersistList, validateTuningValue } = await import(pathToFileURL(outfile).href)
+const { act, createElement, Fragment, createRoot, ui, AgentsView, ConfirmHost, SettingsView, UsageView, WorkspaceView, canPersistList, validateTuningValue } = await import(pathToFileURL(outfile).href)
 assert.equal(canPersistList('loading', [], false), false)
 assert.equal(canPersistList('error', [{ id: 'existing' }], false), false)
 assert.equal(canPersistList('ready', null, false), false)
@@ -216,6 +216,36 @@ try {
   assert(host.querySelector('.workspace-actions .primary').disabled)
   await unmount()
   console.log('PASS real Workspace: directory retry, completion requirements and captain validation')
+
+  // —— 确认框提交中阻断取消（审查阻塞 B2 回归）：onConfirm 在途时取消/遮罩不得把 Promise 结成 false ——
+  let rejectConfirm
+  const confirmResult = ui.confirm({
+    title: '删除该任务？', body: 'fixture', danger: true, confirmText: '删除',
+    onConfirm: () => new Promise((_, reject) => { rejectConfirm = reject })
+  })
+  let settled = false
+  void confirmResult.then((value) => { settled = true; return value })
+  await act(async () => { reactRoot = createRoot(host); reactRoot.render(createElement(ConfirmHost)) })
+  const footer = () => host.querySelector('.confirm-dialog .dialog-footer')
+  await act(async () => { footer().querySelectorAll('button')[1].dispatchEvent(new window.MouseEvent('click', { bubbles: true })) })
+  assert(footer().querySelectorAll('button')[0].disabled, '提交中：取消按钮禁用')
+  assert.equal(footer().querySelectorAll('button')[1].textContent, '提交中…', '提交中：确认按钮进入 busy 态')
+  // 提交中点遮罩与取消按钮都不能结算（已发出的操作无法撤销，取消即撒谎）
+  await act(async () => { host.querySelector('.overlay').dispatchEvent(new window.MouseEvent('click', { bubbles: false })) })
+  await act(async () => { footer().querySelectorAll('button')[0].dispatchEvent(new window.MouseEvent('click', { bubbles: true })) })
+  await act(async () => { await Promise.resolve() })
+  assert.equal(settled, false, '提交中：取消路径未把 Promise 结算成 false')
+  assert(host.querySelector('.confirm-dialog'), '确认框仍在（未被取消关闭）')
+  // 失败后承接错误：显示错误 + 重试/关闭，此时关闭 = 正常结算 false
+  await act(async () => { rejectConfirm(new Error('删除被拒绝')) })
+  await act(async () => { await Promise.resolve(); await Promise.resolve() })
+  assert(host.querySelector('.confirm-error')?.textContent.includes('删除被拒绝'), '失败态展示错误信息')
+  await act(async () => { footer().querySelectorAll('button')[0].dispatchEvent(new window.MouseEvent('click', { bubbles: true })) })
+  await act(async () => { await Promise.resolve() })
+  assert.equal(await confirmResult, false, '失败后关闭按取消结算 false')
+  assert.equal(settled, true)
+  await unmount()
+  console.log('PASS ConfirmHost: 提交中阻断取消（按钮/遮罩），失败态承接错误后可关闭')
 } finally {
   if (host.hasChildNodes()) await act(async () => reactRoot?.unmount())
   process.off('unhandledRejection', onUnhandled)

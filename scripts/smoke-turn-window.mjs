@@ -108,7 +108,7 @@ assert.equal(capped, 52, `折叠后头尾共 52 行（got ${capped}）`)
 await act(async () => { worklog.querySelector('.worklog-expand').dispatchEvent(new window.MouseEvent('click', { bubbles: true })) })
 assert.equal(lineCount(), 300, '点开显示全部后 300 行')
 
-// 5) 新会话窗口重置：task.id 变化回 30
+// 5) 新会话窗口重置：task.id 变化回 30，且 worklog「显示全部」不跨任务继承（key 带任务身份）
 await act(async () => {
   reactRoot.render(createElement(TurnTimeline, {
     task: { ...task, id: 't2' }, turns, activeNav: TOTAL_TURNS - 1, following: true,
@@ -116,6 +116,8 @@ await act(async () => {
   }))
 })
 assert.equal(renderedTurns().length, 30, '切任务后窗口重置回 30')
+const worklogAfterSwitch = logHost.querySelector('.worklog')
+assert.equal(worklogAfterSwitch.querySelectorAll('.log-line').length, 52, '切任务后 worklog 折叠状态重置（showAll 不跨任务继承）')
 
 await act(async () => { reactRoot.unmount() })
 console.log('✅ TURN WINDOW SMOKE PASSED: 500 回合窗口化渲染 30、扩窗/跳转旧回合/长 worklog 折叠全过')

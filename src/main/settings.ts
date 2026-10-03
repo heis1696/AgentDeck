@@ -12,7 +12,13 @@ export function loadSettings(): AppSettings {
     // 迁移：0.3.x 的 squadMaxWorkers → workerConcurrency
     const legacy = raw.squadMaxWorkers
     delete raw.squadMaxWorkers
-    return { ...DEFAULT_SETTINGS, ...raw, ...(legacy != null && raw.workerConcurrency == null ? { workerConcurrency: legacy } : {}) }
+    const merged = { ...DEFAULT_SETTINGS, ...raw, ...(legacy != null && raw.workerConcurrency == null ? { workerConcurrency: legacy } : {}) }
+    // 设置文件可能被手改或由旧版本写入：界面字号读取时归一化到 [12,16] 整数，非法值回默认
+    // （IPC 写入侧已校验，这里兜读取侧——越界值会直接生成 1000px 之类的字号撑爆布局）
+    if (!Number.isInteger(merged.uiFontSize) || merged.uiFontSize < 12 || merged.uiFontSize > 16) {
+      merged.uiFontSize = DEFAULT_SETTINGS.uiFontSize
+    }
+    return merged
   } catch {
     return { ...DEFAULT_SETTINGS }
   }

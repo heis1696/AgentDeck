@@ -311,20 +311,29 @@ export function TurnTimeline({ task, turns, activeNav, following, onFollowLatest
     const sentinel = sentinelRef.current
     if (!root || !sentinel) return
     const observer = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) setVisibleCount((count) => count + WINDOW_STEP)
+      if (entries.some((entry) => entry.isIntersecting)) expandWindow()
     }, { root, rootMargin: '320px 0px 0px 0px' })
     observer.observe(sentinel)
     return () => observer.disconnect()
   }, [hiddenBefore, logRef])
-  // 向上扩窗后保持视口锚定在原内容（scrollTop 补偿高度差），读历史不被顶飞
-  const expandUp = () => {
+  // 扩窗锚点恢复：按钮与观察器共用同一条路径——记录扩窗前内容高度，DOM 提交后把
+  // 新增高度补回 scrollTop，阅读位置不动；哨兵随新增内容退到视口上方，观察器不会
+  // 连环触发把历史一次全加载进来。锁保证一次扩窗未提交（锚点未恢复）前不再叠加触发。
+  const expandAnchorRef = useRef<number | null>(null)
+  const expandLockRef = useRef(false)
+  useLayoutEffect(() => {
+    if (expandAnchorRef.current == null) return
+    const before = expandAnchorRef.current
+    expandAnchorRef.current = null
+    expandLockRef.current = false
     const el = logRef.current
-    const before = el ? el.scrollHeight : 0
+    if (el) el.scrollTop += el.scrollHeight - before
+  }, [visibleCount])
+  const expandWindow = () => {
+    if (expandLockRef.current) return
+    expandLockRef.current = true
+    expandAnchorRef.current = logRef.current?.scrollHeight ?? 0
     setVisibleCount((count) => count + WINDOW_STEP)
-    requestAnimationFrame(() => {
-      const after = logRef.current
-      if (after) after.scrollTop += after.scrollHeight - before
-    })
   }
 
   return (
@@ -338,7 +347,7 @@ export function TurnTimeline({ task, turns, activeNav, following, onFollowLatest
         aria-label="执行记录（回合对话与工具调用）"
       >
         {hiddenBefore > 0 && <div className="log-more" ref={sentinelRef}>
-          <button type="button" className="log-more-btn" onClick={expandUp}>↑ 加载更早 {Math.min(WINDOW_STEP, hiddenBefore)} 回合 · 前面还有 {hiddenBefore} 回合</button>
+          <button type="button" className="log-more-btn" onClick={expandWindow}>↑ 加载更早 {Math.min(WINDOW_STEP, hiddenBefore)} 回合 · 前面还有 {hiddenBefore} 回合</button>
         </div>}
         {turns.slice(firstVisible).map((turn, offset) => {
           const index = firstVisible + offset
@@ -351,7 +360,9 @@ export function TurnTimeline({ task, turns, activeNav, following, onFollowLatest
           let lastBubbleIndex = -1
           let lastWorkIndex = -1
           turn.items.forEach((item, itemIndex) => { if (item.type === 'work') lastWorkIndex = itemIndex; else lastBubbleIndex = itemIndex })
-          return <div className="turn" id={`turn-${index}`} data-turn-idx={index} key={index}>
+          // key 带任务身份：切任务时回合子树整体重挂，worklog「显示全部」等本地状态
+          // 不跨任务继承（否则 A 展开的第 70 回合会把 B 的第 70 回合也顶成全量渲染）
+          return <div className="turn" id={`turn-${index}`} data-turn-idx={index} key={`${task.id}:${index}`}>
             <div className="turn-head">
               <span className="turn-index">{snapshotOnly && contextLabel ? contextLabel : `#${index + 1}`}</span>
               {startedAt > 0 && <time className="turn-time" title={fmtTime(startedAt)}>{fmtTime(startedAt)}</time>}

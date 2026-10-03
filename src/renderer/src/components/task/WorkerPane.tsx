@@ -93,9 +93,11 @@ function WorkerDetail({ task, onOpen, readOnly, dockRootId, execution }: { task:
     const log = logRef.current
     if (!log) return
     syncFollowing()
-    let active = 0
+    // 窗口化后 .turn 只含最近 N 个回合：高亮索引取 data-turn-idx（全局回合号），不数 DOM 序
+    const nodes = log.querySelectorAll<HTMLElement>('.turn')
+    let active = nodes.length ? Number(nodes[0].dataset.turnIdx ?? '0') : 0
     const top = log.getBoundingClientRect().top
-    log.querySelectorAll<HTMLElement>('.turn').forEach((node, index) => { if (node.getBoundingClientRect().top - top <= 70) active = index })
+    nodes.forEach((node) => { if (node.getBoundingClientRect().top - top <= 70) active = Number(node.dataset.turnIdx ?? '0') })
     setActiveNav(followRef.current ? Math.max(0, turns.length - 1) : active)
   }
   /** 「回到最新」：滚到末尾并把跟随状态重新打开（滚动本身尊重 prefers-reduced-motion） */
@@ -108,7 +110,9 @@ function WorkerDetail({ task, onOpen, readOnly, dockRootId, execution }: { task:
   }
   const navigate = (index: number) => {
     const log = logRef.current
-    const target = log?.querySelectorAll<HTMLElement>('.turn')[index]
+    // 按全局回合号定位（#turn-<n>）：窗口化后 DOM 序号 ≠ 回合号；未渲染回合由
+    // TurnTimeline 的 navigateTo 先扩窗再回调到这里，此时节点必已存在
+    const target = log?.querySelector<HTMLElement>(`#turn-${index}`)
     if (!log || !target) return
     followRef.current = false
     setFollowing(false)
