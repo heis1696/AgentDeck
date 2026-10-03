@@ -1,10 +1,20 @@
 # AgentDeck 设计体系 v2
-> 2026-09-20 更新：当前配色、排印、间距、圆角和动效以 `src/renderer/src/tokens.css` 为准。本文保留 v2 设计背景；下文蓝色强调、运行态光晕、按钮上浮和 12px 面板圆角不再是现行要求。
+> 2026-10-03 更新：字阶改为**相对公式**（`--ui-font-size` 基准，见 §〇 与 §2.2），新增「最高优先级约束」（§〇），阴影收敛为浮层专属（§〇 第 4 条）。当前配色、排印、间距、圆角和动效一律以 `src/renderer/src/tokens.css` 为准。
+> 2026-09-20 更新：本文保留 v2 设计背景；下文蓝色强调、运行态光晕、按钮上浮和 12px 面板圆角不再是现行要求。
 > ✅ 校验于 `6b2f038` / v0.22.0-hot.19（2026-09-19 文档审计）——令牌与组件规格仍为现行视觉规范；§5「styles.css 重组方案」已执行完毕，0.19.0 起页面级样式迁移至 `src/renderer/src/polish/` 命名空间（foundation / page-shell / usage / team / board / detail / dock / issue-home）；§3.14 详情页属性栏已被 0.22.0 反馈迭代改版（SideDock 分栏）取代。
 
 
 > 规格版本：v2.0.0 · 生效时间：2026-09-05  
 > 替代：styles.css 四代覆盖层（0.7 基础 → 0.8 Linear 式 → 0.10 浅色补丁 → 0.11 令牌 v2 → 0.12 骨架）
+
+---
+
+## 〇、最高优先级约束（违例视为缺陷，不是风格偏好）
+
+1. **界面字号必须走字阶令牌**：组件与样式只用 `--text-*` 令牌（由 `calc(var(--ui-font-size) ± Npx)` 推导），禁止裸 px `font-size`、禁止绕过令牌改字阶步进。用户改字号只作用于 `--ui-font-size` 一个变量；**绝不改 `html` 自身 `font-size`**——图标、间距、圆角不随字号缩放。
+2. **色值必须走语义令牌**：组件与页面样式引用 `tokens.css` 令牌变量；禁止硬编码 `#hex` / `rgb()` / `hsl()` 与临时 alpha 色（如 `rgba(255,255,255,.5)`）。白名单与机器检查见 §5.3。
+3. **状态色配对使用**：状态淡底上的文字用对应 `--status-*-fg`（暗色提亮一档、浅色压深一档），不要用主文字色或裸状态色凑合；语义色不得挪作装饰。
+4. **阴影分层纪律**：`--shadow-pop` / `--menu-shadow` 只归浮层（dialog / menu / palette / toast / float-window）；内容级卡片的 hover 反馈 = 边框变色 + 1px 上浮，**无投影**。
 
 ---
 
@@ -133,16 +143,19 @@
 
 ### 2.2 排印令牌
 
-**字阶（全站仅此六步，不可擅自添加中间值）**：
+**字阶（相对公式制，以 `--ui-font-size` 为唯一基准，默认 14px，用户可调 12–16px）**：
 
 ```css
---text-micro: 11px;       /* 角色：时间戳、辅助标签、键盘提示 */
---text-caption: 12px;     /* 角色：描述、次要信息、表格正文 */
---text-label: 13px;       /* 角色：列表项标题、按钮、输入框 */
---text-body: 14px;        /* 角色：正文、输入文本 */
---text-title-sm: 16px;    /* 角色：卡片标题、对话框标题 */
---text-title: 18px;       /* 角色：页面标题 */
+--ui-font-size: 14px;                              /* 唯一随设置变化的排版变量 */
+--text-micro: calc(var(--ui-font-size) - 3px);     /* 时间戳、辅助标签、键盘提示 */
+--text-caption: calc(var(--ui-font-size) - 2px);   /* 描述、次要信息、表格正文 */
+--text-label: calc(var(--ui-font-size) - 1px);     /* 列表项标题、按钮、输入框 */
+--text-body: var(--ui-font-size);                  /* 正文、输入文本 */
+--text-title-sm: calc(var(--ui-font-size) + 2px);  /* 卡片标题、对话框标题 */
+--text-title: calc(var(--ui-font-size) + 4px);     /* 页面标题 */
 ```
+
+（tokens.css 另有 `--text-page-title`(+6) 与 `--text-section-title`(+2) 两步页面级标题；步进角色命名不变，禁止擅自添加中间值。）
 
 **字重**：
 - 常规：400（西文）/ 450（中文，系统字体自动映射）
@@ -345,9 +358,10 @@ font-size: var(--text-label);
 .board-card:hover {
   border-color: var(--accent);
   transform: translateY(-1px);
-  box-shadow: var(--shadow-pop);
 }
 ```
+
+（阴影纪律见 §〇 第 4 条：内容级卡片 hover 无投影，`--shadow-pop` 归浮层。）
 
 ### 3.5 看板列（Board Column）
 
@@ -803,6 +817,12 @@ font-size: var(--text-label);
 5. ✅ 文件总行数减少到 ≤900 行（现在 1365 行）。
 6. ✅ 按字母序排列组件块（除布局骨架在前）。
 
+> **机器检查（2026-10-03 起）**：第 3 条与 §六·3 的「字阶只用令牌」已可执行化——`npm run check:design`
+> （`scripts/check-design-tokens.mjs`）扫描 `src/renderer/src/**/*.css` 与 `**/*.{ts,tsx}`，报硬编码色值
+> （`#hex` / `rgb()` / `hsl()`）与非令牌 `font-size` 裸 px，违例即非零退出。规则清单、白名单、豁免注释与
+> 基线还清约定见 [ARCHITECTURE.md](ARCHITECTURE.md) §14。**现行令牌值以 `src/renderer/src/tokens.css` 为准**
+> （本文 §2.1 的色值是 v2 提案值，部分已被 tokens.css 取代）。
+
 ---
 
 ## 六、验收清单
@@ -819,7 +839,7 @@ font-size: var(--text-label);
 - [ ] 7. 状态胶囊：运行中/排队有光晕动画，其他三态静态
 - [ ] 8. 输入框 focus ring：`box-shadow: 0 0 0 3px var(--accent-soft)`，不用 outline
 - [ ] 9. 菜单/toast/对话框入场动画：0.10s / 0.16s / 0.16s，缓动 ease-out
-- [ ] 10. 任务卡 hover：背景变色 + 看板卡有 `translateY(-1px)` + 阴影
+- [ ] 10. 任务卡 hover：背景变色 + 看板卡 `translateY(-1px)`，均无投影（阴影纪律见 §〇）
 
 ### 交互态
 - [ ] 11. 空状态：圆形图标 + 标题 + 描述 + 可选操作按钮，居中

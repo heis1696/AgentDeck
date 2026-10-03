@@ -602,6 +602,7 @@ export type Theme = 'dark' | 'light' | 'system'
 
 export interface AppSettings {
   theme: Theme
+  uiFontSize: number // 界面字号基准（px），字阶令牌由 calc(var(--ui-font-size) ± N) 推导；合法区间 [12,16]
   zcodePath: string // zcode.cjs 路径
   dshPath: string // deepseek-harness bin.js 路径（留空自动扫描）
   nodePath: string // 用来跑 zcode.cjs 的 node；空 = process.execPath 或 PATH 上的 node
@@ -626,6 +627,7 @@ export interface AppSettings {
 
 export const DEFAULT_SETTINGS: AppSettings = {
   theme: 'light',
+  uiFontSize: 14,
   zcodePath: '',
   dshPath: '',
   nodePath: '',

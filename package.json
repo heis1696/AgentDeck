@@ -11,6 +11,8 @@
     "preview": "electron-vite preview",
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "check:architecture": "node scripts/architecture-check.mjs",
+    "check:design": "node scripts/check-design-tokens.mjs",
     "pack": "electron-vite build && electron-builder --dir",
     "dist": "electron-vite build && electron-builder",
     "smoke": "node scripts/smoke-runner.mjs",

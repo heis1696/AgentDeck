@@ -1,0 +1,347 @@
+{
+  "version": 1,
+  "generator": "scripts/check-design-tokens.mjs",
+  "note": "过渡台账：只允许缩小。还清后重跑 --baseline 收缩；不是永久豁免。约定见 docs/ARCHITECTURE.md §14。",
+  "scope": [
+    "src/renderer/src/**/*.css",
+    "src/renderer/src/**/*.{ts,tsx}"
+  ],
+  "whitelist": [
+    "src/renderer/src/tokens.css",
+    "transparent / alpha=0",
+    "0 值",
+    "var() 令牌值",
+    "--font-mono / --mono 规则块",
+    "design-ok 行内注释"
+  ],
+  "rules": {
+    "color-hardcoded": "硬编码色值（#hex / rgb() / rgba() / hsl() / hsla()）——改用 tokens.css 令牌",
+    "font-size-raw-px": "非令牌 font-size 裸 px——改用 var(--text-micro/caption/label/body/title-sm/title)"
+  },
+  "generatedAt": "2026-10-03T14:17:18.020Z",
+  "summary": {
+    "files": 86,
+    "scanned": 85,
+    "css": 14,
+    "code": 72,
+    "violations": 39,
+    "byRule": {
+      "color-hardcoded": 25,
+      "font-size-raw-px": 14
+    }
+  },
+  "entries": [
+    {
+      "key": "b6758da4b6ace020",
+      "rule": "color-hardcoded",
+      "file": "src/renderer/src/components/AgentsView.tsx",
+      "line": 254,
+      "match": "#4f8cff",
+      "text": "canWriteAgents && setEditing({ id: `ag_${Date.now().toString(36)}`, name: '', backend: 'zcode', color: '#4f8cff', note: '', role: '', systemPrompt: '', subordin"
+    },
+    {
+      "key": "28ca253be6c2fe61",
+      "rule": "color-hardcoded",
+      "file": "src/renderer/src/components/AgentsView.tsx",
+      "line": 309,
+      "match": "#4f8cff",
+      "text": "color: draftPicked.color ? d.color : '#4f8cff',"
+    },
+    {
+      "key": "c49ffcd7f22f59fc",
+      "rule": "color-hardcoded",
+      "file": "src/renderer/src/components/RuntimeView.tsx",
+      "line": 127,
+      "match": "#64748b",
+      "text": "<section className=\"runtime-section\"><div className=\"section-heading\"><h3>后端健康</h3><span>探测只在本地进行，可随时重复。</span></div><div className=\"runtime-grid\">{snapshots.ma"
+    },
+    {
+      "key": "81d5807ed14f57fa",
+      "rule": "color-hardcoded",
+      "file": "src/renderer/src/components/UsageView.tsx",
+      "line": 9,
+      "match": "#4bc0c8",
+      "text": "const BACKEND_HUES = ['#4bc0c8', '#e3a84b', '#8f7ff0', '#58c58a', '#5b9dff', '#ef7168', '#d8739e']"
+    },
+    {
+      "key": "7465ad93238a9436",
+      "rule": "color-hardcoded",
+      "file": "src/renderer/src/components/UsageView.tsx",
+      "line": 9,
+      "match": "#e3a84b",
+      "text": "const BACKEND_HUES = ['#4bc0c8', '#e3a84b', '#8f7ff0', '#58c58a', '#5b9dff', '#ef7168', '#d8739e']"
+    },
+    {
+      "key": "56892f0999efb4d2",
+      "rule": "color-hardcoded",
+      "file": "src/renderer/src/components/UsageView.tsx",
+      "line": 9,
+      "match": "#8f7ff0",
+      "text": "const BACKEND_HUES = ['#4bc0c8', '#e3a84b', '#8f7ff0', '#58c58a', '#5b9dff', '#ef7168', '#d8739e']"
+    },
+    {
+      "key": "83ea9dc606ee81d7",
+      "rule": "color-hardcoded",
+      "file": "src/renderer/src/components/UsageView.tsx",
+      "line": 9,
+      "match": "#58c58a",
+      "text": "const BACKEND_HUES = ['#4bc0c8', '#e3a84b', '#8f7ff0', '#58c58a', '#5b9dff', '#ef7168', '#d8739e']"
+    },
+    {
+      "key": "19c1d7a906202259",
+      "rule": "color-hardcoded",
+      "file": "src/renderer/src/components/UsageView.tsx",
+      "line": 9,
+      "match": "#5b9dff",
+      "text": "const BACKEND_HUES = ['#4bc0c8', '#e3a84b', '#8f7ff0', '#58c58a', '#5b9dff', '#ef7168', '#d8739e']"
+    },
+    {
+      "key": "485eb1f1c5841172",
+      "rule": "color-hardcoded",
+      "file": "src/renderer/src/components/UsageView.tsx",
+      "line": 9,
+      "match": "#ef7168",
+      "text": "const BACKEND_HUES = ['#4bc0c8', '#e3a84b', '#8f7ff0', '#58c58a', '#5b9dff', '#ef7168', '#d8739e']"
+    },
+    {
+      "key": "9ef3adc5cf8abbee",
+      "rule": "color-hardcoded",
+      "file": "src/renderer/src/components/UsageView.tsx",
+      "line": 9,
+      "match": "#d8739e",
+      "text": "const BACKEND_HUES = ['#4bc0c8', '#e3a84b', '#8f7ff0', '#58c58a', '#5b9dff', '#ef7168', '#d8739e']"
+    },
+    {
+      "key": "f5b505ff8132a298",
+      "rule": "color-hardcoded",
+      "file": "src/renderer/src/labels.ts",
+      "line": 24,
+      "match": "#8b95a5",
+      "text": "draft: '#8b95a5', active: '#4f8cff', waiting_user: '#e8a13c',"
+    },
+    {
+      "key": "3e3c9dfda10fe8cb",
+      "rule": "color-hardcoded",
+      "file": "src/renderer/src/labels.ts",
+      "line": 24,
+      "match": "#4f8cff",
+      "text": "draft: '#8b95a5', active: '#4f8cff', waiting_user: '#e8a13c',"
+    },
+    {
+      "key": "c65fe5936782536e",
+      "rule": "color-hardcoded",
+      "file": "src/renderer/src/labels.ts",
+      "line": 24,
+      "match": "#e8a13c",
+      "text": "draft: '#8b95a5', active: '#4f8cff', waiting_user: '#e8a13c',"
+    },
+    {
+      "key": "7020cc0563275b32",
+      "rule": "color-hardcoded",
+      "file": "src/renderer/src/labels.ts",
+      "line": 25,
+      "match": "#3cb96e",
+      "text": "completed: '#3cb96e', blocked: '#e8a13c', cancelled: '#8b95a5', failed: '#e05252'"
+    },
+    {
+      "key": "6e4905bb4edeada0",
+      "rule": "color-hardcoded",
+      "file": "src/renderer/src/labels.ts",
+      "line": 25,
+      "match": "#e8a13c",
+      "text": "completed: '#3cb96e', blocked: '#e8a13c', cancelled: '#8b95a5', failed: '#e05252'"
+    },
+    {
+      "key": "33998c1768180d9a",
+      "rule": "color-hardcoded",
+      "file": "src/renderer/src/labels.ts",
+      "line": 25,
+      "match": "#8b95a5",
+      "text": "completed: '#3cb96e', blocked: '#e8a13c', cancelled: '#8b95a5', failed: '#e05252'"
+    },
+    {
+      "key": "ad4a9e936b16af74",
+      "rule": "color-hardcoded",
+      "file": "src/renderer/src/labels.ts",
+      "line": 25,
+      "match": "#e05252",
+      "text": "completed: '#3cb96e', blocked: '#e8a13c', cancelled: '#8b95a5', failed: '#e05252'"
+    },
+    {
+      "key": "f63bb70c22f34b87",
+      "rule": "color-hardcoded",
+      "file": "src/renderer/src/pet/pet.css",
+      "line": 34,
+      "match": "rgba(0, 0, 0, 0.28)",
+      "text": "filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.28));"
+    },
+    {
+      "key": "680a7b991064c3d6",
+      "rule": "font-size-raw-px",
+      "file": "src/renderer/src/polish/board.css",
+      "line": 167,
+      "match": "font-size: 11px",
+      "text": ".board-day-nav-select { max-width: 112px; height: 24px; padding: 0 4px; border: 1px solid transparent; border-radius: var(--radius-sm); background: var(--bg-ins"
+    },
+    {
+      "key": "c6daf8156d435870",
+      "rule": "font-size-raw-px",
+      "file": "src/renderer/src/polish/detail.css",
+      "line": 592,
+      "match": "font-size: 11px",
+      "text": ".meeting-selects select { width: 100%; min-height: 27px; padding: 0 4px; font-size: 11px; }"
+    },
+    {
+      "key": "e870683e7846960c",
+      "rule": "font-size-raw-px",
+      "file": "src/renderer/src/polish/detail.css",
+      "line": 611,
+      "match": "font-size: 11px",
+      "text": ".meeting-interject input { width: 100%; min-height: 27px; padding: 0 7px; font-size: 11px; }"
+    },
+    {
+      "key": "d45b948aa857c957",
+      "rule": "font-size-raw-px",
+      "file": "src/renderer/src/polish/dock.css",
+      "line": 158,
+      "match": "font-size: 11px",
+      "text": ".code-line.is-hunk > code { font-size: 11px; }"
+    },
+    {
+      "key": "26a822b8cbd96dbb",
+      "rule": "font-size-raw-px",
+      "file": "src/renderer/src/polish/meeting-detail.css",
+      "line": 65,
+      "match": "font-size: 10px",
+      "text": "font-size: 10px;"
+    },
+    {
+      "key": "d56c10d7649fbf17",
+      "rule": "font-size-raw-px",
+      "file": "src/renderer/src/polish/meeting-detail.css",
+      "line": 71,
+      "match": "font-size: 10px",
+      "text": ".meeting-detail .mtd-member-state { font-size: 10px; color: var(--text-dim); margin-left: var(--space-1); }"
+    },
+    {
+      "key": "3cb93e41f5183232",
+      "rule": "font-size-raw-px",
+      "file": "src/renderer/src/polish/meeting-detail.css",
+      "line": 106,
+      "match": "font-size: 10px",
+      "text": ".meeting-detail .mtd-speaker time { margin-left: auto; font-size: 10px; }"
+    },
+    {
+      "key": "9f8f7c77fefd1501",
+      "rule": "font-size-raw-px",
+      "file": "src/renderer/src/polish/meeting-detail.css",
+      "line": 127,
+      "match": "font-size: 10px",
+      "text": "font-size: 10px;"
+    },
+    {
+      "key": "c12c66dac0fd3b2e",
+      "rule": "font-size-raw-px",
+      "file": "src/renderer/src/polish/meeting-detail.css",
+      "line": 137,
+      "match": "font-size: 10px",
+      "text": "font-size: 10px;"
+    },
+    {
+      "key": "53bc019253fc5bb5",
+      "rule": "font-size-raw-px",
+      "file": "src/renderer/src/polish/meeting-detail.css",
+      "line": 291,
+      "match": "font-size: 10px",
+      "text": ".meeting-detail .mtd-investigation span { color: var(--text-dim); font-size: 10px; margin-left: auto; flex-shrink: 0; }"
+    },
+    {
+      "key": "e340c4433f8e02cd",
+      "rule": "font-size-raw-px",
+      "file": "src/renderer/src/polish/team.css",
+      "line": 51,
+      "match": "font-size: 14px",
+      "text": "width: 40px; height: 40px; border-radius: var(--radius-md); font-size: 14px;"
+    },
+    {
+      "key": "fd0b83908448f642",
+      "rule": "font-size-raw-px",
+      "file": "src/renderer/src/polish/usage.css",
+      "line": 46,
+      "match": "font-size: 24px",
+      "text": ".us-stat-lead .us-stat-figure { font-size: 24px; }"
+    },
+    {
+      "key": "2deff87959571a0b",
+      "rule": "font-size-raw-px",
+      "file": "src/renderer/src/polish/usage.css",
+      "line": 64,
+      "match": "font-size: 10px",
+      "text": ".us-ring b small { font-size: 10px; font-weight: 600; color: var(--text-faint); margin-left: 1px; }"
+    },
+    {
+      "key": "8bcb4cb342c36234",
+      "rule": "font-size-raw-px",
+      "file": "src/renderer/src/styles.css",
+      "line": 196,
+      "match": "font-size: 40px",
+      "text": ".empty-icon { font-size: 40px; opacity: 0.5; }"
+    },
+    {
+      "key": "a6ce3689f22a290e",
+      "rule": "color-hardcoded",
+      "file": "src/renderer/src/styles.css",
+      "line": 381,
+      "match": "#fff",
+      "text": "color: #fff;"
+    },
+    {
+      "key": "87d6ccfed5c78141",
+      "rule": "color-hardcoded",
+      "file": "src/renderer/src/styles.css",
+      "line": 622,
+      "match": "rgba(0, 0, 0, 0.55)",
+      "text": "background: rgba(0, 0, 0, 0.55);"
+    },
+    {
+      "key": "f40d2ad573962cbb",
+      "rule": "color-hardcoded",
+      "file": "src/renderer/src/styles.css",
+      "line": 690,
+      "match": "#fff",
+      "text": "font-size: var(--text-micro); color: #fff; margin-right: 6px; vertical-align: middle;"
+    },
+    {
+      "key": "74691d65fccc942c",
+      "rule": "color-hardcoded",
+      "file": "src/renderer/src/styles.css",
+      "line": 1361,
+      "match": "rgba(0, 0, 0, 0.16)",
+      "text": ".workspace-prompt:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft), 0 10px 28px rgba(0, 0, 0, 0.16); }"
+    },
+    {
+      "key": "cbadb7a6bb5cc146",
+      "rule": "color-hardcoded",
+      "file": "src/renderer/src/styles.css",
+      "line": 1389,
+      "match": "#fff",
+      "text": ".automation-awake .toggle span { display: block; width: 18px; height: 18px; border-radius: 50%; background: #fff; transition: transform .15s ease; }"
+    },
+    {
+      "key": "8ac86f66f6421131",
+      "rule": "color-hardcoded",
+      "file": "src/renderer/src/styles.css",
+      "line": 1589,
+      "match": "rgba(3,6,9,.72)",
+      "text": ".overlay { background: rgba(3,6,9,.72); backdrop-filter: blur(8px); }"
+    },
+    {
+      "key": "09f197483ffe64ca",
+      "rule": "color-hardcoded",
+      "file": "src/renderer/src/styles.css",
+      "line": 1590,
+      "match": "rgba(0,0,0,.45)",
+      "text": ".dialog { width: min(620px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow-y: auto; padding: var(--space-5); border: 1px solid var(--border-stron"
+    }
+  ]
+}

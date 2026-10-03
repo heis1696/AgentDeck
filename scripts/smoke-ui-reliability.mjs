@@ -182,9 +182,13 @@ try {
   api.settings.get = () => new Promise((resolve) => { finishRead = resolve })
   await mount(SettingsView, { section: 'general', onSection() {} })
   await act(async () => { await original.settings.set({ concurrency: 3 }) })
-  assert.equal(host.querySelector('input[type=range]').value, '3')
-  await act(async () => finishRead({ ...settings, concurrency: 1 }))
-  assert.equal(host.querySelector('input[type=range]').value, '3', 'old read must not overwrite a settings broadcast')
+  // 外观卡新增「界面字号」滑杆后不能再按 DOM 顺序取第一个 range：按字段标签精确定位
+  const concurrencyRange = () =>
+    [...host.querySelectorAll('input[type=range]')]
+      .find((node) => node.closest('.field')?.querySelector('.field-label')?.textContent?.includes('并发任务数'))
+  assert.equal(concurrencyRange().value, '3')
+  await act(async () => { finishRead({ ...settings, concurrency: 1 }) })
+  assert.equal(concurrencyRange().value, '3', 'old read must not overwrite a settings broadcast')
   await unmount()
   console.log('PASS settings broadcast supersedes a pending read')
 

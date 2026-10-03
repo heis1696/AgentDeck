@@ -86,6 +86,12 @@ export function App() {
     if (theme === 'system') { mq.addEventListener('change', apply); return () => mq.removeEventListener('change', apply) }
   }, [settings?.theme])
 
+  // 界面字号：只改 --ui-font-size 这一个变量（字阶令牌全部由它推导），
+  // 绝不动 html 自身 font-size——图标/间距/圆角不随字号缩放。
+  useEffect(() => {
+    document.documentElement.style.setProperty('--ui-font-size', `${settings?.uiFontSize ?? 14}px`)
+  }, [settings?.uiFontSize])
+
   // 中心持有最新任务目录：祖先链解析（子任务→领队）、删除清理、dock 桶剪枝都以它为准。
   // 首份真实列表到达前不喂（ready 门控）：启动瞬间的空目录是「未加载」不是「没有任务」，
   // 喂进去会把待决路由乐观页签全部剪掉。

@@ -237,7 +237,10 @@ const realSettingsGet = api.settings.get
   // 其它设置写入失败必须被捕获：不能出现未处理 rejection
   api.settings.set = async () => { throw new Error('settings store blocked') }
   await mount(SettingsView, { section: 'general', onSection() {} })
-  await fill(host.querySelector('input[type=range]'), '3')
+  // 外观卡的「界面字号」滑杆排在并发之前：按字段标签精确定位，不依赖 DOM 顺序
+  const concurrencyRange = [...host.querySelectorAll('input[type=range]')]
+    .find((node) => node.closest('.field')?.querySelector('.field-label')?.textContent?.includes('并发任务数'))
+  await fill(concurrencyRange, '3')
   assert(toasts.some((item) => item.kind === 'error' && item.text.includes('设置保存失败')), '常规分区写入失败有提示')
   await unmount()
   console.log('PASS SettingsView：脏/保存中/失败三态、检测前保存、连点去重、写入失败可见')

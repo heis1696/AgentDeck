@@ -216,6 +216,8 @@ export function UsageView() {
   const scope = snapshot.range
   const scopeSwitching = scope !== range
   const total = summary.totals
+  // 区间快照会因切换范围、删除任务或统计重算而合法下降；不适用 Math.max(prev, next) 锁定。
+  // 若增加同范围、无重置语义的实时累计值，可用 display = Math.max(prev, next)，显式重置时须清空 prev。
   const tokens = total.inputTokens + total.outputTokens
   const failureRate = total.runs ? Math.round(total.failed / total.runs * 100) : 0
   const avgDuration = total.runs ? total.durationMs / total.runs : 0

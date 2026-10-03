@@ -14,6 +14,7 @@ import './polish/usage.css'
 import './polish/team.css'
 import './polish/dock.css'
 import './polish/operations.css'
+import './polish/confirm.css'
 
 // 渲染页没有 process：平台语义（sharedPathKey 的 win32 折叠/posix 精确分支）只能
 // 用 preload 白名单注入的字面量，必须在首次渲染前落位

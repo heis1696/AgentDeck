@@ -267,9 +267,31 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   const doRetry = () => doAction(() => taskService.retry(task.id))
   const doStart = () => doAction(() => taskService.start(task.id))
   const doDelete = async () => {
-    if (!(await ui.confirm({ title: '删除该任务及其日志？', body: task.title, danger: true, confirmText: '删除' }))) return
-    const result = await taskService.delete(task.id)
-    if (!result.ok) ui.toast.error(result.error ?? '删除失败')
+    const impactSections = [
+      {
+        title: '将删除',
+        items: [
+          { label: '任务与执行记录', description: `「${task.title}」及其本地日志、消息记录与结果将被删除。` },
+          { label: '直属子任务', description: workers.length ? `将一并删除 ${workers.length} 个子任务及其执行记录。` : '没有直属子任务需要删除。' },
+          { label: '工作区产物', description: '如存在，受管 worktree 与任务报告副本会一并清理。' }
+        ]
+      },
+      ...(!task.suppressIssue && task.issueId ? [{
+        title: '保留不变',
+        items: [{ label: `关联 Issue ${issue?.identifier ?? task.issueId}`, description: `Issue 不会删除，工作流状态保持不变${issue ? `（当前：${issue.status}）` : ''}。` }]
+      }] : [])
+    ]
+    await ui.confirm({
+      title: '删除该任务及其日志？',
+      body: task.title,
+      danger: true,
+      confirmText: '删除',
+      impactSections,
+      onConfirm: async () => {
+        const result = await taskService.delete(task.id)
+        if (!result.ok) throw new Error(result.error ?? '删除失败')
+      }
+    })
   }
   const doDuplicate = async () => {
     const copy = await taskService.duplicate(task)

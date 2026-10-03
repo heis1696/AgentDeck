@@ -1,0 +1,71 @@
+.confirm-impact {
+  display: grid;
+  gap: var(--space-3);
+  margin: var(--space-4) 0;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+}
+
+.confirm-impact-section + .confirm-impact-section {
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+
+.confirm-impact-section h3 {
+  margin-bottom: var(--space-2);
+  color: var(--text-dim);
+  font-size: var(--text-caption);
+  font-weight: 600;
+}
+
+.confirm-impact-section ul {
+  display: grid;
+  gap: var(--space-2);
+  list-style: none;
+}
+
+.confirm-impact-section li {
+  display: grid;
+  grid-template-columns: minmax(88px, auto) 1fr;
+  gap: var(--space-2);
+  align-items: baseline;
+  font-size: var(--text-caption);
+}
+
+.confirm-impact-section li strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.confirm-impact-section li span {
+  color: var(--text-dim);
+}
+
+.confirm-error {
+  margin: var(--space-3) 0;
+  color: var(--err);
+  font-size: var(--text-caption);
+  overflow-wrap: anywhere;
+}
+
+.confirm-dialog .dialog-footer .btn.primary:disabled,
+.confirm-dialog .dialog-footer .btn.danger:disabled {
+  opacity: 0.65;
+  cursor: progress;
+}
+
+.confirm-dialog .dialog-footer .btn[aria-busy='true'] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+}
+
+@media (max-width: 480px) {
+  .confirm-impact-section li {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+}

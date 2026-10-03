@@ -6,9 +6,11 @@
    按钮全局体系归 foundation.css 管。
    ============================================================ */
 
-/* ---------- 卡片：head / title / meta 三层分明（平面，无位移无投影） ---------- */
-.board-card { transition: border-color var(--duration-base) var(--ease-in-out); }
-.board-card:hover { border-color: var(--border-strong); }
+/* ---------- 卡片：head / title / meta 三层分明（边框反馈 + 1px 上浮，无投影） ----------
+   阴影纪律：内容级卡片 hover 一律不用浮层阴影（--shadow-pop 归 dialog/menu/palette/toast），
+   反馈 = 边框变色 + 1px 上浮。右键菜单渲染在卡片外部，transform 不影响其定位。 */
+.board-card { transition: border-color var(--duration-base) var(--ease-in-out), transform var(--duration-base) var(--ease-in-out); }
+.board-card:hover { border-color: var(--border-strong); transform: translateY(-1px); }
 .board-card[draggable='true']:active { cursor: grab; }
 .board-card.is-dragging { opacity: .48; border-style: dashed; }
 

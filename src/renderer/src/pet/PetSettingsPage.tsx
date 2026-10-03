@@ -82,6 +82,10 @@ export function PetSettingsPage() {
     apply()
     if (theme === 'system') { mq.addEventListener('change', apply); return () => mq.removeEventListener('change', apply) }
   }, [settings?.theme])
+  // 界面字号跟随主程序设置（同主 UI：只改基准变量，不动 html font-size）
+  useEffect(() => {
+    document.documentElement.style.setProperty('--ui-font-size', `${settings?.uiFontSize ?? 14}px`)
+  }, [settings?.uiFontSize])
   return (
     <div className="pet-settings-page">
       <ToastHost />

@@ -28,6 +28,7 @@
   --bg-raised: #17181b;           /* 表面（卡片/输入框/侧栏）*/
   --bg-hover: #1f2023;            /* 表面悬停 */
   --bg-inset: #0d0e10;            /* 凹陷输入（文本框内部）*/
+  --bg-input-focus: color-mix(in srgb, var(--bg-inset) 86%, var(--accent) 14%); /* 输入聚焦背景：凹陷底上极轻的品牌色 */
   --bg-selected: #26292d;         /* 选中态背景 */
   --bg-overlay: #1b1c20;          /* 浮层表面（菜单/下拉，比表面再亮一档）*/
 
@@ -35,6 +36,7 @@
   --border: #27292d;              /* 默认边框 */
   --border-strong: #35383d;       /* 强调边框（浮层/对话框）*/
   --border-subtle: color-mix(in srgb, var(--border) 62%, transparent); /* 内部分隔线 */
+  --border-focus: color-mix(in srgb, var(--accent) 55%, var(--border)); /* 聚焦边框（输入框 focus 三态之一）*/
 
   /* 文字 */
   --text: #e9eaec;                /* 主文字 */
@@ -49,23 +51,29 @@
   --accent-hover: color-mix(in srgb, var(--accent) 88%, #ffffff); /* 悬停提亮（不靠 filter）*/
   --accent-active: color-mix(in srgb, var(--accent) 88%, #000000); /* 按下压暗 */
 
-  /* 状态色：运行态光环的核心 */
+  /* 状态色：运行态光环的核心。-fg 为配对前景（状态淡底上的文字色）：
+     暗色提亮一档、浅色压深一档，双双过对比 */
   --status-running: #3dbfae;      /* 运行中=青绿电弧（唯一发光态）*/
   --status-running-bg: rgba(61, 191, 174, 0.13);
   --status-running-glow: rgba(61, 191, 174, 0.28);
+  --status-running-fg: color-mix(in srgb, var(--status-running) 72%, #ffffff);
 
   --status-queued: #d9a24a;       /* 排队=琥珀 */
   --status-queued-bg: rgba(217, 162, 74, 0.13);
   --status-queued-glow: rgba(217, 162, 74, 0.24);
+  --status-queued-fg: color-mix(in srgb, var(--status-queued) 72%, #ffffff);
 
   --status-done: #4cba78;         /* 成功=翠绿（不发光）*/
   --status-done-bg: rgba(76, 186, 120, 0.13);
+  --status-done-fg: color-mix(in srgb, var(--status-done) 72%, #ffffff);
 
   --status-failed: #e5655c;       /* 失败=红（不发光）*/
   --status-failed-bg: rgba(229, 101, 92, 0.13);
+  --status-failed-fg: color-mix(in srgb, var(--status-failed) 72%, #ffffff);
 
   --status-cancelled: #7d838b;    /* 已取消=灰（不发光）*/
   --status-cancelled-bg: rgba(125, 131, 139, 0.13);
+  --status-cancelled-fg: color-mix(in srgb, var(--status-cancelled) 72%, #ffffff);
 
   /* 功能色（向后兼容既有 --ok/--warn/--err）*/
   --ok: #4cba78;
@@ -108,15 +116,20 @@
   --space-6: 24px;
   --space-8: 32px;
 
-  /* 字阶（角色命名，全站仅用这些步进）*/
-  --text-micro: 11px;       /* 时间戳、辅助标签、键盘提示 */
-  --text-caption: 12px;     /* 描述、次要信息、表格正文 */
-  --text-label: 13px;       /* 列表项标题、按钮、输入框 */
-  --text-body: 14px;        /* 正文、输入文本 */
-  --text-title-sm: 16px;    /* 卡片标题、对话框标题 */
-  --text-title: 18px;       /* 页面标题 */
-  --text-page-title: 20px;  /* 共享页面主标题 */
-  --text-section-title: 16px;
+  /* 界面字号基准（px）：唯一随用户设置变化的排版变量。
+     字阶全部由 calc(基准 ± Npx) 推导——改字号只动这一个变量，
+     图标/间距/圆角等几何不随之缩放（禁止改 html 自身 font-size）。 */
+  --ui-font-size: 14px;
+
+  /* 字阶（角色命名，全站仅用这些步进；相对公式见 --ui-font-size）*/
+  --text-micro: calc(var(--ui-font-size) - 3px);       /* 时间戳、辅助标签、键盘提示 */
+  --text-caption: calc(var(--ui-font-size) - 2px);     /* 描述、次要信息、表格正文 */
+  --text-label: calc(var(--ui-font-size) - 1px);       /* 列表项标题、按钮、输入框 */
+  --text-body: var(--ui-font-size);                    /* 正文、输入文本 */
+  --text-title-sm: calc(var(--ui-font-size) + 2px);    /* 卡片标题、对话框标题 */
+  --text-title: calc(var(--ui-font-size) + 4px);       /* 页面标题 */
+  --text-page-title: calc(var(--ui-font-size) + 6px);  /* 共享页面主标题 */
+  --text-section-title: calc(var(--ui-font-size) + 2px);
 
   /* 行高（角色命名；正文 1.55，密集信息 1.4，长文/markdown 1.65）*/
   --leading-none: 1;
@@ -240,11 +253,13 @@ html.light {
   --bg-raised: #ffffff;
   --bg-hover: #efeff0;
   --bg-inset: #f2f2f3;
+  --bg-input-focus: #ffffff;      /* 浅色聚焦输入回到纯白，靠边框色表达聚焦 */
   --bg-selected: #e3e5e6;         /* 中性化：去掉残留的青偏 */
   --bg-overlay: #ffffff;
 
   --border: #dee0e3;              /* 比旧值略深：白底上的细线需要能分辨控件边界 */
   --border-strong: #c4c8ce;
+  --border-focus: color-mix(in srgb, var(--accent) 55%, var(--border));
 
   --text: #1b1c1e;
   --text-dim: #5f6368;
@@ -261,19 +276,24 @@ html.light {
   --status-running: #0d7d70;
   --status-running-bg: rgba(13, 125, 112, 0.1);
   --status-running-glow: rgba(13, 125, 112, 0.18);
+  --status-running-fg: color-mix(in srgb, var(--status-running) 86%, #000000);
 
   --status-queued: #9a6610;
   --status-queued-bg: rgba(154, 102, 16, 0.1);
   --status-queued-glow: rgba(154, 102, 16, 0.16);
+  --status-queued-fg: color-mix(in srgb, var(--status-queued) 86%, #000000);
 
   --status-done: #1a7c48;
   --status-done-bg: rgba(26, 124, 72, 0.1);
+  --status-done-fg: color-mix(in srgb, var(--status-done) 86%, #000000);
 
   --status-failed: #c03f37;
   --status-failed-bg: rgba(192, 63, 55, 0.1);
+  --status-failed-fg: color-mix(in srgb, var(--status-failed) 86%, #000000);
 
   --status-cancelled: #6f747c;
   --status-cancelled-bg: rgba(111, 116, 124, 0.1);
+  --status-cancelled-fg: color-mix(in srgb, var(--status-cancelled) 86%, #000000);
 
   --ok: #1a7c48;
   --warn: #9a6610;

@@ -9,7 +9,7 @@
 
 | 文档 | 一句话 | 状态 |
 |---|---|---|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | 架构总览：Issue-first 工作模型、模块地图、关键数据流、可靠性设计、测试基线 | A · 头部差异注记（新模块/导航/测试矩阵待补） |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | 架构总览：Issue-first 工作模型、模块地图、关键数据流、可靠性设计、测试基线；§14 为规范机器检查（`check:design` / `check:architecture`）规则与基线还清约定 | A · 头部差异注记（新模块/导航/测试矩阵待补） |
 | [API.md](API.md) | 四层接口：IPC 桥全量表格、数据模型、后端适配器接口、委派协议、ZCode 协议要点 | A · 头部差异注记（正文 v0.13.x 基准，桌宠 pet 域未收录，对照表见注记框） |
 | [PROMPTS.md](PROMPTS.md) | 提示词系统：模块地图、注入地图、协议标记与解析器契约、术语表、措辞约定、smoke 固化原文、锻造升级规则 | A · 2026-09-29 去歧义重做后写成，改提示词以此为准 |
 | [SIDECAR.md](SIDECAR.md) | Business Brain sidecar：独立 Node 进程、loopback RPC 契约与生命周期 | A |

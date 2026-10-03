@@ -62,6 +62,16 @@ export interface DockHandle { id: string; token: number; rootId: string }
 export type ToastKind = 'info' | 'success' | 'error'
 export interface ToastRecord { id: number; kind: ToastKind; text: string }
 
+export interface ConfirmImpactItem {
+  label: string
+  description: string
+}
+
+export interface ConfirmImpactSection {
+  title: string
+  items: readonly ConfirmImpactItem[]
+}
+
 export interface ConfirmOptions {
   title: string
   body?: string
@@ -69,6 +79,9 @@ export interface ConfirmOptions {
   danger?: boolean
   confirmText?: string
   cancelText?: string
+  impactSections?: readonly ConfirmImpactSection[]
+  /** Optional async work run before this confirmation resolves true. Throw to keep the dialog open with a retryable error. */
+  onConfirm?: () => void | Promise<void>
 }
 export interface ConfirmRequest extends ConfirmOptions { id: number }
 

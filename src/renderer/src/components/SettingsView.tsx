@@ -165,6 +165,14 @@ function GeneralSection() {
           ]}
           onChange={(v) => save({ theme: v as AppSettings['theme'] })}
         />
+        <RangeField
+          label="界面字号"
+          min={12}
+          max={16}
+          value={settings.uiFontSize ?? 14}
+          hint="界面文字整体缩放（12–16px）；只改字号，不缩放图标与间距。"
+          onChange={(v) => save({ uiFontSize: v })}
+        />
       </section>
 
       <section className="settings-card">

@@ -170,10 +170,12 @@ const checkDropdownBounds = async (label, selector, labelSelector) => {
 }
 
 const checkSliderLabelSafety = async () => {
-  const slider = page.locator('.settings-page input[type=range]').first()
+  // 外观卡新增「界面字号」滑杆后第一个 range 不再是并发数：按字段标签精确定位
+  const field = page.locator('.settings-page .field').filter({ hasText: '并发任务数' })
+  const slider = field.locator('input[type=range]')
   await slider.scrollIntoViewIfNeeded()
   const before = await slider.inputValue()
-  const label = page.locator('.settings-page .field:has(input[type=range]) .field-label').first()
+  const label = field.locator('.field-label')
   const labelBox = await label.boundingBox()
   await page.mouse.click(Math.round(labelBox.x + labelBox.width / 2), Math.round(labelBox.y + labelBox.height / 2))
   await settle()

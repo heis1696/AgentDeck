@@ -433,3 +433,82 @@ delegate 标记 → 目标解析（限 subordinates，名字/平台 id 忽略大
 - **终点钩子的真实生效与级联迁移（次轮补齐）**：settle 区分「首次收尾」与「同终态重复收尾」——落库后补收口（生产常态：failTask/finalizer/terminate/cancel 都在状态落库后调用）首次到达时照常执行钩子，重复到达只补记账；重跑经 `reopen(taskId)` 重置登记。`SettleContext.source`（cancel/finalize/terminate…）让横切钩子按来源区分行为；`addSettleHook` 提供与变体 onSettle 同批执行的横切收尾链。**级联取消已迁入**：`cancel()` 三个成功分支（running/queued/failed-retry）统一走 settle（source=cancel），子任务级联停止挂在横切钩子上（原内联语义；terminateTask 自带的全量子任务终止不受影响）。followUp 的 resume 分支同样迁为 Start→Running→Finalize 节点流：良性早退（「回合已失效」）用协作中断表达——引擎在节点边界停止、不进 failTask 错误路径。
 - **run() 主路径节点化（三路径收口完成）**：`run()`（首次执行）、followUp resume（重建续聊）、`startIsolatedTurn`（隔离回合）三条执行路径全部走 Start→Running→Finalize 节点流——同一套节点类、同一引擎、同一在途账键位（`${taskId}:node:start|running|finalize`）。原 try/catch/finally 语义的映射约定固化：良性早退（绑定换手/回合失效的静默 return）= 协作中断（引擎节点边界停止，不进错误路径）；真错误 = 流错误（映射原 catch：关会话+落败+自动重试+失败通知）；外层 finally = 流级 `onFlowEnd` 端口（看门狗取消、事件冲刷、启动句柄清账、pushTask）。goal 的终态联动保持 onTaskChanged 单点回调（其消费面覆盖非终态变化，迁 settle 钩子只会收窄语义，不迁）。
 - **回归**：`smoke:pipeline`（单元：变体解析/账本/idle 不变式/settle 幂等与拒改写/钩子容错/流水账；集成：runner 单点委托、守卫横切、终态入流水账）已接入 `smoke:stage6` 与 `smoke:all`。后续机制（goal/sidecar/retention 钩子化）按变体迁移，不再各建状态机。
+
+## 14. 规范可执行化：机器检查与基线（check:design / check:architecture）
+
+> 2026-10-03 新增。把 [DESIGN-SYSTEM-V2.md](DESIGN-SYSTEM-V2.md) 的设计约束与本文 §3/§7 的三域边界，从「文档里写着」变成「提交前跑得动」。两个脚本均为 node stdlib、零依赖，与 `scripts/` 下既有 `.mjs` 同风格；**不改变任何运行时行为**，只读源码做静态判定。共用文本遮罩工具 `scripts/lib/source-mask.mjs`（注释/字符串分语境，偏移与行号对齐）。
+
+### 14.1 入口与退出码
+
+| 命令 | 脚本 | 作用 |
+|---|---|---|
+| `npm run check:design` | `scripts/check-design-tokens.mjs` | 设计令牌：CSS 与组件里的硬编码色值、非令牌 font-size 裸 px |
+| `npm run check:architecture` | `scripts/architecture-check.mjs` | 三域依赖方向：renderer / preload / main 越界与 electron 引入面 |
+
+退出码统一：**0 = 通过，1 = 有违例，2 = 参数错误**。共同参数：
+
+- `--baseline`：把当前违例写成基线快照（`scripts/baselines/*.baseline.json`），退出 0；
+- `--check-baseline`：只报「基线之外新增」的违例，新增即非零退出；同时报「已还清」条数提示收缩基线；
+- `--json`：机器可读输出（逐条违例含稳定 `key`，便于 CI 消费）。
+
+纯脚本 + 文档改动，不进 `typecheck`（`.mjs` 不在 `tsconfig.json` 的 `include` 内），也不进 `smoke:all`；按需单跑或接 CI。
+
+### 14.2 check:design 规则
+
+扫描面：`src/renderer/src/**/*.css`（含 `polish/*.css`、`styles.css`、`pet/pet.css`）+ `src/renderer/src/**/*.{ts,tsx}`。
+
+| 规则 | 判据 |
+|---|---|
+| `color-hardcoded` | `#hex`（3/4/6/8 位）、`rgb()` / `rgba()` / `hsl()` / `hsla()` 字面量 |
+| `font-size-raw-px` | CSS `font-size: <非 0>px` 未走 `var(--text-*)`；组件内 `fontSize: 13`（React 裸数字即 px）或 `fontSize: '13px'` |
+
+白名单（不算违例）：
+
+- `src/renderer/src/tokens.css` 本身——令牌唯一权威来源；
+- `transparent` 与 alpha=0 的色值（`rgba(0, 0, 0, 0)`、`#rrggbb00`）；
+- 0 长度值（`font-size: 0` / `0px`）；
+- 值里含 `var(` 的令牌引用（含 `var(--text-title, 16px)` 这种带兜底值的写法）；
+- `--font-mono` / `--mono` 规则块——代码与 diff 视图按固定 px 排版，字阶不适用（**块级判定**，跨行规则同样生效）；
+- 行内 `design-ok` 注释（CSS 用 `/* design-ok */`，TS 用 `// design-ok`）——单行豁免，必须写明理由。
+
+组件扫描只认**字符串字面量里的色值**（`style={{ color: '#fff' }}` 算，JSX 正文里的 `#FF00FF` 说明文字不算）；CSS 注释整体不参与判定。
+
+### 14.3 check:architecture 规则
+
+扫描面：`src/{main,preload,renderer,shared}/**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}`；解析静态 `import/export … from`、`require()`、动态 `import()`。注释与字符串分语境：关键字落在字符串/模板字面量里的一律不算依赖（`src/main/hot/shell.ts` 里嵌在模板里的脚本源码不会被误判成该模块的依赖）。
+
+| 规则 | 判据 |
+|---|---|
+| `renderer-imports-main` | renderer → `src/main/**` |
+| `renderer-imports-preload` | renderer → `src/preload/**` |
+| `preload-imports-renderer` | preload → `src/renderer/**` |
+| `main-imports-renderer` | main → `src/renderer/**` |
+| `renderer-imports-electron` | renderer 出现 `require('electron')` **或** `import … from 'electron'` |
+| `import-unresolved` | 相对路径解析不到文件 / 别名解析不到文件 / 说明符既非 Node 内建、也非 `package.json` 声明依赖、也不匹配任何别名 |
+| `alias-not-modeled` | `electron.vite.config.ts` 出现 `resolve.alias`，但 `tsconfig.json` 的 `compilerOptions.paths` 未建模 |
+
+`src/shared/**` 是跨进程契约层，四域都可依赖；renderer 需要的类型一律从 `src/shared` 取，不从 `src/main` / `src/preload` 取。
+
+**别名解析**（ZCode 的 architecture-check 教训：漏别名的依赖检查有盲区）：解析表 = `tsconfig.json` 的 `compilerOptions.paths`（当前仓库为空，一旦有人加就自动纳入）+ 内建约定 `shared/*`、`@shared/*`、`@/*`。解析不到**绝不静默跳过**——`import-unresolved` 直接失败；vite 里新配了别名却没同步进 tsconfig 时 `alias-not-modeled` 同样失败。
+
+### 14.4 护栏：不许空扫描通过
+
+继承 `scripts/graph-index.mjs` 的既有教训（空图静默 exit 0）：两个脚本都设扫描下限与结构断言，任一不满足即非零退出——design 要求命中 ≥60 文件、`polish/*.css` ≥8 个且 `tokens.css` / `styles.css` 存在；architecture 要求 `src/` ≥150 模块且 main / preload / renderer / shared 四域都非空。
+
+### 14.5 基线：过渡台账，不是永久豁免
+
+- **位置**：`scripts/baselines/design-tokens.baseline.json`、`scripts/baselines/architecture.baseline.json`——随手写、**要提交**（交接与 CI 都靠它区分存量与新增）。
+- **条目身份**：`key = sha1(规则 + 文件 + 命中片段 [+ 同键出现序号])`，**不绑行号/列号**——重构挪行不会误报「新增」，修掉一条同类违例会如实报「已还清」，基线可据此单调收缩。
+- **过渡用法**：`npm run check:design -- --check-baseline` 卡增量（新增即红），存量按批次还清；**基线只许缩小**，绝不允许为了过门禁而重跑 `--baseline` 把新违例记进台账。
+- **还清约定**：每还清一批即重跑 `--baseline` 收缩快照，并在提交信息里写明还清项；只增不减的基线视为违规改动。
+- **不得吞配置盲区**：`--baseline` 拒绝写入 `alias-not-modeled`（那是检查器配置盲区，不是存量代码债），命中即报错退出。
+- **终点**：两个检查全绿后删除基线文件与 `--check-baseline` 调用，直接跑全量检查。
+
+### 14.6 当前存量（2026-10-03 首次基线）
+
+- `check:design` **39 条**：`color-hardcoded` 25（`styles.css` 7：`#fff` 与 `rgba()` 阴影/遮罩；`labels.ts` 7：状态色表；`UsageView.tsx` 7：后端色环；`AgentsView.tsx` 2、`RuntimeView.tsx` 1、`pet.css` 1）+ `font-size-raw-px` 14（`meeting-detail.css` 6 条 `10px`、`board/detail/dock` 4 条 `11px`、`usage.css` `10px`/`24px`、`team.css` `14px`、`styles.css` `40px`——全部脱离六步字阶）。
+- `check:architecture` **1 条**：`src/main/pet/packs.ts` 直接 import `src/renderer/src/pet/assets/default/pet.json`（内置桌宠清单）——主进程依赖渲染层资产；还清方向是把该资产挪到 `src/shared` 或主进程自有资产目录。
+
+### 14.7 不在本版范围
+
+`src/shared` 反向纯净性（shared 不得反向依赖三域）、模块环检测、IPC channel 清单与 `docs/API.md` 的一致性——留待后续批次，起步版不一次吞太多规则。
