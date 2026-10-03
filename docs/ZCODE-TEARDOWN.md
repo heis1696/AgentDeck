@@ -223,6 +223,23 @@ DesktopWindowFrame
 
 ## 附：拆解细节入口
 
+### 施工进度（2026-10-03/04，三笔提交）
+
+| 批次 | 内容 | 提交 | 验收 |
+|---|---|---|---|
+| Phase A 视觉 | 相对字阶+界面字号设置（12–16px）、表面谱系补齐（input-focus/border-focus/状态配对前景）、看板卡阴影纪律、DESIGN §〇 法典化 | 10553ea | typecheck/build/smoke:stage6/smoke:ui/checks 全绿 |
+| Phase A 工程 | check:design + check:architecture 机器检查（基线模式）；ConfirmHost 影响预览+提交中/失败态；删除任务接入影响预览；架构基线唯一存量（pet.json 跨层）还清至零 | 10553ea / 98f85b9 | 同上 + pet 三冒烟 |
+| Phase B 交互 | 回合窗口化（默认 30 + 渐进加载 + scrollTop 补偿）、跳转未渲染回合先扩窗（data-turn-idx）、超长 worklog 中段折叠+显示全部否决权；新冒烟 smoke:turn-window（500 回合夹具）挂入 smoke:ui | 7967751 | 全量 smoke:ui 18 段 + event-log 全绿 |
+
+**考查后判定不采纳 / 已达标**（吸收不照抄的边界）：
+- 详情页签按任务记忆——与 smoke-ui-focus 固化的「切任务保持 Git 视图与键盘焦点」键盘流决策冲突，维持全局页签；owner 归属由草稿/浮窗/SideDock/回合导航态承担。
+- 流式期容错渲染→完成态切换、贴底跟随/回到最新、权限等待闭环（busy 禁用+正在提交+失败重试）——AgentDeck 既有实现已达标，未重做。
+- 追加指令排队队列（busy 任务中排队续聊）——产品语义级变更（当前决策：执行中不可发送），待用户决策后另立批次。
+
+**剩余待办**：design 基线 39 条存量分批还清；回合导航轨在超长会话的压缩密度（现 minimap 已有）观察实际使用后再议。
+
+### 报告清单
+
 `.agentdeck-reports/` 下会话工件（md 报告全文，按单号）：
 
 - **#1** Agent 侧：17 子包职责、拉起链路、扩展机制、规模表
