@@ -57,7 +57,7 @@ const store = new TaskStore(tmpStore)
 
 function continueBackend(tag, firstText, secondText) {
   return {
-    id: tag, label: tag,
+    id: tag, label: tag, supportsResume: true,
     async probe() { return { ok: true, detail: '' } },
     async start({ events, turn }) {
       let activeTurn = turn
@@ -336,6 +336,45 @@ assert(predecessorStates.length === 2 && predecessorStates.every(([memory, disk]
 await chainRunner.shutdown()
 await chainRuntime.close()
 await repeatRunner.shutdown()
+
+// ---- 场景 G：硬切链 + 换基线续聊 —— 收工后必须空闲（热更 apply 门控回归） ----
+{
+  const gDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-store-g-'))
+  const gStore = new TaskStore(gDir)
+  const gCreated = []
+  const gRunner = new TaskRunner(gStore, new Map([
+    ['lead', continueBackend('lead', '阶段1完成。<continue start="auto">阶段2：继续施工</continue>', '领队追问回答')],
+    ['wrk', continueBackend('wrk', '阶段2施工完成。', 'worker 追问回答完成')]
+  ]), () => ({ concurrency: 2, mode: 'yolo', notify: false, workerConcurrency: 2 }), () => {})
+  gRunner.attachTeam(() => team)
+  gRunner.attachContinue(({ sourceTaskId, issueId, brief, start }) => {
+    const source = gStore.get(sourceTaskId)
+    const t = gStore.create({ title: '▶ ' + brief.slice(0, 20), prompt: brief, workdir: source.workdir, backend: 'wrk', agentId: 'W', issueId, trigger: 'handoff', continuesFrom: sourceTaskId, ...(start === 'parked' ? { parked: true } : {}) })
+    gCreated.push(t.id)
+    gRunner.enqueue(gStore.get(t.id))
+    return gStore.get(t.id)
+  })
+  const phase1 = gStore.create({ title: '阶段一 G', prompt: '干活', workdir: gDir, backend: 'lead', agentId: 'L' })
+  gStore.update(phase1.id, { issueId: 'iss_G' })
+  gRunner.enqueue(phase1)
+  for (let i = 0; i < 150 && gStore.get(phase1.id)?.status !== 'done'; i++) await new Promise((r) => setTimeout(r, 100))
+  for (let i = 0; i < 150 && !(gCreated.length === 1 && gStore.get(gCreated[0])?.status === 'done'); i++) await new Promise((r) => setTimeout(r, 100))
+  const phase2 = gStore.get(gCreated[0])
+  assert(gStore.get(phase1.id)?.status === 'done' && !!phase2 && phase2.status === 'done', '场景 G：硬切链两阶段全部 done')
+  assert(phase2.issueId === 'iss_G' && phase2.continuesFrom === phase1.id && phase2.trigger === 'handoff', '场景 G：后继同 Issue、指向前一阶段')
+  const rebased = path.join(os.tmpdir(), 'sc-rebased-' + Math.random().toString(36).slice(2, 8))
+  gStore.update(phase2.id, { workdir: rebased })
+  const liveBefore = gRunner.sessions.get(phase2.id)
+  assert(!!liveBefore, '场景 G：后继收工后常驻活会话')
+  let detached = 0
+  liveBefore.detach = async () => { detached++ }
+  const fu = await gRunner.followUp(phase2.id, '基于阶段2成果追问')
+  assert(fu.ok && gStore.get(phase2.id)?.status === 'done' && gStore.get(phase2.id).result.includes('阶段2施工完成'), '场景 G：换基线续聊丢弃旧会话经 resume 重建后完成')
+  assert(detached === 1 && gRunner.sessions.get(phase2.id) !== liveBefore, '场景 G：旧会话按 detach 契约断开本地传输（非会议任务不进退休台账）')
+  assert(gStore.list().every((t) => t.status === 'done') && gRunner.isIdle(), '场景 G：硬切+换基线续聊收工后 isIdle（热更门不放幽灵任务）')
+  assert(gRunner.retiredProviderSessions.size === 0, '场景 G：非会议续聊不产生退休台账')
+  await gRunner.shutdown()
+}
 
 for (const fault of ['event', 'terminal']) {
   const faultRuntime = new SidecarRuntime(fs.mkdtempSync(path.join(os.tmpdir(), 'sc-finalize-fault-')))

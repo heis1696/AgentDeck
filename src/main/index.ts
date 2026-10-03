@@ -650,10 +650,13 @@ const initMain = async (): Promise<void> => {
   automationTimer = setInterval(automationTick, 15_000)
   automationTick()
 
-  // 热更状态机装配（§5.1 UpdaterDeps 注入；空闲门控 = runner.isIdle + automationTick 临界区重查）
+  // 自动化 tick 临界区迁入 Issue 管线在途源：空闲判定单点化（不再各自组合布尔）
+  runner.pipeline.addSource({ label: 'automation', size: () => (automationBusy ? 1 : 0) })
+
+  // 热更状态机装配（§5.1 UpdaterDeps 注入；空闲门控 = runner.isIdle 单点，automation 已入管线）
   hotUpdater = new HotUpdater({
     getWindow: () => mainWindow,
-    isMainIdle: () => runner.isIdle() && !automationBusy,
+    isMainIdle: () => runner.isIdle(),
     relaunchForUpdate: (version) => {
       quitting = true
       // 剥离上一轮热更参数再补新值：逐轮累积会让后续实例带着一堆陈旧的

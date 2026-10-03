@@ -9,7 +9,9 @@ export class TaskFinalizer {
   constructor(
     private readonly store: TaskStore,
     private readonly pushTask: (taskId: string) => void,
-    private readonly snapshot: (workdir: string) => Promise<{ diff: string; stat: string; snapshot?: TaskGitSnapshot }> = snapshotGitAfter
+    private readonly snapshot: (workdir: string) => Promise<{ diff: string; stat: string; snapshot?: TaskGitSnapshot }> = snapshotGitAfter,
+    /** 终点端口：终态字段落库后回调（Issue 管线的 settle 单点收尾） */
+    private readonly onTerminal?: (taskId: string, outcome: 'done' | 'failed' | 'cancelled') => void | Promise<void>
   ) {}
 
   /**
@@ -90,9 +92,13 @@ export class TaskFinalizer {
       // retain the derived fields without resurrecting it into done.
       this.store.updateIf(taskId, { ...identity, status: ['done', 'failed', 'cancelled'] }, derived)
       this.pushTask(taskId)
+      if (current.status === 'done' || current.status === 'failed' || current.status === 'cancelled') {
+        await this.onTerminal?.(taskId, current.status)
+      }
       return
     }
     this.store.updateIf(taskId, running, { status: 'done', endedAt: Date.now(), ...derived })
     this.pushTask(taskId)
+    await this.onTerminal?.(taskId, 'done')
   }
 }

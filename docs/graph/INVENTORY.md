@@ -42,6 +42,9 @@
 | --- | --- | --- |
 | `src/main/runner.ts` | 任务运行器：队列 + 生命周期状态机（queued→running→done/failed/cancelled）+ 事件管道 + 委派循环编排 | `TaskRunner`、`RunnerPorts`、`MAX_CONSULT_ROUNDS` |
 | `src/main/executor.ts` | 执行器：后端会话 start/stop 与晚到回调/清理 promise 的收尾（2s 上限的 settleWithin） | `Executor` |
+| `src/main/pipeline/issue-pipeline.ts` | Issue 管线状态机：变体注册/横切准入/在途账本/统一终点 settle/流水账（isIdle 单点裁决，见 ARCHITECTURE §13） | `IssuePipeline`、`PipelineVariant`、`IssueOutcome`、`busySources` 等 |
+| `src/main/pipeline/flow.ts` | 执行流引擎：实际运行 node 化（FlowNode 顺序执行、节点级在途账、协作中断、并发流可观测） | `FlowEngine`、`FlowNode`、`FlowContext`、`FlowResult` |
+| `src/main/pipeline/nodes.ts` | 标准节点库：端口驱动的 Start/Running/Finalize 节点与 standardFlow 工厂 | `StartNode`、`RunningNode`、`FinalizeNode`、`standardFlow`、`ExecutionPorts` |
 | `src/main/delegate.ts` | 委派协议：`<delegate>/<consult>/<investigate>/<continue>/<review>` 标记解析、子任务并行执行、worktree 分支合并回灌 | `runDelegationLoop`、`parseDelegates(Merged)`、`buildAgentPrompt`、`buildDelegationBlock`、`MAX_DEPTH`、`MAX_TOTAL_ROUNDS`、`ancestorBudget` |
 | `src/main/scheduler.ts` | 并发调度器：普通任务与委派 worker 双队列，不感知执行细节 | `Scheduler`、`SchedulerLimits` |
 | `src/main/task-service.ts` | 任务创建领域服务：assignment/handoff/child 三类创建的统一入口与校验 | `TaskService`、`CreateTaskInput`、`TaskCreationService`（死别名，见 §4） |
@@ -597,3 +600,7 @@ src/shared/types: taskEventType TASK_EVENT_KINDS TASK_EVENT_MANIFEST (type)Accep
 ---
 
 *盘点方法备注：import 图/循环依赖/导出符号/死代码均由一次性脚本静态解析（相对 import 正则 + Tarjan SCC + 符号整词交叉扫描），未运行任何会改动文件的命令；清理对象的磁盘状态取自主检出只读 `ls`/`du`/`git check-ignore`。*
+
+> 2026-10-03 增补：`src/main/pipeline/issue-pipeline.ts` 为新增模块（Issue 管线状态机：runner 的 isIdle/会议准入/终态收口单点化），被 `smoke-issue-pipeline` 直连消费（单元电池 + runner 集成，`npm run smoke:pipeline`，已接入 stage6 与 smoke:all）；同 smoke 亦直连 `runner.ts` 的 `TaskRunner`（`pipeline` 探针、`attachMeetingGuard`、`terminateTask`、`isIdle`）、`store.ts` 的 `TaskStore` 与 `task-service.ts` 的 `TaskService`。这些导出同样受本附录公共 API 保护规则约束。
+
+> 2026-10-03 增补（执行层）：`src/main/pipeline/flow.ts`（`FlowEngine`/`FlowNode`/`FlowContext`/`FlowResult`）与 `src/main/pipeline/nodes.ts`（`StartNode`/`RunningNode`/`FinalizeNode`/`standardFlow`/`ExecutionPorts`）为新增执行层模块（实际运行 node 化），被 `smoke-issue-pipeline` 直连消费（流引擎单元电池 + 标准节点库 + 隔离回合集成）；`runner.ts` 新增 `flowEngine` 公共出口与 `delegate-child` 变体注册。这些导出同样受本附录公共 API 保护规则约束。

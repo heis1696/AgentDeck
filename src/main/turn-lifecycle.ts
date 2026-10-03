@@ -293,6 +293,13 @@ export class TurnLifecycle {
     return true
   }
 
+  /** 会话已被持有方释放（closeSession 的关闭/detach 重建路径）：清除挂载记录，
+   * 后续新会话 attach 时不再对它二次 stop/close——否则 preserve 的 detach 保留语义
+   * 会被前会话清扫抵消，退休台账里的会话也被提前关闭。 */
+  detachSession(session: BackendSession) {
+    if (this.sessionValue?.session === session) this.sessionValue = undefined
+  }
+
   admitSession(token: EventGateToken, session: BackendSession, owner = session.sessionId) {
     return this.attachSession(token, session, owner)
   }

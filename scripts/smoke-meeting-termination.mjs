@@ -371,6 +371,37 @@ console.log('--- rejected close is retained and retried ---')
   await h.runner.shutdown()
 }
 
+console.log('--- completed board is idle for hot-update apply ---')
+{
+  const h = makeHarness()
+  // 历史修复点一（e02dc0a）：done 任务常驻活会话不算忙
+  const plain = h.createTask()
+  h.runner.enqueue(h.store.get(plain.id))
+  await waitFor(() => h.store.get(plain.id)?.status === 'done', 'plain task done')
+  check(h.runner.sessionCount() === 1, 'done task keeps its live session for follow-ups')
+  // 历史修复点二（retired 台账）：会议成员换基线续聊重建后留下的 detach 台账不算忙
+  const member = h.createTask({ meetingId: 'ledger-scope', meetingTaskRole: 'member', suppressIssue: true, workdir: path.join(h.data, 'round-1') })
+  h.runner.enqueue(h.store.get(member.id))
+  await waitFor(() => h.store.get(member.id)?.status === 'done', 'member task done')
+  check(!h.store.get(member.id).issueId, 'meeting member runs on the meeting-owned issue without creating its own')
+  const live = h.runner.sessions.get(member.id)
+  check(!!live, 'done member task keeps its live session for follow-ups')
+  let detached = 0
+  live.detach = async () => { detached++ }
+  h.store.update(member.id, { workdir: path.join(h.data, 'round-2') })
+  const followUp = await h.runner.followUp(member.id, '第二轮发言')
+  check(followUp.ok && h.store.get(member.id)?.status === 'done', 'rebased member follow-up rebuilds the session and completes the round')
+  check(detached === 1 && h.log.closes.length === 0, 'rebuild detaches the provider session instead of closing it')
+  check(h.runner.sessions.get(member.id) !== live, 'the second round runs on a fresh resumed session')
+  const ledger = [...h.runner.retiredProviderSessions.values()].filter((entry) => entry.taskId === member.id)
+  check(ledger.length === 1, 'retired ledger records the detached provider session')
+  check(h.store.list().every((t) => t.status === 'done') && h.runner.isIdle(), 'all-done board with live sessions and a retired ledger is idle')
+  await h.runner.forget(member.id)
+  check(h.runner.retiredProviderSessions.size === 0, 'forget drops ledger entries nothing can consume anymore')
+  check(h.runner.isIdle(), 'idle verdict survives the ledger purge')
+  await h.runner.shutdown()
+}
+
 console.log('--- pending close is not forgotten after timeout ---')
 {
   const h = makeHarness({ closeGate: defer() }, { terminationTimeoutMs: 30 })
