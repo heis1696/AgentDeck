@@ -4,7 +4,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { validatePetManifest, type PackAssets, type PetManifest, type PetPackInfo } from '../../shared/pet'
-import builtinManifest from '../../renderer/src/pet/assets/default/pet.json'
+import builtinManifest from '../../shared/pet-assets/default/pet.json'
 
 export const BUILTIN_PACK_ID = 'default'
 export const USER_PETS_DIR = 'pets'

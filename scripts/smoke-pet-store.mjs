@@ -92,7 +92,9 @@ ok(new PetStore(dir).get().chatHistory.length === 1, '非法历史条目被过�
 // —— 用户素材包扫描 + data URL 下发 ——
 const petsRoot = path.join(dir, 'pets')
 const goodDir = path.join(petsRoot, 'goodpack')
+// 内置包夹具 = 帧 PNG（渲染层资产）+ pet.json（src/shared/pet-assets，2026-10-03 架构还清后分离）
 fs.cpSync(path.join(root, 'src/renderer/src/pet/assets/default'), goodDir, { recursive: true })
+fs.copyFileSync(path.join(root, 'src/shared/pet-assets/default/pet.json'), path.join(goodDir, 'pet.json'))
 fs.mkdirSync(path.join(petsRoot, 'badpack'), { recursive: true })
 fs.writeFileSync(path.join(petsRoot, 'badpack', 'pet.json'), '{"frameSize":[64]}') // 缺七态
 const listed = packs.listPacks(dir)

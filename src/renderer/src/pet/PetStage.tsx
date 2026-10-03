@@ -8,7 +8,7 @@
 // 菜单/聊天开合上报主进程（开着时整窗收鼠标）；悬停 ~800ms 浮出状态栏（pointer-events:none）。
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { bridge, type PackAssets, type PetStateSnapshot } from '../api'
-import builtinManifestJson from './assets/default/pet.json'
+import builtinManifestJson from '../../../shared/pet-assets/default/pet.json'
 import { pickFoodLine, pickPetLine, PET_FOODS } from '../../../shared/pet-lines'
 import { tuneTransitions } from '../../../shared/pet-life'
 import {

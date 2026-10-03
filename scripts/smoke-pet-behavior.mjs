@@ -21,9 +21,9 @@ const pet = await import(pathToFileURL(outfile).href)
 let failed = 0
 const ok = (cond, msg) => { console.log(`  ${cond ? '✓' : '✗'} ${msg}`); if (!cond) failed++ }
 
-// —— 真实 pet.json 驱动 + 帧文件在库 ——
+// —— 真实 pet.json 驱动 + 帧文件在库（清单在 src/shared/pet-assets，帧 PNG 留渲染层资产管线） ——
 const assetsDir = path.join(root, 'src/renderer/src/pet/assets/default')
-const raw = JSON.parse(fs.readFileSync(path.join(assetsDir, 'pet.json'), 'utf8'))
+const raw = JSON.parse(fs.readFileSync(path.join(root, 'src/shared/pet-assets/default/pet.json'), 'utf8'))
 const m = pet.validatePetManifest(raw)
 ok(m !== null, '内置 pet.json 通过 validatePetManifest')
 ok(Object.keys(m.states).length === 8, `七态 + eat 扩展态齐备（got ${Object.keys(m.states).length}）`)

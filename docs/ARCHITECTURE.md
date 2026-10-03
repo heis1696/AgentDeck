@@ -506,8 +506,8 @@ delegate 标记 → 目标解析（限 subordinates，名字/平台 id 忽略大
 
 ### 14.6 当前存量（2026-10-03 首次基线）
 
+- `check:architecture` **已还清至零**（2026-10-03）：唯一存量 `src/main/pet/packs.ts` import 渲染层 `pet.json` 已修复——清单移至 `src/shared/pet-assets/default/pet.json`（主进程与渲染层共同指向单一来源，帧 PNG 仍走渲染层资产管线），`scripts/baselines/architecture.baseline.json` 已删除，验证门改为全量 `npm run check:architecture`。
 - `check:design` **39 条**：`color-hardcoded` 25（`styles.css` 7：`#fff` 与 `rgba()` 阴影/遮罩；`labels.ts` 7：状态色表；`UsageView.tsx` 7：后端色环；`AgentsView.tsx` 2、`RuntimeView.tsx` 1、`pet.css` 1）+ `font-size-raw-px` 14（`meeting-detail.css` 6 条 `10px`、`board/detail/dock` 4 条 `11px`、`usage.css` `10px`/`24px`、`team.css` `14px`、`styles.css` `40px`——全部脱离六步字阶）。
-- `check:architecture` **1 条**：`src/main/pet/packs.ts` 直接 import `src/renderer/src/pet/assets/default/pet.json`（内置桌宠清单）——主进程依赖渲染层资产；还清方向是把该资产挪到 `src/shared` 或主进程自有资产目录。
 
 ### 14.7 不在本版范围
 
