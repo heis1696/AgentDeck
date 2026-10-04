@@ -1,5 +1,5 @@
 # 热更 feed 部署指南（阿里云 118.31.43.156）
-> ✅ 当前已核验 v0.23.7 / 0.23.7-hot.1，源码发布提交 383cc9d；启动性能根治批（存储读路径缓存化 + 窗口先行 + app:ready 就绪屏障）已发包，三通道 HTTP 拉取验签与 zip 哈希复核通过。0.23.4 及更早发布记录保留为历史。
+> ✅ 当前已核验 v0.23.8 / 0.23.8-hot.1，源码发布提交 5c9894d；启动性能根治批（存储读路径缓存化 + 窗口先行 + app:ready 就绪屏障）已发包，三通道 HTTP 拉取验签与 zip 哈希复核通过。0.23.4 及更早发布记录保留为历史。
 
 
 > 配套设计：`docs/HOT-UPDATE-IMPL-DESIGN.md` §6.2/§9.1、`docs/archive/INSTALLER-FREE-HOT-UPDATE.md`。
@@ -128,3 +128,13 @@ npm run deploy:hot          # 等价 FEED_HOST/FEED_USER/FEED_REMOTE_DIR 可用 
 | shell / portable | 0.23.7 | 329354835 | 766be7f9abadb28d669094f15b40729d64cd94b133af1a6d4adbbc642b09f2b7 |
 
 内容（ZCode 经验吸收第四批）：@ 文件引用输入壳（派单框 + 追问框共用 useFileReferenceMenu，目录下钻/完整相对路径/IME 让路）+ Issue 标签编辑；Issue 详情 meta 两线语义分组翻新（chip 统一基线 + 色彩纪律）；聊天区全幅（终结 936/1120 多代宽度帽）+ 回合索引线窄屏收窄存活（SideDock 打开不再消失）；运行檐「正在做什么」实时活动摘要；执行记录页内搜索（回合级、数据层匹配、Enter/Shift+Enter 循环跳转）；最近工作区剔除机器生成的委派 worktree（存量载入清洗）。三通道 manifest keyId=ad-2026-09-r2，暂存校验后原子切换，发布后 HTTP 核验一致，壳包 HEAD=200。便携包入口 http://118.31.43.156/shell/shell-0.23.7.zip。
+
+## 十二、0.23.8 发布（工作区文件树）
+
+| 通道 | 版本 | 字节数 | ZIP SHA256 |
+| --- | --- | --- | --- |
+| renderer | 0.23.8-hot.1 | 4784316 | b4b1c246db8c4aeb3ee59e0edf32afd81556ab05e021867ec31000e7663c984d |
+| payload | 0.23.8-hot.1 | 6062358 | 69d984b37014d7da1717360591657645599c1a1d69e83ecc4603d75d4b558495 |
+| shell / portable | 0.23.8 | 329366836 | b404d8fb7aa9c1b6e493469db21b954a961b1f53d1ad2311948d03c6091b1603 |
+
+内容（ZCode 经验吸收第五批）：工作区文件树——任务详情内浏览产物（SideDock 新 files 页签：懒加载树 + 刷新清缓存；文件点击经新 IPC workspace:readFile 读取后以 CodeViewer 语法高亮打开，二进制走信息态；realpath 双向解析防符号链接逃逸、512KB 上限、NUL 嗅探）。入口：Git 视图「当前工作区」段与「更多操作」菜单；workdir 定位优先委派 worktree。三通道 manifest keyId=ad-2026-09-r2，暂存校验后原子切换，发布后 HTTP 核验一致，壳包 HEAD=200。便携包入口 http://118.31.43.156/shell/shell-0.23.8.zip。
