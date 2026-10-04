@@ -79,11 +79,24 @@
   font-weight: 600;
   letter-spacing: 0;
 }
+/* ---------- 1. 详情 meta：两线语义分组（吸收 ZCode「有序密集」） ----------
+   第一线「身份与流转」（这是什么单、走到哪、谁在做）＋第二线「控制与事实」（怎么推进、
+   用什么跑、花了多少）。换行只发生在组与组之间（meta-line 断行），chip 不再满行乱飘。
+   chip 造型统一：高 22、pill、micro 字号；色彩纪律——中性事实 text-dim，可交互的
+   hover 反馈，语义状态才带色（status-chip / 重试 warn）。 */
 .detail .detail-meta {
-  gap: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: stretch;
+}
+.detail .detail-meta .meta-line {
+  display: flex;
   align-items: center;
   flex-wrap: wrap;
+  gap: 6px;
   row-gap: 6px;
+  min-width: 0;
 }
 .detail .detail-meta .meta-group {
   display: inline-flex;
@@ -98,7 +111,7 @@
   flex: 0 0 auto;
   width: 1px;
   height: 12px;
-  background: var(--border);
+  background: var(--border-subtle);
 }
 .detail .detail-eyebrow {
   margin: 0;
@@ -110,33 +123,37 @@
 }
 .detail .detail-meta .link { color: var(--text-dim); }
 .detail .detail-meta .link:hover { color: var(--accent); }
-.detail .detail-meta .backend-chip {
-  display: inline-flex;
-  align-items: center;
-  min-height: 22px;
-  padding: 1px 9px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
-  background: var(--bg-inset);
-  color: var(--text-dim);
-  font: 600 var(--text-micro) var(--font-ui);
-}
+/* chip 基线（meta-chip 及其同族）：所有事实 chip 一个造型；可交互加 .meta-chip-action */
+.detail .meta-chip,
+.detail .detail-meta .backend-chip,
+.detail .detail-meta .workspace-chip,
 .detail .detail-meta .retry-chip {
   display: inline-flex;
   align-items: center;
+  gap: 4px;
   min-height: 22px;
   padding: 1px 9px;
-  border: 1px solid color-mix(in srgb, var(--status-queued) 34%, transparent);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-dim);
+  font: 500 var(--text-micro) var(--font-ui);
+  white-space: nowrap;
+}
+.detail .meta-chip.mono,
+.detail .detail-meta .backend-chip { font-family: var(--mono); }
+.detail .detail-meta .retry-chip,
+.detail .meta-chip.is-warn {
+  border-color: color-mix(in srgb, var(--status-queued) 34%, transparent);
   background: var(--status-queued-bg);
-  color: var(--status-queued);
-  font: 600 var(--text-micro) var(--font-ui);
+  color: var(--status-queued-fg);
 }
-.detail .detail-meta .workspace-chip {
-  min-height: 22px;
-  padding: 1px 9px;
-  background: var(--bg-inset);
-}
+.detail .meta-chip-action { cursor: pointer; transition: border-color var(--duration-base) var(--ease-in-out), background var(--duration-base) var(--ease-in-out), color var(--duration-base) var(--ease-in-out); }
+.detail .meta-chip-action:hover { border-color: var(--border-strong); background: var(--bg-hover); color: var(--text); }
+/* 标签摘要（第一线，最多 2 枚）：安静的中性 chip，编辑入口在 ℹ 弹层 */
+.detail .meta-labels-summary { display: inline-flex; gap: 4px; }
+.detail .meta-chip.meta-label-summary { padding: 1px 8px; color: var(--text-faint); }
+.detail .meta-chip.meta-label-summary:hover { color: var(--text-dim); }
 
 /* ---------- 2. tab 条：active = accent 文字 + 2px accent 底线 ---------- */
 .detail-page .detail-main > .tabs {
@@ -403,25 +420,15 @@ html.light .detail-actions .detail-btn-ghost-danger {
 /* ---------- 6. meta 行横向压缩（原右侧属性栏信息并入 header） ---------- */
 .detail { position: relative; }
 .detail .meta-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  min-height: 22px;
+  /* 基线造型在文件头部「详情 meta」段统一定义；这里只补事实 chip 的宽度上限 */
   max-width: 260px;
-  padding: 1px 9px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
-  background: var(--bg-inset);
-  color: var(--text-dim);
-  font: 600 var(--text-micro) var(--font-ui);
-  white-space: nowrap;
 }
 .detail .meta-chip.mono { font-family: var(--mono); }
 /* 工作流下拉（原有 7 态）：收成 chip 形态 */
 .detail .meta-workflow {
   min-height: 22px;
   padding: 0 4px 0 8px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-pill);
   background: var(--bg-inset);
   color: var(--text-dim);
@@ -910,9 +917,11 @@ html.light .tab.active {
 .detail-page .tab-bar .tab.status-queued .dot { box-shadow: 0 0 0 3px var(--status-queued-bg); }
 
 /* ---------- D. Floating worker overview, grouped by conversation turn ---------- */
-.detail .worker-overview-trigger { gap: 5px; min-height: 24px; padding: 2px 8px; border-radius: var(--radius-sm); cursor: pointer; }
+/* 触发 chip 随 meta-chip 基线（meta-chip-action 已带 hover）；这里只保留激活态的品牌反馈 */
+.detail .worker-overview-trigger { gap: 5px; }
 .detail .worker-overview-trigger:hover,
 .detail .worker-overview-trigger[aria-expanded='true'] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.detail .worker-overview-trigger:hover .worker-overview-count { color: inherit; }
 .worker-overview-count { padding-left: 4px; color: var(--text-faint); font-size: var(--text-micro); font-variant-numeric: tabular-nums; }
 .worker-overview { min-width: 0; padding: 2px; }
 .worker-overview-summary { display: flex; align-items: center; gap: 6px; padding: 4px 2px 10px; color: var(--text-dim); font-size: var(--text-caption); }

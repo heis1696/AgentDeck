@@ -446,24 +446,32 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     <PageHeader
       title={editingTitle ? <input ref={titleEditRef} className="title-edit-input" value={titleDraft} autoFocus onChange={(event) => setTitleEdit({ draft: event.target.value })} onKeyDown={(event) => { if (isComposingKey(event.nativeEvent)) return; if (event.key === 'Enter') { event.preventDefault(); void saveTitle() } }} onBlur={() => void saveTitle()} /> : <><span className="task-title-text" title={task.title}>{task.title}</span><button ref={titleEditBtnRef} className="title-edit" type="button" title="重命名" onClick={beginTitleEdit}><Pencil size={13} aria-hidden="true" /></button></>}
       metadata={<div className="detail-meta">
-        <span className="meta-group meta-identity"><span className="detail-eyebrow">{parent ? '队员任务' : '工作任务'}</span>{parent && <a className="mini link" role="button" tabIndex={0} onClick={() => onSelect(parent.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(parent.id) } }}>↩ 领队任务: {parent.title}</a>}</span>
-        {workers.length > 0 && <button type="button" className="worker-overview-trigger meta-chip" aria-haspopup="dialog" aria-expanded={float === 'workers'} aria-controls={float === 'workers' ? 'worker-overview' : undefined} title={`队员概览：${workerStateSummary || '全部已结束'}`} onClick={() => setFloat((current) => current === 'workers' ? null : 'workers')}><Users size={13} aria-hidden="true" /> 队员 {workers.length}<span className="worker-overview-count">{workers.length - activeWorkers.length} 已结束</span></button>}
-        <IssueIdChip id={issueId} />
-        {issue && <IssueFlowRail status={issue.status} />}
-        <select className="meta-workflow" title="人工工作流：选项只列合法流转；人工状态在任务非运行期保持（运行期自动显示执行状态）" aria-label="工作流" value={issue?.status ?? 'todo'} onChange={(event) => {
-          const next = updateWorkflow(event.target.value as IssueStatus)
-          void next.then((result) => { if (!result) ui.toast.error('状态未更新：流转不合法或 Issue 不存在（详见动态页）') })
-        }}>
-          {issueWorkflowOptions(issue?.status ?? 'todo').map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-        </select>
-        {issue && <select className="meta-priority" title="优先级（看板与列表按此排序显示）" aria-label="优先级" value={issue.priority ?? 'none'} onChange={(event) => void setIssuePriority(event.target.value as IssuePriority)}>
-          {PRIORITY_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-        </select>}
-        <span className="meta-group meta-status"><span className={`status-chip status-${task.status}`}>{stateLabel}</span>{turnActive && <span className="active-duration" aria-hidden="true">工作中 · {fmtDuration(elapsed)}</span>}</span>
-        <span className="meta-divider" aria-hidden="true" />
-        <span className="meta-group meta-source"><span className="badge backend-chip" title={`执行后端 ${task.backend}`}>{task.backend}</span>{workdir && <button className="workspace-chip" type="button" title={workdir} onClick={() => void bridge.openPath(workdir)}><FolderOpen size={13} aria-hidden="true" /><span>{workdir.split(/[\\/]/).filter(Boolean).pop()}</span></button>}<span className="meta-chip" title={`${task.startedAt ? fmtTime(task.startedAt) : '未开始'} → ${task.endedAt ? fmtTime(task.endedAt) : turnActive ? '进行中' : '—'}`}>⏱ {elapsed > 0 ? fmtDuration(elapsed) : '—'}</span>{task.usage && <span className="meta-chip" title={`输入 ${task.usage.inputTokens.toLocaleString()} · 输出 ${task.usage.outputTokens.toLocaleString()} · 回合 ${task.usage.turns}${task.usage.costUsd > 0 ? ` · 成本 $${task.usage.costUsd.toFixed(4)}` : ''}`}>{fmtTokens(task.usage.inputTokens + task.usage.outputTokens)} tokens{task.usage.costUsd > 0 ? ` · $${task.usage.costUsd.toFixed(4)}` : ''}</span>}{integration?.branch && <span className="meta-chip mono" title={`集成分支 ${integration.branch}`}>⎇ {integration.branch.replace('agentdeck/task-', '#')}</span>}{!!task.attempt && <span className="retry-chip" title={`自动重试 ${task.attempt}/2`}>⟳ 重试 {task.attempt}/2</span>}</span>
-        <div className="meta-info-wrap" ref={infoRef}>
-          <button type="button" className={`meta-chip meta-info-btn ${infoOpen ? 'open' : ''}`} title="原始指令、交接备注与详细信息" aria-expanded={infoOpen} onClick={() => setInfoOpen((value) => !value)}><Info size={12} aria-hidden="true" /></button>
+        {/* 第一线「身份与流转」：这是什么单、走到哪、谁在做——只读事实，按语义聚组换行 */}
+        <div className="meta-line">
+          <span className="meta-group meta-identity"><span className="detail-eyebrow">{parent ? '队员任务' : '工作任务'}</span>{parent && <a className="mini link" role="button" tabIndex={0} onClick={() => onSelect(parent.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(parent.id) } }}>↩ 领队任务: {parent.title}</a>}</span>
+          {workers.length > 0 && <button type="button" className="meta-chip meta-chip-action worker-overview-trigger" aria-haspopup="dialog" aria-expanded={float === 'workers'} aria-controls={float === 'workers' ? 'worker-overview' : undefined} title={`队员概览：${workerStateSummary || '全部已结束'}`} onClick={() => setFloat((current) => current === 'workers' ? null : 'workers')}><Users size={12} aria-hidden="true" /> 队员 {workers.length}<span className="worker-overview-count">{workers.length - activeWorkers.length} 已结束</span></button>}
+          <IssueIdChip id={issueId} />
+          {issue && <IssueFlowRail status={issue.status} />}
+          {issue && issue.labels.filter((label) => label !== '委派').length > 0 && <span className="meta-labels-summary">
+            {issue.labels.filter((label) => label !== '委派').slice(0, 2).map((label) => <span className="meta-chip meta-label-summary" key={label} title={label}>{label}</span>)}
+          </span>}
+        </div>
+        {/* 第二线「控制与事实」：流转控制（工作流/优先级/状态）+ 执行事实（后端/目录/耗时/用量）+ 详情入口 */}
+        <div className="meta-line">
+          <select className="meta-workflow" title="人工工作流：选项只列合法流转；人工状态在任务非运行期保持（运行期自动显示执行状态）" aria-label="工作流" value={issue?.status ?? 'todo'} onChange={(event) => {
+            const next = updateWorkflow(event.target.value as IssueStatus)
+            void next.then((result) => { if (!result) ui.toast.error('状态未更新：流转不合法或 Issue 不存在（详见动态页）') })
+          }}>
+            {issueWorkflowOptions(issue?.status ?? 'todo').map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>
+          {issue && <select className="meta-priority" title="优先级（看板与列表按此排序显示）" aria-label="优先级" value={issue.priority ?? 'none'} onChange={(event) => void setIssuePriority(event.target.value as IssuePriority)}>
+            {PRIORITY_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>}
+          <span className="meta-group meta-status"><span className={`status-chip status-${task.status}`}>{stateLabel}</span>{turnActive && <span className="active-duration" aria-hidden="true">工作中 · {fmtDuration(elapsed)}</span>}</span>
+          <span className="meta-divider" aria-hidden="true" />
+          <span className="meta-group meta-source"><span className="meta-chip mono" title={`执行后端 ${task.backend}`}>{task.backend}</span>{workdir && <button className="meta-chip meta-chip-action workspace-chip" type="button" title={workdir} onClick={() => void bridge.openPath(workdir)}><FolderOpen size={12} aria-hidden="true" /><span>{workdir.split(/[\\/]/).filter(Boolean).pop()}</span></button>}<span className="meta-chip" title={`${task.startedAt ? fmtTime(task.startedAt) : '未开始'} → ${task.endedAt ? fmtTime(task.endedAt) : turnActive ? '进行中' : '—'}`}>⏱ {elapsed > 0 ? fmtDuration(elapsed) : '—'}</span>{task.usage && <span className="meta-chip" title={`输入 ${task.usage.inputTokens.toLocaleString()} · 输出 ${task.usage.outputTokens.toLocaleString()} · 回合 ${task.usage.turns}${task.usage.costUsd > 0 ? ` · 成本 $${task.usage.costUsd.toFixed(4)}` : ''}`}>{fmtTokens(task.usage.inputTokens + task.usage.outputTokens)} tokens{task.usage.costUsd > 0 ? ` · $${task.usage.costUsd.toFixed(4)}` : ''}</span>}{integration?.branch && <span className="meta-chip mono" title={`集成分支 ${integration.branch}`}>⎇ {integration.branch.replace('agentdeck/task-', '#')}</span>}{!!task.attempt && <span className="meta-chip is-warn" title={`自动重试 ${task.attempt}/2`}>⟳ 重试 {task.attempt}/2</span>}</span>
+          <div className="meta-info-wrap" ref={infoRef}>
+            <button type="button" className={`meta-chip meta-chip-action meta-info-btn ${infoOpen ? 'open' : ''}`} title="原始指令、交接备注与详细信息" aria-expanded={infoOpen} onClick={() => setInfoOpen((value) => !value)}><Info size={12} aria-hidden="true" /></button>
           {infoOpen && <div className="meta-info-pop" ref={infoPopRef}>
             <div className="meta-info-sec"><div className="meta-info-head"><span className="meta-info-label">原始指令</span><button type="button" className="meta-info-copy" onClick={() => void copyPrompt()}>复制</button></div><pre className="meta-info-prompt">{task.prompt}</pre></div>
             {task.handoff && <div className="meta-info-sec"><span className="meta-info-label">交接备注</span><p>{task.handoff}</p></div>}
@@ -497,6 +505,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
             {isRelay && <div className="meta-info-sec"><span className="meta-info-label"><Waypoints size={12} /> 阶段接力 · 第 {relayStage} 阶段</span>{relayPred && <p><a className="mini link" role="button" tabIndex={0} title={relayPred.title} onClick={() => onSelect(relayPred.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(relayPred.id) } }}>接力自：{relayPred.title}</a></p>}{relaySucc && <p><a className="mini link" role="button" tabIndex={0} title={relaySucc.title} onClick={() => onSelect(relaySucc.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(relaySucc.id) } }}>{relaySucc.status === 'queued' && relaySucc.parked ? '⏸ ' : '已接力 → '}{relaySucc.title.replace(/^▶ /, '')}</a></p>}{!relayPred && <p>触发：上一阶段接力（同 Issue 新会话）</p>}</div>}
             {!workdir && <div className="meta-info-sec"><span className="meta-info-label">工作目录</span><p className="dim">未绑定</p></div>}
           </div>}
+        </div>
         </div>
       </div>}
       actions={<>{goalActive && <button type="button" className="meta-chip float-chip is-goal" title={`${goal!.text}\n点击打开目标模式浮窗`} onClick={() => setFloat((cur) => (cur === 'goal' ? null : 'goal'))}>🎯 {goalChipSummary}</button>}{meeting && <button type="button" className="meta-chip float-chip is-meeting" title={`${meeting.topic}\n点击打开会议浮窗`} onClick={() => setFloat((cur) => (cur === 'meeting' ? null : 'meeting'))}>💬 {MEETING_STATUS_LABEL[meeting.status]}{meeting.round ? ` · 第 ${meeting.round}/${meeting.maxRounds} 轮` : ''}</button>}{task.status === 'queued' && <button className="btn primary" disabled={busy} onClick={() => void doStart()}><Play size={13} aria-hidden="true" /> 开始执行</button>}{turnActive && <button className="btn danger" disabled={busy} onClick={() => void doCancel()}><Square size={12} aria-hidden="true" /> 停止</button>}{(task.status === 'failed' || task.status === 'cancelled' || task.status === 'done') && <><button className="btn detail-btn-emphasis" disabled={busy} onClick={() => void doRetry()}><RefreshCw size={13} aria-hidden="true" /> 重新运行</button>{task.status === 'done' && <button className="btn detail-btn-ghost" title="复制结果为 Markdown" disabled={busy || !task.result} onClick={() => void copyResult()}><Copy size={13} aria-hidden="true" /> 复制结果</button>}</>}<ActionMenu items={actionItems} label="更多操作" /></>}
