@@ -365,3 +365,10 @@ html:root .field select[aria-invalid='true'] {
   border: none;
   background: transparent;
 }
+
+/* ---------- @ 文件引用补全面板（派单输入壳）：复用 skill-menu 的浮层语言 ---------- */
+.workspace-composer { position: relative; }
+.file-menu .file-menu-head { letter-spacing: 0; }
+.file-menu-item .file-menu-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-menu-item .file-menu-slash { color: var(--text-faint); }
+.file-menu-empty { padding: 0 2px; }

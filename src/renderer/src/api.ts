@@ -32,9 +32,14 @@ export function fileDiff(taskId: string, file: string): Promise<FileDiffResult> 
 }
 
 /** 工作区 git 概览（workspace:gitSummary）：分支/领先落后/未提交计数/最近提交；非仓库 ok:false 灰态 */
-export type { WorkspaceGitSummary } from '../../shared/contracts'
+export type { WorkspaceGitSummary, WorkspaceEntriesResult, WorkspaceEntry } from '../../shared/contracts'
 export function workspaceGitSummary(dir: string): Promise<import('../../shared/contracts').WorkspaceGitSummary> {
   return bridge.workspace.gitSummary(dir)
+}
+
+/** 工作区目录清单（workspace:listEntries）：@ 文件引用补全数据源；目录在前文件在后 */
+export function workspaceListEntries(dir: string, subdir: string): Promise<import('../../shared/contracts').WorkspaceEntriesResult> {
+  return bridge.workspace.listEntries(dir, subdir)
 }
 
 /** 任务列表 + 实时更新。

@@ -1190,3 +1190,43 @@ html:root :is(.detail-body, .result, .git-pane, .issue-timeline, .float-window)
   .chat-latest, .action-menu-panel { animation: none; }
   .detail-page .tab-bar .tab .tab-progress { animation: none; }
 }
+
+/* Issue 标签编辑（ℹ 弹层内）：chips + 迷你输入框，空态只有输入框 */
+.detail .meta-labels { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.detail .meta-label-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 4px 1px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  background: var(--bg-inset);
+  color: var(--text-dim);
+  font-size: var(--text-micro);
+}
+.detail .meta-label-remove {
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  padding: 0 3px;
+  line-height: 1;
+  border-radius: var(--radius-sm);
+}
+.detail .meta-label-remove:hover { color: var(--status-failed); }
+.detail .meta-label-input {
+  min-width: 96px;
+  width: 96px;
+  padding: 2px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--text-micro);
+}
+.detail .meta-label-input::placeholder { color: var(--text-faint); }
+.detail .meta-label-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--bg-inset);
+}

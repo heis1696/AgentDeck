@@ -205,6 +205,21 @@ export interface WorkspaceGitSummary {
   lastCommit?: { hash: string; subject: string; when: string }
 }
 
+/** 工作区目录清单条目（workspace:listEntries）：@ 文件引用补全的数据源 */
+export interface WorkspaceEntry {
+  name: string
+  kind: 'dir' | 'file'
+}
+
+/** 目录清单结果（workspace:listEntries）：目录在前文件在后、字典序；重目录按名单跳过 */
+export interface WorkspaceEntriesResult {
+  ok: boolean
+  code?: 'bad-dir' | 'bad-subdir' | 'escapes-root' | 'list-failed'
+  error?: string
+  entries: WorkspaceEntry[]
+  truncated?: boolean
+}
+
 /** Renderer-safe snapshot of the optional business-brain sidecar. */
 export interface SidecarSnapshot {
   protocolVersion: number
@@ -318,6 +333,8 @@ export interface AgentDeckApi {
   workspace: {
     /** 目录 git 概览（分支/领先落后/未提交计数/最近提交）；非仓库返回 ok:false code:'not-a-repo' */
     gitSummary: (dir: string) => Promise<WorkspaceGitSummary>
+    /** 目录清单（@ 文件引用补全）：subdir 相对路径，重目录跳过，单目录上限 */
+    listEntries: (dir: string, subdir: string) => Promise<WorkspaceEntriesResult>
   }
   notify: (title: string, body: string) => void
   /** 主进程平台（preload 白名单注入的只读字面量）：渲染层据此选 sharedPathKey 的

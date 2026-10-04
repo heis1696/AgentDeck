@@ -24,7 +24,7 @@ import type {
   SkillsFromUrlResult,
   SkillsShEntry
 } from '../shared/extensions'
-import type { AgentDeckApi, AgentInfo, AgentModelCatalog, FileDiffResult, GoalCheckpointInput, GoalCreateInput, MeetingCreateInput, PermissionRequest, PresetInfo, SidecarSnapshot, TaskCreateInput, UpdateChannel, UpdateStateSnapshot, WorkspaceGitSummary } from '../shared/contracts'
+import type { AgentDeckApi, AgentInfo, AgentModelCatalog, FileDiffResult, GoalCheckpointInput, GoalCreateInput, MeetingCreateInput, PermissionRequest, PresetInfo, SidecarSnapshot, TaskCreateInput, UpdateChannel, UpdateStateSnapshot, WorkspaceEntriesResult, WorkspaceGitSummary } from '../shared/contracts'
 import type { PackAssets, PetDragPosition, PetGenDone, PetGenProgress, PetGenStartInput, PetSayPayload, PetStateSnapshot, PetThrowVelocity, PetWindowEvent } from '../shared/pet'
 
 // 就绪屏障（启动契约，与主进程 initMain 的 app:ready 对应）：窗口先出、壳先画，
@@ -192,7 +192,8 @@ const api: AgentDeckApi = {
   pickDir: (): Promise<string> => invoke('dialog:pick-dir'),
   openPath: (target: string): Promise<void> => invoke('shell:open', target),
   workspace: {
-    gitSummary: (dir: string): Promise<WorkspaceGitSummary> => invoke('workspace:gitSummary', dir)
+    gitSummary: (dir: string): Promise<WorkspaceGitSummary> => invoke('workspace:gitSummary', dir),
+    listEntries: (dir: string, subdir: string): Promise<WorkspaceEntriesResult> => invoke('workspace:listEntries', dir, subdir)
   },
   notify: (title: string, body: string): void => ipcRenderer.send('notify', { title, body }),
   agents: {

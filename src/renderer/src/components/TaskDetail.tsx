@@ -335,6 +335,17 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
       ui.toast.error(cause instanceof Error ? cause.message : '优先级更新失败')
     }
   }
+  /** Issue 标签：元数据通道；空集即清空（'委派' 是系统标签，不进编辑面） */
+  const [labelDraft, setLabelDraft] = useTaskScopedState(task.id, '')
+  const setIssueLabels = async (labels: string[]) => {
+    try {
+      const next = await bridge.issues.update(issueId, { labels })
+      if (!next) ui.toast.error('标签未更新：Issue 不存在')
+      else void refreshIssue()
+    } catch (cause) {
+      ui.toast.error(cause instanceof Error ? cause.message : '标签更新失败')
+    }
+  }
   const beginTitleEdit = () => { titleSessionRef.current = task.id; setTitleEdit({ draft: task.title }) }
   const cancelTitleEdit = () => { titleSessionRef.current = null; setTitleEdit(null) }
   // 就地重命名也是「浮层」：Escape 由统一交互层消费（最上层），关闭后焦点回到重命名按钮。
@@ -456,6 +467,31 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
           {infoOpen && <div className="meta-info-pop" ref={infoPopRef}>
             <div className="meta-info-sec"><div className="meta-info-head"><span className="meta-info-label">原始指令</span><button type="button" className="meta-info-copy" onClick={() => void copyPrompt()}>复制</button></div><pre className="meta-info-prompt">{task.prompt}</pre></div>
             {task.handoff && <div className="meta-info-sec"><span className="meta-info-label">交接备注</span><p>{task.handoff}</p></div>}
+            {issue && <div className="meta-info-sec"><span className="meta-info-label">标签</span>
+              <div className="meta-labels">
+                {issue.labels.filter((label) => label !== '委派').map((label) => (
+                  <span className="meta-label-chip" key={label}>{label}
+                    <button type="button" className="meta-label-remove" title={`移除标签 ${label}`} aria-label={`移除标签 ${label}`} onClick={() => void setIssueLabels(issue.labels.filter((item) => item !== label))}>×</button>
+                  </span>
+                ))}
+                <input
+                  className="meta-label-input"
+                  value={labelDraft}
+                  placeholder={issue.labels.length ? '添加…' : '回车添加标签'}
+                  aria-label="添加标签"
+                  onChange={(event) => setLabelDraft(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (isComposingKey(event.nativeEvent)) return
+                    if (event.key !== 'Enter' && event.key !== ' ') return
+                    const value = labelDraft.trim().slice(0, 24)
+                    if (!value) return
+                    event.preventDefault()
+                    setLabelDraft('')
+                    if (!issue.labels.includes(value)) void setIssueLabels([...issue.labels, value])
+                  }}
+                />
+              </div>
+            </div>}
             {task.usage && <div className="meta-info-sec"><span className="meta-info-label">用量明细</span><p>输入 {task.usage.inputTokens.toLocaleString()} · 输出 {task.usage.outputTokens.toLocaleString()} · 回合 {task.usage.turns}{task.usage.costUsd > 0 ? ` · 成本 $${task.usage.costUsd.toFixed(4)}` : ''}</p></div>}
             {task.sessionId && <div className="meta-info-sec"><span className="meta-info-label">会话 ID</span><code className="meta-info-mono">{task.sessionId}</code></div>}
             {isRelay && <div className="meta-info-sec"><span className="meta-info-label"><Waypoints size={12} /> 阶段接力 · 第 {relayStage} 阶段</span>{relayPred && <p><a className="mini link" role="button" tabIndex={0} title={relayPred.title} onClick={() => onSelect(relayPred.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(relayPred.id) } }}>接力自：{relayPred.title}</a></p>}{relaySucc && <p><a className="mini link" role="button" tabIndex={0} title={relaySucc.title} onClick={() => onSelect(relaySucc.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(relaySucc.id) } }}>{relaySucc.status === 'queued' && relaySucc.parked ? '⏸ ' : '已接力 → '}{relaySucc.title.replace(/^▶ /, '')}</a></p>}{!relayPred && <p>触发：上一阶段接力（同 Issue 新会话）</p>}</div>}
