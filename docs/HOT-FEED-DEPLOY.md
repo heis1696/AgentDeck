@@ -1,5 +1,5 @@
 # 热更 feed 部署指南（阿里云 118.31.43.156）
-> ✅ 当前已核验 v0.23.6 / 0.23.6-hot.1，源码发布提交 1e095aa；启动性能根治批（存储读路径缓存化 + 窗口先行 + app:ready 就绪屏障）已发包，三通道 HTTP 拉取验签与 zip 哈希复核通过。0.23.4 及更早发布记录保留为历史。
+> ✅ 当前已核验 v0.23.7 / 0.23.7-hot.1，源码发布提交 383cc9d；启动性能根治批（存储读路径缓存化 + 窗口先行 + app:ready 就绪屏障）已发包，三通道 HTTP 拉取验签与 zip 哈希复核通过。0.23.4 及更早发布记录保留为历史。
 
 
 > 配套设计：`docs/HOT-UPDATE-IMPL-DESIGN.md` §6.2/§9.1、`docs/archive/INSTALLER-FREE-HOT-UPDATE.md`。
@@ -118,3 +118,13 @@ npm run deploy:hot          # 等价 FEED_HOST/FEED_USER/FEED_REMOTE_DIR 可用 
 | shell / portable | 0.23.6 | 329329293 | 9e5e9c18245033d23644538ecbbbe71667aa5379579791804a777b019253ec15 |
 
 内容（ZCode 经验吸收第二/三批）：工作区 git 状态卡（新 IPC workspace:gitSummary——分支/领先落后/暂存·未暂存·未跟踪计数/最近提交；派单页与任务详情 Git 视图「当前工作区」段，非仓库灰态）；Issue 人工流转状态机出 UI（shared/taskflow ISSUE_TRANSITIONS 矩阵：主线+终态重开+受阻旁路；updateWorkflow 非法拒绝写盘、settleWorkflow 机器收口通道；详情下拉只列合法项 + 站点灯管线轨道 + 优先级可编辑；看板拖拽/右键只给合法目标列）。三通道 manifest 签名 keyId=ad-2026-09-r2，暂存校验后原子切换；发布后 HTTP 拉取三通道 stable 清单核验版本/哈希一致，壳包 HEAD=200。便携包入口 http://118.31.43.156/shell/shell-0.23.6.zip。
+
+## 十一、0.23.7 发布（工作区与 Issue 体验批）
+
+| 通道 | 版本 | 字节数 | ZIP SHA256 |
+| --- | --- | --- | --- |
+| renderer | 0.23.7-hot.1 | 4774776 | 73e17d1b88b788a80e7d3fe4a388a6fcf6f134ad7582e79b5bd086baa557ec36 |
+| payload | 0.23.7-hot.1 | 6050357 | 3a66eba59e52f045d5f184c739de53b36a4e4104637b6d4761e17eb80cf28e49 |
+| shell / portable | 0.23.7 | 329354835 | 766be7f9abadb28d669094f15b40729d64cd94b133af1a6d4adbbc642b09f2b7 |
+
+内容（ZCode 经验吸收第四批）：@ 文件引用输入壳（派单框 + 追问框共用 useFileReferenceMenu，目录下钻/完整相对路径/IME 让路）+ Issue 标签编辑；Issue 详情 meta 两线语义分组翻新（chip 统一基线 + 色彩纪律）；聊天区全幅（终结 936/1120 多代宽度帽）+ 回合索引线窄屏收窄存活（SideDock 打开不再消失）；运行檐「正在做什么」实时活动摘要；执行记录页内搜索（回合级、数据层匹配、Enter/Shift+Enter 循环跳转）；最近工作区剔除机器生成的委派 worktree（存量载入清洗）。三通道 manifest keyId=ad-2026-09-r2，暂存校验后原子切换，发布后 HTTP 核验一致，壳包 HEAD=200。便携包入口 http://118.31.43.156/shell/shell-0.23.7.zip。
