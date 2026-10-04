@@ -1,5 +1,5 @@
 # 热更 feed 部署指南（阿里云 118.31.43.156）
-> ✅ 当前已核验 v0.23.2 / v0.23.2-hot.1，源码发布提交 6399100；三个使用反馈修复已发包，宿主公共上下文限额与自动裁剪已完全移除。服务器三通道、nginx stable 根、r2 信任密钥及不可变历史均核验；0.23.1 与 2026-09-19 的旧审计保留为历史记录。
+> ✅ 当前已核验 v0.23.5 / v0.23.5-hot.1，源码发布提交 cb8d7c2；启动性能根治批（存储读路径缓存化 + 窗口先行 + app:ready 就绪屏障）已发包，三通道 HTTP 拉取验签与 zip 哈希复核通过。0.23.4 及更早发布记录保留为历史。
 
 
 > 配套设计：`docs/HOT-UPDATE-IMPL-DESIGN.md` §6.2/§9.1、`docs/archive/INSTALLER-FREE-HOT-UPDATE.md`。
@@ -98,3 +98,13 @@ npm run deploy:hot          # 等价 FEED_HOST/FEED_USER/FEED_REMOTE_DIR 可用 
 | shell / portable | 0.23.4 | 329304832 | 9b6ed7447fa0a443047592a54d483d30ecdde8b43601dcf09bdc3475d2df5371 |
 
 内容：界面字号设置与相对字阶（--ui-font-size 公式化）、执行记录回合窗口化与超长 worklog 折叠、确认框影响预览与提交中安全门、设计/架构机器检查（check:design / check:architecture，架构基线已还清至零）、发布前独立审查六项修复。三通道 manifest 签名 keyId=ad-2026-09-r2，部署为暂存校验后原子切换；发布后 HTTP 拉取三通道 stable 清单核验版本与哈希一致，壳包 HEAD=200。部署过程中一次 ssh 连接超时（网络瞬断），按幂等协议重试 deploy:hot 成功。便携包入口 http://118.31.43.156/shell/shell-0.23.4.zip。
+
+## 九、0.23.5 发布（启动性能根治批）
+
+| 通道 | 版本 | 字节数 | ZIP SHA256 |
+| --- | --- | --- | --- |
+| renderer | 0.23.5-hot.1 | 4738806 | 929fab03feec8f1ea70b2d38208d94a052063b339d78f10809714644a44d2fac |
+| payload | 0.23.5-hot.1 | 6007524 | d8a2d3a26e924a0d8296b55e1fd94871b8857f17a7c56825b739b0dafc72554a |
+| shell / portable | 0.23.5 | 329312204 | 64689c446aad20bec13266b4393790ea87f77dfaeb1c2271845f6034221c4178 |
+
+内容：TaskStore/IssueStore 读路径缓存化（内存权威文档 + 磁盘身份失效，事务私有副本与回执失败回滚）、启动次序框架（窗口先行 + app:ready 就绪屏障，preload invoke 统一排队）。实测（425 任务/69MB 日志）：窗口出现 270ms、get×200 由秒级降 3ms、IssueStore sync 无变化由 200-400ms/次降 1.4ms/次；审码判官复核无阻断/高危。三通道 manifest 签名 keyId=ad-2026-09-r2，部署为暂存校验后原子切换；发布后 HTTP 拉取三通道 stable 清单，Ed25519 验签（信任锚 4eb1c26a…）与 artifact zip 哈希全部复核一致；payload 36 文件含 out/preload（preload 随 payload 与壳同步，无新旧错峰配对）；壳包与便携包 HEAD=200。便携包入口 http://118.31.43.156/shell/shell-0.23.5.zip。
