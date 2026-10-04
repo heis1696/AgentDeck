@@ -75,6 +75,15 @@ export function sharedPathKey(candidate: string): string {
 }
 
 /** 最近工作区上浮：按路径键去重（别名写法不再重复展示/持久化），最新写法置顶，超限截断。 */
+/** 机器管理的委派 worktree 根段：这些目录由派单系统生成与回收（见主进程 git.ts 的
+ *  SYSTEM_SIDECAR_DIRS），不属于「最近工作区」这类人工选择的目录面——任务的 workdir
+ *  自动收录与存量清洗都要排除；用户经目录选择器显式挑中（pushRecentWorkspace）不拦。 */
+const MANAGED_WORKTREE_SEGMENT = '.agentdeck-worktrees'
+
+export function isManagedWorktreePath(dir: string): boolean {
+  return typeof dir === 'string' && dir.split(/[\\/]+/).includes(MANAGED_WORKTREE_SEGMENT)
+}
+
 export function pushRecentWorkspace(current: ReadonlyArray<string>, dir: string, cap: number): string[] {
   if (!dir) return [...current]
   const key = sharedPathKey(dir)
@@ -82,11 +91,12 @@ export function pushRecentWorkspace(current: ReadonlyArray<string>, dir: string,
 }
 
 /** 最近工作区并入（任务里出现过的目录）：按路径键判重，已有条目及其别名写法都不重复
- *  加入，保持原顺序，超限截断。 */
+ *  加入，保持原顺序，超限截断。委派 worktree 目录（机器生成）不收录，存量中已被历史
+ *  版本收录的一并剔除（载入即清洗）。 */
 export function extendRecentWorkspaces(current: ReadonlyArray<string>, dirs: ReadonlyArray<string>, cap: number): string[] {
-  const next = [...current]
+  const next = current.filter((item) => !isManagedWorktreePath(item))
   for (const dir of dirs) {
-    if (!dir) continue
+    if (!dir || isManagedWorktreePath(dir)) continue
     const key = sharedPathKey(dir)
     if (next.some((item) => sharedPathKey(item) === key)) continue
     next.push(dir)

@@ -198,6 +198,10 @@ section('最近工作区：按路径键去重')
     ok(extendRecentWorkspaces(['/repos/alpha'], ['/repos/alpha'], cap).length === 1, '并入：同一写法不重复并入')
   }
   ok(pushRecentWorkspace(['C:\\keep'], '', cap).join(',') === 'C:\\keep', '空目录不上浮')
+  // 委派 worktree 目录（机器生成）不进「最近工作区」：自动收录拒绝 + 存量载入清洗；显式选择不拦
+  ok(extendRecentWorkspaces(['C:\\repos\\alpha'], ['C:\\repos\\alpha\\.agentdeck-worktrees\\task-x_c1', 'C:\\repos\\beta'], cap).join(',') === 'C:\\repos\\alpha,C:\\repos\\beta', '并入：委派 worktree 目录不收录')
+  ok(extendRecentWorkspaces(['C:\\repos\\alpha', 'D:\\agentdeck\\.agentdeck-worktrees\\t_abc_c2', '/x/.agentdeck-worktrees/t_y'], ['C:\\repos\\beta'], cap).length === 2, '载入清洗：存量中已收录的 worktree 一并剔除')
+  ok(pushRecentWorkspace(['C:\\repos\\alpha'], 'C:\\repos\\alpha\\.agentdeck-worktrees\\task-x_c1', cap).length === 2, '显式选择（pushRecentWorkspace）不受 worktree 过滤拦截')
 }
 
 /* --------------------------------------------- WorkspaceSwitcher 当前项判定 */
