@@ -34,6 +34,8 @@
 
 preload 以 `contextBridge` 暴露，全部经 `ipcRenderer.invoke/on` 与主进程通信。TypeScript 契约：`src/shared/contracts.ts` 的 `AgentDeckApi` 接口；渲染层组件经 `src/renderer/src/task-service.ts`（任务操作单一入口）调用，不直接拼装 IPC payload。全部写入口在 main 侧接收 `unknown` 并经 `ipc-validation.ts` 校验。
 
+> **启动就绪屏障（`app:ready`）**：主进程 `initMain`（`src/main/index.ts`）先建窗口再水合数据面（sidecar 握手、TaskStore/IssueStore 装载、启动对账、IPC 注册）。`app:ready` 是唯一先于 `createWindow` 注册的 handler；preload 的 invoke 封装层把**所有** invoke 排队在该屏障之后（30s 超时或屏障调用失败即放行，退化为直接调用的既有行为），渲染层组件无需感知启动时序。广播推送（`on*` 订阅）不受屏障影响。
+
 ### 1.1 任务 `bridge.tasks`
 
 | 方法 | 签名 | 说明 |

@@ -60,7 +60,10 @@ export class SidecarRuntime {
     this.agents = loadAgents(userDataDir)
     this.store = new TaskStore(userDataDir, { recoverRunning: false })
     this.store.recoverDeadGitOperations()
-    this.issueStore = new IssueStore(userDataDir)
+    this.issueStore = new IssueStore(userDataDir, {
+      taskDocument: () => this.store.documentForProjection(),
+      noteTaskIndexWritten: () => this.store.noteIndexWrittenExternally()
+    })
     // A committed Task must keep the sidecar available while its Issue
     // projection retries. This also makes startup resilient to a transient
     // write/fsync/rename failure in the projection file.

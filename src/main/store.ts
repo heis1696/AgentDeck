@@ -264,6 +264,12 @@ export class TaskStore {
   private indexDirty = false
   private flushRetryDelayMs = 250
   private restartInterrupted: Task[] = []
+  /** 水合缓存（框架层读路径）：内存权威文档 + 磁盘身份失效。索引经原子写发布
+   *  （tmp+rename，inode 必变），另一进程（sidecar）落盘即改身份、下次读自然重载；
+   *  本进程写入在 saveIndex 内同步换新身份。事务走 readDocumentForWrite 的私有
+   *  副本，半途抛错不污染缓存——与此前「每次全量重读即回滚」语义等价。 */
+  private cachedDocument: TaskIndexDocument | undefined
+  private cachedIndexIdentity: string | undefined
 
   constructor(userDataDir: string, options: { recoverRunning?: boolean } = {}) {
     this.userDataDir = userDataDir
@@ -356,7 +362,41 @@ export class TaskStore {
     }
   }
 
+  /** 索引文件磁盘身份：dev:ino:size:mtimeMs 复合键。原子写必换 inode，原地改写也被
+   *  size/mtime 兜住；stat 不可读视为已变（朝安全方向失效）。前提是 NTFS 级别的
+   *  inode/mtime 粒度——FAT/exFAT（ino 恒 0、mtime 2s 粒度）上同尺寸写入有理论撞键，
+   *  表现为一读陈旧缓存后自愈；userDataDir 常规在 %APPDATA%（NTFS），仅显式指到
+   *  外来卷（AGENTDECK_USER_DATA_DIR → U 盘/网络盘）才可能触发。 */
+  private indexIdentity(): string | undefined {
+    try {
+      const stat = fs.statSync(this.indexFile(), { bigint: true })
+      return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`
+    } catch {
+      return undefined
+    }
+  }
+
   private readDocument(deriveCounts: boolean | string = true): TaskIndexDocument {
+    const identity = this.indexIdentity()
+    if (this.cachedDocument && identity !== undefined && identity === this.cachedIndexIdentity) {
+      // 缓存文档在装载时已派生 eventCount，本进程内由 append/truncate 增量维护；
+      // 他进程的计数漂移随其索引落盘改身份，下次读全量重载时修正。
+      // 单任务读（get）保留逐任务对账：外部进程可能只追加了 JSONL 而索引尚在延迟写，
+      // 一次 stat 的代价换回单任务新鲜度；全量 sweep 只留给真正的重载路径。
+      if (typeof deriveCounts === 'string') {
+        const task = this.cachedDocument.tasks.find((item) => item.id === deriveCounts)
+        if (task) {
+          const count = this.eventLog(task.id).count()
+          if (task.eventCount !== count) {
+            task.eventCount = count
+            this.pendingSnapshots.add(task.id)
+            this.indexDirty = true
+            this.scheduleFlush()
+          }
+        }
+      }
+      return this.cachedDocument
+    }
     const raw = readJsonFile<unknown>(this.indexFile(), undefined)
     const document = raw === undefined ? { schemaVersion: TASK_INDEX_SCHEMA_VERSION, tasks: [] } : migrateTaskIndex(raw, Date.now(), { recoverRunning: false, trustedOfficeAgentIds: this.trustedOfficeAgentIds })
     if (deriveCounts) for (const task of document.tasks) {
@@ -371,12 +411,24 @@ export class TaskStore {
         this.scheduleFlush()
       }
     }
+    this.cachedDocument = document
+    this.cachedIndexIdentity = identity
     return document
+  }
+
+  /** 变更路径专用：缓存命中返回私有深拷贝——事务在中途抛错时丢弃的是副本，
+   *  缓存与磁盘保持一致（等价于此前每次全量重读的回滚语义）。注：structuredClone
+   *  保留 own undefined 键（事务补丁可产生），重载路径 JSON 序列化会丢同键——
+   *  现网全部 has() 判断均配值比较，两路径在该差异下等价。 */
+  private readDocumentForWrite(deriveCounts: boolean | string = true): TaskIndexDocument {
+    return structuredClone(this.readDocument(deriveCounts))
   }
 
   private saveIndex(document: TaskIndexDocument) {
     document.tasks.sort((a, b) => b.createdAt - a.createdAt)
     atomicWriteJson(this.indexFile(), document)
+    this.cachedDocument = document
+    this.cachedIndexIdentity = this.indexIdentity()
   }
 
   private scheduleFlush(delayMs = 250) {
@@ -416,9 +468,19 @@ export class TaskStore {
       this.pendingSnapshots.delete(id)
     }
     if (needsAcknowledgement) {
+      const acknowledgedSnapshots = document.pendingTaskSnapshots
+      const acknowledgedDeletes = document.pendingTaskDeletes
       delete document.pendingTaskSnapshots
       delete document.pendingTaskDeletes
-      this.saveIndex(document)
+      try {
+        this.saveIndex(document)
+      } catch (error) {
+        // 回执写失败必须回滚内存字段：文档可能已随上一次 saveIndex 进入缓存，
+        // 提前删除会把「已回执」假象留在缓存/文档里，重试会永久跳过这次回执
+        if (acknowledgedSnapshots) document.pendingTaskSnapshots = acknowledgedSnapshots
+        if (acknowledgedDeletes) document.pendingTaskDeletes = acknowledgedDeletes
+        throw error
+      }
     }
   }
 
@@ -430,7 +492,7 @@ export class TaskStore {
   private transactionWithCountScope<T>(action: SynchronousAction<T, TaskTransaction>, deriveCounts: boolean | string): T {
     assertSynchronousAction(action)
     const work = ((token: TransactionToken) => {
-      const document = this.readDocument(deriveCounts)
+      const document = this.readDocumentForWrite(deriveCounts)
       const tasks = new Map(document.tasks.map((task) => [task.id, task]))
       const touched = new Set<string>()
       const removed = new Set<string>()
@@ -566,6 +628,14 @@ export class TaskStore {
         // already committed index, but remains queued for explicit/background retry.
         try { this.flushSnapshotsLocked(document) }
         catch (error) { console.error('[TaskStore] Snapshot flush pending', error); this.scheduleFlush() }
+      } else if (this.cachedDocument) {
+        // 纯事件追加不落索引（延迟到后台 flush）：磁盘 tasks.json 落后于 JSONL 权威时，
+        // 缓存必须立即吸收计数真值——旧行为靠每次全量重读+派生自动修复，缓存化后此为唯一通道。
+        const byId = new Map(this.cachedDocument.tasks.map((task) => [task.id, task]))
+        for (const task of tasks.values()) {
+          const cached = byId.get(task.id)
+          if (cached && cached.eventCount !== task.eventCount) cached.eventCount = task.eventCount
+        }
       }
       return result
     }) as SynchronousAction<T>
@@ -574,9 +644,28 @@ export class TaskStore {
 
   create(input: TaskCreateRecord): Task { return this.transaction((tx) => tx.create(input)) }
 
+  /** 单任务读取。返回对象与内存权威文档共享（缓存命中路径）：调用方**只读**，
+   *  任何改动必须走事务（update/appendEvent…）——原地改返回对象会驻留缓存直到
+   *  下一次磁盘身份变化，且可能随事务落盘（静默数据腐坏，现行调用面已审计为零）。 */
   get(id: string): Task | undefined { return this.readDocument(id).tasks.find((task) => task.id === id) }
 
-  list(): Task[] { return this.readDocument().tasks.sort((a, b) => b.createdAt - a.createdAt) }
+  /** 进程内投影消费口（IssueStore 注入用）：权威文档 + 磁盘身份。缓存命中零读盘；
+   *  他进程写盘（sidecar）在下次调用时自动重载一次并换新身份。文档为共享缓存对象，
+   *  调用方只读，不得原地改动。 */
+  documentForProjection(): { identity: string; document: TaskIndexDocument } {
+    const document = this.readDocument(false)
+    return { identity: this.cachedIndexIdentity ?? '', document }
+  }
+
+  /** IssueStore 投影回执的身份重配对：回执在 .storage.lock 内直写 tasks.json 清空
+   *  pendingIssueProjections——内容与本进程缓存文档一致（共享文档被同步删字段），
+   *  仅缓存身份滞后。重配对免去 TaskStore 下一次读的整份重解析（每次任务完结一回）。 */
+  noteIndexWrittenExternally(): void {
+    this.cachedIndexIdentity = this.indexIdentity()
+  }
+
+  /** 共享缓存文档的 tasks 数组不得被调用方原地排序/增删：浅拷贝后排序。 */
+  list(): Task[] { return this.readDocument().tasks.slice().sort((a, b) => b.createdAt - a.createdAt) }
 
   update(id: string, patch: Partial<Task>) { return this.updateIf(id, {}, patch) }
 
@@ -728,8 +817,15 @@ export class TaskStore {
     if (this.indexTimer) { clearTimeout(this.indexTimer); this.indexTimer = undefined }
     try {
       for (const claim of [...this.pendingGitReleases.values()]) this.releaseGitOperation(claim)
+      // 稳态早退：无任何待写工作且缓存有效时跳过锁与克隆（回执协议在锁内先改文档后写盘，
+      // 私有副本语义靠克隆保证——写失败丢弃副本即可，缓存不受污染）
+      if (!this.indexDirty && !this.pendingSnapshots.size && !this.pendingDeletes.size) {
+        const cached = this.cachedDocument
+        if (cached && this.indexIdentity() === this.cachedIndexIdentity
+          && !cached.pendingTaskSnapshots?.length && !cached.pendingTaskDeletes?.length) return
+      }
       withStorageTransaction(this.userDataDir, () => {
-        const document = this.readDocument(false)
+        const document = this.readDocumentForWrite(false)
         let dirty = this.indexDirty
         for (const task of document.tasks) {
           const count = this.eventLog(task.id).count()
@@ -758,6 +854,8 @@ export class TaskStore {
 
   reload() {
     this.logs.clear()
+    this.cachedDocument = undefined
+    this.cachedIndexIdentity = undefined
     this.readDocument()
   }
 
@@ -793,7 +891,7 @@ export class TaskStore {
 
   truncateEvents(id: string, keepThroughSeq: number, expected: TaskExpectation = {}): boolean {
     return withStorageTransaction(this.userDataDir, () => {
-      const document = this.readDocument()
+      const document = this.readDocumentForWrite()
       const task = document.tasks.find((item) => item.id === id)
       if (!task || !matchesTask(task, expected)) return false
       const kept = this.eventLog(id).truncate(keepThroughSeq)

@@ -77,7 +77,7 @@ try {
 
   countCalls = 0
   store.transaction((transaction) => assert.equal(transaction.get(target.id).eventCount, 65))
-  assert.equal(countCalls, taskCount, 'public transactions retain full count reconciliation')
+  assert.equal(countCalls, 0, 'cached transactions skip the full count sweep (counts maintained incrementally)')
 
   const peer = new TaskStore(dataDir)
   stores.push(peer)
@@ -105,11 +105,19 @@ try {
   assert.equal(countCalls, 2, 'batch append reconciles only the requested log')
   countCalls = 0
   assert.equal(store.list().find((task) => task.id === target.id).eventCount, 65)
-  assert.equal(countCalls, taskCount, 'lists retain full count reconciliation')
+  assert.equal(countCalls, 0, 'cached lists skip the full count sweep (single-task reads still reconcile on demand)')
   const restarted = new TaskStore(dataDir)
   stores.push(restarted)
   assert.equal(restarted.get(other.id).eventCount, 2)
   assert.equal(restarted.get(target.id).eventCount, 65)
+  // 跨实例延迟索引窗口守护：对端纯 append（索引写延迟到 flush）期间，本进程 get()
+  // 的单任务对账必须立即看到 JSONL 新值；对端 flush 落索引后，身份失效让 list() 也新鲜
+  const peerDeferred = new TaskStore(dataDir)
+  stores.push(peerDeferred)
+  peerDeferred.appendEvent(other.id, { ts: Date.now(), kind: 'text', text: 'deferred append' })
+  assert.equal(store.get(other.id).eventCount, 3, 'cross-instance deferred append reconciles on single-task read')
+  peerDeferred.flush()
+  assert.equal(store.list().find((task) => task.id === other.id).eventCount, 3, 'peer flush propagates through identity invalidation')
   console.log(`PASS store-performance: ${taskCount} tasks; 64 appends use ${appendCounts} count calls instead of ${64 * (taskCount + 1)}; ${elapsed.toFixed(1)}ms; staging 0 scans; peer updates and restart counts preserved`)
 } finally {
   EventLog.prototype.count = originalCount

@@ -1,3 +1,4 @@
+import fs from 'node:fs'
 import path from 'node:path'
 import type { Comment, Issue, IssuePriority, IssueStatus, Run, Task } from '../shared/types'
 import { executionRecordFromTask, taskStatusToIssueStatus } from '../shared/taskflow'
@@ -59,33 +60,88 @@ export class IssueStore {
   private readonly taskIndexFile: string
   private data: Persisted = { issues: [], runs: [], comments: [], nextIdentifier: 1 }
   private lastTaskFingerprint = ''
+  /** 指纹与投影文档的磁盘身份绑定：身份未变即文档未变，免重算 13MB 排序键指纹 */
+  private fingerprintIdentity: string | undefined
+  /** 投影文档缓存：任务索引文件身份未变时复用已解析文档，免 13MB 重读重解析 */
+  private projectionCache: { identity: string; document: TaskIndexDocument } | undefined
+  /** issues/index.json 磁盘身份：与 this.data 配对，他进程写盘（或本进程落盘）即失效 */
+  private dataIdentity: string | undefined
   private latestTasks = new Map<string, Task>()
   private pendingProjection = new Map<string, Task>()
   private projectionTimer: NodeJS.Timeout | undefined
   private projectionRetryMs = 250
   private closed = false
+  private readonly taskDocumentProvider: (() => { identity: string; document: TaskIndexDocument }) | undefined
+  private readonly taskIndexWrittenNotifier: (() => void) | undefined
 
-  constructor(userDataDir: string) {
+  /** taskDocument 提供方（主/sidecar 进程内接线 TaskStore 权威文档口）：命中即免读盘；
+   *  缺省回退到自身按文件身份的解析缓存，独立构造（smoke/独立实例）行为不变。
+   *  noteTaskIndexWritten 配套回执通道：provider 模式下回执写盘后由 TaskStore 重配对
+   *  缓存身份（内容即其共享文档），双方都免去一次全量重载。 */
+  constructor(userDataDir: string, options: { taskDocument?: () => { identity: string; document: TaskIndexDocument }; noteTaskIndexWritten?: () => void } = {}) {
     this.userDataDir = userDataDir
     this.file = path.join(userDataDir, 'issues', 'index.json')
     this.taskIndexFile = path.join(userDataDir, 'tasks', 'tasks.json')
+    this.taskDocumentProvider = options.taskDocument
+    this.taskIndexWrittenNotifier = options.noteTaskIndexWritten
     this.data = withStorageTransaction(this.userDataDir, () => {
       const current = this.readDataLocked()
-      if (this.backfillIssueIds(current)) atomicWriteJson(this.file, current)
+      if (this.backfillIssueIds(current)) this.writeDataLocked(current)
       return current
     })
   }
 
-  private readDataLocked(): Persisted {
-    return persistedFrom(readJsonFile<unknown>(this.file, undefined))
+  /** 与 TaskStore 同构的复合磁盘身份（dev:ino:size:mtimeMs）；不可读视为已变。 */
+  private fileIdentity(file: string): string | undefined {
+    try {
+      const stat = fs.statSync(file, { bigint: true })
+      return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`
+    } catch {
+      return undefined
+    }
   }
 
-  private readProjectionTasksLocked(fallback: Task[]): { tasks: Task[]; document?: TaskIndexDocument } {
+  private readDataLocked(): Persisted {
+    const identity = this.fileIdentity(this.file)
+    if (this.dataIdentity !== undefined && identity === this.dataIdentity) return this.data
+    const current = persistedFrom(readJsonFile<unknown>(this.file, undefined))
+    this.data = current
+    this.dataIdentity = identity
+    return current
+  }
+
+  /** 统一落盘口：写后同步换新身份，紧随其后的读取不再重读 6.4MB。 */
+  private writeDataLocked(next: Persisted): void {
+    atomicWriteJson(this.file, next)
+    this.data = next
+    this.dataIdentity = this.fileIdentity(this.file)
+  }
+
+  /** 投影输入读取：优先进程内 TaskStore 权威文档（零读盘），否则按文件身份复用
+   *  已解析文档；身份变化（本进程事务落盘或 sidecar 写盘）才真正重读重解析。
+   *  tasks.json 缺失时投影输入只能是调用方传入的 fallback 数组——没有磁盘身份可锚定，
+   *  identity 返回 undefined，指纹门对其失效（每次现算，等同旧行为）。 */
+  private readProjectionTasksLocked(fallback: Task[]): { tasks: Task[]; document?: TaskIndexDocument; identity?: string; fromProvider: boolean } {
+    const provided = this.taskDocumentProvider?.()
+    if (provided && provided.identity) {
+      const document = provided.document
+      const currentIds = new Set(document.tasks.map((task) => task.id))
+      const tasks = [...(document.pendingIssueProjections ?? []).filter((task) => currentIds.has(task.id)), ...document.tasks]
+      return { tasks, document, identity: provided.identity, fromProvider: true }
+    }
+    const identity = this.fileIdentity(this.taskIndexFile)
+    if (identity && this.projectionCache?.identity === identity) {
+      const document = this.projectionCache.document
+      const currentIds = new Set(document.tasks.map((task) => task.id))
+      const tasks = [...(document.pendingIssueProjections ?? []).filter((task) => currentIds.has(task.id)), ...document.tasks]
+      return { tasks, document, identity, fromProvider: false }
+    }
     const raw = readJsonFile<unknown>(this.taskIndexFile, undefined)
-    if (raw === undefined) return { tasks: fallback }
+    if (raw === undefined) return { tasks: fallback, fromProvider: false }
     const document = migrateTaskIndex(raw, Date.now(), { recoverRunning: false })
     const currentIds = new Set(document.tasks.map((task) => task.id))
-    return { document, tasks: [...(document.pendingIssueProjections ?? []).filter((task) => currentIds.has(task.id)), ...document.tasks] }
+    if (identity) this.projectionCache = { identity, document }
+    return { document, tasks: [...(document.pendingIssueProjections ?? []).filter((task) => currentIds.has(task.id)), ...document.tasks], identity, fromProvider: false }
   }
 
   private backfillIssueIds(data: Persisted): boolean {
@@ -119,32 +175,51 @@ export class IssueStore {
   /** Rebuild the projection from committed task snapshots. */
   sync(tasks: Task[]) {
     withStorageTransaction(this.userDataDir, () => {
-      const { tasks: committedTasks, document } = this.readProjectionTasksLocked(tasks)
-      const fingerprint = taskFingerprint(committedTasks)
+      const { tasks: committedTasks, document, identity, fromProvider } = this.readProjectionTasksLocked(tasks)
+      const fingerprint = identity !== undefined && this.fingerprintIdentity === identity ? this.lastTaskFingerprint : taskFingerprint(committedTasks)
       const current = this.readDataLocked()
 
       // Reads still refresh local state. A different IssueStore instance may
       // have committed comments or metadata since the previous projection.
       if (fingerprint === this.lastTaskFingerprint && !document?.pendingIssueProjections?.length) {
         this.data = current
+        // 内容等价的索引改写（如 TaskStore 同内容落盘）也要认领新身份：
+        // 否则身份门永远判「变过」，每次 sync 都重算一遍 13MB 指纹
+        this.fingerprintIdentity = identity
         this.rebuildLatestTasks(committedTasks)
         return
       }
 
       const next = clonePersisted(current)
       this.projectTasks(next, committedTasks)
-      if (JSON.stringify(next) !== JSON.stringify(current)) atomicWriteJson(this.file, next)
+      if (JSON.stringify(next) !== JSON.stringify(current)) this.writeDataLocked(next)
       // Acknowledgement follows the Issue commit. Replaying after an ack write
       // failure finds the same run/report identities and cannot duplicate them.
       if (document?.pendingIssueProjections?.length) {
+        const acknowledged = document.pendingIssueProjections
         delete document.pendingIssueProjections
-        atomicWriteJson(this.taskIndexFile, document)
+        try {
+          atomicWriteJson(this.taskIndexFile, document)
+        } catch (error) {
+          // 回执写失败回滚内存字段：provider 路径下 document 是 TaskStore 的共享缓存
+          // 文档，提前删除会让下一次 sync 误判「无待回执」而永久丢失回执队列
+          document.pendingIssueProjections = acknowledged
+          throw error
+        }
+        if (fromProvider) {
+          // provider 模式：写盘内容即 TaskStore 共享文档，通知其重配对缓存身份，
+          // 双方都免去一次全量重载；自身无需维护 projectionCache（永不走该分支读）
+          this.taskIndexWrittenNotifier?.()
+        } else {
+          this.projectionCache = { identity: this.fileIdentity(this.taskIndexFile) ?? '', document }
+        }
       }
 
       // A failed write leaves both the old fingerprint and the old in-memory
       // snapshot intact, so the next sync retries the same projection.
       this.data = next
       this.lastTaskFingerprint = fingerprint
+      this.fingerprintIdentity = identity
       this.rebuildLatestTasks(committedTasks)
     })
   }
@@ -441,10 +516,10 @@ export class IssueStore {
       next.comments = next.comments.filter((comment) => comment.issueId !== id)
       next.deletedIssueIds = [...new Set([...(next.deletedIssueIds ?? []), id])]
       next.deletedTaskIds = [...new Set([...(next.deletedTaskIds ?? []), issue.taskId])]
-      atomicWriteJson(this.file, next)
-      this.data = next
+      this.writeDataLocked(next)
       this.latestTasks.delete(id)
       this.lastTaskFingerprint = ''
+      this.fingerprintIdentity = undefined
       return true
     })
   }
@@ -496,8 +571,7 @@ export class IssueStore {
       const comment: Comment = { id: this.id('com'), issueId: nextIssue.id, author, content: content.trim(), reactions: [], createdAt: Date.now(), ...(source?.meetingId ? { meetingId: source.meetingId, sourceTurnId: source.sourceTurnId } : {}) }
       next.comments.push(comment)
       nextIssue.updatedAt = comment.createdAt
-      atomicWriteJson(this.file, next)
-      this.data = next
+      this.writeDataLocked(next)
       return comment
     })
   }
@@ -531,8 +605,7 @@ export class IssueStore {
         nextIssue.statusOverride = patch.status
       }
       nextIssue.updatedAt = Date.now()
-      atomicWriteJson(this.file, next)
-      this.data = next
+      this.writeDataLocked(next)
       return nextIssue
     })
   }
@@ -548,8 +621,7 @@ export class IssueStore {
       const current = this.readDataLocked()
       const next = clonePersisted(current)
       next.comments = next.comments.filter((comment) => comment.meetingId !== meetingId)
-      atomicWriteJson(this.file, next)
-      this.data = next
+      this.writeDataLocked(next)
     })
   }
 }

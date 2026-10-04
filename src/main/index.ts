@@ -1,5 +1,5 @@
 // AgentDeck 主进程入口
-import { app, BrowserWindow, Menu, Notification, Tray } from 'electron'
+import { app, BrowserWindow, Menu, Notification, Tray, ipcMain } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
 import { TaskStore } from './store'
@@ -299,462 +299,477 @@ const initMain = async (): Promise<void> => {
     return custom || path.join(app.getPath('home'), '.agentdeck')
   }
   ensureSharedDir(resolveSharedDir())
-  // Claim raw orphan runs before TaskStore performs restart migration. The
-  // sidecar is the durable owner of this boundary; otherwise the compatibility
-  // store would eagerly rewrite `running` to `failed` before takeover sees it.
-  sidecarManager = new SidecarManager({
-    userDataDir: app.getPath('userData'),
-    entrypoint: path.join(__dirname, 'sidecar-server.js'),
-    preferredPort: Number(process.env.AGENTDECK_SIDECAR_PORT) || undefined
-  })
-  sidecarManager.onStatus((snapshot) => {
-    const { token: _token, ...publicSnapshot } = snapshot
-    mainWindow?.webContents.send('sidecar:status', publicSnapshot)
-  })
-  try { await sidecarManager.reconnect() } catch { /* compatibility fallback keeps main-process execution available */ }
-  store = new TaskStore(app.getPath('userData'))
-  store.recoverDeadGitOperations()
-  issueStore = new IssueStore(app.getPath('userData'))
-  issueStore.syncEventually(store.list())
-  // 启动清扫：回收上次会话遗留的委派 worktree（合并临时目录 + 已删任务的目录），后台执行不阻塞启动。
-  // 目录集合按 uniquePathsByKey 折叠去重：同一仓库的别名写法（大小写/盘符差异）不再
-  // 重复清扫、并发重扫同一现场；去重后保留首个写法做真实文件系统调用
-  for (const dir of uniquePathsByKey(store.list().map((t) => t.worktree?.repoDir || t.workdir))) {
-    void sweepWorktrees(dir, (owner, worktree) => shouldKeepTaskWorktree(store.list(), dir, owner, worktree), {
-      claimWorktree: (owner, merge) => {
-        const claim = store.claimWorktreeCleanup(dir, owner, merge)
-        return claim ? { release: () => { try { store.releaseGitOperation(claim) } catch {} } } : undefined
-      }
-    }).then((report) => {
-      // 清扫失败不再静默：连续多轮失败时用户能从时间线发现「有删不掉的 worktree」线索
-      for (const failure of report.failed) store.noteWorktreeCleanupFailure(dir, failure)
-    }).catch(() => {})
-    // 报告副本 GC 挂线三（启动清扫）：孤儿副本（任务已不在册）删除，在册副本保留
-    void sweepReportCopies(dir, (id) => !!store.get(id)).catch(() => {})
-  }
-  goalStore = new GoalStore(app.getPath('userData'))
-  automationStore = new AutomationStore(app.getPath('userData'))
-
-  const zcode = createZcodeBackend(() => ({ nodePath: settings.nodePath, zcodePath: settings.zcodePath }))
-  backends.set(zcode.id, zcode)
-  backends.set('claude', createClaudeBackend())
-  backends.set('codex', createCodexBackend())
-  backends.set('opencode', createOpencodeBackend())
-  backends.set('dsh', createDshBackend(() => ({ dshPath: settings.dshPath })))
-  agents = loadAgents()
-
-  taskService = new TaskService({
-    store,
-    issueStore,
-    getAgent: (agentId) => agents.find((agent) => agent.id === agentId)
-  })
-
-  runner = new TaskRunner(store, backends, () => ({
-    concurrency: settings.concurrency,
-    mode: settings.mode,
-    notify: settings.notifyOnDone,
-    workerConcurrency: settings.workerConcurrency,
-    turnIdleTimeoutMs: settings.turnIdleTimeoutMs,
-    permissionTimeoutMs: settings.permissionTimeoutMs,
-    maxRetryAttempts: settings.maxRetryAttempts,
-    retryBackoffMs: settings.retryBackoffMs,
-    maxHandoffChain: settings.maxHandoffChain,
-    delegateMaxRounds: settings.delegateMaxRounds,
-    delegateMaxTotalRounds: settings.delegateMaxTotalRounds,
-    delegateMaxDepth: settings.delegateMaxDepth,
-    doomLoopThreshold: settings.doomLoopThreshold
-  }), (task) => notifyTaskChanged(task), {
-    send: (channel, payload) => mainWindow?.webContents.send(channel, payload),
-    onTaskEvent: (taskId, event) => goalController?.onTaskEvent(taskId, event),
-    notify: (task, what, body) => {
-      try {
-        if (!Notification.isSupported()) return
-        const notification = new Notification({ title: `任务${what}: ${task.title}`, body: (body || '').slice(0, 180) })
-        notification.on('click', () => {
-          mainWindow?.show()
-          mainWindow?.focus()
-          mainWindow?.webContents.send('task:focus', task.id)
-        })
-        notification.show()
-      } catch {}
-    }
-  })
-  runner.attachTeam(() => agents)
-  runner.attachTaskService(taskService)
-  agentSessions = new AgentSessionRegistry({ store, taskService, runner, getAgents: () => agents })
-  runner.attachConsult(async ({ sourceTaskId, call, depth }) => {
-    const source = store.get(sourceTaskId)
-    const target = agentSessions.resolve(call.to, source?.agentId)
-    if (!target || target.backend.toLowerCase() === 'dsh') return `未找到可咨询的队长：${call.to}`
-    if (depth >= 1) return '咨询深度已达上限；请基于当前信息自行判断。'
-    const sourceName = agents.find((agent) => agent.id === source?.agentId)?.name ?? '队长'
-    const result = await agentSessions.followUp(target.id,
-      consultRequestPrompt(sourceName, call.prompt),
-      { collectFinal: true, consultDepth: depth + 1 })
-    return result.ok ? (result.finalText ?? '（对方未返回文字意见）') : `咨询失败：${result.error ?? '未知错误'}`
-  })
-  runner.attachInvestigate(async ({ sourceTaskId, call, depth }) => {
-    if (depth >= 1) return '调查深度已达上限；请基于已有信息判断。'
-    const child = await runner.spawnInvestigateChild(sourceTaskId, call)
-    if (!child) return `调查未能接单：${call.to}`
-    const deadline = Date.now() + 10 * 60 * 1000
-    for (;;) {
-      const current = store.get(child.id)
-      if (!current) return `调查任务已消失：${child.id}`
-      if (current.status === 'done') return current.result ?? '（调查没有返回文字）'
-      if (current.status === 'failed' || current.status === 'cancelled') return `调查任务 ${current.status}：${current.error ?? '无最终报告'}`
-      if (Date.now() >= deadline) return `调查任务超时：${child.id}`
-      await new Promise((resolve) => setTimeout(resolve, 500))
-    }
-  })
-  meetingController = new MeetingController({
-    store: new MeetingStore(app.getPath('userData')),
-    offices: agentSessions,
-    getAgents: () => agents,
-    taskService,
-    startTask: (taskId) => {
-      // 与「▶ 启动」按钮、拖动启动共用同一次捕获身份的准备工作
-      const started = prepareManualTaskStart(store, taskId)
-      if (!started) return
-      runner.enqueue(started)
-    },
-    issueExists: (issueId) => !!issueStore.get(issueId),
-    taskStore: store,
-    getIssueTask: (issueId) => {
-      const issue = issueStore.get(issueId)
-      return issue ? store.get(issue.taskId) : undefined
-    },
-    isFreshIssue: (issueId) => {
-      const issue = issueStore.get(issueId)
-      const task = issue ? store.get(issue.taskId) : undefined
-      return !!task && task.status === 'queued' && task.parked === true && !task.startedAt && !task.runId
-        && (task.eventCount ?? 0) === 0 && issueStore.comments(issueId).length === 0
-        && issueStore.runs(issueId).length === 0
-    },
-    onTaskUpdated: (task) => runner.pushTask(task.id),
-    addIssueComment: (issueId, content, authorId, meetingId, sourceTurnId) => {
-      const comment = issueStore.addComment(issueId, content, { type: authorId === 'user' ? 'user' : 'agent', id: authorId ?? 'meeting' }, { meetingId, sourceTurnId })
-      if (!comment) throw new Error('会议评论镜像未写入')
-    },
-    cancelTask: (taskId) => runner.terminateTask(taskId),
-    deleteTaskData: async (meeting, tasks) => {
-      const matchesStoppedTask = (task: Task): boolean => {
-        const current = store.get(task.id)
-        return !!current && current.meetingId === meeting.id && !current.gitOperation
-          && ['done', 'failed', 'cancelled'].includes(current.status)
-          && store.matches(task.id, { runId: task.runId, executionOwner: task.executionOwner })
-      }
-      if (!tasks.every(matchesStoppedTask)) return { ok: false, error: '会议执行归属已变化，未清理任务与日志' }
-      if (meeting.ownsIssue && store.list().some((task) => task.issueId === meeting.issueId && task.meetingId !== meeting.id)) {
-        return { ok: false, error: 'Issue 存在不属于会议的执行，已保留历史，不能整单删除' }
-      }
-      const roots = new Set<string>()
-      for (const task of tasks) {
-        if (task.worktree?.repoDir) roots.add(task.worktree.repoDir)
-        else if (task.workdir) {
-          const root = await resolveRepositoryRoot(task.workdir)
-          if (root) roots.add(root)
-        }
-        if (task.worktree) {
-          const reclaimed = await reclaimWorktree(task.worktree.path, {
-            deleteBranch: true,
-            expectedOwnerTaskId: task.worktree.ownerTaskId,
-            expectedGenerationId: task.worktree.generationId,
-            beforeReclaim: async (workdir) => matchesStoppedTask(task)
-              && await runner.releaseWorktreeSessions(workdir) && matchesStoppedTask(task)
-          })
-          if (!reclaimed.ok) return { ok: false, error: `会议工作树尚未安全回收：${task.worktree.path}` }
-        }
-      }
-      const deleted = await taskService.deleteTerminalCascade(tasks.map((task) => task.id), (taskId) => runner.forget(taskId),
-        (current) => current.every((task) => tasks.some((captured) => captured.id === task.id && matchesStoppedTask(captured))))
-      if (!deleted) return { ok: false, error: '会议任务状态或归属已变化，请重试删除' }
-      deleteReportCopies([...roots], deleted)
-      for (const taskId of deleted) mainWindow?.webContents.send('task:deleted', taskId)
-      return { ok: true }
-    },
-    deleteMeetingComments: (meetingId) => issueStore.deleteMeetingComments(meetingId),
-    deleteIssue: (issueId) => { issueStore.deleteIssue(issueId) }
-  })
-  runner.attachMeetingGuard((task: Task) => meetingController.canRunTask(task))
-  meetingController.recover()
-  meetingController.subscribe((meeting) => mainWindow?.webContents.send('meetings:updated', meeting))
-  // Issue 评论统一中继（全文层统一降级出口）：评论未送达（Issue 不存在）= warn + 任务事件 + 推送，
-  // 重启续报/审核备注/停放通知三处共用，绝不静默丢
-  const issueRelay: IssueRelayChannels = {
-    addComment: (issueId, text, author) => issueStore.addComment(issueId, text, author ?? { type: 'agent', id: 'relay' }),
-    appendEvent: (taskId, event) => store.appendEvent(taskId, event),
-    pushEvent: (taskId, event) => runner.pushEvent(taskId, event)
-  }
-  // 启动对账：执行只活在主进程内存里，快照里遗留的 running 只有在**执行身份被证实
-  // 已死**时才是僵尸——活跃或身份不可读的运行一律保留（租约过期不是死亡证据）。
-  // 接管统一走 store.recoverDeadRuns：锁外探活、锁内按捕获身份条件提交，每个死运行
-  // 只认领一次；日志尾部按捕获运行绑定，替换运行之前的旧日志不能决定它的结论。
-  // dispatchHold 子单（建单在翻面前被打断）的磁盘归属核实接线 setWorktreeOwner。
-  // 整体兜底：启动对账跑在窗口/IPC 建立之前，绝不允许它把启动炸掉——对账失败只
-  // 降级为遗留任务待手动处理（子单级异常已按单捕获走具名失败路径，这里是最后防线）。
-  try {
-    await reconcileStartupTasks({
-      store,
-      pushEvent: (taskId, event) => runner.pushEvent(taskId, event),
-      enqueue: (task) => runner.enqueue(task),
-      notifyTaskChanged,
-      bindWorktreeOwner: (wtDir, ownerTaskId, expected) => setWorktreeOwner(wtDir, ownerTaskId, expected),
-      relayInterruptedLeader: (stale, kids) => {
-        if (!stale.issueId) return
-        const excerpts = kids.slice(0, 5).map((kid) => `- **${kid.title}**（${kid.status}）：${(kid.result ?? '').slice(0, 400) || '（无最终输出）'}`).join('\n')
-        relayIssueCommentOrEvent(issueRelay, {
-          issueId: stale.issueId,
-          taskId: stale.id,
-          comment: `⚠ 委派报告未送达：领队执行被应用重启打断。以下为队员报告摘要：\n${excerpts}`,
-          fallbackEventText: `⚠ Issue 评论未送达（Issue 不存在），队员报告摘要转投任务时间线：\n${excerpts}`
-        })
-      }
-    })
-  } catch (error) {
-    console.error('[startup] 启动对账失败（应用继续启动，遗留任务保留可手动处理）', error)
-  }
-  presets = loadPresets()
-  runner.attachPresets(() => presets)
-  runner.attachIssueOps({
-    reviewStatus: (childId, verdict, note) => {
-      const child = store.get(childId)
-      if (!child?.issueId) return
-      issueStore.updateWorkflow(child.issueId, verdict === 'pass' ? 'done' : 'blocked')
-      if (note) {
-        // 审核备注走统一中继：评论未送达（Issue 不存在）降级为子任务事件留痕
-        relayIssueCommentOrEvent(issueRelay, {
-          issueId: child.issueId,
-          taskId: childId,
-          comment: `审核${verdict === 'pass' ? '通过' : '退回'}：${note}`,
-          fallbackEventText: `⚠ 审核评论未送达（Issue 不存在）；审核${verdict === 'pass' ? '通过' : '退回'}：${note}`,
-          author: { type: 'agent', id: 'reviewer' }
-        })
-      }
-      publishIssueUpdate(child)
-    },
-    addIssueComment: (issueId, text) => {
-      return issueStore.addComment(issueId, text, { type: 'agent', id: 'relay' })
-    }
-  })
-
-  /** Single creation path for user issues, automation runs, and legacy tasks. */
-  const createTask = (input: CreateTaskInput, trigger: RunTrigger = 'assignment') => taskService.createTask(input, trigger)
-
-  // Goals reuse the existing TaskRunner/Issue projection.  The controller is
-  // intentionally installed after createTask so every compatibility run uses
-  // the same creation path and retains the existing task/JSONL contract.
-  goalController = new GoalController(goalStore, {
-    createTask: (input) => taskService.createTask({
-      title: input.title,
-      prompt: input.prompt,
-      workdir: input.workdir,
-      backend: input.backend,
-      agentId: input.agentId,
-      issueId: input.issueId,
-      goalId: input.goalId,
-      phaseIndex: input.phaseIndex,
-      dedupeKey: input.dedupeKey,
-      startNow: input.startNow
-    }, input.trigger),
-    doomLoopThreshold: () => settings.doomLoopThreshold,
-    maxRetryAttempts: () => settings.maxRetryAttempts,
-    verifyAcceptance: (goal, task) => verifyAcceptance(goal, task),
-    enqueueTask: (task) => runner.enqueue(task),
-    startTask: (task) => {
-      return prepareManualTaskStart(store, task.id) ?? store.get(task.id) ?? task
-    },
-    cancelTask: (taskId) => runner.cancel(taskId),
-    listTasks: () => store.list(),
-    continueTask: (taskId, content) => runner.followUp(taskId, content),
-    onGuard: (goal, reason, detail) => {
-      const task = store.list().find((candidate) => candidate.goalId === goal.id)
-      if (!task) return
-      const event = store.appendEvent(task.id, {
-        ts: Date.now(),
-        kind: 'status',
-        text: `Goal guard ${reason}: ${detail}`,
-        data: { stopReason: reason, goalId: goal.id }
-      })
-      if (event) runner.pushEvent(task.id, event)
-    },
-    finalizeIssue: (issueId) => {
-      const issue = issueStore.get(issueId)
-      if (!issue) return
-      issueStore.updateWorkflow(issueId, 'done')
-      const task = store.get(issue.taskId)
-      if (task) publishIssueUpdate(task)
-    }
-  })
-  goalController.subscribe((goal) => mainWindow?.webContents.send('goals:updated', goal))
-  // An active goal must never resume silently after an application restart.
-  goalController.recover(store.list())
-
-  // 阶段接力（<continue>）：同一 Issue 上创建后继执行——新会话硬切，简报为唯一携带物
-  runner.attachContinue(({ sourceTaskId, issueId, brief, start }) => {
-    const source = store.get(sourceTaskId)
-    if (!source) return null
-    const resolved = taskService.resolveHandoffTask({ sourceTaskId, issueId, brief, start })
-    if (!resolved) return null
-    const { task, created } = resolved
-    if (!created) {
-      notifyTaskChanged(task)
-      return task
-    }
-    if (!task.parked && task.status === 'queued') runner.enqueue(task)
-    else {
-      notifyTaskChanged(task)
-      // 停放的后继对用户是隐形的（调度泵与重启对账都跳过 parked）——落一条 Issue 评论
-      // 把"等你启动"喊到用户看得到的地方，而不是只留在旧执行的时间线尾部。
-      // Only a newly created successor gets a visible handoff notice.
-      if (task.parked && task.issueId) {
-        const firstLine = task.prompt.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? task.title
-        // 停放通知走统一中继：评论未送达（Issue 不存在）降级为后继任务事件留痕
-        relayIssueCommentOrEvent(issueRelay, {
-          issueId: task.issueId,
-          taskId: task.id,
-          comment: `⏸ 阶段接力已备好：${firstLine.slice(0, 80)}——下一阶段在等你启动（打开该 Issue 的最新执行，点「▶ 启动」）`,
-          fallbackEventText: `⚠ 停放通知未送达（Issue 不存在）：阶段接力已备好，等用户启动`,
-          author: { type: 'agent', id: source.agentId ?? 'relay' }
-        })
-      }
-    }
-    return task
-  })
-
-  // 【待定】自动化功能未经完整设计（照搬实现后未迭代），已知缺口：
-  // 1) workdir 为空/失效时 zcode 后端兜底到 os.tmpdir()，Agent 在空目录里空跑（表单却标注"可选"）
-  // 2) output='run_only' 带 suppressIssue，渲染层无任何界面展示这类任务，结果不可见
-  // 3) Automation 只存 lastRunAt/nextRunAt，无运行历史、无上次成功/失败状态，运行记录与自动化脱钩
-  // 4) 无重叠保护：间隔 < 执行时长时任务会逐轮堆积；update 改间隔不重算 nextRunAt
-  // 修复方向：workdir 必填校验、run_only 结果回写自动化、task 加 automationId 归组历史、tick 跳过在跑的
-  const runAutomation = (id: string) => {
-    const automation = automationStore.get(id)
-    if (!automation || !automation.enabled || !automation.prompt.trim()) return null
-    const agent = agents.find((item) => item.id === automation.agentId)
-    const task = createTask({ title: automation.name, prompt: automation.prompt, workdir: automation.workdir, backend: agent?.backend, ...(agent ? { agentId: agent.id } : {}), ...(automation.output === 'run_only' ? { suppressIssue: true } : {}) }, 'autopilot')
-    automationStore.markRun(id)
-    runner.enqueue(store.get(task.id)!)
-    return store.get(task.id) ?? null
-  }
-  let automationBusy = false
-  const automationTick = () => {
-    automationBusy = true
-    try {
-      const now = Date.now()
-      for (const automation of automationStore.list()) if (automation.enabled && (automation.nextRunAt ?? now) <= now) runAutomation(automation.id)
-    } finally {
-      automationBusy = false
-    }
-  }
-  automationTimer = setInterval(automationTick, 15_000)
-  automationTick()
-
-  // 自动化 tick 临界区迁入 Issue 管线在途源：空闲判定单点化（不再各自组合布尔）
-  runner.pipeline.addSource({ label: 'automation', size: () => (automationBusy ? 1 : 0) })
-
-  // 热更状态机装配（§5.1 UpdaterDeps 注入；空闲门控 = runner.isIdle 单点，automation 已入管线）
-  hotUpdater = new HotUpdater({
-    getWindow: () => mainWindow,
-    isMainIdle: () => runner.isIdle(),
-    relaunchForUpdate: (version) => {
-      quitting = true
-      // 剥离上一轮热更参数再补新值：逐轮累积会让后续实例带着一堆陈旧的
-      // --agentdeck-hot-applied/--relaunch-retry 启动，干扰取锁重试环与状态上报
-      const stale = new Set(['--agentdeck-hot-applied', '--agentdeck-relaunch-retry', '--agentdeck-hot-fallback'])
-      const cleanArgs: string[] = []
-      const rest = process.argv.slice(1)
-      for (let i = 0; i < rest.length; i++) {
-        if (stale.has(rest[i])) {
-          if (rest[i] === '--agentdeck-hot-applied') i++ // 跳过其版本值参数
-          continue
-        }
-        cleanArgs.push(rest[i])
-      }
-      app.relaunch({ args: [...cleanArgs, '--agentdeck-hot-applied', version, '--agentdeck-relaunch-retry'] })
-      app.quit()
-    },
-    settings: () => settings,
-    getUserDataDir: () => app.getPath('userData'),
-    getShellVersion: () => app.getVersion(),
-    getAppDir: () => (app.isPackaged ? path.dirname(process.execPath) : null),
-    quitForShellUpdate: () => {
-      quitting = true
-      app.quit()
-    }
-  })
-
-  // 桌宠：配置存储 + 透明窗 + AI 脑；enabled 时启动即亮窗
-  // TODO: {board_summary} 挂点——目前是 store 粗统计（状态计数 + 活跃 goal 数），
-  // 后续接 Issue 标题/Goal 阶段进度后替换成更细的看板摘要
-  const buildBoardSummary = (): string => {
-    const tasks = store.list()
-    if (!tasks.length) return '暂无任务摘要'
-    const count = (status: Task['status']) => tasks.filter((task) => task.status === status).length
-    const parts = [
-      `共 ${tasks.length} 个任务`,
-      `进行中 ${count('running')}`,
-      `排队 ${count('queued')}`,
-      `已完成 ${count('done')}`
-    ]
-    const failed = count('failed')
-    if (failed) parts.push(`失败 ${failed}`)
-    const activeGoals = goalStore.list().filter((goal) => goal.status === 'active').length
-    if (activeGoals) parts.push(`活跃目标 ${activeGoals} 个`)
-    return parts.join('、')
-  }
-  // 桌宠宿主（阶段 1）：契约事件通道 + deck.* 工具；开关位持久化在 pet.json（经 petController.store 读，
-  // 构造前闭包不触发，无空引用窗口）。deck.createTask 经 toPetHostDraftCreateInput 钉死 startNow:false
-  // = parked 草稿（taskService 语义：绝不 enqueue，等用户手动启动）；deck.annotateTask 直连
-  // issueStore.addComment 的独立通道，不走解析 @mention 的 issues:add-comment 路径。
-  const petHost = new PetHost({
-    getSwitches: () => petController?.store.get().hostSwitches ?? DEFAULT_PET_HOST_SWITCHES,
-    buildBoardSummary,
-    queryBoard: () => store.list(),
-    createDraftTask: (input) => {
-      const task = createTask(toPetHostDraftCreateInput(input), 'assignment')
-      return { id: task.id, title: task.title, status: task.status }
-    },
-    annotateIssue: (issueId, text) => { issueStore.addComment(issueId, text, { type: 'agent', id: 'pet' }) },
-    resolveTask: (taskId) => store.get(taskId)
-  })
-  // 桌宠：配置存储 + 透明窗 + AI 脑；enabled 时启动即亮窗。{board_summary} 宏改走快照通道
-  //（host 缓存 board.snapshot 捕获的摘要，宏注入行为保持），buildBoardSummary 作为快照构建源
-  petController = new PetController({
-    userDataDir: app.getPath('userData'),
-    getPresets: () => presets,
-    getMainWindow: () => mainWindow,
-    host: petHost
-  })
-
-  registerIpcHandlers({
-    getWindow: () => mainWindow,
-    get settings() { return settings },
-    setSettings: (next) => { settings = saveSettings(next) },
-    get sharedDir() { return resolveSharedDir() },
-    store,
-    runner,
-    issueStore,
-    goalController,
-    meetingController,
-    automationStore,
-    backends,
-    zcode,
-    sidecar: sidecarManager,
-    updates: hotUpdater,
-    pet: petController ?? undefined,
-    get agents() { return agents },
-    set agents(value) { agents = value },
-    get presets() { return presets },
-    set presets(value) { presets = value },
-    createTask,
-    runAutomation,
-    publishIssueUpdate
-  })
-
+  // 就绪屏障（框架层启动契约）：窗口先出、渲染层先画壳，全部数据面（sidecar 握手、
+  // store 水合、启动对账、IPC 注册）完成前，渲染层初始装载挂在本 invoke 上等待。
+  // handler 必须先于 createWindow 注册——渲染进程可能在任何水合完成前就发起调用。
+  let resolveStoresReady: () => void = () => {}
+  const storesReady = new Promise<void>((resolve) => { resolveStoresReady = resolve })
+  ipcMain.handle('app:ready', () => storesReady)
   createWindow()
   createTray()
-  petController?.start()
+  try {
+    // Claim raw orphan runs before TaskStore performs restart migration. The
+    // sidecar is the durable owner of this boundary; otherwise the compatibility
+    // store would eagerly rewrite `running` to `failed` before takeover sees it.
+    sidecarManager = new SidecarManager({
+      userDataDir: app.getPath('userData'),
+      entrypoint: path.join(__dirname, 'sidecar-server.js'),
+      preferredPort: Number(process.env.AGENTDECK_SIDECAR_PORT) || undefined
+    })
+    sidecarManager.onStatus((snapshot) => {
+      const { token: _token, ...publicSnapshot } = snapshot
+      mainWindow?.webContents.send('sidecar:status', publicSnapshot)
+    })
+    try { await sidecarManager.reconnect() } catch { /* compatibility fallback keeps main-process execution available */ }
+    store = new TaskStore(app.getPath('userData'))
+    store.recoverDeadGitOperations()
+    issueStore = new IssueStore(app.getPath('userData'), {
+      taskDocument: () => store.documentForProjection(),
+      noteTaskIndexWritten: () => store.noteIndexWrittenExternally()
+    })
+    issueStore.syncEventually(store.list())
+    // 启动清扫：回收上次会话遗留的委派 worktree（合并临时目录 + 已删任务的目录），后台执行不阻塞启动。
+    // 目录集合按 uniquePathsByKey 折叠去重：同一仓库的别名写法（大小写/盘符差异）不再
+    // 重复清扫、并发重扫同一现场；去重后保留首个写法做真实文件系统调用
+    for (const dir of uniquePathsByKey(store.list().map((t) => t.worktree?.repoDir || t.workdir))) {
+      void sweepWorktrees(dir, (owner, worktree) => shouldKeepTaskWorktree(store.list(), dir, owner, worktree), {
+        claimWorktree: (owner, merge) => {
+          const claim = store.claimWorktreeCleanup(dir, owner, merge)
+          return claim ? { release: () => { try { store.releaseGitOperation(claim) } catch {} } } : undefined
+        }
+      }).then((report) => {
+        // 清扫失败不再静默：连续多轮失败时用户能从时间线发现「有删不掉的 worktree」线索
+        for (const failure of report.failed) store.noteWorktreeCleanupFailure(dir, failure)
+      }).catch(() => {})
+      // 报告副本 GC 挂线三（启动清扫）：孤儿副本（任务已不在册）删除，在册副本保留
+      void sweepReportCopies(dir, (id) => !!store.get(id)).catch(() => {})
+    }
+    goalStore = new GoalStore(app.getPath('userData'))
+    automationStore = new AutomationStore(app.getPath('userData'))
+
+    const zcode = createZcodeBackend(() => ({ nodePath: settings.nodePath, zcodePath: settings.zcodePath }))
+    backends.set(zcode.id, zcode)
+    backends.set('claude', createClaudeBackend())
+    backends.set('codex', createCodexBackend())
+    backends.set('opencode', createOpencodeBackend())
+    backends.set('dsh', createDshBackend(() => ({ dshPath: settings.dshPath })))
+    agents = loadAgents()
+
+    taskService = new TaskService({
+      store,
+      issueStore,
+      getAgent: (agentId) => agents.find((agent) => agent.id === agentId)
+    })
+
+    runner = new TaskRunner(store, backends, () => ({
+      concurrency: settings.concurrency,
+      mode: settings.mode,
+      notify: settings.notifyOnDone,
+      workerConcurrency: settings.workerConcurrency,
+      turnIdleTimeoutMs: settings.turnIdleTimeoutMs,
+      permissionTimeoutMs: settings.permissionTimeoutMs,
+      maxRetryAttempts: settings.maxRetryAttempts,
+      retryBackoffMs: settings.retryBackoffMs,
+      maxHandoffChain: settings.maxHandoffChain,
+      delegateMaxRounds: settings.delegateMaxRounds,
+      delegateMaxTotalRounds: settings.delegateMaxTotalRounds,
+      delegateMaxDepth: settings.delegateMaxDepth,
+      doomLoopThreshold: settings.doomLoopThreshold
+    }), (task) => notifyTaskChanged(task), {
+      send: (channel, payload) => mainWindow?.webContents.send(channel, payload),
+      onTaskEvent: (taskId, event) => goalController?.onTaskEvent(taskId, event),
+      notify: (task, what, body) => {
+        try {
+          if (!Notification.isSupported()) return
+          const notification = new Notification({ title: `任务${what}: ${task.title}`, body: (body || '').slice(0, 180) })
+          notification.on('click', () => {
+            mainWindow?.show()
+            mainWindow?.focus()
+            mainWindow?.webContents.send('task:focus', task.id)
+          })
+          notification.show()
+        } catch {}
+      }
+    })
+    runner.attachTeam(() => agents)
+    runner.attachTaskService(taskService)
+    agentSessions = new AgentSessionRegistry({ store, taskService, runner, getAgents: () => agents })
+    runner.attachConsult(async ({ sourceTaskId, call, depth }) => {
+      const source = store.get(sourceTaskId)
+      const target = agentSessions.resolve(call.to, source?.agentId)
+      if (!target || target.backend.toLowerCase() === 'dsh') return `未找到可咨询的队长：${call.to}`
+      if (depth >= 1) return '咨询深度已达上限；请基于当前信息自行判断。'
+      const sourceName = agents.find((agent) => agent.id === source?.agentId)?.name ?? '队长'
+      const result = await agentSessions.followUp(target.id,
+        consultRequestPrompt(sourceName, call.prompt),
+        { collectFinal: true, consultDepth: depth + 1 })
+      return result.ok ? (result.finalText ?? '（对方未返回文字意见）') : `咨询失败：${result.error ?? '未知错误'}`
+    })
+    runner.attachInvestigate(async ({ sourceTaskId, call, depth }) => {
+      if (depth >= 1) return '调查深度已达上限；请基于已有信息判断。'
+      const child = await runner.spawnInvestigateChild(sourceTaskId, call)
+      if (!child) return `调查未能接单：${call.to}`
+      const deadline = Date.now() + 10 * 60 * 1000
+      for (;;) {
+        const current = store.get(child.id)
+        if (!current) return `调查任务已消失：${child.id}`
+        if (current.status === 'done') return current.result ?? '（调查没有返回文字）'
+        if (current.status === 'failed' || current.status === 'cancelled') return `调查任务 ${current.status}：${current.error ?? '无最终报告'}`
+        if (Date.now() >= deadline) return `调查任务超时：${child.id}`
+        await new Promise((resolve) => setTimeout(resolve, 500))
+      }
+    })
+    meetingController = new MeetingController({
+      store: new MeetingStore(app.getPath('userData')),
+      offices: agentSessions,
+      getAgents: () => agents,
+      taskService,
+      startTask: (taskId) => {
+        // 与「▶ 启动」按钮、拖动启动共用同一次捕获身份的准备工作
+        const started = prepareManualTaskStart(store, taskId)
+        if (!started) return
+        runner.enqueue(started)
+      },
+      issueExists: (issueId) => !!issueStore.get(issueId),
+      taskStore: store,
+      getIssueTask: (issueId) => {
+        const issue = issueStore.get(issueId)
+        return issue ? store.get(issue.taskId) : undefined
+      },
+      isFreshIssue: (issueId) => {
+        const issue = issueStore.get(issueId)
+        const task = issue ? store.get(issue.taskId) : undefined
+        return !!task && task.status === 'queued' && task.parked === true && !task.startedAt && !task.runId
+          && (task.eventCount ?? 0) === 0 && issueStore.comments(issueId).length === 0
+          && issueStore.runs(issueId).length === 0
+      },
+      onTaskUpdated: (task) => runner.pushTask(task.id),
+      addIssueComment: (issueId, content, authorId, meetingId, sourceTurnId) => {
+        const comment = issueStore.addComment(issueId, content, { type: authorId === 'user' ? 'user' : 'agent', id: authorId ?? 'meeting' }, { meetingId, sourceTurnId })
+        if (!comment) throw new Error('会议评论镜像未写入')
+      },
+      cancelTask: (taskId) => runner.terminateTask(taskId),
+      deleteTaskData: async (meeting, tasks) => {
+        const matchesStoppedTask = (task: Task): boolean => {
+          const current = store.get(task.id)
+          return !!current && current.meetingId === meeting.id && !current.gitOperation
+            && ['done', 'failed', 'cancelled'].includes(current.status)
+            && store.matches(task.id, { runId: task.runId, executionOwner: task.executionOwner })
+        }
+        if (!tasks.every(matchesStoppedTask)) return { ok: false, error: '会议执行归属已变化，未清理任务与日志' }
+        if (meeting.ownsIssue && store.list().some((task) => task.issueId === meeting.issueId && task.meetingId !== meeting.id)) {
+          return { ok: false, error: 'Issue 存在不属于会议的执行，已保留历史，不能整单删除' }
+        }
+        const roots = new Set<string>()
+        for (const task of tasks) {
+          if (task.worktree?.repoDir) roots.add(task.worktree.repoDir)
+          else if (task.workdir) {
+            const root = await resolveRepositoryRoot(task.workdir)
+            if (root) roots.add(root)
+          }
+          if (task.worktree) {
+            const reclaimed = await reclaimWorktree(task.worktree.path, {
+              deleteBranch: true,
+              expectedOwnerTaskId: task.worktree.ownerTaskId,
+              expectedGenerationId: task.worktree.generationId,
+              beforeReclaim: async (workdir) => matchesStoppedTask(task)
+                && await runner.releaseWorktreeSessions(workdir) && matchesStoppedTask(task)
+            })
+            if (!reclaimed.ok) return { ok: false, error: `会议工作树尚未安全回收：${task.worktree.path}` }
+          }
+        }
+        const deleted = await taskService.deleteTerminalCascade(tasks.map((task) => task.id), (taskId) => runner.forget(taskId),
+          (current) => current.every((task) => tasks.some((captured) => captured.id === task.id && matchesStoppedTask(captured))))
+        if (!deleted) return { ok: false, error: '会议任务状态或归属已变化，请重试删除' }
+        deleteReportCopies([...roots], deleted)
+        for (const taskId of deleted) mainWindow?.webContents.send('task:deleted', taskId)
+        return { ok: true }
+      },
+      deleteMeetingComments: (meetingId) => issueStore.deleteMeetingComments(meetingId),
+      deleteIssue: (issueId) => { issueStore.deleteIssue(issueId) }
+    })
+    runner.attachMeetingGuard((task: Task) => meetingController.canRunTask(task))
+    meetingController.recover()
+    meetingController.subscribe((meeting) => mainWindow?.webContents.send('meetings:updated', meeting))
+    // Issue 评论统一中继（全文层统一降级出口）：评论未送达（Issue 不存在）= warn + 任务事件 + 推送，
+    // 重启续报/审核备注/停放通知三处共用，绝不静默丢
+    const issueRelay: IssueRelayChannels = {
+      addComment: (issueId, text, author) => issueStore.addComment(issueId, text, author ?? { type: 'agent', id: 'relay' }),
+      appendEvent: (taskId, event) => store.appendEvent(taskId, event),
+      pushEvent: (taskId, event) => runner.pushEvent(taskId, event)
+    }
+    // 启动对账：执行只活在主进程内存里，快照里遗留的 running 只有在**执行身份被证实
+    // 已死**时才是僵尸——活跃或身份不可读的运行一律保留（租约过期不是死亡证据）。
+    // 接管统一走 store.recoverDeadRuns：锁外探活、锁内按捕获身份条件提交，每个死运行
+    // 只认领一次；日志尾部按捕获运行绑定，替换运行之前的旧日志不能决定它的结论。
+    // dispatchHold 子单（建单在翻面前被打断）的磁盘归属核实接线 setWorktreeOwner。
+    // 整体兜底：启动对账跑在窗口/IPC 建立之前，绝不允许它把启动炸掉——对账失败只
+    // 降级为遗留任务待手动处理（子单级异常已按单捕获走具名失败路径，这里是最后防线）。
+    try {
+      await reconcileStartupTasks({
+        store,
+        pushEvent: (taskId, event) => runner.pushEvent(taskId, event),
+        enqueue: (task) => runner.enqueue(task),
+        notifyTaskChanged,
+        bindWorktreeOwner: (wtDir, ownerTaskId, expected) => setWorktreeOwner(wtDir, ownerTaskId, expected),
+        relayInterruptedLeader: (stale, kids) => {
+          if (!stale.issueId) return
+          const excerpts = kids.slice(0, 5).map((kid) => `- **${kid.title}**（${kid.status}）：${(kid.result ?? '').slice(0, 400) || '（无最终输出）'}`).join('\n')
+          relayIssueCommentOrEvent(issueRelay, {
+            issueId: stale.issueId,
+            taskId: stale.id,
+            comment: `⚠ 委派报告未送达：领队执行被应用重启打断。以下为队员报告摘要：\n${excerpts}`,
+            fallbackEventText: `⚠ Issue 评论未送达（Issue 不存在），队员报告摘要转投任务时间线：\n${excerpts}`
+          })
+        }
+      })
+    } catch (error) {
+      console.error('[startup] 启动对账失败（应用继续启动，遗留任务保留可手动处理）', error)
+    }
+    presets = loadPresets()
+    runner.attachPresets(() => presets)
+    runner.attachIssueOps({
+      reviewStatus: (childId, verdict, note) => {
+        const child = store.get(childId)
+        if (!child?.issueId) return
+        issueStore.updateWorkflow(child.issueId, verdict === 'pass' ? 'done' : 'blocked')
+        if (note) {
+          // 审核备注走统一中继：评论未送达（Issue 不存在）降级为子任务事件留痕
+          relayIssueCommentOrEvent(issueRelay, {
+            issueId: child.issueId,
+            taskId: childId,
+            comment: `审核${verdict === 'pass' ? '通过' : '退回'}：${note}`,
+            fallbackEventText: `⚠ 审核评论未送达（Issue 不存在）；审核${verdict === 'pass' ? '通过' : '退回'}：${note}`,
+            author: { type: 'agent', id: 'reviewer' }
+          })
+        }
+        publishIssueUpdate(child)
+      },
+      addIssueComment: (issueId, text) => {
+        return issueStore.addComment(issueId, text, { type: 'agent', id: 'relay' })
+      }
+    })
+
+    /** Single creation path for user issues, automation runs, and legacy tasks. */
+    const createTask = (input: CreateTaskInput, trigger: RunTrigger = 'assignment') => taskService.createTask(input, trigger)
+
+    // Goals reuse the existing TaskRunner/Issue projection.  The controller is
+    // intentionally installed after createTask so every compatibility run uses
+    // the same creation path and retains the existing task/JSONL contract.
+    goalController = new GoalController(goalStore, {
+      createTask: (input) => taskService.createTask({
+        title: input.title,
+        prompt: input.prompt,
+        workdir: input.workdir,
+        backend: input.backend,
+        agentId: input.agentId,
+        issueId: input.issueId,
+        goalId: input.goalId,
+        phaseIndex: input.phaseIndex,
+        dedupeKey: input.dedupeKey,
+        startNow: input.startNow
+      }, input.trigger),
+      doomLoopThreshold: () => settings.doomLoopThreshold,
+      maxRetryAttempts: () => settings.maxRetryAttempts,
+      verifyAcceptance: (goal, task) => verifyAcceptance(goal, task),
+      enqueueTask: (task) => runner.enqueue(task),
+      startTask: (task) => {
+        return prepareManualTaskStart(store, task.id) ?? store.get(task.id) ?? task
+      },
+      cancelTask: (taskId) => runner.cancel(taskId),
+      listTasks: () => store.list(),
+      continueTask: (taskId, content) => runner.followUp(taskId, content),
+      onGuard: (goal, reason, detail) => {
+        const task = store.list().find((candidate) => candidate.goalId === goal.id)
+        if (!task) return
+        const event = store.appendEvent(task.id, {
+          ts: Date.now(),
+          kind: 'status',
+          text: `Goal guard ${reason}: ${detail}`,
+          data: { stopReason: reason, goalId: goal.id }
+        })
+        if (event) runner.pushEvent(task.id, event)
+      },
+      finalizeIssue: (issueId) => {
+        const issue = issueStore.get(issueId)
+        if (!issue) return
+        issueStore.updateWorkflow(issueId, 'done')
+        const task = store.get(issue.taskId)
+        if (task) publishIssueUpdate(task)
+      }
+    })
+    goalController.subscribe((goal) => mainWindow?.webContents.send('goals:updated', goal))
+    // An active goal must never resume silently after an application restart.
+    goalController.recover(store.list())
+
+    // 阶段接力（<continue>）：同一 Issue 上创建后继执行——新会话硬切，简报为唯一携带物
+    runner.attachContinue(({ sourceTaskId, issueId, brief, start }) => {
+      const source = store.get(sourceTaskId)
+      if (!source) return null
+      const resolved = taskService.resolveHandoffTask({ sourceTaskId, issueId, brief, start })
+      if (!resolved) return null
+      const { task, created } = resolved
+      if (!created) {
+        notifyTaskChanged(task)
+        return task
+      }
+      if (!task.parked && task.status === 'queued') runner.enqueue(task)
+      else {
+        notifyTaskChanged(task)
+        // 停放的后继对用户是隐形的（调度泵与重启对账都跳过 parked）——落一条 Issue 评论
+        // 把"等你启动"喊到用户看得到的地方，而不是只留在旧执行的时间线尾部。
+        // Only a newly created successor gets a visible handoff notice.
+        if (task.parked && task.issueId) {
+          const firstLine = task.prompt.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? task.title
+          // 停放通知走统一中继：评论未送达（Issue 不存在）降级为后继任务事件留痕
+          relayIssueCommentOrEvent(issueRelay, {
+            issueId: task.issueId,
+            taskId: task.id,
+            comment: `⏸ 阶段接力已备好：${firstLine.slice(0, 80)}——下一阶段在等你启动（打开该 Issue 的最新执行，点「▶ 启动」）`,
+            fallbackEventText: `⚠ 停放通知未送达（Issue 不存在）：阶段接力已备好，等用户启动`,
+            author: { type: 'agent', id: source.agentId ?? 'relay' }
+          })
+        }
+      }
+      return task
+    })
+
+    // 【待定】自动化功能未经完整设计（照搬实现后未迭代），已知缺口：
+    // 1) workdir 为空/失效时 zcode 后端兜底到 os.tmpdir()，Agent 在空目录里空跑（表单却标注"可选"）
+    // 2) output='run_only' 带 suppressIssue，渲染层无任何界面展示这类任务，结果不可见
+    // 3) Automation 只存 lastRunAt/nextRunAt，无运行历史、无上次成功/失败状态，运行记录与自动化脱钩
+    // 4) 无重叠保护：间隔 < 执行时长时任务会逐轮堆积；update 改间隔不重算 nextRunAt
+    // 修复方向：workdir 必填校验、run_only 结果回写自动化、task 加 automationId 归组历史、tick 跳过在跑的
+    const runAutomation = (id: string) => {
+      const automation = automationStore.get(id)
+      if (!automation || !automation.enabled || !automation.prompt.trim()) return null
+      const agent = agents.find((item) => item.id === automation.agentId)
+      const task = createTask({ title: automation.name, prompt: automation.prompt, workdir: automation.workdir, backend: agent?.backend, ...(agent ? { agentId: agent.id } : {}), ...(automation.output === 'run_only' ? { suppressIssue: true } : {}) }, 'autopilot')
+      automationStore.markRun(id)
+      runner.enqueue(store.get(task.id)!)
+      return store.get(task.id) ?? null
+    }
+    let automationBusy = false
+    const automationTick = () => {
+      automationBusy = true
+      try {
+        const now = Date.now()
+        for (const automation of automationStore.list()) if (automation.enabled && (automation.nextRunAt ?? now) <= now) runAutomation(automation.id)
+      } finally {
+        automationBusy = false
+      }
+    }
+    automationTimer = setInterval(automationTick, 15_000)
+    automationTick()
+
+    // 自动化 tick 临界区迁入 Issue 管线在途源：空闲判定单点化（不再各自组合布尔）
+    runner.pipeline.addSource({ label: 'automation', size: () => (automationBusy ? 1 : 0) })
+
+    // 热更状态机装配（§5.1 UpdaterDeps 注入；空闲门控 = runner.isIdle 单点，automation 已入管线）
+    hotUpdater = new HotUpdater({
+      getWindow: () => mainWindow,
+      isMainIdle: () => runner.isIdle(),
+      relaunchForUpdate: (version) => {
+        quitting = true
+        // 剥离上一轮热更参数再补新值：逐轮累积会让后续实例带着一堆陈旧的
+        // --agentdeck-hot-applied/--relaunch-retry 启动，干扰取锁重试环与状态上报
+        const stale = new Set(['--agentdeck-hot-applied', '--agentdeck-relaunch-retry', '--agentdeck-hot-fallback'])
+        const cleanArgs: string[] = []
+        const rest = process.argv.slice(1)
+        for (let i = 0; i < rest.length; i++) {
+          if (stale.has(rest[i])) {
+            if (rest[i] === '--agentdeck-hot-applied') i++ // 跳过其版本值参数
+            continue
+          }
+          cleanArgs.push(rest[i])
+        }
+        app.relaunch({ args: [...cleanArgs, '--agentdeck-hot-applied', version, '--agentdeck-relaunch-retry'] })
+        app.quit()
+      },
+      settings: () => settings,
+      getUserDataDir: () => app.getPath('userData'),
+      getShellVersion: () => app.getVersion(),
+      getAppDir: () => (app.isPackaged ? path.dirname(process.execPath) : null),
+      quitForShellUpdate: () => {
+        quitting = true
+        app.quit()
+      }
+    })
+
+    // 桌宠：配置存储 + 透明窗 + AI 脑；enabled 时启动即亮窗
+    // TODO: {board_summary} 挂点——目前是 store 粗统计（状态计数 + 活跃 goal 数），
+    // 后续接 Issue 标题/Goal 阶段进度后替换成更细的看板摘要
+    const buildBoardSummary = (): string => {
+      const tasks = store.list()
+      if (!tasks.length) return '暂无任务摘要'
+      const count = (status: Task['status']) => tasks.filter((task) => task.status === status).length
+      const parts = [
+        `共 ${tasks.length} 个任务`,
+        `进行中 ${count('running')}`,
+        `排队 ${count('queued')}`,
+        `已完成 ${count('done')}`
+      ]
+      const failed = count('failed')
+      if (failed) parts.push(`失败 ${failed}`)
+      const activeGoals = goalStore.list().filter((goal) => goal.status === 'active').length
+      if (activeGoals) parts.push(`活跃目标 ${activeGoals} 个`)
+      return parts.join('、')
+    }
+    // 桌宠宿主（阶段 1）：契约事件通道 + deck.* 工具；开关位持久化在 pet.json（经 petController.store 读，
+    // 构造前闭包不触发，无空引用窗口）。deck.createTask 经 toPetHostDraftCreateInput 钉死 startNow:false
+    // = parked 草稿（taskService 语义：绝不 enqueue，等用户手动启动）；deck.annotateTask 直连
+    // issueStore.addComment 的独立通道，不走解析 @mention 的 issues:add-comment 路径。
+    const petHost = new PetHost({
+      getSwitches: () => petController?.store.get().hostSwitches ?? DEFAULT_PET_HOST_SWITCHES,
+      buildBoardSummary,
+      queryBoard: () => store.list(),
+      createDraftTask: (input) => {
+        const task = createTask(toPetHostDraftCreateInput(input), 'assignment')
+        return { id: task.id, title: task.title, status: task.status }
+      },
+      annotateIssue: (issueId, text) => { issueStore.addComment(issueId, text, { type: 'agent', id: 'pet' }) },
+      resolveTask: (taskId) => store.get(taskId)
+    })
+    // 桌宠：配置存储 + 透明窗 + AI 脑；enabled 时启动即亮窗。{board_summary} 宏改走快照通道
+    //（host 缓存 board.snapshot 捕获的摘要，宏注入行为保持），buildBoardSummary 作为快照构建源
+    petController = new PetController({
+      userDataDir: app.getPath('userData'),
+      getPresets: () => presets,
+      getMainWindow: () => mainWindow,
+      host: petHost
+    })
+
+    registerIpcHandlers({
+      getWindow: () => mainWindow,
+      get settings() { return settings },
+      setSettings: (next) => { settings = saveSettings(next) },
+      get sharedDir() { return resolveSharedDir() },
+      store,
+      runner,
+      issueStore,
+      goalController,
+      meetingController,
+      automationStore,
+      backends,
+      zcode,
+      sidecar: sidecarManager,
+      updates: hotUpdater,
+      pet: petController ?? undefined,
+      get agents() { return agents },
+      set agents(value) { agents = value },
+      get presets() { return presets },
+      set presets(value) { presets = value },
+      createTask,
+      runAutomation,
+      publishIssueUpdate
+    })
+
+    petController?.start()
+  } finally {
+    // 数据面终态（含中途失败）必放行就绪屏障：初始化抛错时渲染层立即拿到真实的
+    // 「handler 未注册」错误，而不是假死到 preload 的 30s 超时兜底
+    resolveStoresReady()
+  }
 
   const stopRetention = startIssueRetention({
     store, issueStore, taskService,

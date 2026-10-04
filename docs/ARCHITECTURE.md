@@ -326,6 +326,16 @@ delegate 标记 → 目标解析（限 subordinates，名字/平台 id 忽略大
 | goals:delete（非终态先停任务再级联删 runs/checkpoints）+ goals:deleted 广播 | 旧目标永久占据面板、无法重新开启目标模式 |
 | 退出码/非零即失败 + 无输出判失败（opencode） | 静默假成功 |
 
+### 5.1 存储读路径框架（内存权威文档 + 磁盘身份失效）
+
+TaskStore/IssueStore 的读路径不再是「每次全量读盘重解析」：装载一次后持有内存权威文档，以索引文件磁盘身份（dev:ino:size:mtimeMs 复合键，原子写必换 inode）判失效——他进程（sidecar）写盘即失效重载，本进程落盘在 saveIndex 内同步换新身份。三条配套合同：
+
+- **只读快照**：`get()/list()/documentForProjection()` 返回的对象与缓存共享，调用方**只读**——任何改动必须走事务；事务内部走 `structuredClone` 私有副本，中途抛错丢弃副本即回滚（等价旧的「全量重读即回滚」语义）。
+- **延迟索引的计数真值**：纯事件追加事务不落索引（延迟到后台 flush），退出时把 JSONL 派生的 eventCount 吸收进缓存；`get(id)` 缓存命中仍做单任务对账（一次 stat），兜住他进程「只追加 JSONL、索引未落」的窗口。`list()` 缓存命中零扫描。
+- **回执失败回滚**：TaskStore flushSnapshots 与 IssueStore 投影回执都是「先删文档字段、再写盘」——写失败必须回滚内存字段，否则缓存带着「已回执」假象，重试路径会永久跳过回执。
+
+启动次序配套（app:ready 屏障）：窗口先建、渲染层先画壳，数据面（sidecar 握手、store 水合、对账、IPC 注册）完成前 preload 的 invoke 封装层统一排队；初始化中途失败由 finally 放行屏障，渲染层拿到真实错误而非假死。
+
 ---
 
 ## 6. 已知限制
