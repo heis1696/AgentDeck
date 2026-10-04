@@ -1182,8 +1182,13 @@ html:root :is(.detail-body, .result, .git-pane, .issue-timeline, .float-window)
   .detail-body .timeline-line .timeline-sentence { white-space: normal; }
 }
 @container detail-left (max-width: 720px) {
-  .chat-minimap { display: none; }
-  .detail-body .log.chat { padding-left: 14px; padding-right: 14px; }
+  /* 索引线不消失：窄模式收窄到 14px（命中区与线同步收小），聊天内边距让位 */
+  .chat-minimap { width: 14px; }
+  .chat-minimap-item { width: 14px; }
+  .chat-minimap-item::after { left: 3px; width: 8px; }
+  .chat-minimap-item:hover::after,
+  .chat-minimap-item:focus-visible::after { width: 12px; }
+  .detail-body .log.chat { padding-left: 26px; padding-right: 14px; }
   .detail-body .issue-timeline { padding: 12px 14px 40px; }
   .detail-page .detail-main > .followup { padding: 10px 14px 12px; }
   .detail .error-banner { width: calc(100% - 28px); }
@@ -1239,3 +1244,11 @@ html:root :is(.detail-body, .result, .git-pane, .issue-timeline, .float-window)
   border-color: var(--accent);
   background: var(--bg-inset);
 }
+
+/* ---------- 聊天区宽度：全幅（吸收 ZCode 会话满帧） ----------
+   历史上限是四代覆盖层叠出来的阅读度量假设（936/1120/1080 一族），宽窗下两侧
+   大片留白、tab 行与内容各行其宽。密集操作型工作台应用满可用宽度：行可读性交给
+   气泡 86% 上限与段落排版，不再由整列上限兜底。本段为宽度权威（最后载入）。 */
+.detail-page .detail-main > * { max-width: none; }
+.detail-page .detail-main > .detail-body > :is(.log.chat, .result, .git-pane) { width: 100%; max-width: none; }
+.detail .error-banner { max-width: none; }
