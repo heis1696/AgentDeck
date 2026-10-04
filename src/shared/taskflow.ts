@@ -126,3 +126,39 @@ export function validateMove(from: TaskStatus, to: TaskStatus): { ok: true } | {
   }
   return { ok: true }
 }
+
+/**
+ * Issue 人工工作流矩阵：与任务/目标同款 data-only 矩阵（加一条流转只改这里）。
+ * 语义边界：
+ * - 这是**人工**维度——执行投影（taskStatusToIssueStatus）不受此约束，运行期以执行态为准；
+ * - 终态可重开（done→in_review、cancelled→todo），重开是显式的人工动作；
+ * - blocked 是旁路：开工前（todo）与执行/审查中都可能受阻，解除后回待办或直接继续。
+ */
+const ISSUE_TRANSITIONS: Record<IssueStatus, readonly IssueStatus[]> = {
+  backlog: ['todo', 'cancelled'],
+  todo: ['in_progress', 'backlog', 'blocked', 'cancelled'],
+  in_progress: ['in_review', 'blocked', 'cancelled'],
+  in_review: ['done', 'in_progress', 'blocked', 'cancelled'],
+  done: ['in_review'],
+  blocked: ['todo', 'in_progress', 'cancelled'],
+  cancelled: ['todo']
+}
+
+export function canTransitionIssue(from: IssueStatus, to: IssueStatus): boolean {
+  if (from === to) return true
+  return ISSUE_TRANSITIONS[from].includes(to)
+}
+
+export function issueTransitionTargets(from: IssueStatus): readonly IssueStatus[] {
+  return ISSUE_TRANSITIONS[from]
+}
+
+export function validateIssueMove(from: IssueStatus, to: IssueStatus): { ok: true } | { ok: false; error: string } {
+  if (!canTransitionIssue(from, to)) {
+    if (from === 'done') return { ok: false, error: '已完成的 Issue 只能重开为「审查中」，不能直接流转' }
+    if (from === 'cancelled') return { ok: false, error: '已取消的 Issue 只能重开为「待办」' }
+    if (from === 'in_progress') return { ok: false, error: '进行中的 Issue 先进入「审查中」或标记「受阻」' }
+    return { ok: false, error: `无效的 Issue 状态流转：${from} -> ${to}` }
+  }
+  return { ok: true }
+}

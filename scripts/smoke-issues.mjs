@@ -38,9 +38,33 @@ store.sync([{ ...task, issueId: issue.id }, { ...followUp, status: 'failed', err
 ok(store.comments(issue.id).some((item) => item.runId === 'run_followup' && item.content.includes('Agent execution error')), 'failed run creates a report with run association')
 store.updateMetadata(issue.id, { priority: 'high', labels: ['review', 'review', 'code'] })
 ok(store.get(issue.id).priority === 'high' && store.get(issue.id).labels.join(',') === 'review,code', 'issue metadata persists and normalizes')
-store.updateWorkflow(issue.id, 'done')
-store.sync([task])
+// 人工工作流走 ISSUE_TRANSITIONS 矩阵：合法链落盘、非法拒绝且状态不变
+store.updateWorkflow(issue.id, 'todo')        // blocked → todo（解除受阻）
+store.updateWorkflow(issue.id, 'in_progress') // todo → in_progress
+store.updateWorkflow(issue.id, 'in_review')   // in_progress → in_review
+store.updateWorkflow(issue.id, 'done')        // in_review → done
+store.sync([task])                            // 投影同步：task done → in_review 派生态，人工 override 必须胜出
 ok(store.get(issue.id).status === 'done' && store.get(issue.id).statusOverride === 'done', 'human workflow status survives projection sync')
+let illegalThrew = false
+try { store.updateWorkflow(issue.id, 'todo') } catch (cause) { illegalThrew = cause instanceof Error && /重开/.test(cause.message) }
+ok(illegalThrew && store.get(issue.id).status === 'done', '非法流转被拒（done 只能重开为 in_review），状态与 override 不变')
+store.updateWorkflow(issue.id, 'in_review')   // done → in_review（重开合法）
+store.updateWorkflow(issue.id, 'done')
+ok(store.get(issue.id).status === 'done', '终态重开环路合法')
+// 矩阵单元：旁路与重开语义钉死（加流转只许改 ISSUE_TRANSITIONS，不许散落实现）
+const taskflowOutfile = path.join(root, 'out', 'smoke-issue-taskflow.cjs')
+await build({ entryPoints: [path.join(root, 'src/shared/taskflow.ts')], outfile: taskflowOutfile, bundle: true, platform: 'node', format: 'cjs', target: 'node18' })
+const { canTransitionIssue, validateIssueMove } = await import(pathToFileURL(taskflowOutfile).href)
+ok(canTransitionIssue('in_review', 'done') && canTransitionIssue('done', 'in_review') && canTransitionIssue('cancelled', 'todo') && canTransitionIssue('blocked', 'in_progress') && canTransitionIssue('todo', 'blocked'), '合法流转：审查→完成 / 终态重开 / 受阻解除 / 开工前受阻')
+ok(!canTransitionIssue('done', 'todo') && !canTransitionIssue('backlog', 'in_progress') && !canTransitionIssue('todo', 'done'), '非法流转：跳站直达一律拒绝')
+ok(validateIssueMove('in_progress', 'done').ok === false && /审查中/.test(validateIssueMove('in_progress', 'done').error), '拒绝原因是人类可读中文')
+ok(canTransitionIssue('todo', 'todo') && canTransitionIssue('done', 'done'), '自流转恒合法（幂等）')
+// 机器收口通道：审核裁决/finalize 直达终态，不受人工矩阵约束（等价旧 updateWorkflow 行为）
+store.updateWorkflow(issue.id, 'in_review')                 // done → in_review（重开）
+store.updateWorkflow(issue.id, 'blocked')                   // in_review → blocked（合法）
+const settled = store.settleWorkflow(issue.id, 'done')      // 人工矩阵 blocked→done 非法，机器收口必须放行
+ok(settled?.status === 'done' && settled.statusOverride === 'done', '机器收口通道（settleWorkflow）绕过人工矩阵直达终态')
+try { store.updateWorkflow(issue.id, 'todo'); ok(false, '人工通道同路径必须仍被拒') } catch { ok(store.get(issue.id).status === 'done', '人工通道同路径仍被矩阵拒绝') }
 
 // 存量缺 id 数据：加载即补齐并持久化，taskId 关联不丢
 const legacyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-issues-legacy-'))
@@ -80,8 +104,8 @@ ok(mergeReloaded.status === 'in_progress' && mergeReloaded.statusOverride === 'i
 ok(mergeReloaded.priority === 'urgent' && mergeReloaded.labels.join(',') === 'bug,ui' && mergeReloaded.dueDate === 1_700_000_000_000, '同批提交的元数据跨重启持久')
 const metaOnly = mergeStore.update(mergeIssue.id, { priority: 'low', labels: [] })
 ok(metaOnly.status === 'in_progress' && metaOnly.priority === 'low' && metaOnly.labels.length === 0, '仅元数据更新：保留状态并支持清空 labels')
-const statusOnly = mergeStore.update(mergeIssue.id, { status: 'done' })
-ok(statusOnly.status === 'done' && statusOnly.statusOverride === 'done' && statusOnly.priority === 'low' && statusOnly.dueDate === 1_700_000_000_000, '仅状态更新：保留 priority/dueDate')
+const statusOnly = mergeStore.update(mergeIssue.id, { status: 'in_review' }) // in_progress → in_review（合法流转；矩阵生效后不再是任意直达）
+ok(statusOnly.status === 'in_review' && statusOnly.statusOverride === 'in_review' && statusOnly.priority === 'low' && statusOnly.dueDate === 1_700_000_000_000, '仅状态更新：保留 priority/dueDate')
 ok(mergeStore.update(mergeIssue.id, { dueDate: 0 }).dueDate === undefined, 'dueDate=0 清除截止日期')
 const issueIds = mergeStore.list().map((item) => item.id).join(',')
 ok(mergeStore.update('iss_missing', { status: 'done', priority: 'high', labels: ['x'], dueDate: 1 }) === null, '未知 Issue 返回 null')

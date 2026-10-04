@@ -532,7 +532,8 @@ const initMain = async (): Promise<void> => {
       reviewStatus: (childId, verdict, note) => {
         const child = store.get(childId)
         if (!child?.issueId) return
-        issueStore.updateWorkflow(child.issueId, verdict === 'pass' ? 'done' : 'blocked')
+        // 机器收口通道：审核裁决直达终态/受阻，不走人工流转矩阵
+        issueStore.settleWorkflow(child.issueId, verdict === 'pass' ? 'done' : 'blocked')
         if (note) {
           // 审核备注走统一中继：评论未送达（Issue 不存在）降级为子任务事件留痕
           relayIssueCommentOrEvent(issueRelay, {
@@ -593,7 +594,8 @@ const initMain = async (): Promise<void> => {
       finalizeIssue: (issueId) => {
         const issue = issueStore.get(issueId)
         if (!issue) return
-        issueStore.updateWorkflow(issueId, 'done')
+        // 机器收口：finalize 直达已完成（等价旧行为，矩阵只约束人工通道）
+        issueStore.settleWorkflow(issueId, 'done')
         const task = store.get(issue.taskId)
         if (task) publishIssueUpdate(task)
       }

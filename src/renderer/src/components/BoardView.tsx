@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import type { Goal, Issue, IssueStatus, Task } from '../../../shared/types'
 import type { Meeting } from '../../../shared/meeting'
 import { publicTasksOf } from '../../../shared/task-visibility'
+import { canTransitionIssue, validateIssueMove } from '../../../shared/taskflow'
 import { useMeetings } from '../hooks/useMeetings'
 import { meetingForNavigation, meetingNavigationTasks, meetingPresentation, meetingRootId } from './meeting/meetingViewState'
 import { bridge, fmtDuration } from '../api'
@@ -260,11 +261,20 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
     setMenu(null)
     const issue = byTask.get(taskId)
     if (!issue) return
+    // 拖拽/右键同路：合法性前端先判（ISSUE_TRANSITIONS 矩阵），非法给中文原因不发请求；后端校验是防线
+    const verdict = validateIssueMove(issue.status, next)
+    if (!verdict.ok) { ui.toast.error(verdict.error); return }
     try {
       const result = await bridge.issues.update(issue.id, { status: next })
       if (!result) ui.toast.error('更新 Issue 失败')
       else { issuesStore.upsert(result); ui.toast.success(`已移到「${ISSUE_STATUS_LABELS[next]}」`) }
-    } catch { ui.toast.error('更新 Issue 失败') }
+    } catch (cause) { ui.toast.error(cause instanceof Error ? cause.message : '更新 Issue 失败') }
+  }
+  /** 拖拽中的卡对这一列是否合法落点（非合法列不给 drop） */
+  const illegalDropFor = (column: IssueStatus): boolean => {
+    if (!draggingTask) return false
+    const issue = byTask.get(draggingTask)
+    return !!issue && !canTransitionIssue(issue.status, column)
   }
   const startTask = async (taskId: string) => {
     if (!tasks.some((task) => task.id === taskId && !task.meetingId)) return
@@ -354,12 +364,13 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
     <div className="board issue-board">{COLUMNS.map((column) => {
       const items = dayRoots.filter((node) => nodeStatus(node) === column.key && matches(node)).sort((a, b) => updatedAt(b) - updatedAt(a))
       const orphans = dayOrphans.filter((node) => nodeStatus(node) === column.key && matches(node)).sort((a, b) => updatedAt(b) - updatedAt(a))
-      return <section key={column.key} className={`board-col ${dropTarget === column.key ? 'is-drag-target' : ''}`} aria-label={column.label} onDragEnter={() => setDropTarget(column.key)} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move' }} onDragLeave={(event) => { if (event.currentTarget === event.target) setDropTarget(null) }} onDrop={(event) => { event.preventDefault(); const id = event.dataTransfer.getData('text/task-id'); if (id) void move(id, column.key); setDropTarget(null) }}>
+      const illegal = illegalDropFor(column.key)
+      return <section key={column.key} className={`board-col ${dropTarget === column.key && !illegal ? 'is-drag-target' : ''}${illegal ? ' is-illegal-target' : ''}`} aria-label={column.label} onDragEnter={() => setDropTarget(column.key)} onDragOver={(event) => { if (illegal) { event.dataTransfer.dropEffect = 'none'; return } event.preventDefault(); event.dataTransfer.dropEffect = 'move' }} onDragLeave={(event) => { if (event.currentTarget === event.target) setDropTarget(null) }} onDrop={(event) => { event.preventDefault(); const id = event.dataTransfer.getData('text/task-id'); if (id) void move(id, column.key); setDropTarget(null) }}>
         <div className="board-col-head"><span className={`dot board-col-dot board-col-dot-${column.key}`} /><column.icon size={14} aria-hidden="true" /><span className="board-col-title">{column.label}</span><span className="board-col-count">{items.length + orphans.length}</span></div>
         <div className="board-col-body">{loading && !issues.length ? <div className="board-loading-state" aria-live="polite"><LoaderCircle size={17} className="spin" /><span>正在加载</span></div> : <>{items.map(renderCard)}{orphans.length > 0 && <section className="board-orphans"><h3 className="board-orphans-head">（无领队）<span>{orphans.length}</span></h3>{orphans.map(renderCard)}</section>}{!items.length && !orphans.length && <EmptyState compact title={!dayHasCards ? (selectedDay == null ? BOARD_EMPTY_ALL_HINT : BOARD_EMPTY_DAY_HINT) : filtering ? '没有匹配的 Issue' : '空'} />}</>}</div>
         {draggingTask && dropTarget === column.key && <div className="board-drop-hint"><span>放置到</span><strong>{column.label}</strong></div>}
       </section>
     })}</div>
-    {menu && menuIssue && <div className="board-context-menu" ref={menuRef} role="menu" style={{ left: menu.x, top: menu.y }} onClick={(event) => event.stopPropagation()}><button role="menuitem" onClick={() => { setMenu(null); onOpen(menu.id) }}>打开 Issue</button><div className="board-context-separator" />{COLUMNS.filter((column) => column.key !== menuIssue.status).map((column) => <button key={column.key} role="menuitem" onClick={() => void move(menu.id, column.key)}>移到「{column.label}」</button>)}</div>}
+    {menu && menuIssue && <div className="board-context-menu" ref={menuRef} role="menu" style={{ left: menu.x, top: menu.y }} onClick={(event) => event.stopPropagation()}><button role="menuitem" onClick={() => { setMenu(null); onOpen(menu.id) }}>打开 Issue</button><div className="board-context-separator" />{COLUMNS.filter((column) => column.key !== menuIssue.status && canTransitionIssue(menuIssue.status, column.key)).map((column) => <button key={column.key} role="menuitem" onClick={() => void move(menu.id, column.key)}>移到「{column.label}」</button>)}</div>}
   </div>
 }

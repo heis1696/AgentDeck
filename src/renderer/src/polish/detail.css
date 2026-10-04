@@ -434,6 +434,69 @@ html.light .detail-actions .detail-btn-ghost-danger {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-glow);
 }
+/* 优先级下拉：与工作流 chip 同形态（元数据通道，非状态机） */
+.detail .meta-priority {
+  min-height: 22px;
+  padding: 0 4px 0 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  background: var(--bg-inset);
+  color: var(--text-faint);
+  font: 600 var(--text-micro) var(--font-ui);
+  cursor: pointer;
+  transition: border-color var(--duration-base) var(--ease-in-out), color var(--duration-base) var(--ease-in-out);
+}
+.detail .meta-priority:hover { color: var(--text-dim); }
+.detail .meta-priority:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+/* 管线轨道灯（吸收 ZCode 站点灯）：主线五站——已过实心、当前高亮、未到空心；
+   连接段编码「走过没有」，旁路态（受阻/已取消）以徽标附尾。 */
+.detail .issue-flow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  padding: 0 6px;
+}
+.detail .issue-flow-seg {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-faint);
+}
+.detail .issue-flow-seg + .issue-flow-seg::before {
+  content: '';
+  width: 10px;
+  height: 1px;
+  background: var(--border);
+  margin: 0 2px;
+}
+.detail .issue-flow-seg.passed + .issue-flow-seg::before { background: var(--status-done); }
+.detail .issue-flow-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  border: 1px solid var(--text-faint);
+  background: transparent;
+  transition: background var(--duration-base) var(--ease-in-out), border-color var(--duration-base) var(--ease-in-out), box-shadow var(--duration-base) var(--ease-in-out);
+}
+.detail .issue-flow-seg.passed .issue-flow-dot {
+  border-color: var(--status-done);
+  background: var(--status-done);
+}
+.detail .issue-flow-seg.current .issue-flow-dot {
+  border-color: var(--accent);
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.detail .issue-flow-side {
+  margin-left: 6px;
+  font-size: var(--text-micro);
+  line-height: 1;
+}
+.detail .issue-flow-side.is-blocked { color: var(--warn); }
+.detail .issue-flow-side.is-cancelled { color: var(--text-faint); }
 /* 目标/会议浮窗的状态芯片（header 右侧，仅有活跃 goal/meeting 时出现） */
 .detail .meta-chip.float-chip { cursor: pointer; transition: border-color var(--duration-base) var(--ease-in-out), background var(--duration-base) var(--ease-in-out), color var(--duration-base) var(--ease-in-out); }
 .detail .meta-chip.float-chip.is-goal {

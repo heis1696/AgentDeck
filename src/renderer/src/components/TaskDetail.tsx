@@ -30,7 +30,8 @@ import { FloatWindow } from '../ui/FloatWindow'
 import { GoalPanel } from './goal/GoalPanel'
 import { MeetingPanel } from './meeting/MeetingPanel'
 import { MEETING_STATUS_LABEL } from './meeting/MeetingCard'
-import type { Goal, IssueStatus, Task } from '../../../shared/types'
+import type { Goal, IssuePriority, IssueStatus, Task } from '../../../shared/types'
+import { issueTransitionTargets } from '../../../shared/taskflow'
 import type { Meeting } from '../../../shared/meeting'
 import type { SkillMeta } from '../../../shared/skills'
 import { currentGitChanges, currentGitSnapshot } from '../../../shared/git-snapshot'
@@ -47,6 +48,30 @@ const WORKFLOW_OPTIONS: Array<{ value: IssueStatus; label: string }> = [
   { value: 'in_review', label: '审查中' }, { value: 'done', label: '已完成' }, { value: 'blocked', label: '受阻' },
   { value: 'cancelled', label: '已取消' }
 ]
+const WORKFLOW_LABELS: Record<IssueStatus, string> = Object.fromEntries(WORKFLOW_OPTIONS.map((option) => [option.value, option.label])) as Record<IssueStatus, string>
+/** 工作流下拉只列合法流转（当前状态 + ISSUE_TRANSITIONS 目标）——后端校验是防线，UI 不发非法请求 */
+const issueWorkflowOptions = (current: IssueStatus) =>
+  [current, ...issueTransitionTargets(current)].map((value) => ({ value, label: WORKFLOW_LABELS[value] }))
+/** 管线主线五站（blocked/cancelled 是旁路态，不进轨道） */
+const FLOW_STATIONS: ReadonlyArray<IssueStatus> = ['backlog', 'todo', 'in_progress', 'in_review', 'done']
+const PRIORITY_OPTIONS: Array<{ value: IssuePriority; label: string }> = [
+  { value: 'none', label: '优先级' }, { value: 'urgent', label: '紧急' }, { value: 'high', label: '高' }, { value: 'medium', label: '中' }, { value: 'low', label: '低' }
+]
+
+/** 管线轨道灯（吸收 ZCode 站点灯视觉）：主线五站——已过站实心、当前站高亮、未到站空心；
+ *  blocked/cancelled 旁路态以徽标附在轨道尾部，一眼读出「走到哪、卡在哪」。 */
+function IssueFlowRail({ status }: { status: IssueStatus }) {
+  const onMain = FLOW_STATIONS.indexOf(status)
+  return <span className="issue-flow" role="img" aria-label={`工作流：${WORKFLOW_LABELS[status]}`}>
+    {FLOW_STATIONS.map((station, index) => (
+      <span key={station} className={`issue-flow-seg${index < onMain ? ' passed' : ''}${station === status ? ' current' : ''}`}>
+        <i className="issue-flow-dot" title={WORKFLOW_LABELS[station]} />
+      </span>
+    ))}
+    {status === 'blocked' && <span className="issue-flow-side is-blocked" title="受阻：解除后回待办或继续">⛔</span>}
+    {status === 'cancelled' && <span className="issue-flow-side is-cancelled" title="已取消：可重开为待办">✕</span>}
+  </span>
+}
 
 /**
  * 任务详情：头部 chrome（标题 + 一行 meta + 动作区）、运行檐（执行中实时回报）、
@@ -300,6 +325,16 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     const copy = await taskService.duplicate(task)
     if (copy) onSelect(copy.id)
   }
+  /** Issue 优先级：元数据通道（不经过状态机），看板显示、详情可改 */
+  const setIssuePriority = async (priority: IssuePriority) => {
+    try {
+      const next = await bridge.issues.update(issueId, { priority })
+      if (!next) ui.toast.error('优先级未更新：Issue 不存在')
+      else void refreshIssue()
+    } catch (cause) {
+      ui.toast.error(cause instanceof Error ? cause.message : '优先级更新失败')
+    }
+  }
   const beginTitleEdit = () => { titleSessionRef.current = task.id; setTitleEdit({ draft: task.title }) }
   const cancelTitleEdit = () => { titleSessionRef.current = null; setTitleEdit(null) }
   // 就地重命名也是「浮层」：Escape 由统一交互层消费（最上层），关闭后焦点回到重命名按钮。
@@ -403,9 +438,16 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
         <span className="meta-group meta-identity"><span className="detail-eyebrow">{parent ? '队员任务' : '工作任务'}</span>{parent && <a className="mini link" role="button" tabIndex={0} onClick={() => onSelect(parent.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(parent.id) } }}>↩ 领队任务: {parent.title}</a>}</span>
         {workers.length > 0 && <button type="button" className="worker-overview-trigger meta-chip" aria-haspopup="dialog" aria-expanded={float === 'workers'} aria-controls={float === 'workers' ? 'worker-overview' : undefined} title={`队员概览：${workerStateSummary || '全部已结束'}`} onClick={() => setFloat((current) => current === 'workers' ? null : 'workers')}><Users size={13} aria-hidden="true" /> 队员 {workers.length}<span className="worker-overview-count">{workers.length - activeWorkers.length} 已结束</span></button>}
         <IssueIdChip id={issueId} />
-        <select className="meta-workflow" title="工作流" aria-label="工作流" value={issue?.status ?? 'todo'} onChange={(event) => void updateWorkflow(event.target.value as IssueStatus)}>
-          {WORKFLOW_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+        {issue && <IssueFlowRail status={issue.status} />}
+        <select className="meta-workflow" title="人工工作流：选项只列合法流转；人工状态在任务非运行期保持（运行期自动显示执行状态）" aria-label="工作流" value={issue?.status ?? 'todo'} onChange={(event) => {
+          const next = updateWorkflow(event.target.value as IssueStatus)
+          void next.then((result) => { if (!result) ui.toast.error('状态未更新：流转不合法或 Issue 不存在（详见动态页）') })
+        }}>
+          {issueWorkflowOptions(issue?.status ?? 'todo').map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         </select>
+        {issue && <select className="meta-priority" title="优先级（看板与列表按此排序显示）" aria-label="优先级" value={issue.priority ?? 'none'} onChange={(event) => void setIssuePriority(event.target.value as IssuePriority)}>
+          {PRIORITY_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+        </select>}
         <span className="meta-group meta-status"><span className={`status-chip status-${task.status}`}>{stateLabel}</span>{turnActive && <span className="active-duration" aria-hidden="true">工作中 · {fmtDuration(elapsed)}</span>}</span>
         <span className="meta-divider" aria-hidden="true" />
         <span className="meta-group meta-source"><span className="badge backend-chip" title={`执行后端 ${task.backend}`}>{task.backend}</span>{workdir && <button className="workspace-chip" type="button" title={workdir} onClick={() => void bridge.openPath(workdir)}><FolderOpen size={13} aria-hidden="true" /><span>{workdir.split(/[\\/]/).filter(Boolean).pop()}</span></button>}<span className="meta-chip" title={`${task.startedAt ? fmtTime(task.startedAt) : '未开始'} → ${task.endedAt ? fmtTime(task.endedAt) : turnActive ? '进行中' : '—'}`}>⏱ {elapsed > 0 ? fmtDuration(elapsed) : '—'}</span>{task.usage && <span className="meta-chip" title={`输入 ${task.usage.inputTokens.toLocaleString()} · 输出 ${task.usage.outputTokens.toLocaleString()} · 回合 ${task.usage.turns}${task.usage.costUsd > 0 ? ` · 成本 $${task.usage.costUsd.toFixed(4)}` : ''}`}>{fmtTokens(task.usage.inputTokens + task.usage.outputTokens)} tokens{task.usage.costUsd > 0 ? ` · $${task.usage.costUsd.toFixed(4)}` : ''}</span>}{integration?.branch && <span className="meta-chip mono" title={`集成分支 ${integration.branch}`}>⎇ {integration.branch.replace('agentdeck/task-', '#')}</span>}{!!task.attempt && <span className="retry-chip" title={`自动重试 ${task.attempt}/2`}>⟳ 重试 {task.attempt}/2</span>}</span>

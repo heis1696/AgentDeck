@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import type { Comment, Issue, IssuePriority, IssueStatus, Run, Task } from '../shared/types'
-import { executionRecordFromTask, taskStatusToIssueStatus } from '../shared/taskflow'
+import { executionRecordFromTask, taskStatusToIssueStatus, validateIssueMove } from '../shared/taskflow'
 import { atomicWriteJson, readJsonFile, withStorageTransaction } from './persistence'
 import { migrateTaskIndex, type TaskIndexDocument } from './store'
 
@@ -581,7 +581,15 @@ export class IssueStore {
   }
 
   updateWorkflow(id: string, status: IssueStatus) {
+    // 人工流转走 shared/taskflow 的 ISSUE_TRANSITIONS 矩阵（与任务/目标同款防线）：
+    // UI 只渲染合法目标，这里是后端兜底——非法流转拒绝写盘并抛出中文原因。
     return this.updateIssue(id, { status })
+  }
+
+  /** 机器收口通道（审核裁决 pass/fail、finalizeIssue）：语义即「直达终态/受阻」，
+   *  不受人工矩阵约束（矩阵管的是 UI 人工流转），行为与旧 updateWorkflow 一致。 */
+  settleWorkflow(id: string, status: IssueStatus) {
+    return this.updateIssue(id, { status, settle: true })
   }
 
   /** Combined IPC update retained for callers that change workflow and metadata together. */
@@ -589,13 +597,21 @@ export class IssueStore {
     return this.updateIssue(id, patch)
   }
 
-  private updateIssue(id: string, patch: { priority?: IssuePriority; labels?: string[]; dueDate?: number; status?: IssueStatus }) {
+  private updateIssue(id: string, patch: { priority?: IssuePriority; labels?: string[]; dueDate?: number; status?: IssueStatus; settle?: boolean }) {
     return withStorageTransaction(this.userDataDir, () => {
       const current = this.readDataLocked()
       const issue = this.findIssue(current, id)
       if (!issue) {
         this.data = current
         return null
+      }
+      // settle = 机器收口（审核裁决/finalize），直达不校验；否则人工流转必须过矩阵
+      if (patch.status && patch.status !== issue.status && !patch.settle) {
+        const verdict = validateIssueMove(issue.status, patch.status)
+        if (!verdict.ok) {
+          this.data = current
+          throw new Error(verdict.error)
+        }
       }
       const next = clonePersisted(current)
       const nextIssue = this.findIssue(next, issue.id)!
