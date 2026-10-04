@@ -108,6 +108,20 @@ assert.equal(capped, 52, `折叠后头尾共 52 行（got ${capped}）`)
 await act(async () => { worklog.querySelector('.worklog-expand').dispatchEvent(new window.MouseEvent('click', { bubbles: true })) })
 assert.equal(lineCount(), 300, '点开显示全部后 300 行')
 
+// 6) 页内搜索（切任务前——此时树挂的是 spy onNavigate）：数据层匹配含未渲染回合，Enter 跳转走扩窗路径
+await act(async () => { logHost.querySelector('.chat-search-trigger').dispatchEvent(new window.MouseEvent('click', { bubbles: true })) })
+const searchInput = logHost.querySelector('.chat-search-bar input')
+assert.ok(searchInput, '搜索条在触发后出现')
+await act(async () => {
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+  setter.call(searchInput, '问题 12')
+  searchInput.dispatchEvent(new window.Event('input', { bubbles: true }))
+})
+assert(logHost.querySelector('.chat-search-count').textContent.includes('/11'), '命中计数正确（问题 12 与 120-129 共 11 处；定位前显示 –/11）')
+await act(async () => { searchInput.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true })) })
+assert.ok(logHost.querySelector('#turn-11'), 'Enter 跳转把未渲染的目标回合扩进 DOM')
+assert.equal(navigated[navigated.length - 1], 11, '跳转回调收到全局回合号 11')
+
 // 5) 新会话窗口重置：task.id 变化回 30，且 worklog「显示全部」不跨任务继承（key 带任务身份）
 await act(async () => {
   reactRoot.render(createElement(TurnTimeline, {

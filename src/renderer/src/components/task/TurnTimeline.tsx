@@ -1,4 +1,4 @@
-import { ArrowDown, ChevronDown, Copy, Undo2 } from 'lucide-react'
+import { ArrowDown, ChevronDown, Copy, Search, Undo2, X, ChevronUp } from 'lucide-react'
 import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from 'react'
 import { Markdown, renderStreamingMarkers } from '../Markdown'
 import { bridge, fmtDuration, fmtTime } from '../../api'
@@ -266,6 +266,17 @@ function WorkLog({ work, autoOpen }: { work: TaskEvent[]; autoOpen: boolean }) {
  *  「历史/实时分离」：运行中回合永远在窗口内（窗口从末尾数起），流式追加不触碰未渲染的旧回合。 */
 const WINDOW_STEP = 30
 
+/** 回合可检索文本：用户输入 + 回复正文 + 工具名（长会话里「刚才哪轮说了 XX」的查找面） */
+function turnSearchText(turn: Turn): string {
+  const parts: string[] = []
+  if (turn.userText != null) parts.push(turn.userText)
+  for (const item of turn.items) {
+    if (item.type === 'final' || item.type === 'text') parts.push(item.text)
+    else for (const event of item.work) if (event.text) parts.push(event.text)
+  }
+  return parts.join('\n')
+}
+
 /**
  * 执行记录（回合时间线）：
  * - 每个回合有极简页眉（#序号 + 起始时间 + 状态），长会话里随时知道「读到第几问」；
@@ -336,6 +347,22 @@ export function TurnTimeline({ task, turns, activeNav, following, onFollowLatest
     setVisibleCount((count) => count + WINDOW_STEP)
   }
 
+  // 页内搜索（吸收 ZCode find 模式，回合级 MVP）：数据层匹配（不受窗口化影响），命中跳转走 navigateTo
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchPos, setSearchPos] = useState(-1)
+  const searchMatches = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase()
+    if (!q) return [] as number[]
+    return turns.reduce<number[]>((acc, turn, index) => (turnSearchText(turn).toLowerCase().includes(q) ? (acc.push(index), acc) : acc), [])
+  }, [turns, searchQuery])
+  const gotoMatch = (delta: number) => {
+    if (!searchMatches.length) return
+    const next = searchPos < 0 ? (delta > 0 ? 0 : searchMatches.length - 1) : (searchPos + delta + searchMatches.length) % searchMatches.length
+    setSearchPos(next)
+    navigateTo(searchMatches[next])
+  }
+
   return (
     <TimelineOptionsContext.Provider value={{ taskId: task.id, dockRootId, snapshotOnly }}><div className={`chat-wrap${following ? ' is-following' : ' is-reading'}`}>
       <TurnMinimap turns={turns} activeNav={activeNav} onNavigate={navigateTo} />
@@ -349,6 +376,27 @@ export function TurnTimeline({ task, turns, activeNav, following, onFollowLatest
         {hiddenBefore > 0 && <div className="log-more" ref={sentinelRef}>
           <button type="button" className="log-more-btn" onClick={expandWindow}>↑ 加载更早 {Math.min(WINDOW_STEP, hiddenBefore)} 回合 · 前面还有 {hiddenBefore} 回合</button>
         </div>}
+        {/* 页内搜索：吸顶不随内容滚动；命中按回合计数，↑↓/Enter 循环跳转（数据层匹配，含未渲染回合） */}
+        <div className="chat-search">
+          {searchOpen && <div className="chat-search-bar" role="search">
+            <input
+              value={searchQuery}
+              placeholder="在执行记录中查找…"
+              aria-label="在执行记录中查找"
+              onChange={(event) => { setSearchQuery(event.target.value); setSearchPos(-1) }}
+              onKeyDown={(event) => {
+                if (isComposingKey(event.nativeEvent)) return
+                if (event.key === 'Enter') { event.preventDefault(); gotoMatch(event.shiftKey ? -1 : 1) }
+                if (event.key === 'Escape') { event.preventDefault(); setSearchOpen(false) }
+              }}
+            />
+            <span className="chat-search-count" aria-live="polite">{searchQuery.trim() ? (searchMatches.length ? `${searchPos < 0 ? '–' : searchPos + 1}/${searchMatches.length}` : '无匹配') : ''}</span>
+            <button type="button" className="icon-btn" onClick={() => gotoMatch(-1)} disabled={!searchMatches.length} title="上一个匹配（Shift+Enter）" aria-label="上一个匹配"><ChevronUp size={12} aria-hidden="true" /></button>
+            <button type="button" className="icon-btn" onClick={() => gotoMatch(1)} disabled={!searchMatches.length} title="下一个匹配（Enter）" aria-label="下一个匹配"><ChevronDown size={12} aria-hidden="true" /></button>
+            <button type="button" className="icon-btn" onClick={() => setSearchOpen(false)} title="关闭搜索（Esc）" aria-label="关闭搜索"><X size={12} aria-hidden="true" /></button>
+          </div>}
+          {!searchOpen && <button type="button" className="icon-btn chat-search-trigger" onClick={() => setSearchOpen(true)} title="在执行记录中查找" aria-label="在执行记录中查找"><Search size={13} aria-hidden="true" /></button>}
+        </div>
         {turns.slice(firstVisible).map((turn, offset) => {
           const index = firstVisible + offset
           const streaming = index === turns.length - 1 && active

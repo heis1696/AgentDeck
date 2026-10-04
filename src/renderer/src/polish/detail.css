@@ -1252,3 +1252,42 @@ html:root :is(.detail-body, .result, .git-pane, .issue-timeline, .float-window)
 .detail-page .detail-main > * { max-width: none; }
 .detail-page .detail-main > .detail-body > :is(.log.chat, .result, .git-pane) { width: 100%; max-width: none; }
 .detail .error-banner { max-width: none; }
+
+/* ---------- 执行记录页内搜索（吸收 ZCode find）：吸顶不随内容滚 ---------- */
+.chat-search {
+  position: sticky;
+  top: 0;
+  z-index: 7;
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 0 4px 6px;
+  min-height: 24px;
+}
+.chat-search-trigger { color: var(--text-faint); }
+.chat-search-trigger:hover { color: var(--text-dim); }
+.chat-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 5px 3px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--bg-overlay);
+  box-shadow: var(--menu-shadow);
+}
+.chat-search-bar input {
+  width: 190px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: var(--text-caption);
+  outline: none;
+}
+.chat-search-bar input::placeholder { color: var(--text-faint); }
+.chat-search-count { min-width: 44px; text-align: center; color: var(--text-faint); font-size: var(--text-micro); font-variant-numeric: tabular-nums; }
+.chat-search-bar .icon-btn { padding: 3px; color: var(--text-dim); }
+.chat-search-bar .icon-btn:hover:not(:disabled) { color: var(--text); background: var(--bg-hover); }
+.chat-search-bar .icon-btn:disabled { opacity: 0.4; cursor: default; }
+/* 运行檐当前活动摘要：省略号截断，悬停看全文 */
+.run-rail-item.is-activity { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); }

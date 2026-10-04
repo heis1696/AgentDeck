@@ -16,6 +16,8 @@ import { useIssueDetails } from '../hooks/useIssueDetails'
 import { PermissionPrompt } from './task/PermissionPrompt'
 import { FOLLOW_EPSILON, TurnTimeline } from './task/TurnTimeline'
 import { SkillMenu, buildMenuItems, parseSkillDirective, wrapSkillDirective, SKILL_MENU_LISTBOX_ID, skillMenuOptionId, type LocalCommandKey } from './task/SkillMenu'
+import { WorkspaceFileMenu, FILE_MENU_LISTBOX_ID, fileMenuOptionId } from './WorkspaceFileMenu'
+import { useFileReferenceMenu } from '../hooks/useFileReferenceMenu'
 import { ActionMenu, type ActionMenuItem } from './task/ActionMenu'
 import { usePromptHistory } from '../hooks/usePromptHistory'
 import { taskDraftSlot, useTaskDraftField, useTaskScopedState } from '../hooks/taskDrafts'
@@ -112,6 +114,9 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   const tabRefs = useRef(new Map<Tab, HTMLButtonElement>())
   const { events, permission, permissionBusy, permissionError, permissionNotice, refreshPermissions, refreshEvents, answerPermission } = useTaskEvents(task.id)
   const turns = useTurnModel(events, task.prompt)
+  // @ 文件引用（与派单框同一状态机）：workdir 定位与 Git 视图/fileDiff 同规则——优先委派 worktree
+  const fileRef = useFileReferenceMenu({ workdir: task.worktree?.path?.trim() || task.workdir, textareaRef: followRef })
+  const fileMenuExpanded = fileRef.open && fileRef.items.length > 0
   // 追问框：↑↓ 历史重写 + / 命令菜单（本地命令 + 技能；技能列表首按 / 时懒加载一次）
   const history = usePromptHistory(task.id)
   const [skills, setSkills] = useState<SkillMeta[]>([])
@@ -154,6 +159,21 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   const stateLabel = isParkedQueued(task) ? PARKED_QUEUED_LABEL : TASK_STATUS_LABELS[task.status]
   const elapsed = task.startedAt ? Math.max(0, (task.endedAt ?? now) - task.startedAt) : 0
   const lastEventAt = events.length ? events[events.length - 1].ts : 0
+  // 当前活动摘要：从事件尾端回溯最近一次工具调用——started 优先（正在做），否则最近 result（刚做完）
+  const currentActivity = useMemo(() => {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const event = events[i]
+      if (event.kind !== 'tool') continue
+      const data = (event.data ?? {}) as { phase?: string; args?: string; preview?: string; durationMs?: number }
+      const target = (data.phase === 'started' ? data.args : data.preview) ?? ''
+      const targetLine = target.split('\n')[0]?.trim() ?? ''
+      const label = data.phase === 'started'
+        ? `🛠 ${event.text}${targetLine ? ` · ${targetLine}` : ''}`
+        : `${event.text} ✓${data.durationMs != null ? ` ${Math.round(data.durationMs)}ms` : ''}`
+      return { label: label.length > 72 ? label.slice(0, 72) + '…' : label, title: label }
+    }
+    return null
+  }, [events])
   const agentCommentCount = comments.filter((comment) => comment.author.type === 'agent').length
   const gitChanges = currentGitChanges(task)
   const integration = currentGitSnapshot(task)?.scope === 'integration' ? task.integration : undefined
@@ -513,6 +533,8 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     {(turnActive || task.status === 'queued') && <div className={`run-rail status-${task.status}${turnActive ? ' is-live' : ''}`} role="status" aria-live="polite">
       <span className="run-rail-pulse" aria-hidden="true" />
       <strong className="run-rail-state">{stateLabel}</strong>
+      {/* 当前活动（吸收 ZCode 状态面板）：最近一次工具调用的名字与目标，不切页就知道 agent 在干嘛 */}
+      {currentActivity && <><span className="run-rail-sep" aria-hidden="true">·</span><span className="run-rail-item is-activity" aria-hidden="true" title={currentActivity.title}>{currentActivity.label}</span></>}
       {/* 每秒刷新的计时对读屏是噪音：视觉可见、不进无障碍树 */}
       <span className="run-rail-item" aria-hidden="true">{turnActive ? `已用 ${fmtDuration(elapsed)}` : isParkedQueued(task) ? '等你启动' : '等待调度'}</span>
       <span className="run-rail-sep" aria-hidden="true">·</span>
@@ -566,26 +588,39 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
       <div className="detail-body" role="tabpanel" id="detail-tabpanel" aria-labelledby={`detail-tab-${tab}`}>{tab === 'activity' && <ActivityTimeline task={task} issueIdentifier={issue?.identifier} runs={runs} comments={comments} loading={issueLoading} error={issueError} onRetry={() => void refreshIssue()} onShowLog={() => setTab('log')} />}{tab === 'log' && <TurnTimeline task={task} turns={turns} activeNav={activeNav} following={following} onFollowLatest={followLatest} onNavigate={scrollToTurn} onRewind={(index) => void doRewind(index)} logRef={logRef} onScroll={onLogScroll} />}{tab === 'result' && <div className="result" tabIndex={0} aria-label="最终结果">{task.result ? <Markdown text={task.result} /> : turnActive ? <div className="list-empty">执行中，暂无最终结果</div> : <div className="list-empty">（无结果）</div>}</div>}{tab === 'git' && <GitSummary task={task} />}</div>
       {task.sessionId && task.status !== 'queued' && <footer className="followup">
         {skillMenuOpen && <SkillMenu items={menuItems} activeIndex={skillIndex} onHover={setSkillIndex} onPickCommand={openLocalCommand} onPickSkill={(skill) => { setFollowUp(`/${skill.name} `); setSkillMenuOpen(false); followRef.current?.focus() }} />}
+        {fileMenuExpanded && <WorkspaceFileMenu items={fileRef.items} activeIndex={fileRef.active} onHover={fileRef.setActive} onPick={(item) => {
+          const picked = fileRef.pick(item, followUp)
+          if (!picked) return
+          setFollowUp(picked.value)
+          requestAnimationFrame(() => { const el = followRef.current; if (el) { el.focus(); el.selectionStart = el.selectionEnd = picked.caret; autoGrow(el) } })
+        }} />}
         <div className="followup-row">
-        <textarea ref={followRef} value={followUp} placeholder="追问 / 继续这个会话…（Enter 发送，Shift+Enter 换行，↑↓ 翻历史，/ 命令与技能）" rows={1} aria-label="追问内容"
+        <textarea ref={followRef} value={followUp} placeholder="追问 / 继续这个会话…（Enter 发送，Shift+Enter 换行，↑↓ 翻历史，/ 命令与技能，@ 引用工作区文件）" rows={1} aria-label="追问内容"
           aria-describedby="followup-hint"
-          /* WAI-ARIA 1.2 组合框（审查项 5）：焦点始终留在 textarea，选项只通过 aria-activedescendant 指认 */
+          /* WAI-ARIA 1.2 组合框（审查项 5）：焦点始终留在 textarea，选项只通过 aria-activedescendant 指认；
+             / 命令与 @ 文件两个 listbox 文本上互斥，expanded/controls 取当前活跃的那个 */
           role="combobox"
           aria-autocomplete="list"
           aria-haspopup="listbox"
-          aria-expanded={skillMenuExpanded}
-          aria-controls={skillMenuExpanded ? SKILL_MENU_LISTBOX_ID : undefined}
-          aria-activedescendant={skillActiveOptionId}
+          aria-expanded={skillMenuExpanded || fileMenuExpanded}
+          aria-controls={skillMenuExpanded ? SKILL_MENU_LISTBOX_ID : fileMenuExpanded ? FILE_MENU_LISTBOX_ID : undefined}
+          aria-activedescendant={skillMenuExpanded ? skillActiveOptionId : fileMenuExpanded ? fileMenuOptionId(Math.min(fileRef.active, fileRef.items.length - 1)) : undefined}
           onChange={(event) => {
             setFollowUp(event.target.value); autoGrow(event.target)
             const startsSlash = event.target.value.startsWith('/')
             setSkillMenuOpen(startsSlash)
             if (!startsSlash) history.exitBrowse()
+            fileRef.onTextChange(event.target.value, event.target.selectionStart ?? event.target.value.length)
           }}
           onKeyDown={(event) => {
             // IME 组合中（isComposing / keyCode 229）：Enter 上屏、Esc 取消候选、↑↓ 选候选、
             // Tab 上屏——全部属于输入法，追问框与命令菜单都不抢键
             if (isComposingKey(event.nativeEvent)) return
+            // @ 文件菜单优先（与 / 命令菜单文本上互斥）：↑↓ 选择、Enter/Tab 插入路径、Esc 关闭
+            if (fileRef.handleKeyDown(event, followUp, ({ value, caret }) => {
+              setFollowUp(value)
+              requestAnimationFrame(() => { const el = followRef.current; if (el) { el.focus(); el.selectionStart = el.selectionEnd = caret; autoGrow(el) } })
+            })) return
             // 命令/技能菜单开着时先服务菜单导航
             if (skillMenuOpen && menuItems.length > 0) {
               if (event.key === 'ArrowDown') { event.preventDefault(); setSkillIndex((i) => Math.min(menuItems.length - 1, i + 1)); return }

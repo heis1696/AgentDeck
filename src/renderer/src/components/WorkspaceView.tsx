@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowUpRight, ChevronDown, ChevronRight, Clock3, FolderOpen, ListTodo, LoaderCircle, MessagesSquare, RefreshCw, Target, Zap } from 'lucide-react'
-import { bridge, getTaskWhenReady, workspaceListEntries, type AgentInfo } from '../api'
+import { bridge, getTaskWhenReady, type AgentInfo } from '../api'
 import { isComposingKey, ui } from '../ui/interaction-center'
 import { useInteractionSelector } from '../hooks/useInteraction'
 import { captains } from './meeting/captains'
 import { AgentPicker } from './AgentPicker'
 import { WorkspaceGitCard } from './WorkspaceGitCard'
-import { WorkspaceFileMenu, detectFileToken, splitToken, filterEntries, FILE_MENU_LISTBOX_ID, fileMenuOptionId, type FileMenuItem } from './WorkspaceFileMenu'
-import type { WorkspaceEntry } from '../../../shared/contracts'
+import { WorkspaceFileMenu, FILE_MENU_LISTBOX_ID, fileMenuOptionId } from './WorkspaceFileMenu'
+import { useFileReferenceMenu } from '../hooks/useFileReferenceMenu'
 import type { Task } from '../../../shared/types'
 import { isForgeAgent } from '../../../shared/forge'
 
@@ -90,44 +90,11 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
   const [busy, setBusy] = useState(false)
   const promptRef = useRef<HTMLTextAreaElement>(null)
   const agentRequestRef = useRef(0)
-  // @ 文件引用补全（吸收 ZCode 输入壳 mention 面板）：打 @ 列工作区条目，目录带 / 下钻、文件落完整相对路径
-  const [fileMenu, setFileMenu] = useState<{ items: FileMenuItem[] } | null>(null)
-  const [fileMenuActive, setFileMenuActive] = useState(0)
-  const fileMenuOpen = !!fileMenu
-  const fileMenuItems = fileMenu?.items ?? []
+  // @ 文件引用补全（吸收 ZCode 输入壳 mention 面板）：状态机抽在 useFileReferenceMenu，与追问框共用
+  const fileRef = useFileReferenceMenu({ workdir, textareaRef: promptRef })
+  const fileMenuOpen = fileRef.open
+  const fileMenuItems = fileRef.items
   const fileMenuExpanded = fileMenuOpen && fileMenuItems.length > 0
-  const listingCacheRef = useRef(new Map<string, WorkspaceEntry[]>())
-  const listingSeqRef = useRef(0)
-  useEffect(() => { listingCacheRef.current.clear() }, [workdir])
-  const runFileMenu = (token: string) => {
-    const base = workdir.trim()
-    if (!base) { setFileMenu(null); return }
-    const { subdir, filter } = splitToken(token)
-    const cached = listingCacheRef.current.get(subdir)
-    if (cached) { setFileMenu({ items: filterEntries(cached, filter, subdir) }); setFileMenuActive(0); return }
-    const seq = ++listingSeqRef.current
-    setFileMenu({ items: [] })
-    setFileMenuActive(0)
-    void workspaceListEntries(base, subdir).then((result) => {
-      if (seq !== listingSeqRef.current) return
-      if (!result.ok) { setFileMenu(null); return }
-      listingCacheRef.current.set(subdir, result.entries)
-      setFileMenu({ items: filterEntries(result.entries, filter, subdir) })
-    }).catch(() => { if (seq === listingSeqRef.current) setFileMenu(null) })
-  }
-  const pickFile = (item: FileMenuItem) => {
-    const el = promptRef.current
-    if (!el) return
-    const caret = el.selectionStart ?? el.value.length
-    const token = detectFileToken(el.value, caret)
-    const start = token ? token.at : caret
-    const insert = item.kind === 'dir' ? `${item.path}/` : `${item.path} `
-    setPrompt(el.value.slice(0, start) + insert + el.value.slice(caret))
-    const after = start + insert.length
-    requestAnimationFrame(() => { el.focus(); el.selectionStart = el.selectionEnd = after })
-    if (item.kind === 'dir') runFileMenu(`${item.path}/`)
-    else setFileMenu(null)
-  }
 
   const loadAgents = useCallback(async () => {
     const request = ++agentRequestRef.current
@@ -214,7 +181,7 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
   const clearPrompt = () => {
     draft.prompt = ''
     setPrompt('')
-    setFileMenu(null)
+    fileRef.clear()
     draft.handoff = ''
     setHandoff('')
     setHandoffOpen(false)
@@ -292,12 +259,10 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // @ 文件菜单开着时先服务菜单导航（↑↓/Enter/Tab/Esc），IME 组合中全部让路给输入法
-    if (fileMenuOpen && !isComposingKey(e.nativeEvent)) {
-      if (e.key === 'ArrowDown' && fileMenuItems.length) { e.preventDefault(); setFileMenuActive((i) => Math.min(fileMenuItems.length - 1, i + 1)); return }
-      if (e.key === 'ArrowUp' && fileMenuItems.length) { e.preventDefault(); setFileMenuActive((i) => Math.max(0, i - 1)); return }
-      if ((e.key === 'Enter' || e.key === 'Tab') && fileMenuItems.length) { e.preventDefault(); pickFile(fileMenuItems[Math.min(fileMenuActive, fileMenuItems.length - 1)]); return }
-      if (e.key === 'Escape') { e.preventDefault(); setFileMenu(null); return }
-    }
+    if (!isComposingKey(e.nativeEvent) && fileRef.handleKeyDown(e, prompt, ({ value, caret }) => {
+      setPrompt(value)
+      requestAnimationFrame(() => { const el = promptRef.current; if (el) { el.focus(); el.selectionStart = el.selectionEnd = caret } })
+    })) return
     // 回车发送；Shift+Enter 换行；输入法组词的 Enter 不算（isComposingKey：isComposing 或 keyCode 229）
     if (e.key === 'Enter' && !e.shiftKey && !isComposingKey(e.nativeEvent)) {
       e.preventDefault()
@@ -415,9 +380,14 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
           {fileMenuExpanded && (
             <WorkspaceFileMenu
               items={fileMenuItems}
-              activeIndex={fileMenuActive}
-              onHover={setFileMenuActive}
-              onPick={pickFile}
+              activeIndex={fileRef.active}
+              onHover={fileRef.setActive}
+              onPick={(item) => {
+                const result = fileRef.pick(item, prompt)
+                if (!result) return
+                setPrompt(result.value)
+                requestAnimationFrame(() => { const el = promptRef.current; if (el) { el.focus(); el.selectionStart = el.selectionEnd = result.caret } })
+              }}
             />
           )}
           <textarea
@@ -433,15 +403,13 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
             aria-haspopup="listbox"
             aria-expanded={fileMenuExpanded}
             aria-controls={fileMenuExpanded ? FILE_MENU_LISTBOX_ID : undefined}
-            aria-activedescendant={fileMenuExpanded ? fileMenuOptionId(Math.min(fileMenuActive, fileMenuItems.length - 1)) : undefined}
+            aria-activedescendant={fileMenuExpanded ? fileMenuOptionId(Math.min(fileRef.active, fileMenuItems.length - 1)) : undefined}
             onChange={(e) => {
               setPrompt(e.target.value)
               const el = e.target
               el.style.height = 'auto'
               el.style.height = `${Math.min(el.scrollHeight, window.innerHeight * 0.4)}px`
-              const token = detectFileToken(el.value, el.selectionStart ?? el.value.length)
-              if (token) runFileMenu(token.token)
-              else setFileMenu(null)
+              fileRef.onTextChange(el.value, el.selectionStart ?? el.value.length)
             }}
             onKeyDown={onKeyDown}
           />
