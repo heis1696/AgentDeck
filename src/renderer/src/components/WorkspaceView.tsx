@@ -5,6 +5,7 @@ import { isComposingKey, ui } from '../ui/interaction-center'
 import { useInteractionSelector } from '../hooks/useInteraction'
 import { captains } from './meeting/captains'
 import { AgentPicker } from './AgentPicker'
+import { WorkspaceGitCard } from './WorkspaceGitCard'
 import type { Task } from '../../../shared/types'
 import { isForgeAgent } from '../../../shared/forge'
 
@@ -382,6 +383,8 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
           <div><span className="context-label">当前工作区</span><strong title={workdir}>{workdir ? workdir.split(/[\\/]/).pop() : '尚未选择'}</strong></div>
           <button className="btn" onClick={onPickWorkspace} title="选择工作区"><FolderOpen size={14} aria-hidden="true" /> 更换</button>
         </div>
+        {/* 工作区做实：选定目录即显示 git 真实状态（分支/未提交/最近提交），派单前看清目录现状 */}
+        <WorkspaceGitCard dir={workdir.trim()} />
         <div className="workspace-row workspace-actions">
           <button
             className="btn"

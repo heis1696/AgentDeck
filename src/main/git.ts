@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import type { FileDiffErrorCode, FileDiffResult } from '../shared/contracts'
+import type { FileDiffErrorCode, FileDiffResult, WorkspaceGitSummary } from '../shared/contracts'
 import type { Task, TaskGitSnapshot, WorktreeCleanupStatus, WorktreeInfo } from '../shared/types'
 import { currentProcessIdentity, processOwnerState } from './persistence'
 
@@ -220,6 +220,48 @@ async function git(workdir: string, args: string[], timeout = 15000): Promise<st
 function gitError(result: GitCommandResult): string {
   const detail = (result.stderr || result.stdout).trim()
   return `git exit ${result.code ?? 'unknown'}${detail ? `: ${detail.slice(0, 500)}` : ''}`
+}
+
+/** 工作区 git 概览（渲染契约 workspace:gitSummary）：三次轻量探测合成一张状态卡。
+ *  派单页与任务详情用它回答「这个目录现在长什么样」——分支/领先落后/未提交计数/最近提交。
+ *  非仓库、git 失败一律 ok:false 带码，绝不抛：UI 显示灰态而不是报错。
+ *  porcelain v1 双字符 XY 解析：'??' 未跟踪；X 非 = 暂存改动；Y 非 = 未暂存改动。 */
+export async function workspaceGitSummary(workdir: string): Promise<WorkspaceGitSummary> {
+  const inside = await runGit(workdir, ['rev-parse', '--is-inside-work-tree'], 10_000)
+  if (!inside.ok || inside.stdout.trim() !== 'true') {
+    return { ok: false, code: 'not-a-repo', error: '该目录不是 git 仓库' }
+  }
+  const status = await runGit(workdir, ['status', '--porcelain=v1', '-b', '--untracked-files=normal'], 15_000)
+  if (!status.ok) return { ok: false, code: 'git-failed', error: gitError(status) }
+  let branch: string | undefined
+  let ahead: number | undefined
+  let behind: number | undefined
+  let staged = 0
+  let unstaged = 0
+  let untracked = 0
+  for (const line of status.stdout.split('\n')) {
+    if (line.startsWith('## ')) {
+      const header = line.slice(3)
+      const track = /\[(?:ahead (\d+))?(?:,\s*)?(?:behind (\d+))?\]/.exec(header)
+      branch = header.split('...')[0].replace(/\s*\[.*$/, '').trim() || undefined
+      ahead = track?.[1] ? Number(track[1]) : undefined
+      behind = track?.[2] ? Number(track[2]) : undefined
+      continue
+    }
+    if (line.length < 2) continue
+    const x = line[0]
+    const y = line[1]
+    if (x === '?' && y === '?') { untracked++; continue }
+    if (x !== ' ') staged++
+    if (y !== ' ') unstaged++
+  }
+  let lastCommit: WorkspaceGitSummary['lastCommit']
+  const log = await runGit(workdir, ['log', '-1', '--format=%h%x1f%s%x1f%cr'], 10_000)
+  if (log.ok && log.stdout.trim()) {
+    const [hash, subject, when] = log.stdout.trim().split('\x1f')
+    lastCommit = { hash: hash ?? '', subject: subject ?? '', when: when ?? '' }
+  }
+  return { ok: true, branch, ahead, behind, staged, unstaged, untracked, lastCommit }
 }
 
 /** git 并发写冲突指纹：index 文件锁存在或另一 git 进程持有（回放/对齐按此重试而非立即拒单） */

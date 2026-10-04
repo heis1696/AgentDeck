@@ -19,7 +19,8 @@ window.HTMLElement.prototype.getClientRects = function () { return [{ width: 100
 const emptyApi = {
   agents: { list: async () => [], save: async (list) => list },
   presets: { list: async () => [], save: async (list) => list, newId: async () => 'preset-test', models: async () => ({ source: 'catalog', models: [] }) },
-  settings: { get: async () => ({}), set: async (patch) => patch, onUpdated: () => () => {} }
+  settings: { get: async () => ({}), set: async (patch) => patch, onUpdated: () => () => {} },
+  workspace: { gitSummary: async () => ({ ok: false, code: 'not-a-repo', error: 'stub' }) }
 }
 window.agentdeck = emptyApi
 

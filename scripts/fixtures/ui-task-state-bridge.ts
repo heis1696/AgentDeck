@@ -283,6 +283,7 @@ const api = {
   sidecar: { onStatus: never, status: () => settle(null) },
   pickDir: () => settle(''),
   openPath: () => settle(undefined),
+  workspace: { gitSummary: () => settle({ ok: false, code: 'not-a-repo', error: 'fixture 仓库未模拟' }) },
   notify: () => undefined
 } as unknown as AgentDeckApi
 

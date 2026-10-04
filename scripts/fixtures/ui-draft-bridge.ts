@@ -304,6 +304,7 @@ const api = {
   },
   pickDir: () => settle(''),
   openPath: () => settle(undefined),
+  workspace: { gitSummary: () => settle({ ok: false, code: 'not-a-repo', error: 'fixture 仓库未模拟' }) },
   notify: () => undefined,
   agents: {
     list: () => settle(store.agents.map((agent) => ({ ...agent }))),

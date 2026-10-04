@@ -31,6 +31,12 @@ export function fileDiff(taskId: string, file: string): Promise<FileDiffResult> 
   return bridge.tasks.fileDiff(taskId, file)
 }
 
+/** 工作区 git 概览（workspace:gitSummary）：分支/领先落后/未提交计数/最近提交；非仓库 ok:false 灰态 */
+export type { WorkspaceGitSummary } from '../../shared/contracts'
+export function workspaceGitSummary(dir: string): Promise<import('../../shared/contracts').WorkspaceGitSummary> {
+  return bridge.workspace.gitSummary(dir)
+}
+
 /** 任务列表 + 实时更新。
  *  广播自带完整 Task（task:updated）/id（task:deleted），直接增量落位——稳态零 list 拉取；
  *  全量快照只在首次装载与显式 refresh 发生（单调序号最新读获胜 + 读期间广播缓冲重放，

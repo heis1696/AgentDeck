@@ -168,6 +168,7 @@ Goal 是绑定**真实 Issue** 的持久长时程目标（v2 起不再创建独�
 | `bridge.settings.onUpdated(cb)` | 设置变更广播（主题跟随等） |
 | `bridge.settings.probe()` | zcode 综合探测（含 node 运行时解析结果与搜索路径） |
 | `bridge.pickDir()` | 系统目录选择框，取消返回 `''` |
+| `bridge.workspace.gitSummary(dir)` | 目录 git 概览（`WorkspaceGitSummary`：分支/领先落后/暂存·未暂存·未跟踪计数/最近提交）；非仓库 `ok:false code:'not-a-repo'` 灰态，坏目录 `bad-dir`，git 失败 `git-failed`，一律不 reject。派单页与任务详情「当前工作区」状态卡的数据源 |
 | `bridge.openPath(target)` | 只放行 http(s) URL 与本地已存在路径 |
 | `bridge.notify(title, body)` | 主进程系统通知（点击聚焦窗口并广播 `task:focus`） |
 

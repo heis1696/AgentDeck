@@ -9,6 +9,7 @@ import { registerSkillsIpc } from './skills'
 import { registerSystemIpc } from './system'
 import { registerTaskIpc } from './tasks'
 import { registerUpdatesIpc } from './updates'
+import { registerWorkspaceIpc } from './workspace'
 
 export type { CreateTaskInput } from './context'
 
@@ -23,4 +24,5 @@ export function registerIpcHandlers(ctx: IpcContext) {
   registerPetIpc(ctx)
   registerSystemIpc(ctx)
   registerUpdatesIpc(ctx)
+  registerWorkspaceIpc()
 }

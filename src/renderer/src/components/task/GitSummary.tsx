@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 import { Copy } from 'lucide-react'
 import { DiffView, parseDiff } from '../DiffView'
 import { ui } from '../../ui/interaction-center'
+import { WorkspaceGitCard } from '../WorkspaceGitCard'
 import type { Task } from '../../../../shared/types'
 import { currentGitChanges, currentGitSnapshot } from '../../../../shared/git-snapshot'
 
@@ -39,6 +40,14 @@ export function GitSummary({ task }: { task: Task }) {
   }
   return (
     <div className="git-pane" tabIndex={0} aria-label="Git 改动" data-snapshot-state={state}>
+      {/* 当前工作区实时状态（与执行快照互补）：快照回答「这轮执行改了什么」，状态卡回答「目录现在长什么样」。
+          workdir 定位与 tasks:fileDiff 同规则：优先委派 worktree 真实目录，否则任务绑定目录。 */}
+      {(task.worktree?.path?.trim() || task.workdir) && (
+        <div className="git-pane-live">
+          <span className="git-pane-live-label">当前工作区</span>
+          <WorkspaceGitCard dir={task.worktree?.path?.trim() || task.workdir} />
+        </div>
+      )}
       {state === 'executing' && <div className="git-snapshot-state" role="status"><strong>{task.status === 'queued' ? '等待执行，暂无 Git 快照' : '执行中，尚未收集 Git 快照'}</strong><span>执行结束后会收集可用的仓库变更。</span></div>}
       {state === 'unavailable' && <div className="git-snapshot-state" role="status"><strong>未记录 Git 快照</strong><span>{snapshot?.reason || (task.workdir ? '没有本次执行的有效快照，当前仓库状态未知。' : '此任务未绑定工作目录。')}</span></div>}
       {state === 'error' && <div className="git-snapshot-state" role="alert"><strong>Git 快照采集失败</strong><span>{snapshot?.reason || '无法确定仓库变更状态。'}</span></div>}
