@@ -20,10 +20,11 @@
  * items 清空 → 整体卸载，主内容自动占回全宽。
  */
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react'
-import { FileCode2, ListTodo, X, XCircle } from 'lucide-react'
+import { FileCode2, FolderTree, ListTodo, X, XCircle } from 'lucide-react'
 import type { Task } from '../../../shared/types'
 import { CodeViewer } from './CodeViewer'
 import { WorkerPane } from '../components/task/WorkerPane'
+import { FilesPane } from '../components/task/FilesPane'
 import { ui, isComposingKey, type DockHandle, type DockItem, type DockEntry } from './interaction-center'
 import { useInteractionSelector } from '../hooks/useInteraction'
 
@@ -177,7 +178,7 @@ export function SideDock({ taskId, tasks, onOpen, renderTask }: { taskId: string
             if (event.key === 'Home' || event.key === 'End') { event.preventDefault(); activate(event.key === 'Home' ? 0 : items.length - 1) }
             if (event.key === 'Delete') { event.preventDefault(); closeTab(index) }
           }}>
-            {item.kind === 'file' ? <FileCode2 size={14} aria-hidden="true" /> : <ListTodo size={14} aria-hidden="true" />}
+            {item.kind === 'file' ? <FileCode2 size={14} aria-hidden="true" /> : item.kind === 'files' ? <FolderTree size={14} aria-hidden="true" /> : <ListTodo size={14} aria-hidden="true" />}
             <span className="dock-tab-title">{item.title}</span>
             {!!filePayload && (additions > 0 || deletions > 0) && <span className="dock-tab-stats" aria-hidden="true">{additions > 0 && <span className="edit-added">+{additions}</span>}{deletions > 0 && <span className="edit-deleted">-{deletions}</span>}</span>}
             {worker && <span className={`dot dot-${worker.status}`} aria-hidden="true" />}
@@ -188,7 +189,9 @@ export function SideDock({ taskId, tasks, onOpen, renderTask }: { taskId: string
       <div className="dock-panel" role="tabpanel" id={`${prefix}-panel`} aria-labelledby={`${prefix}-tab-${activeIndex < 0 ? 0 : activeIndex}`}>
         {active.kind === 'file'
           ? <CodeViewer key={active.id} {...active.payload} />
-          : renderTask ? renderTask(active) : <WorkerPane key={active.payload.taskId} taskId={active.payload.taskId} tasks={tasks} onOpen={onOpen} />}
+          : active.kind === 'files'
+            ? <FilesPane key={active.id} taskId={active.payload.taskId} workdir={active.payload.workdir} />
+            : renderTask ? renderTask(active) : <WorkerPane key={active.payload.taskId} taskId={active.payload.taskId} tasks={tasks} onOpen={onOpen} />}
       </div>
     </div>
   </aside>

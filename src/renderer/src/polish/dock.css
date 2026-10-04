@@ -330,3 +330,43 @@ html.light .code-token { color: var(--shiki-light); font-style: var(--shiki-ligh
   .code-line.is-jump { animation: none; background: var(--status-queued-bg); }
   .worker-pane-progress { animation: none; }
 }
+
+/* ---------- 工作区文件树（files 页签）：懒加载树 + 行内状态 ---------- */
+.files-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.files-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.files-root { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: var(--text-caption); }
+.files-refresh { padding: 4px; color: var(--text-faint); }
+.files-refresh:hover { color: var(--text); background: var(--bg-hover); }
+.files-tree { flex: 1; min-height: 0; overflow: auto; padding: 6px 4px 16px; }
+.files-node { display: flex; flex-direction: column; }
+.files-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 24px;
+  padding-right: 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--text-caption);
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+}
+.files-row:hover { background: var(--bg-hover); color: var(--text); }
+.files-row:focus-visible { outline: none; box-shadow: var(--focus-halo); }
+.files-dir > .files-name { color: var(--text); }
+.files-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.files-status { padding: 4px 8px; color: var(--text-faint); font-size: var(--text-micro); }
+.files-status-inline { margin-left: auto; color: var(--text-faint); font-size: var(--text-micro); flex-shrink: 0; }
+.files-row:disabled { cursor: default; opacity: 0.6; }
+/* Git 视图「当前工作区」段的浏览按钮 */
+.git-pane-browse { flex-shrink: 0; align-self: center; }

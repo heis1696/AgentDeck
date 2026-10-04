@@ -220,6 +220,18 @@ export interface WorkspaceEntriesResult {
   truncated?: boolean
 }
 
+/** 工作区文件读取（workspace:readFile）：文件浏览 tab 的内容通道。
+ *  越界/二进制/超限一律 ok:false 带码，不 reject。 */
+export interface WorkspaceFileRead {
+  ok: boolean
+  code?: 'bad-dir' | 'bad-path' | 'escapes-root' | 'missing' | 'binary' | 'too-large' | 'read-failed'
+  error?: string
+  path: string
+  content?: string
+  truncated?: boolean
+  size?: number
+}
+
 /** Renderer-safe snapshot of the optional business-brain sidecar. */
 export interface SidecarSnapshot {
   protocolVersion: number
@@ -335,6 +347,8 @@ export interface AgentDeckApi {
     gitSummary: (dir: string) => Promise<WorkspaceGitSummary>
     /** 目录清单（@ 文件引用补全）：subdir 相对路径，重目录跳过，单目录上限 */
     listEntries: (dir: string, subdir: string) => Promise<WorkspaceEntriesResult>
+    /** 读文件（文件浏览 tab）：相对路径、realpath 防越界、512KB 上限、二进制拒绝 */
+    readFile: (dir: string, path: string) => Promise<WorkspaceFileRead>
   }
   notify: (title: string, body: string) => void
   /** 主进程平台（preload 白名单注入的只读字面量）：渲染层据此选 sharedPathKey 的

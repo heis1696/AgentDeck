@@ -42,6 +42,12 @@ export function workspaceListEntries(dir: string, subdir: string): Promise<impor
   return bridge.workspace.listEntries(dir, subdir)
 }
 
+/** 工作区文件读取（workspace:readFile）：文件浏览 tab 内容通道；realpath 防逃逸、512KB 上限、二进制嗅探 */
+export type { WorkspaceFileRead } from '../../shared/contracts'
+export function workspaceReadFile(dir: string, file: string): Promise<import('../../shared/contracts').WorkspaceFileRead> {
+  return bridge.workspace.readFile(dir, file)
+}
+
 /** 任务列表 + 实时更新。
  *  广播自带完整 Task（task:updated）/id（task:deleted），直接增量落位——稳态零 list 拉取；
  *  全量快照只在首次装载与显式 refresh 发生（单调序号最新读获胜 + 读期间广播缓冲重放，

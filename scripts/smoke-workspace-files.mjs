@@ -22,15 +22,17 @@ fs.mkdirSync(path.join(ws, 'docs'))
 fs.mkdirSync(path.join(ws, 'node_modules', 'left-pad'), { recursive: true })   // 应被跳过
 fs.mkdirSync(path.join(ws, '.git', 'objects'), { recursive: true })            // 应被跳过
 for (const name of ['README.md', 'package.json', 'z-last.txt', 'a-first.ts']) fs.writeFileSync(path.join(ws, name), 'x\n')
-fs.writeFileSync(path.join(ws, 'src', 'index.ts'), 'x\n')
-fs.writeFileSync(path.join(ws, 'src', 'deep', 'util.ts'), 'x\n')
-fs.writeFileSync(path.join(ws, 'docs', 'plan.md'), 'x\n')
+fs.writeFileSync(path.join(ws, 'src', 'index.ts'), 'export const one = 1\n')
+fs.writeFileSync(path.join(ws, 'src', 'deep', 'util.ts'), 'export const util = "u"\n')
+fs.writeFileSync(path.join(ws, 'docs', 'plan.md'), '# plan\n')
+fs.writeFileSync(path.join(ws, 'blob.bin'), Buffer.from([0x42, 0x00, 0x69, 0x6e]))  // NUL → 二进制
+fs.writeFileSync(path.join(ws, 'huge.txt'), 'x'.repeat(512 * 1024 + 1))             // 超上限
 
 const outfile = path.join(root, 'out/smoke-workspace-files.cjs')
 await build({
   stdin: {
     contents: [
-      "export { listWorkspaceEntries, WORKSPACE_LISTING_CAP } from './src/main/workspace-listing'",
+      "export { listWorkspaceEntries, readWorkspaceFile, WORKSPACE_LISTING_CAP } from './src/main/workspace-listing'",
       "export { WorkspaceFileMenu, detectFileToken, splitToken, filterEntries, FILE_MENU_LISTBOX_ID, fileMenuOptionId } from './src/renderer/src/components/WorkspaceFileMenu'"
     ].join('\n'),
     resolveDir: root,
@@ -39,13 +41,13 @@ await build({
   outfile, bundle: true, platform: 'node', format: 'cjs', jsx: 'automatic',
   external: ['electron', 'react', 'react/jsx-runtime', 'lucide-react']
 })
-const { listWorkspaceEntries, WORKSPACE_LISTING_CAP, WorkspaceFileMenu, detectFileToken, splitToken, filterEntries, FILE_MENU_LISTBOX_ID, fileMenuOptionId } = await import(pathToFileURL(outfile).href)
+const { listWorkspaceEntries, readWorkspaceFile, WORKSPACE_LISTING_CAP, WorkspaceFileMenu, detectFileToken, splitToken, filterEntries, FILE_MENU_LISTBOX_ID, fileMenuOptionId } = await import(pathToFileURL(outfile).href)
 
 try {
   // —— 目录清单：跳过名单、目录在前、字典序 ——
   const top = listWorkspaceEntries(ws, '')
   assert.equal(top.ok, true)
-  assert.deepEqual(top.entries.map((e) => `${e.kind}:${e.name}`), ['dir:docs', 'dir:src', 'file:a-first.ts', 'file:package.json', 'file:README.md', 'file:z-last.txt'], '重目录跳过 + 目录在前文件在后 + 字典序')
+  assert.deepEqual(top.entries.map((e) => `${e.kind}:${e.name}`), ['dir:docs', 'dir:src', 'file:a-first.ts', 'file:blob.bin', 'file:huge.txt', 'file:package.json', 'file:README.md', 'file:z-last.txt'], '重目录跳过 + 目录在前文件在后 + 字典序')
   const deep = listWorkspaceEntries(ws, 'src')
   assert.deepEqual(deep.entries.map((e) => e.name), ['deep', 'index.ts'], '子目录清单正确')
   // 反斜杠输入容错
@@ -84,7 +86,33 @@ try {
   assert(doc.getElementById(fileMenuOptionId(1))?.getAttribute('aria-selected') === 'true', '活动项可指认且选中')
   assert(doc.querySelector('.file-menu-item .mono'), '条目名走等宽字体（路径可读）')
 
-  console.log('✅ WORKSPACE FILES SMOKE PASSED: 清单/跳过名单/上限/越界 + token 检测拆分过滤 + 菜单契约全过')
+  // —— 文件读取（文件浏览 tab 的内容通道）——
+  const text = readWorkspaceFile(ws, 'src/deep/util.ts')
+  assert.equal(text.ok, true)
+  assert.equal(text.content, 'export const util = "u"\n', '文本内容读取正确')
+  assert.equal(text.size, 'export const util = "u"\n'.length, '大小回带')
+  const bin = readWorkspaceFile(ws, 'blob.bin')
+  assert.equal(bin.ok && bin.code, 'binary', 'NUL 嗅探判二进制（ok:true code:binary）')
+  assert(typeof bin.size === 'number', '二进制是信息态不是错误（带大小）')
+  assert.equal(readWorkspaceFile(ws, 'huge.txt').code, 'too-large', '超 512KB 上限拒绝')
+  assert.equal(readWorkspaceFile(ws, 'no-such.txt').code, 'missing', '不存在文件 missing')
+  assert.equal(readWorkspaceFile(ws, '../escape.txt').code, 'bad-path', '.. 段拒绝')
+  assert.equal(readWorkspaceFile(ws, path.join(ws, 'README.md')).code, 'bad-path', '绝对路径拒绝')
+  assert.equal(readWorkspaceFile(ws, 'src').code, 'bad-path', '目录不是文件')
+  // 符号链接逃逸：链到工作区外的文件必须被 realpath 拦下
+  if (process.platform !== 'win32' || fs.symlinkSync.length > 0) {
+    try {
+      const outside = path.join(temp, 'outside-secret.txt')
+      fs.writeFileSync(outside, 'secret')
+      fs.symlinkSync(outside, path.join(ws, 'leak.txt'))
+      assert.equal(readWorkspaceFile(ws, 'leak.txt').code, 'escapes-root', '符号链接逃逸被 realpath 拦截')
+    } catch (cause) {
+      if (process.platform === 'win32' && String(cause).includes('privilege')) console.log('  ⚠ Windows 无符号链接权限，跳过逃逸用例')
+      else throw cause
+    }
+  }
+
+  console.log('✅ WORKSPACE FILES SMOKE PASSED: 清单/跳过名单/上限/越界 + 读取/二进制/超限/符号链接逃逸 + token 检测拆分过滤 + 菜单契约全过')
 } finally {
   fs.rmSync(temp, { recursive: true, force: true })
 }

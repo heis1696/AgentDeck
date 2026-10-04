@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
-  ChevronDown, Copy, FileText, FolderOpen, History, Info, ListChecks,
+  ChevronDown, Copy, FileText, FolderOpen, FolderTree, History, Info, ListChecks,
   Pencil, Play, RefreshCw, Square, Trash2, Users, Waypoints
 } from 'lucide-react'
 import { bridge, fmtDuration, fmtTime, fmtTokens } from '../api'
@@ -437,6 +437,13 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   }
   const copyPrompt = async () => { await navigator.clipboard.writeText(task.prompt); ui.toast.success('原始指令已复制') }
   const openWorker = (id: string, title: string) => ui.dock.open({ id: `task:${id}`, kind: 'task', title, payload: { taskId: id } })
+  /** 工作区文件树（SideDock 浏览 tab）：workdir 定位与 Git 视图/fileDiff 同规则——优先委派 worktree */
+  const openFilesPane = () => {
+    const dir = task.worktree?.path?.trim() || workdir
+    if (!dir) return
+    const name = dir.split(/[\\/]/).filter(Boolean).pop() ?? dir
+    ui.dock.open({ id: `files:${task.id}`, kind: 'files', title: `文件 · ${name}`, payload: { taskId: task.id, workdir: dir } })
+  }
   const selectTab = (key: Tab, moveFocus = true) => {
     setTab(key)
     if (moveFocus) tabRefs.current.get(key)?.focus()
@@ -447,7 +454,10 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     { key: 'copy-pr', label: '复制 PR 描述', hint: '标题 + 摘要 + 改动', icon: <Copy size={13} aria-hidden="true" />, disabled: busy || !task.result, run: () => void copyPrBody() },
     { key: 'copy-prompt', label: '复制原始指令', icon: <Copy size={13} aria-hidden="true" />, run: () => void copyPrompt() },
     { key: 'duplicate', label: '复制为新任务', icon: <ListChecks size={13} aria-hidden="true" />, disabled: busy, run: () => void doDuplicate() },
-    ...(workdir ? [{ key: 'open-dir', label: '打开工作目录', hint: workdir, icon: <FolderOpen size={13} aria-hidden="true" />, run: () => void bridge.openPath(workdir) }] : []),
+    ...(workdir ? [
+      { key: 'browse-files', label: '浏览工作区文件', hint: '文件树 · 侧栏分页', icon: <FolderTree size={13} aria-hidden="true" />, run: () => openFilesPane() },
+      { key: 'open-dir', label: '打开工作目录', hint: workdir, icon: <FolderOpen size={13} aria-hidden="true" />, run: () => void bridge.openPath(workdir) }
+    ] : []),
     ...(canDelete ? [{ key: 'delete', label: '删除任务与日志', icon: <Trash2 size={13} aria-hidden="true" />, danger: true, run: () => void doDelete() }] : [])
   ]
 

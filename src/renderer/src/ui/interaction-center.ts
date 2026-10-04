@@ -46,6 +46,7 @@ export interface DockFileDiff {
 export type DockItem =
   | { id: string; kind: 'task'; title: string; payload: { taskId: string; execution?: { runId: string } } }
   | { id: string; kind: 'file'; title: string; payload: DockEditMetadata & { taskId: string } & DockFileDiff }
+  | { id: string; kind: 'files'; title: string; payload: { taskId: string; workdir: string } }
 export interface DockItemPatch {
   title?: string
   payload?: Partial<DockEditMetadata & DockFileDiff & { taskId: string }>

@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { Copy } from 'lucide-react'
+import { Copy, FolderTree } from 'lucide-react'
 import { DiffView, parseDiff } from '../DiffView'
 import { ui } from '../../ui/interaction-center'
 import { WorkspaceGitCard } from '../WorkspaceGitCard'
@@ -46,6 +46,11 @@ export function GitSummary({ task }: { task: Task }) {
         <div className="git-pane-live">
           <span className="git-pane-live-label">当前工作区</span>
           <WorkspaceGitCard dir={task.worktree?.path?.trim() || task.workdir} />
+          <button type="button" className="btn detail-btn-ghost git-pane-browse" title="在侧栏分页里浏览工作区文件树（任务产物不出应用）" onClick={() => {
+            const dir = task.worktree?.path?.trim() || task.workdir
+            const name = dir.split(/[\\/]/).filter(Boolean).pop() ?? dir
+            ui.dock.open({ id: `files:${task.id}`, kind: 'files', title: `文件 · ${name}`, payload: { taskId: task.id, workdir: dir } })
+          }}><FolderTree size={13} aria-hidden="true" /> 浏览文件</button>
         </div>
       )}
       {state === 'executing' && <div className="git-snapshot-state" role="status"><strong>{task.status === 'queued' ? '等待执行，暂无 Git 快照' : '执行中，尚未收集 Git 快照'}</strong><span>执行结束后会收集可用的仓库变更。</span></div>}

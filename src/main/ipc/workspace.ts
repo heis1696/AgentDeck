@@ -3,8 +3,8 @@
 import fs from 'node:fs'
 import { ipcMain } from 'electron'
 import { workspaceGitSummary } from '../git'
-import { listWorkspaceEntries } from '../workspace-listing'
-import type { WorkspaceEntriesResult, WorkspaceGitSummary } from '../../shared/contracts'
+import { listWorkspaceEntries, readWorkspaceFile } from '../workspace-listing'
+import type { WorkspaceEntriesResult, WorkspaceFileRead, WorkspaceGitSummary } from '../../shared/contracts'
 
 function badDir(dir: unknown, reason: string): WorkspaceGitSummary {
   return { ok: false, code: 'bad-dir', error: `工作目录不可用：${reason}` }
@@ -43,5 +43,14 @@ export function registerWorkspaceIpc() {
     const base = validBaseDir(dir)
     if (!base.ok) return { ok: false, code: 'bad-dir', error: `工作目录不可用：${base.reason}`, entries: [] }
     return listWorkspaceEntries(base.value, typeof subdir === 'string' ? subdir : '')
+  })
+
+  // 渲染契约：workspace:readFile(dir, path) —— 文件浏览 tab 的内容通道。
+  //   相对路径 + realpath 双向解析防符号链接逃逸；512KB 上限；NUL 嗅探判二进制（ok:true code:'binary'）。
+  ipcMain.handle('workspace:readFile', (_e, dir: unknown, file: unknown): WorkspaceFileRead => {
+    const base = validBaseDir(dir)
+    if (!base.ok) return { ok: false, code: 'bad-dir', error: `工作目录不可用：${base.reason}`, path: String(file ?? '') }
+    if (typeof file !== 'string') return { ok: false, code: 'bad-path', error: '文件路径必须是字符串', path: '' }
+    return readWorkspaceFile(base.value, file)
   })
 }
