@@ -1,6 +1,7 @@
 // 一次性 CLI 进程的公共基座：spawn + JSONL 行解析 + 看门狗 + 进程清理
 // 适用于 claude / codex / opencode（zcode 是常驻服务，单独实现）
 import { spawn, type ChildProcess } from 'node:child_process'
+import { EventEmitter } from 'node:events'
 import path from 'node:path'
 import type { TaskEvent, ToolEditMeta } from '../../shared/types'
 
@@ -150,12 +151,30 @@ export function runCliJsonl(opts: {
   if (process.versions.electron && sameExecutablePath(opts.command, process.execPath)) {
     env.ELECTRON_RUN_AS_NODE = '1'
   }
-  const child = spawn(opts.command, [...opts.prefixArgs, ...opts.args], {
-    cwd: opts.cwd,
-    env,
-    stdio: [opts.stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
-    windowsHide: true
-  })
+  let child: ChildProcess
+  try {
+    child = spawn(opts.command, [...opts.prefixArgs, ...opts.args], {
+      cwd: opts.cwd,
+      env,
+      stdio: [opts.stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+      windowsHide: true
+    })
+  } catch (error) {
+    // Windows 的 ENAMETOOLONG 等是 spawn 同步抛出（不走 error 事件）：折算成已退出的
+    // stub runner，错误统一走 exited 通道——调用方的 onSpawn/onLaunch 与清理照常成立，
+    // 不会因为 spawn 抛错而零 kill 句柄（DeepSeek 扫雷 P0）
+    const message = error instanceof Error ? error.message : String(error)
+    const stub = Object.assign(new EventEmitter(), {
+      pid: undefined, exitCode: -1, signalCode: null, killed: false,
+      stdin: null, stdout: null, stderr: null,
+      kill() { return true }
+    }) as unknown as ChildProcess
+    return {
+      child: stub,
+      exited: Promise.resolve({ code: -1, signal: null, stderrTail: message, stdoutBytes: 0, lineCount: 0, parseErrors: 0 }),
+      kill: () => Promise.resolve({ ok: true, code: -1 })
+    }
+  }
   if (opts.stdin !== undefined && child.stdin) {
     // CLI 早退时 stdin 端会断（EPIPE）：错误吞掉——进程退出/看门狗路径已能给出具名失败
     child.stdin.on('error', () => {})
@@ -187,8 +206,11 @@ export function runCliJsonl(opts: {
 
   child.stdout!.setEncoding('utf8')
   child.stdout!.on('data', (chunk: string) => {
-    clearTimeout(idleTimer)
-    if (!killed) idleTimer.refresh()
+    // 续命只能在未 clear 的定时器上 refresh：clearTimeout 之后的 refresh() 不会复活
+    // 定时器（Node 22 实测）——原先先 clear 再 refresh，首个输出分片后看门狗永久缴械，
+    // 挂死的 CLI 只能等 5MB 上限兜底
+    if (killed) clearTimeout(idleTimer)
+    else idleTimer.refresh()
     total += chunk.length
     if (total > (opts.maxTotalBytes ?? 5 * 1024 * 1024)) {
       killTree()

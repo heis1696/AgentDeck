@@ -40,6 +40,31 @@ const huge = await new Promise((resolve) => {
 if (huge.result.code !== 0 || huge.lines[0]?.len !== hugePayload.length) throw new Error('oversized (46K) stdin payload failed — the ENAMETOOLONG class is not fixed')
 console.log('✓ stdin delivery intact, including a 46K payload beyond the Windows argv limit')
 
+// 空闲看门狗必须在输出后续命：clearTimeout 之后的 refresh() 不复活定时器（Node 22 实测），
+// 原先先 clear 再 refresh——首个输出分片后看门狗永久缴械，挂死 CLI 只能等 5MB 上限
+const hangdog = runCliJsonl({ command: process.execPath, prefixArgs: [], args: ['-e', "process.stdout.write('{\"a\":1}\\n'); setInterval(()=>{}, 1000)"], cwd: root, idleTimeoutMs: 400, onLine: () => {} })
+const watchdogKilled = await Promise.race([
+  hangdog.exited.then((r) => r.code !== 0),
+  new Promise((resolve) => setTimeout(() => resolve('timeout'), 4_000))
+])
+if (watchdogKilled !== true) throw new Error('idle watchdog stayed armed after output — clearTimeout+refresh disarms it forever')
+console.log('✓ idle watchdog keeps working after output (refresh revives, clear-then-refresh did not)')
+
+// spawn 同步抛（Windows 长 argv 的 ENAMETOOLONG 正是当初事故机制；另用非数组 args
+// 作跨平台载体）：折算成已退出的 stub runner，错误统一走 exited 通道——调用方的
+// 句柄注册与清理不会因 spawn 抛错而全部落空（DeepSeek 扫雷 P0）
+const stubbed = (args) => runCliJsonl({ command: process.execPath, prefixArgs: [], args, cwd: root, onLine: () => {} })
+const iterStub = stubbed(null)
+const iterExit = await iterStub.exited
+if (iterExit.code !== -1 || !/not iterable|args/i.test(iterExit.stderrTail)) throw new Error('synchronous spawn throw did not surface through the exited channel')
+if (!(await iterStub.kill()).ok) throw new Error('stub runner kill must report ok (nothing was ever spawned)')
+if (process.platform === 'win32') {
+  const longStub = stubbed(['-e', 'process.exit(0)', 'x'.repeat(40_000)])
+  const longExit = await longStub.exited
+  if (longExit.code !== -1 || !/ENAMETOOLONG/.test(longExit.stderrTail)) throw new Error('Windows ENAMETOOLONG sync throw did not surface through the exited channel')
+}
+console.log('✓ synchronous spawn throws surface via exited with a killable stub runner')
+
 // 可执行路径等值判定两形态：大小写不敏感平台（win32）折叠——同一可执行文件的别名
 // 写法（大小写差异）判等，ELECTRON_RUN_AS_NODE 兜底不漏打；大小写敏感平台精确比较。
 // 别名构造按平台通用：POSIX 绝对路径的首段是空串（/usr/...），从根分隔符后的第一个

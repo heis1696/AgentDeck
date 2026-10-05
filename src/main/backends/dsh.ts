@@ -74,6 +74,12 @@ export function createDshBackend(getPaths: () => { dshPath: string }): AgentBack
     // 每次调用现取设置，设置页改路径后无需重启即可生效
     const dsh = findDshBin(getPaths().dshPath || undefined)
     if (!dsh) return Promise.reject(new Error('找不到 dsh（DeepSeek Harness）。请在设置页指定 bin.js 路径'))
+    // dsh headless 只收位置参数、不读 stdin（实测）：任务文本只能走 argv，撞上
+    // Windows CreateProcess 32767 字符上限就是 spawn ENAMETOOLONG。超长在此具名拒绝，
+    // 给出可行动的原因，而不是让 spawn 报一个看不出所以然的系统错误（DeepSeek 扫雷 P0）
+    if (prompt.length > 30_000) {
+      return Promise.reject(new Error(`任务文本 ${prompt.length} 字，超过 dsh headless 命令行上限（约 3 万字；dsh 不支持 stdin 投喂）。请缩短任务文本，或改用 claude/codex/opencode/zcode 后端（prompt 走 stdin，无此限制）`))
+    }
     let out = ''
     let settled = false
     let settle!: (v: { response: string; ok: boolean; error?: string }) => void

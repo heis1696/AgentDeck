@@ -317,8 +317,15 @@ export class MeetingController {
   subscribe(listener: (meeting: Meeting) => void) { this.listeners.add(listener); return () => this.listeners.delete(listener) }
   private save(id: string, patch: Partial<Meeting>) {
     const updated = this.store.update(id, patch)
-    if (updated) this.syncContainer(updated)
-    if (updated) for (const listener of this.listeners) listener(updated)
+    if (updated) {
+      // 容器投影与监听器都是权威提交的下游：它们的异常绝不能回滚/阻断会议状态机——
+      // 否则 cancel 的停止意图落盘后，一个容器投影写失败就跳过全部执行终止，
+      // 留下无人收口的 stopState=stopping（审码判官扫雷 P0 复现）
+      try { this.syncContainer(updated) } catch (error) { console.error('[Meeting] container projection failed', error) }
+      for (const listener of this.listeners) {
+        try { listener(updated) } catch (error) { console.error('[Meeting] save listener failed', error) }
+      }
+    }
     return updated
   }
 
@@ -449,6 +456,9 @@ export class MeetingController {
     } finally {
       this.running.delete(id)
       this.runs.delete(id)
+      // 暂停请求绑定调度代次：调度器退出后没人再消费它，跨代残留会让下一次「继续」
+      // 秒退回 waiting_user（审码判官扫雷 P2：强制综合期间点暂停的泄漏路径）
+      this.pauseRequested.delete(id)
       finish()
     }
   }
@@ -463,6 +473,11 @@ export class MeetingController {
       if (this.store.list().some((item) => item.status === 'active' && item.id !== id)) return { ok: false, error: '已有会议正在进行' }
       const settled = await this.settleStop(id, meeting)
       if (!settled.ok) return settled
+      // 收口期间用户可能已点了停止/删除：复核后再继续，绝不把已取消/删除中的会议复活
+      const after = this.store.get(id)
+      if (!after || after.status !== 'waiting_user' || after.stopState || after.deleting) {
+        return { ok: false, error: '会议状态已变化，继续已让位', meeting: after ?? undefined }
+      }
     }
     if (this.store.list().some((item) => item.status === 'active' && item.id !== id)) return { ok: false, error: '已有会议正在进行' }
     this.save(id, { status: 'active', stopReason: undefined, blockedReason: undefined })
@@ -527,8 +542,8 @@ export class MeetingController {
     const meeting = this.store.get(id)
     if (!meeting) return { ok: true }
     this.runs.get(id)?.abort.abort()
-    this.save(id, { deleting: true })
-    const deleting = (async (): Promise<MeetingResult> => {
+    this.save(id, { deleting: true, deleteFailed: undefined })
+    const attempt = (async (): Promise<MeetingResult> => {
       try {
         const stopped = await this.cancel(id)
         if (!stopped.ok) return stopped
@@ -547,6 +562,15 @@ export class MeetingController {
         this.save(id, { blockedReason: `会议删除未完成：${message}` })
         return { ok: false, error: message, meeting: this.get(id) ?? undefined }
       }
+    })()
+    const deleting = (async (): Promise<MeetingResult> => {
+      const result = await attempt
+      if (!result.ok && this.get(id)) {
+        // deleting 保留（它是重启恢复续删的依据），失败改标 deleteFailed：UI 据此放开
+        // 停止/删除按钮——否则本会话内无重试入口，只能等重启（审码判官扫雷 P0）
+        try { this.save(id, { deleteFailed: true }) } catch { /* 连落盘都失败时交给重启恢复 */ }
+      }
+      return result
     })()
     this.deleting.set(id, deleting)
     try { return await deleting }

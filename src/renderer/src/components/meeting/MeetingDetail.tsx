@@ -139,9 +139,12 @@ export function MeetingDetail({ meeting, tasks, onDeleted }: {
   const canStart = meeting.status === 'draft'
   const canPause = meeting.status === 'active'
   const canResume = meeting.status === 'waiting_user'
-  const stoppable = !meeting.deleting && meeting.stopState !== 'stopping'
+  // 删除失败后（deleteFailed）放开停止/删除按钮：deleting 本身保留——它是重启恢复续删的
+  // 依据，但留着不放开重试就是本会话内的假死（只能等重启）
+  const deletingLive = !!meeting.deleting && !meeting.deleteFailed
+  const stoppable = !deletingLive && meeting.stopState !== 'stopping'
     && (meeting.status === 'active' || meeting.status === 'waiting_user' || meeting.stopState === 'failed')
-  const deletable = !meeting.deleting && meeting.stopState !== 'stopping' && meeting.stopState !== 'failed'
+  const deletable = !deletingLive && meeting.stopState !== 'stopping' && meeting.stopState !== 'failed'
 
   const openMemberDock = (agentId: string) => {
     ui.dock.open({ id: memberItemId, kind: 'task', title: meetingMemberDisplayName(turns, agentId), payload: { taskId: rootId } }, { rootId })

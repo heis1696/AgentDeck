@@ -567,6 +567,131 @@ console.log('--- resume settles a failed stop instead of bouncing the user ---')
   await runner.shutdown()
 }
 
+console.log('--- container projection failure cannot skip member termination ---')
+{
+  // 审码判官扫雷 P0：cancel 的停止意图落盘后，syncContainer 投影抛错会让 cancel
+  // 整个中断——成员执行没收到终止，落盘却是无人在途的 stopState=stopping。
+  const data = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-term-proj-'))
+  const store = new TaskStore(data)
+  const service = new TaskService({ store })
+  const log = { launches: [], launchStops: [], stops: [], closes: [] }
+  const cfg = { holdStart: false, startGate: null, stopGate: null, stopDelay: 0, closeGate: null, closeFails: false, failFirst: false, turnGates: {} }
+  const backend = makeBackend(cfg, log)
+  const runner = new TaskRunner(store, new Map([[backend.id, backend]]), () => ({ concurrency: 4, workerConcurrency: 4, mode: 'yolo', notify: false }))
+  const agents = [
+    { id: 'alpha', name: 'Alpha', backend: backend.id, role: '队长' },
+    { id: 'beta', name: 'Beta', backend: backend.id, role: '队长' },
+    { id: 'gamma', name: 'Gamma', backend: backend.id, role: '队长' }
+  ]
+  runner.attachTeam(() => agents)
+  const offices = new AgentSessionRegistry({ store, taskService: service, runner, getAgents: () => agents, waitPollMs: 5, waitTimeoutMs: 5_000 })
+  const meetingStore = new MeetingStore(data)
+  const container = service.createTask({ title: 'container', prompt: 'x', backend: backend.id })
+  // 容器投影每次写都炸：投影是权威提交的下游，绝不能阻断停止流程
+  const throwingTaskStore = {
+    get: (id) => store.get(id),
+    list: () => store.list(),
+    update: (id, patch) => {
+      throw new Error('container projection write failed')
+    }
+  }
+  const controller = new MeetingController({
+    store: meetingStore, offices, getAgents: () => agents, taskService: service,
+    issueExists: () => true, taskStore: throwingTaskStore,
+    cancelTask: (taskId) => taskId === container.id ? Promise.resolve({ ok: true }) : runner.terminateTask(taskId),
+    addIssueComment: () => {}
+  })
+  const meeting = controller.create({
+    issueId: 'iss_proj', topic: 'projection isolation', maxRounds: 1, maxDurationMs: 8_000,
+    participants: [
+      { agentId: 'alpha', role: 'reporter' }, { agentId: 'beta', role: 'critic' }, { agentId: 'gamma', role: 'designer' }
+    ]
+  })
+  meetingStore.update(meeting.id, { ownsIssue: true, containerTaskId: container.id })
+  store.update(container.id, { meetingId: meeting.id, meetingTaskRole: 'container' })
+  cfg.turnGates.alpha = defer()
+  const started = controller.start(meeting.id)
+  await waitFor(() => store.list().some((t) => t.meetingId === meeting.id && t.status === 'running'), 'member execution in flight')
+  const stopped = await controller.cancel(meeting.id)
+  check(stopped.ok === true, 'cancel survives a throwing container projection')
+  check(store.list().every((t) => t.meetingId !== meeting.id || t.status !== 'running'), 'member executions were still terminated')
+  check(controller.get(meeting.id)?.stopState === undefined, 'stop settles cleanly despite projection errors')
+  cfg.turnGates.alpha.resolve()
+  await started
+  await runner.shutdown()
+}
+
+console.log('--- failed delete re-enables the retry buttons ---')
+{
+  // 审码判官扫雷 P0：deleting=true 落盘后删除失败，UI 停止/删除全被禁用，
+  // 本会话无重试入口，只能重启 recover。
+  const data = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-term-del-'))
+  const store = new TaskStore(data)
+  const service = new TaskService({ store })
+  const log = { launches: [], launchStops: [], stops: [], closes: [] }
+  const cfg = { holdStart: false, startGate: null, stopGate: null, stopDelay: 0, closeGate: null, closeFails: false, failFirst: false, turnGates: {} }
+  const backend = makeBackend(cfg, log)
+  const runner = new TaskRunner(store, new Map([[backend.id, backend]]), () => ({ concurrency: 4, workerConcurrency: 4, mode: 'yolo', notify: false }))
+  const agents = [{ id: 'alpha', name: 'Alpha', backend: backend.id, role: '队长' }, { id: 'gamma', name: 'Gamma', backend: backend.id, role: '队长' }]
+  runner.attachTeam(() => agents)
+  const offices = new AgentSessionRegistry({ store, taskService: service, runner, getAgents: () => agents, waitPollMs: 5, waitTimeoutMs: 5_000 })
+  const meetingStore = new MeetingStore(data)
+  const controller = new MeetingController({
+    store: meetingStore, offices, getAgents: () => agents, taskService: service,
+    issueExists: () => true, taskStore: store,
+    cancelTask: (taskId) => runner.terminateTask(taskId),
+    addIssueComment: () => {},
+    deleteTaskData: async () => ({ ok: false, error: 'worktree cleanup failed' })
+  })
+  const meeting = controller.create({ issueId: 'iss_del', topic: 'delete retry', maxRounds: 1, maxDurationMs: 8_000, participants: [{ agentId: 'alpha', role: 'reporter' }, { agentId: 'gamma', role: 'designer' }] })
+  meetingStore.update(meeting.id, { status: 'waiting_user' })
+  const failed = await controller.delete(meeting.id)
+  check(failed.ok === false, 'delete surfaces the cleanup failure')
+  // deleting 保留（重启恢复续删依据），失败改标 deleteFailed 供 UI 放开重试按钮
+  check(controller.get(meeting.id)?.deleting === true && controller.get(meeting.id)?.deleteFailed === true, 'a failed delete keeps the durable deleting marker and flags deleteFailed for UI retry')
+  const retried = await controller.delete(meeting.id)
+  check(retried.ok === false && controller.get(meeting.id)?.deleteFailed === true, 'delete can be retried in-session (flag re-armed on the new failure)')
+  await runner.shutdown()
+}
+
+console.log('--- a concurrent stop wins over an in-flight resume settle ---')
+{
+  // 审码判官扫雷 P1：resume 的自动收口 await 期间用户点了停止——旧 resume 不复核，
+  // 会把已取消的会议复活成 active 并跑起新调度器。
+  const data = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-term-race-'))
+  const store = new TaskStore(data)
+  const service = new TaskService({ store })
+  const log = { launches: [], launchStops: [], stops: [], closes: [] }
+  const cfg = { holdStart: false, startGate: null, stopGate: null, stopDelay: 0, closeGate: null, closeFails: false, failFirst: false, turnGates: {} }
+  const backend = makeBackend(cfg, log)
+  const runner = new TaskRunner(store, new Map([[backend.id, backend]]), () => ({ concurrency: 4, workerConcurrency: 4, mode: 'yolo', notify: false }))
+  const agents = [{ id: 'alpha', name: 'Alpha', backend: backend.id, role: '队长' }, { id: 'gamma', name: 'Gamma', backend: backend.id, role: '队长' }]
+  runner.attachTeam(() => agents)
+  const offices = new AgentSessionRegistry({ store, taskService: service, runner, getAgents: () => agents, waitPollMs: 5, waitTimeoutMs: 5_000 })
+  const meetingStore = new MeetingStore(data)
+  const settleGate = defer()
+  let gateOnce = true
+  const controller = new MeetingController({
+    store: meetingStore, offices, getAgents: () => agents, taskService: service,
+    issueExists: () => true, taskStore: store,
+    cancelTask: (taskId) => (gateOnce ? (gateOnce = false, settleGate.promise.then(() => runner.terminateTask(taskId))) : runner.terminateTask(taskId)),
+    addIssueComment: () => {}
+  })
+  const meeting = controller.create({ issueId: 'iss_race', topic: 'stop beats resume', maxRounds: 1, maxDurationMs: 8_000, participants: [{ agentId: 'alpha', role: 'reporter' }, { agentId: 'gamma', role: 'designer' }] })
+  const member = service.createTask({ title: 'member', prompt: 'x', backend: backend.id, meetingId: meeting.id, meetingTaskRole: 'member', suppressIssue: true })
+  store.update(member.id, { status: 'done', sessionId: 's-done' })
+  meetingStore.update(meeting.id, { status: 'waiting_user', stopState: 'failed', stopReason: 'budget', blockedReason: '终止余波失败' })
+  const resuming = controller.resume(meeting.id)
+  await sleep(30)
+  const cancelling = controller.cancel(meeting.id)
+  settleGate.resolve()
+  const [resumed, cancelled] = await Promise.all([resuming, cancelling])
+  check(cancelled.ok === true, 'the concurrent stop completes')
+  check(resumed.ok === false, 'the stale resume yields instead of resurrecting the meeting')
+  check(controller.get(meeting.id)?.status === 'cancelled' && !controller.running.has(meeting.id), 'meeting stays cancelled with no resurrected scheduler')
+  await runner.shutdown()
+}
+
 console.log('--- scoped late-start cleanup never drops failure ---')
 {
   const executor = new Executor()

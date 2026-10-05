@@ -170,6 +170,8 @@ export interface Meeting {
   executionEpoch?: number
   stopState?: 'stopping' | 'failed'
   deleting?: boolean
+  /** 删除尝试失败过（deleting 保留作重启续删依据；UI 据此放开停止/删除重试按钮） */
+  deleteFailed?: boolean
   topic: string
   participants: MeetingParticipant[]
   status: MeetingStatus
