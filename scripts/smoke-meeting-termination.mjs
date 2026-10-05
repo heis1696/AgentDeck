@@ -513,6 +513,59 @@ console.log('--- failed epoch commit must not strand the run registration ---')
   await runner.shutdown()
 }
 
+console.log('--- resume settles a failed stop instead of bouncing the user ---')
+{
+  // 实战（meeting_muvpfggz）：预算暂停后终止余波 taskkill 128 → stopState=failed，
+  // resume 一律拒绝「请先完成会议停止或删除」——继续按钮看得见按不动。
+  // 修复：resume 对 failed 确认先自动收口；recover 不把暂停态翻成取消。
+  const data = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-term-resume-'))
+  const store = new TaskStore(data)
+  const service = new TaskService({ store })
+  const log = { launches: [], launchStops: [], stops: [], closes: [] }
+  const cfg = { holdStart: false, startGate: null, stopGate: null, stopDelay: 0, closeGate: null, closeFails: false, failFirst: false, turnGates: {} }
+  const backend = makeBackend(cfg, log)
+  const runner = new TaskRunner(store, new Map([[backend.id, backend]]), () => ({ concurrency: 4, workerConcurrency: 4, mode: 'yolo', notify: false }))
+  const agents = [
+    { id: 'alpha', name: 'Alpha', backend: backend.id, role: '队长' },
+    { id: 'beta', name: 'Beta', backend: backend.id, role: '队长' },
+    { id: 'gamma', name: 'Gamma', backend: backend.id, role: '队长' }
+  ]
+  runner.attachTeam(() => agents)
+  const offices = new AgentSessionRegistry({ store, taskService: service, runner, getAgents: () => agents, waitPollMs: 5, waitTimeoutMs: 5_000 })
+  const meetingStore = new MeetingStore(data)
+  const controller = new MeetingController({
+    store: meetingStore, offices, getAgents: () => agents, taskService: service,
+    issueExists: () => true, taskStore: store,
+    cancelTask: (taskId) => runner.terminateTask(taskId),
+    addIssueComment: () => {}
+  })
+  runner.attachMeetingGuard((task) => controller.canRunTask(task))
+  const participants = [
+    { agentId: 'alpha', role: 'reporter' }, { agentId: 'beta', role: 'critic' }, { agentId: 'gamma', role: 'designer' }
+  ]
+
+  // 恢复路径：waiting_user + failed 确认 → 只收口停止账，不得翻成取消
+  const paused = controller.create({ issueId: 'iss_rec', topic: 'recover keeps the pause', maxRounds: 1, maxDurationMs: 8_000, participants })
+  meetingStore.update(paused.id, { status: 'waiting_user', stopState: 'failed', stopReason: 'budget', blockedReason: '终止余波失败' })
+  controller.recover()
+  await waitFor(() => controller.get(paused.id)?.stopState === undefined, 'recovery settles the failed stop')
+  check(controller.get(paused.id)?.status === 'waiting_user', 'recovery never cancels a paused meeting to finish its stop')
+
+  // 继续路径：resume 自动收口 failed 确认后照常续跑
+  const stuck = controller.create({ issueId: 'iss_res', topic: 'resume settles the stop', maxRounds: 1, maxDurationMs: 8_000, participants })
+  meetingStore.update(stuck.id, { status: 'waiting_user', stopState: 'failed', stopReason: 'budget', blockedReason: '终止余波失败' })
+  const resumed = await controller.resume(stuck.id)
+  check(resumed.ok === true, 'resume auto-settles the failed stop instead of refusing')
+  const afterResume = controller.get(stuck.id)
+  check(!!afterResume && afterResume.stopState === undefined && ['concluded', 'waiting_user', 'failed', 'cancelled'].includes(afterResume.status), 'resumed meeting runs to a settled state with no lingering stop')
+  // stopState=stopping（真正在途的停止）仍然拒绝——那不是自动收口能替的
+  const inFlightStop = controller.create({ issueId: 'iss_stp', topic: 'stopping is respected', maxRounds: 1, maxDurationMs: 8_000, participants })
+  meetingStore.update(inFlightStop.id, { status: 'waiting_user', stopState: 'stopping' })
+  const refused = await controller.resume(inFlightStop.id)
+  check(!refused.ok && refused.error === '请先完成会议停止或删除', 'an in-flight stop (stopping) still refuses resume')
+  await runner.shutdown()
+}
+
 console.log('--- scoped late-start cleanup never drops failure ---')
 {
   const executor = new Executor()
@@ -545,18 +598,30 @@ console.log('--- scoped late-start cleanup never drops failure ---')
 }
 
 if (process.platform === 'win32') {
-  console.log('--- process tree exit does not hide taskkill failure ---')
+  console.log('--- process tree kill: root verifiably gone beats kill failure ---')
   const child = Object.assign(new EventEmitter(), { pid: 123456, exitCode: null, signalCode: null })
   const killer = new EventEmitter()
   const originalSpawn = childProcess.spawn
   childProcess.spawn = () => killer
   try {
+    // 语义演进（原「closed root 不能掩盖失败树杀」）：杀失败但根进程已可验证退出
+    // （exitCode 已落）= 无可杀即已杀灭。一次性 CLI 的回合结果先于进程退出到达，
+    // 紧接的终止会让 taskkill 撞上「进程刚死」窗口（实战 128/255 均见，曾以
+    // 「初始化中止: taskkill exited 128」卡死预算暂停后的继续按钮）。
     const killing = killProcessTree(child)
     child.exitCode = 0
     child.emit('close', 0)
     killer.emit('close', 1)
-    check(!(await killing).ok, 'a closed root process cannot turn a failed tree kill into success')
+    check((await killing).ok, 'a kill failure on a verifiably-exited root counts as killed')
     check((await killProcessTree(child)).ok, 'a failed kill result is retryable after verified process exit')
+    // 根进程未见退出（可能还活着）时杀失败仍是失败——那里才存在真杀不掉的风险
+    const aliveChild = Object.assign(new EventEmitter(), { pid: 123457, exitCode: null, signalCode: null })
+    const aliveKiller = new EventEmitter()
+    childProcess.spawn = () => aliveKiller
+    const killingAlive = killProcessTree(aliveChild)
+    aliveChild.emit('close', null)
+    aliveKiller.emit('close', 1)
+    check(!(await killingAlive).ok, 'a kill failure without exit proof on the root is still a failure')
   } finally { childProcess.spawn = originalSpawn }
 }
 

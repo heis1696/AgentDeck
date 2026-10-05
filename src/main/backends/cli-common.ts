@@ -37,12 +37,17 @@ export function killProcessTree(child: ChildProcess): Promise<KillProcessResult>
     const finish = (result: KillProcessResult) => {
       if (settled) return
       settled = true
+      // 杀失败但根进程已可验证地退出（exitCode/signalCode 已落）：无可杀即已杀灭。
+      // 一次性 CLI 的回合结果先于进程退出到达，紧接的终止会让 taskkill 撞上
+      // 「进程刚死」窗口（实战 128/255 均见）；根已死时 /T 也够不着任何后代，
+      // 报失败只会让会议停止收不了口，不带来任何额外清理。
+      const rootGone = child.exitCode !== null || child.signalCode !== null
       if (timer) clearTimeout(timer)
       child.removeListener('close', onClose)
       child.removeListener('error', onError)
       killer?.removeListener('error', onError)
       killer?.removeListener('close', onKillClose)
-      resolve(result)
+      resolve(!result.ok && rootGone ? { ok: true, code: child.exitCode } : result)
     }
     const complete = () => {
       if (childClosed && killCompleted) finish(killError ?? { ok: true, code: child.exitCode })

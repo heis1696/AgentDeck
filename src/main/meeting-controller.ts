@@ -446,8 +446,15 @@ export class MeetingController {
   async resume(id: string): Promise<MeetingResult> {
     const meeting = this.store.get(id)
     if (!meeting || meeting.status !== 'waiting_user') return { ok: false, error: '会议不在 waiting_user' }
-    if (meeting.stopState || meeting.deleting || this.running.has(id)) return { ok: false, error: '请先完成会议停止或删除' }
-    if (this.store.list().some((item) => item.status === 'active')) return { ok: false, error: '已有会议正在进行' }
+    if (meeting.deleting || this.running.has(id) || meeting.stopState === 'stopping') return { ok: false, error: '请先完成会议停止或删除' }
+    if (meeting.stopState === 'failed') {
+      // 暂停时挂了失败确认（预算暂停 + 终止余波失败实战）：继续前先自动收口，
+      // 收不了口才拦——否则「继续会议」按钮看得见按不动，用户被逼去手动补停止
+      if (this.store.list().some((item) => item.status === 'active' && item.id !== id)) return { ok: false, error: '已有会议正在进行' }
+      const settled = await this.settleStop(id, meeting)
+      if (!settled.ok) return settled
+    }
+    if (this.store.list().some((item) => item.status === 'active' && item.id !== id)) return { ok: false, error: '已有会议正在进行' }
     this.save(id, { status: 'active', stopReason: undefined, blockedReason: undefined })
     return this.start(id)
   }
@@ -458,6 +465,18 @@ export class MeetingController {
     this.pauseRequested.add(id)
     if (!this.running.has(id)) this.save(id, { status: 'waiting_user', stopReason: 'no_progress', blockedReason: '用户请求暂停', currentTurn: undefined })
     return { ok: true, meeting: this.store.get(id) ?? meeting }
+  }
+
+  /** 收口在途停止：确认全部成员执行退出并等调度器让位，成功即清除 stopState。
+   *  只动停止账，不动会议状态——取消（cancel）与继续前的自动收口（resume）共用。 */
+  private async settleStop(id: string, meeting: Meeting): Promise<MeetingResult> {
+    const stopped = await this.stopExecutions(meeting)
+    const finished = stopped.ok && await this.waitForRun(id)
+    if (!stopped.ok || !finished) {
+      const error = stopped.error ?? '会议调度尚未退出，请重试停止'
+      return { ok: false, error, meeting: this.save(id, { stopState: 'failed', blockedReason: error }) ?? undefined }
+    }
+    return { ok: true, meeting: this.save(id, { stopState: undefined, blockedReason: '会议执行已停止' }) ?? undefined }
   }
 
   async cancel(id: string): Promise<MeetingResult> {
@@ -472,15 +491,7 @@ export class MeetingController {
       executionEpoch: (meeting.executionEpoch ?? 0) + 1,
       stopState: 'stopping', stopReason: undefined, blockedReason: '正在停止会议执行', currentTurn: undefined
     })
-    const stopping = (async (): Promise<MeetingResult> => {
-      const stopped = await this.stopExecutions(meeting)
-      const finished = stopped.ok && await this.waitForRun(id)
-      if (!stopped.ok || !finished) {
-        const error = stopped.error ?? '会议调度尚未退出，请重试停止'
-        return { ok: false, error, meeting: this.save(id, { stopState: 'failed', blockedReason: error }) ?? undefined }
-      }
-      return { ok: true, meeting: this.save(id, { stopState: undefined, blockedReason: '会议执行已停止' }) ?? undefined }
-    })()
+    const stopping = (async (): Promise<MeetingResult> => this.settleStop(id, meeting))()
     this.stopping.set(id, stopping)
     try { return await stopping }
     finally { if (this.stopping.get(id) === stopping) this.stopping.delete(id) }
@@ -567,6 +578,12 @@ export class MeetingController {
       }
       if (meeting.deleting) {
         void this.delete(meeting.id).catch((error) => console.error('[Meeting] delete recovery failed', error))
+        continue
+      }
+      if (meeting.stopState === 'failed' && meeting.status === 'waiting_user') {
+        // 暂停态挂着失败确认：只收口停止账，绝不能翻成取消——用户要求的是暂停/继续，
+        // 恢复路径替他取消等于吞掉整场会议（预算暂停 + taskkill 余波实战）
+        void this.settleStop(meeting.id, meeting).catch((error) => console.error('[Meeting] stop settle recovery failed', error))
         continue
       }
       if (meeting.stopState) {
