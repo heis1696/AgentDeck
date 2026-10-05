@@ -421,7 +421,17 @@ export class MeetingController {
     try {
       // epoch 提交也在清理边界内：登记了 runs 却没能真正启动时，finally 必须撤销登记，
       // 否则停止永远等不到 done——「会议调度尚未退出」永久拒停拒删（审码判官 P1 复现）
-      this.save(id, { executionEpoch: (meeting.executionEpoch ?? 0) + 1 })
+      try {
+        this.save(id, { executionEpoch: (meeting.executionEpoch ?? 0) + 1 })
+      } catch (saveError) {
+        // epoch 落盘失败时 active 已写盘却没有调度器，而 canStart 只认 draft、canResume
+        // 只认 waiting_user——不回滚的话重启前没有任何按钮能救活这场会
+        const current = this.store.get(id)
+        if (current && current.status === 'active' && !this.running.has(id)) {
+          this.save(id, { status: 'waiting_user', stopReason: 'failed', blockedReason: `启动落盘失败：${saveError instanceof Error ? saveError.message : String(saveError)}` })
+        }
+        throw saveError
+      }
       this.running.add(id)
       const result = await this.run(id)
       if (result.meeting && ['concluded', 'failed', 'waiting_user'].includes(result.meeting.status)) {

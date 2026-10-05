@@ -507,6 +507,7 @@ console.log('--- failed epoch commit must not strand the run registration ---')
   let startError = ''
   await controller.start(meeting.id).catch((error) => { startError = String(error?.message ?? error) })
   check(startError.includes('transient meeting index write failure'), 'start surfaces the transient epoch commit failure')
+  check(controller.get(meeting.id)?.status === 'waiting_user', 'epoch commit failure rolls back to a resumable status instead of an active orphan')
   const stopped = await controller.cancel(meeting.id)
   check(stopped.ok === true, 'meeting is still stoppable after a failed start (no stranded run registration)')
   check(controller.get(meeting.id).stopState === undefined, 'stop completes and clears stopState instead of waiting forever')
