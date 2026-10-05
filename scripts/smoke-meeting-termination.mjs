@@ -77,7 +77,7 @@ function makeBackend(cfg, log) {
         const gate = cfg.turnGates?.[agent]
         if (gate) await gate.promise
         if (cfg.failFirst && seq === 1) {
-          events.onTurnEnd({ ok: false, response: '', error: 'HTTP 429 too many requests' }, stamp)
+          events.onTurnEnd({ ok: false, response: '', error: cfg.failError ?? 'HTTP 429 too many requests' }, stamp)
           return
         }
         const text = content === undefined ? `${agent} first turn done` : respond(agent, content)
@@ -114,7 +114,7 @@ function makeHarness(backendCfg = {}, runnerOpts = {}) {
   const store = new TaskStore(data)
   const service = new TaskService({ store })
   const log = { launches: [], launchStops: [], stops: [], closes: [] }
-  const cfg = { holdStart: false, startGate: null, stopGate: null, stopDelay: 0, closeGate: null, closeFails: false, failFirst: false, turnGates: {}, ...backendCfg }
+  const cfg = { holdStart: false, startGate: null, stopGate: null, stopDelay: 0, closeGate: null, closeFails: false, failFirst: false, failError: null, turnGates: {}, ...backendCfg }
   const backend = makeBackend(cfg, log)
   const runner = new TaskRunner(store, new Map([[backend.id, backend]]), () => ({
     concurrency: 4, workerConcurrency: 4, mode: 'yolo', notify: false,
@@ -422,6 +422,95 @@ console.log('--- pending close is not forgotten after timeout ---')
   check((await confirmed.terminateTask(task.id)).ok, 'persisted exit proof permits idempotent cleanup after restart')
   await confirmed.shutdown()
   await h.runner.shutdown()
+}
+
+console.log('--- naturally failed run durably proves its own exit ---')
+{
+  // 实战事故（meeting_muvfy1ar）：claude 成员任务 spawn ENAMETOOLONG 落败后，
+  // 会议停止被「历史会议执行退出未确认」永久拒停——失败由本运行器亲眼观察，
+  // 必须随失败落盘退出证明，停止才收得了口。
+  const h = makeHarness({ failFirst: true, failError: 'spawn ENAMETOOLONG' })
+  const task = h.createTask({ meetingId: 'fail-proof', meetingTaskRole: 'member', suppressIssue: true })
+  h.runner.enqueue(h.store.get(task.id))
+  await waitFor(() => h.store.get(task.id)?.status === 'failed', 'member task failed at spawn')
+  const record = h.store.get(task.id)
+  check(record.runId && record.terminatedRunId === record.runId, 'failure writes the durable exit proof for its own run')
+  const stopped = await h.runner.terminateTask(task.id)
+  check(stopped.ok, 'naturally failed member task stops without the historical-execution refusal')
+  check(h.store.get(task.id).status === 'failed', 'stop of a failed task keeps the recorded failure')
+  await h.runner.shutdown()
+}
+
+console.log('--- dead execution owner cannot deadlock the meeting stop ---')
+{
+  // owner 进程已死时没有谁能补上退出确认：拒停是永久死锁（会议停不掉也删不掉），
+  // 必须放行收尾；owner 存活且无凭据的拒停由上一节的 'unknown' 检查继续守住。
+  const h = makeHarness()
+  const task = h.createTask({ meetingId: 'dead-owner', meetingTaskRole: 'member', suppressIssue: true })
+  h.runner.enqueue(h.store.get(task.id))
+  await waitFor(() => h.store.get(task.id)?.status === 'done', 'member task done')
+  const done = h.store.get(task.id)
+  // 伪造前一进程的 owner：真实已退出的子进程 pid——探活必判 dead（ESRCH）
+  const dead = childProcess.spawnSync(process.execPath, ['-e', 'process.exit(0)'])
+  h.store.update(task.id, { executionOwner: { pid: dead.pid, instance: '10995116277761234', token: 'foreign', leaseExpiresAt: Date.now() + 30_000 } })
+  check(h.store.get(task.id).runId === done.runId, 'forged owner keeps the run identity intact')
+  const foreign = new TaskRunner(h.store, new Map([[h.backend.id, h.backend]]), () => ({ concurrency: 1, mode: 'yolo', notify: false }))
+  const stopped = await foreign.terminateTask(task.id)
+  check(stopped.ok, 'dead owner without exit proof no longer blocks the stop')
+  check(h.store.get(task.id).terminatedRunId === done.runId, 'the stop records the exit proof it was waiting for')
+  await foreign.shutdown()
+  await h.runner.shutdown()
+}
+
+console.log('--- failed epoch commit must not strand the run registration ---')
+{
+  // 审码判官 P1：start() 先登记 runs 再提交 epoch，提交抛错时登记无人清理——
+  // 停止永远等不到 done，「会议调度尚未退出」永久拒停拒删。修复后 finally 兜底撤销。
+  const data = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-term-epoch-'))
+  const store = new TaskStore(data)
+  const service = new TaskService({ store })
+  const log = { launches: [], launchStops: [], stops: [], closes: [] }
+  const cfg = { holdStart: false, startGate: null, stopGate: null, stopDelay: 0, closeGate: null, closeFails: false, failFirst: false, turnGates: {} }
+  const backend = makeBackend(cfg, log)
+  const runner = new TaskRunner(store, new Map([[backend.id, backend]]), () => ({ concurrency: 4, workerConcurrency: 4, mode: 'yolo', notify: false }))
+  const agents = [
+    { id: 'alpha', name: 'Alpha', backend: backend.id, role: '队长' },
+    { id: 'beta', name: 'Beta', backend: backend.id, role: '队长' },
+    { id: 'gamma', name: 'Gamma', backend: backend.id, role: '队长' }
+  ]
+  runner.attachTeam(() => agents)
+  class FlakyEpochStore extends MeetingStore {
+    constructor(dir) { super(dir); this.failEpochOnce = false }
+    update(id, patch) {
+      if (this.failEpochOnce && patch?.executionEpoch !== undefined && patch.status === undefined) {
+        this.failEpochOnce = false
+        throw new Error('transient meeting index write failure')
+      }
+      return super.update(id, patch)
+    }
+  }
+  const offices = new AgentSessionRegistry({ store, taskService: service, runner, getAgents: () => agents, waitPollMs: 5, waitTimeoutMs: 5_000 })
+  const meetingStore = new FlakyEpochStore(data)
+  const controller = new MeetingController({
+    store: meetingStore, offices, getAgents: () => agents, taskService: service,
+    issueExists: () => true, taskStore: store,
+    cancelTask: (taskId) => runner.terminateTask(taskId),
+    addIssueComment: () => {}
+  })
+  const meeting = controller.create({
+    issueId: 'iss_epoch', topic: 'epoch commit failure', maxRounds: 1,
+    participants: [
+      { agentId: 'alpha', role: 'reporter' }, { agentId: 'beta', role: 'critic' }, { agentId: 'gamma', role: 'designer' }
+    ]
+  })
+  meetingStore.failEpochOnce = true
+  let startError = ''
+  await controller.start(meeting.id).catch((error) => { startError = String(error?.message ?? error) })
+  check(startError.includes('transient meeting index write failure'), 'start surfaces the transient epoch commit failure')
+  const stopped = await controller.cancel(meeting.id)
+  check(stopped.ok === true, 'meeting is still stoppable after a failed start (no stranded run registration)')
+  check(controller.get(meeting.id).stopState === undefined, 'stop completes and clears stopState instead of waiting forever')
+  await runner.shutdown()
 }
 
 console.log('--- scoped late-start cleanup never drops failure ---')

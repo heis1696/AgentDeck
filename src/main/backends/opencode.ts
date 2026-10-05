@@ -1,7 +1,9 @@
 // OpenCode 适配器（一次性进程模型）
-// 无头：opencode run --format json --dangerously-skip-permissions --dir <workdir> <prompt>
+// 无头：opencode run --format json --dangerously-skip-permissions --dir <workdir>（prompt 走 stdin）
 // 事件：step_start/tool_use/step_finish/text（sessionID 全程携带）；回合结束 = 进程退出
 // 续聊：-s <sessionId>
+// prompt 走 stdin（无位置参数时 opencode run 读管道）：argv 版在 Windows 撞
+// CreateProcess 32767 字符命令行上限，会议上下文随轮次膨胀后 spawn ENAMETOOLONG
 import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnStamp } from './types'
 import { bindTurn } from './types'
 import type { TaskEvent, ToolEditMeta } from '../../shared/types'
@@ -59,8 +61,7 @@ export function createOpencodeBackend(config: OpencodeBackendOptions = {}): Agen
       '--dangerously-skip-permissions',
       ...(model ? ['--model', model] : []),
       ...(workdir ? ['--dir', workdir] : []),
-      ...(resumeSessionId ? ['-s', resumeSessionId] : []),
-      prompt
+      ...(resumeSessionId ? ['-s', resumeSessionId] : [])
     ]
     let sessionId = resumeSessionId ?? ''
     let finalText = ''
@@ -86,6 +87,7 @@ export function createOpencodeBackend(config: OpencodeBackendOptions = {}): Agen
       prefixArgs: resolved.prefixArgs,
       args,
       cwd: workdir || process.cwd(),
+      stdin: prompt,
       onLine: (obj) => {
         if (!isJsonObject(obj)) return
         const j = obj

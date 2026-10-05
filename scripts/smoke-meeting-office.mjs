@@ -248,6 +248,50 @@ check(persistedMember?.id === memberA.id, 'meeting member mapping survives regis
 
 check(notifications === 0, 'suppressed office and member tasks emit no notifications')
 
+console.log('--- member bootstrap failure re-bootstraps instead of bricking the session ---')
+{
+  // 审码判官 P1：成员首回合在 sessionId 落库前失败 → ensure 把终态单当已完成初始化 →
+  // followUp 被「无会话可恢复」永久拒绝，会议重试永远起不来。修复：终态且无 sessionId
+  // 的会话单重新引导（同任务身份、新会话）；有 sessionId 的终态单绝不走重建路径。
+  let bootFails = true
+  let bootStarts = 0
+  const bootBackend = {
+    id: 'fake-boot',
+    label: 'Fake boot',
+    supportsResume: true,
+    async probe() { return { ok: true, detail: 'fake' } },
+    async start({ events, turn }) {
+      bootStarts++
+      if (bootFails) throw new Error('bootstrap backend down')
+      setTimeout(() => {
+        events.onEvent({ ts: Date.now(), kind: 'final', text: 'boot-ready' }, turn)
+        events.onTurnEnd({ ok: true, response: 'boot-ready' }, turn)
+      }, 5)
+      return {
+        sessionId: `boot-session-${bootStarts}`,
+        turnScoped: true,
+        async send(_content, nextTurn) {
+          events.onEvent({ ts: Date.now(), kind: 'final', text: 'boot-reply' }, nextTurn)
+          events.onTurnEnd({ ok: true, response: 'boot-reply' }, nextTurn)
+        },
+        async stop() {},
+        async close() {}
+      }
+    }
+  }
+  const bootRunner = new TaskRunner(store, new Map([[bootBackend.id, bootBackend]]), () => ({ concurrency: 1, workerConcurrency: 1, mode: 'yolo', notify: false }))
+  const bootAgents = [{ id: 'booter', name: 'Booter', backend: bootBackend.id, role: '队长' }]
+  const bootRegistry = new AgentSessionRegistry({ store, taskService: service, runner: bootRunner, getAgents: () => bootAgents, waitPollMs: 5, waitTimeoutMs: 5_000 })
+  const failed = await bootRegistry.ensure('booter', { meetingId: 'mtg_BOOT' })
+  check(failed.status === 'failed' && !failed.sessionId, 'failed bootstrap leaves a terminal member task without a session')
+  bootFails = false
+  const recovered = await bootRegistry.ensure('booter', { meetingId: 'mtg_BOOT' })
+  check(bootStarts === 2 && recovered.status === 'done' && !!recovered.sessionId, 'terminal member without a session re-bootstraps on the next ensure')
+  const spoke = await bootRegistry.followUp('booter', '重建后的发言', { meetingId: 'mtg_BOOT', collectFinal: true })
+  check(spoke.ok && spoke.finalText === 'boot-reply', 'follow-up works after the re-bootstrap')
+  await bootRunner.shutdown()
+}
+
 await runner.shutdown()
 if (process.exitCode) process.exit(1)
 console.log('\n✅ MEETING OFFICE SMOKE PASSED')

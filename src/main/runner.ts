@@ -4,7 +4,7 @@ import type { ExecutionOwner, Task, TaskEvent, WorktreeInfo } from '../shared/ty
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 import { sameExecutionOwner, type TaskExpectation, type TaskStore } from './store'
-import { createExecutionOwner } from './persistence'
+import { createExecutionOwner, processOwnerState } from './persistence'
 import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnStamp, PermissionRequest, BackendTurnResult } from './backends/types'
 import { runDelegationLoop, parseContinueMerged, stripContinue, parseDelegates, stripDelegates, stripRoundNotes, stripReviews, parseConsultsMerged, stripConsults, parseInvestigatesMerged, stripInvestigates, ancestorBudget, sanitizeChildPrompt, escapeProtocolLiterals, MAX_DEPTH, MAX_TOTAL_ROUNDS, DELEGATE_REJECT_EXCERPT_MARK, findUnmatchedConsultOpens, findUnmatchedInvestigateOpens, unmatchedConsultOpenReason, unmatchedInvestigateOpenReason, parseSparseAttr, type AgentLike, type DelegateCall, type ConsultCall, type InvestigateCall, type IssueCommentLike } from './delegate'
 import { buildAgentPrompt, buildDelegationBlock, buildChildPrompt, sharedWorkspaceInstruction, handoffNoteBlock, delegateRecoveryNotice, consultReplyFeedback, investigationTaskPrompt, investigationFeedback, CONTINUE_BLOCK, HANDOFF_CUE, HANDOFF_RECEIVE_CUE, HANDOFF_START_CONFIRMED_CUE, RETITLE_PROMPT } from './prompts'
@@ -1128,7 +1128,13 @@ export class TaskRunner {
       ? runCondition(claim)
       : { status: 'queued', runId: task.runId, executionOwner: task.executionOwner }
     // 回合失败：流式期间基于半截输出提前建的单一并撤销（无人收编/回灌，也不该被信任）
-    if (!this.store.updateIf(taskId, expected, { status: 'failed', endedAt: Date.now(), error, failure: classifyFailure({ error }) })) return false
+    // terminatedRunId 同时落盘：失败由本运行器亲眼观察（进程退出/spawn 即败），
+    // 它就是该 run 的退出证明——不落的话，会议停止的「历史执行退出未确认」守卫
+    // 会对这张已终态任务永久拒停（spawn ENAMETOOLONG 实战：会议无法停止也无法删除）。
+    if (!this.store.updateIf(taskId, expected, {
+      status: 'failed', endedAt: Date.now(), error, failure: classifyFailure({ error }),
+      ...(claim ? { terminatedRunId: claim.runId } : {})
+    })) return false
     this.abandonEarlySpawns(taskId)
     if (claim && this.claims.get(taskId) === claim) this.claims.delete(taskId)
     this.lifecycle(taskId).setStatus('failed')
@@ -3285,8 +3291,11 @@ export class TaskRunner {
       return owner?.taskId === taskId && owner.runId === current.runId && sameExecutionOwner(owner.owner, current.executionOwner)
     })
     if (!target && current.meetingId && current.runId && current.terminatedRunId !== current.runId
+      && processOwnerState(current.executionOwner) !== 'dead'
       && !(registered?.runId === current.runId && sameExecutionOwner(registered.owner, current.executionOwner))
       && !this.sessions.has(taskId) && !this.activeRuns.has(taskId) && !this.activeTurns.has(taskId) && !knownRelease) {
+      // owner 进程已死时不再拒停：没有任何进程能补上退出确认，等下去是永久死锁
+      // （会议既停不掉也删不掉）。owner 存活且无凭据时维持拒停——它的关闭流程可能还在途。
       return { ok: false, error: '历史会议执行退出未确认，已保留任务与日志' }
     }
     if (!target) {

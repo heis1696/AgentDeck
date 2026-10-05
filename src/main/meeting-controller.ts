@@ -131,19 +131,24 @@ function validEnvelope(value: unknown): value is Envelope {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const item = value as Record<string, unknown>
   if (!Array.isArray(item.decisions) || !item.decisions.every((entry) => typeof entry === 'string')) return false
-  const objections = Array.isArray(item.objections) ? item.objections : []
+  // 字段缺席按默认空集放行；字段在场却类型错误必须整体拒绝——宽容成空集会把 `{}` 一路
+  // 带进 minutesFromRound 的 .map()，在轮次异常兜底之外抛错，留下 active 却无调度器的僵尸会议
+  if (item.objections !== undefined && !Array.isArray(item.objections)) return false
+  const objections = item.objections ?? []
   if (!objections.every((entry) => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false
     const row = entry as Record<string, unknown>
     return typeof row.text === 'string' && typeof row.ref === 'string' && typeof row.resolved === 'boolean'
   })) return false
-  const actionItems = Array.isArray(item.actionItems) ? item.actionItems : []
+  if (item.actionItems !== undefined && !Array.isArray(item.actionItems)) return false
+  const actionItems = item.actionItems ?? []
   if (!actionItems.every((entry) => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false
     const row = entry as Record<string, unknown>
     return typeof row.title === 'string' && typeof row.owner === 'string' && Array.isArray(row.acceptance) && row.acceptance.every((v) => typeof v === 'string')
   })) return false
-  const openQuestions = Array.isArray(item.openQuestions) ? item.openQuestions : []
+  if (item.openQuestions !== undefined && !Array.isArray(item.openQuestions)) return false
+  const openQuestions = item.openQuestions ?? []
   if (!openQuestions.every((entry) => typeof entry === 'string')) return false
   return true
 }
@@ -413,9 +418,11 @@ export class MeetingController {
     let finish!: () => void
     const done = new Promise<void>((resolve) => { finish = resolve })
     this.runs.set(id, { abort, done, finish })
-    this.save(id, { executionEpoch: (meeting.executionEpoch ?? 0) + 1 })
-    this.running.add(id)
     try {
+      // epoch 提交也在清理边界内：登记了 runs 却没能真正启动时，finally 必须撤销登记，
+      // 否则停止永远等不到 done——「会议调度尚未退出」永久拒停拒删（审码判官 P1 复现）
+      this.save(id, { executionEpoch: (meeting.executionEpoch ?? 0) + 1 })
+      this.running.add(id)
       const result = await this.run(id)
       if (result.meeting && ['concluded', 'failed', 'waiting_user'].includes(result.meeting.status)) {
         abort.abort()

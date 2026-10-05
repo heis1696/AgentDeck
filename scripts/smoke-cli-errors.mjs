@@ -21,6 +21,25 @@ const empty = await run('process.exit(0)')
 if (empty.result.code !== 0 || empty.result.stdoutBytes !== 0 || empty.result.lineCount !== 0) throw new Error('empty output result is incorrect')
 console.log('✓ non-zero exit, JSON parse failure and empty output')
 
+// stdin 投喂：超长 prompt 不再走 argv（Windows CreateProcess 32767 字符命令行上限，
+// 会议上下文随轮次膨胀到 46K 时 claude/codex spawn ENAMETOOLONG 实战）。含一例
+// 超限载荷——argv 版在 win32 必炸，stdin 版必须原样送达。
+const readStdin = "let d='';process.stdin.setEncoding('utf8').on('data',c=>d+=c).on('end',()=>{process.stdout.write(JSON.stringify({len:d.length,head:d.slice(0,6)}))+'\\n'})"
+const small = await new Promise((resolve) => {
+  const lines = []
+  const runner = runCliJsonl({ command: process.execPath, prefixArgs: [], args: ['-e', readStdin], cwd: root, stdin: 'secret', idleTimeoutMs: 5000, onLine: (obj) => lines.push(obj) })
+  runner.exited.then((result) => resolve({ result, lines }))
+})
+if (small.result.code !== 0 || small.lines[0]?.len !== 6 || small.lines[0]?.head !== 'secret') throw new Error('stdin payload was not delivered intact')
+const hugePayload = 'x'.repeat(46_116)
+const huge = await new Promise((resolve) => {
+  const lines = []
+  const runner = runCliJsonl({ command: process.execPath, prefixArgs: [], args: ['-e', readStdin], cwd: root, stdin: hugePayload, idleTimeoutMs: 5000, onLine: (obj) => lines.push(obj) })
+  runner.exited.then((result) => resolve({ result, lines }))
+})
+if (huge.result.code !== 0 || huge.lines[0]?.len !== hugePayload.length) throw new Error('oversized (46K) stdin payload failed — the ENAMETOOLONG class is not fixed')
+console.log('✓ stdin delivery intact, including a 46K payload beyond the Windows argv limit')
+
 // 可执行路径等值判定两形态：大小写不敏感平台（win32）折叠——同一可执行文件的别名
 // 写法（大小写差异）判等，ELECTRON_RUN_AS_NODE 兜底不漏打；大小写敏感平台精确比较。
 // 别名构造按平台通用：POSIX 绝对路径的首段是空串（/usr/...），从根分隔符后的第一个

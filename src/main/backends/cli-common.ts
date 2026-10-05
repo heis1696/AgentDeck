@@ -135,6 +135,9 @@ export function runCliJsonl(opts: {
   maxTotalBytes?: number
   /** 附加环境变量（默认继承主进程 env） */
   env?: Record<string, string>
+  /** 投喂到子进程 stdin 的载荷（写完即关）。超长 prompt 必须走这里：
+   *  argv 版在 Windows 撞 CreateProcess 32767 字符命令行上限（spawn ENAMETOOLONG）。 */
+  stdin?: string
 }): CliJsonlRunner {
   // 兜底场景 command = process.execPath（electron 充当 node，见 cli-locator）：
   // 不带 ELECTRON_RUN_AS_NODE 打包版会忽略脚本参数把自己再启动一遍
@@ -145,9 +148,14 @@ export function runCliJsonl(opts: {
   const child = spawn(opts.command, [...opts.prefixArgs, ...opts.args], {
     cwd: opts.cwd,
     env,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: [opts.stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
     windowsHide: true
   })
+  if (opts.stdin !== undefined && child.stdin) {
+    // CLI 早退时 stdin 端会断（EPIPE）：错误吞掉——进程退出/看门狗路径已能给出具名失败
+    child.stdin.on('error', () => {})
+    child.stdin.end(opts.stdin)
+  }
   let stderrTail = ''
   let total = 0
   let buffer = ''

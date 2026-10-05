@@ -1,7 +1,9 @@
 // OpenAI Codex 适配器（一次性进程模型）
-// 无头：codex exec --json --dangerously-bypass-approvals-and-sandbox <prompt>
+// 无头：codex exec --json --dangerously-bypass-approvals-and-sandbox -
 // 事件：thread.started(id) → item.started/completed(command_execution|mcp_tool_call|agent_message) → turn.completed
-// 续聊：codex exec resume <id> --json ...
+// 续聊：codex exec resume <id> --json ... -
+// prompt 走 stdin（`-` 显式声明从 stdin 读）：argv 版在 Windows 撞 CreateProcess
+// 32767 字符命令行上限，会议上下文随轮次膨胀后 spawn ENAMETOOLONG
 // 注意：Windows 下 workspace-write 沙箱会废掉命令执行，必须 bypass（实测 exit -1）
 import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnResult, BackendTurnStamp } from './types'
 import { bindTurn } from './types'
@@ -31,8 +33,8 @@ export function createCodexBackend(): AgentBackend {
     const modelArgs = model ? ['-m', model] : []
     const effortArgs = thinking ? ['-c', `model_reasoning_effort=${MODEL_REASONING_EFFORT[thinking]}`] : []
     const args = resumeSessionId
-      ? ['exec', 'resume', resumeSessionId, ...modelArgs, ...effortArgs, ...common, prompt]
-      : ['exec', ...modelArgs, ...effortArgs, ...common, prompt]
+      ? ['exec', 'resume', resumeSessionId, ...modelArgs, ...effortArgs, ...common, '-']
+      : ['exec', ...modelArgs, ...effortArgs, ...common, '-']
     let sessionId = resumeSessionId ?? ''
     let finalText = ''
     // Codex can emit multiple agent_message items in one turn. Keep all of
@@ -60,6 +62,7 @@ export function createCodexBackend(): AgentBackend {
       prefixArgs: resolved.prefixArgs,
       args,
       cwd: workdir,
+      stdin: prompt,
       onLine: (obj) => {
         if (!isJsonObject(obj)) return
         const j = obj

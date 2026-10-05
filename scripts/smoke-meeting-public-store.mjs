@@ -182,6 +182,28 @@ try {
   check(storeD4.getTurn(meetingD.id, turnD.id)?.body === '重启前完整正文', 'orphan reclaim keeps committed bodies')
   check(!fs.existsSync(path.join(bodiesDir, meetingD.id, 'turn_orphan.json')) && !fs.existsSync(path.join(bodiesDir, 'meeting_ghost')) && !fs.existsSync(path.join(bodiesDir, meetingD.id, `${turnD.id}.json.tmp`)), 'orphan bodies, ghost meeting dirs and temp leftovers are reclaimed on load')
 
+  // 孤儿清理失败（EPERM/EACCES 等）是垃圾回收问题，不得炸掉构造函数阻断有效数据加载（审码判官 P0）
+  fs.mkdirSync(path.join(bodiesDir, 'meeting_ghost2'))
+  fs.writeFileSync(path.join(bodiesDir, 'meeting_ghost2', 'x.json'), '{}')
+  fs.writeFileSync(path.join(bodiesDir, meetingD.id, 'turn_locked.json'), '{}')
+  const originalRmSync = fs.rmSync
+  let rmFailures = 0
+  fs.rmSync = (target, ...rest) => {
+    if (String(target).includes('meeting_ghost2') || String(target).includes('turn_locked')) {
+      rmFailures++
+      const denial = new Error(`EPERM: operation not permitted, unlink '${target}'`)
+      denial.code = 'EPERM'
+      throw denial
+    }
+    return originalRmSync.call(fs, target, ...rest)
+  }
+  try {
+    const storeD5 = new MeetingStore(dirD)
+    check(rmFailures >= 2 && !!storeD5.get(meetingD.id) && storeD5.getTurn(meetingD.id, turnD.id)?.body === '重启前完整正文', 'orphan cleanup failure (EPERM) defers instead of breaking store construction')
+  } finally {
+    fs.rmSync = originalRmSync
+  }
+
   const bodyTarget = storeD4.appendTurn(makeTurn({ meetingId: meetingD.id, status: 'speaking' }))
   const watermarkBeforeFailure = storeD4.readTurns(meetingD.id).latestVersion
   fs.mkdirSync(path.join(bodiesDir, meetingD.id, `${bodyTarget.id}.json`))

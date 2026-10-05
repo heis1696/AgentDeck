@@ -500,7 +500,13 @@ export class MeetingStore {
       if (!entry.isDirectory() || !SAFE_STORAGE_ID.test(entry.name)) continue
       const meetingDir = path.join(this.bodiesRoot, entry.name)
       if (!this.data.meetings.some((meeting) => meeting.id === entry.name)) {
-        fs.rmSync(meetingDir, { recursive: true, force: true })
+        // 孤儿清理是垃圾回收，不是事务一致性：单项失败只记日志延后（下次构造/reload 重试），
+        // 绝不让 EPERM/EACCES 之类的删除失败炸掉构造函数、阻断整个应用初始化
+        try {
+          fs.rmSync(meetingDir, { recursive: true, force: true })
+        } catch (error) {
+          console.warn('[MeetingStore] orphan meeting body dir cleanup deferred', error)
+        }
         continue
       }
       const turnIds = new Set(this.turnsOf(entry.name).map((turn) => turn.id))
@@ -512,7 +518,13 @@ export class MeetingStore {
       }
       for (const file of files) {
         const turnId = file.name.endsWith('.json') ? file.name.slice(0, -'.json'.length) : file.name
-        if (!SAFE_STORAGE_ID.test(turnId) || !turnIds.has(turnId)) fs.rmSync(path.join(meetingDir, file.name), { force: true })
+        if (!SAFE_STORAGE_ID.test(turnId) || !turnIds.has(turnId)) {
+          try {
+            fs.rmSync(path.join(meetingDir, file.name), { force: true })
+          } catch (error) {
+            console.warn('[MeetingStore] orphan turn body cleanup deferred', error)
+          }
+        }
       }
     }
   }

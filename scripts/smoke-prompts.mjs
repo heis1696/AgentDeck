@@ -259,6 +259,12 @@ for (const [name, text] of renderedInstances) {
 }
 check(renderedInstances.every(([, text]) => text.includes(p.ENVELOPE_FIELDS)), '纪要字段形状用文字说明（不靠示例内容教学）')
 check(meeting_mod.parseEnvelope(JSON.stringify({ decisions: ['x'], objections: [{ text: 't', ref: 'r', resolved: true }], actionItems: [{ title: 'a', owner: 'Alpha', acceptance: ['ok'] }], openQuestions: [] })) !== null, '纪要最小合法实例可被接受')
+// 字段在场却类型错误必须整体拒绝：宽容成空集会把 `{}` 带进 minutesFromRound 的 .map()，
+// 在轮次异常兜底之外抛错，留下 active 却无调度器的僵尸会议（审码判官 P1 复现）
+check(meeting_mod.parseEnvelope(JSON.stringify({ decisions: [], objections: {}, actionItems: [], openQuestions: [] })) === null, 'object-valued objections field is rejected, not coerced to empty')
+check(meeting_mod.parseEnvelope(JSON.stringify({ decisions: [], actionItems: 'none', openQuestions: [] })) === null, 'string-valued actionItems field is rejected')
+check(meeting_mod.parseEnvelope(JSON.stringify({ decisions: [], openQuestions: 7 })) === null, 'number-valued openQuestions field is rejected')
+check(meeting_mod.parseEnvelope(JSON.stringify({ decisions: [] })) !== null, 'absent optional fields still default to empty sets')
 
 // 接力：协议示例带指纹，复述不触发；显式 auto 且非示例的简报才触发
 const continueExample = p.CONTINUE_BLOCK.match(/<continue start="auto">[\s\S]*?<\/continue>/)?.[0] ?? ''

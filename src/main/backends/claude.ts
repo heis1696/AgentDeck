@@ -1,7 +1,9 @@
 // Claude Code 适配器（一次性进程模型）
-// 无头：claude -p <prompt> --output-format stream-json --verbose --dangerously-skip-permissions
+// 无头：claude -p --output-format stream-json --verbose --dangerously-skip-permissions
 // 事件：system/init(session_id) → assistant(text|tool_use) → user(tool_result) → result(终态+费用)
 // 续聊：--resume <sessionId>
+// prompt 走 stdin（claude -p 无位置参数时从 stdin 读）：argv 版在 Windows 撞
+// CreateProcess 32767 字符命令行上限，会议上下文随轮次膨胀后 spawn ENAMETOOLONG。
 import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnStamp } from './types'
 import { bindTurn } from './types'
 import type { TaskEvent, ThinkingLevel, ToolEditMeta } from '../../shared/types'
@@ -31,7 +33,7 @@ export function createClaudeBackend(): AgentBackend {
     const resolved = resolveCli('claude')
     if (!resolved) return Promise.reject(new Error('PATH 上找不到 claude'))
     const args = [
-      '-p', prompt,
+      '-p',
       '--output-format', 'stream-json',
       '--verbose',
       '--dangerously-skip-permissions',
@@ -57,6 +59,7 @@ export function createClaudeBackend(): AgentBackend {
       prefixArgs: resolved.prefixArgs,
       args,
       cwd: workdir,
+      stdin: prompt,
       // API 预设连接覆盖：与 cc-switch 同机制（env 快照），但不写全局 settings.json；
       // 思考强度走同一 env 对象注入，互不覆盖
       ...(connection || thinking

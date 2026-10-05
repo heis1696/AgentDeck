@@ -273,8 +273,20 @@ export class AgentSessionRegistry {
       }
     }
 
-    if (task.status === 'queued') {
+    // 首回合没建立过会话的终态任务（bootstrap 在 sessionId 落库前失败/被取消）：
+    // followUp 会以「无会话可恢复」拒绝，这张会话单就永久废了——会议重试永远起不来。
+    // 终态且无 sessionId 时重新引导既有任务（同一任务身份、新会话）；有 sessionId 的
+    // 终态单照旧走续聊，绝不走这条重建路径。
+    const needsBootstrap = (task.status === 'done' || task.status === 'failed' || task.status === 'cancelled') && !task.sessionId
+    if (task.status === 'queued' || needsBootstrap) {
       throwIfAborted(signal, `会话操作已取消（${agent.name}）`)
+      if (needsBootstrap) {
+        const rebooted = this.store.update(task.id, { status: 'queued', endedAt: undefined, error: undefined, runId: undefined, executionOwner: undefined })
+        if (rebooted) {
+          this.note(task.id, '↻ 会话首回合未建立会话（无 sessionId），重新引导会话启动')
+          task = rebooted
+        }
+      }
       if (task.parked) {
         // An office task is controlled by this registry, never by the parked
         // UI queue. Clear a stale flag before handing it to the runner.
