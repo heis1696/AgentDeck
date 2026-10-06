@@ -301,18 +301,23 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
     return <span className="badge board-child-diff" title="完成时抓取的 git 改动统计">{stat.files > 0 && <span>{stat.files}文件</span>}{stat.plus !== undefined && <span className="diff-add">+{stat.plus}</span>}{stat.minus !== undefined && <span className="diff-del">−{stat.minus}</span>}</span>
   }
   const childCards = (nodes: BoardNode[]): React.ReactNode => <div className="board-child-list">{nodes.map((node) => <div key={node.task.id} className="board-child-item">
-    <button className="board-child-card" data-status={node.task.status} onClick={() => onOpen(node.task.id)} title={`${TASK_STATUS_LABELS[node.task.status]} · ${node.task.title}`}>
-      <span className="board-child-line1">
-        <span className={`dot dot-${node.task.status}${node.task.status === 'running' ? ' board-child-dot-running' : ''}`} />
-        <span className="board-child-title">{node.task.title}</span>
-        <span className="board-child-state">{TASK_STATUS_LABELS[node.task.status]}</span>
-        {node.task.startedAt && <span className="board-child-time">{elapsed(node.task, now)}</span>}
-      </span>
-      <span className="board-child-line2">
-        <span className="badge board-child-backend">{node.task.backend}</span>
-        {diffBadge(node.task)}
-      </span>
-    </button>
+    <div className="board-child-row">
+      <button className="board-child-card" data-status={node.task.status} onClick={() => onOpen(node.task.id)} title={`${TASK_STATUS_LABELS[node.task.status]} · ${node.task.title}`}>
+        <span className="board-child-line1">
+          <span className={`dot dot-${node.task.status}${node.task.status === 'running' ? ' board-child-dot-running' : ''}`} />
+          <span className="board-child-title">{node.task.title}</span>
+          <span className="board-child-state">{TASK_STATUS_LABELS[node.task.status]}</span>
+          {node.task.startedAt && <span className="board-child-time">{elapsed(node.task, now)}</span>}
+        </span>
+        <span className="board-child-line2">
+          <span className="badge board-child-backend">{node.task.backend}</span>
+          {diffBadge(node.task)}
+        </span>
+      </button>
+      {/* 子 issue（委派单）失败/取消的就地重跑：此前必须点进详情才能「重新运行」，
+          队员单挂了（如 zcode 输出超限）没法原地拉起 */}
+      {(node.task.status === 'failed' || node.task.status === 'cancelled') && <button className="board-child-retry" disabled={starting === node.task.id} title="重新运行本子单（领队在环时结果照常回灌）" onClick={() => void retryTask(node.task.id)}>⟳</button>}
+    </div>
     {node.children.length > 0 && childCards(node.children)}
   </div>)}</div>
   const renderCard = (node: BoardNode) => {

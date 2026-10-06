@@ -213,6 +213,11 @@
 .board-child-list { display: flex; flex-direction: column; gap: 2px; }
 /* 深层子单沿左连接竖线缩进（行式层级的缩进引导线） */
 .board-child-list .board-child-list { margin: 2px 0 0 10px; padding-left: 9px; border-left: 1px solid var(--border-strong); }
+.board-child-row { display: flex; align-items: stretch; gap: 4px; }
+.board-child-row .board-child-card { flex: 1 1 auto; width: auto; }
+.board-child-retry { flex: none; align-self: center; min-height: 20px; padding: 0 7px; border: 1px solid color-mix(in srgb, var(--status-queued) 42%, transparent); border-radius: var(--radius-pill); background: var(--status-queued-bg); color: var(--warn); font-size: var(--text-micro); font-weight: 600; white-space: nowrap; cursor: pointer; }
+.board-child-retry:hover { border-color: var(--status-queued); }
+.board-child-retry:disabled { opacity: 0.55; cursor: default; }
 .board-child-card { display: flex; flex-direction: column; gap: 3px; width: 100%; padding: 4px 6px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-dim); font-size: var(--text-micro); text-align: left; cursor: pointer; transition: background var(--duration-base) var(--ease-in-out), color var(--duration-base) var(--ease-in-out); }
 .board-child-card:hover { background: var(--bg-hover); color: var(--text); }
 .board-child-card[data-status='running'] { border-color: transparent; background: transparent; }

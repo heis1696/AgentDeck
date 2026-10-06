@@ -28,6 +28,7 @@ try {
   // 失败/取消的看板卡片必须有就地重跑入口（zcode 输出超限实战：只能点进详情才能重跑）
   const boardSource = fs.readFileSync(path.join(root, 'src/renderer/src/components/BoardView.tsx'), 'utf8')
   assert.match(boardSource, /task\.status === 'failed' \|\| task\.status === 'cancelled'[\s\S]{0,400}retryTask\(task\.id\)/, 'failed and cancelled board cards expose an in-place rerun wired to tasks:retry')
+  assert.match(boardSource, /node\.task\.status === 'failed' \|\| node\.task\.status === 'cancelled'[\s\S]{0,300}retryTask\(node\.task\.id\)/, 'failed and cancelled delegate child rows expose an in-place rerun too')
   const data = path.join(temp, 'data')
   store = new TaskStore(data)
   const fixtureIssues = new IssueStore(data)
