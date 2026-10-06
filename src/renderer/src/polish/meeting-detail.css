@@ -241,6 +241,9 @@
 .meeting-detail .mtd-pane-section > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .meeting-detail .mtd-pane-section[open] > summary { margin-bottom: 10px; }
 .meeting-detail .mtd-pane-person { display: flex; align-items: center; gap: 10px; }
+.meeting-detail .mtd-pane-control { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 4px 0; }
+.meeting-detail .mtd-pane-control .btn { flex-shrink: 0; }
+.meeting-detail .mtd-pane-control-reason { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-micro); color: var(--text-dim); }
 .meeting-detail .mtd-pane-person div { min-width: 0; }
 .meeting-detail .mtd-pane-person strong { display: block; font-weight: 600; overflow-wrap: anywhere; }
 .meeting-detail .mtd-pane-person span { color: var(--text-dim); font-size: var(--text-micro); }

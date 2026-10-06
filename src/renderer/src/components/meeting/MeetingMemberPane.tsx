@@ -18,7 +18,7 @@
  * WorkerPane 只读日志按所选 Task/Run/Turn 过滤，不回退成员会话的全部历史。
  */
 import { useEffect, useRef, useState, type ChangeEvent } from 'react'
-import { FolderSearch } from 'lucide-react'
+import { FolderSearch, Play, RefreshCw } from 'lucide-react'
 import type { Meeting, MeetingMemberExecutions, MeetingTurn, MeetingTurnDetail } from '../../../../shared/meeting'
 import type { Task, TaskStatus } from '../../../../shared/types'
 import { bridge } from '../../api'
@@ -171,11 +171,30 @@ export function MeetingMemberPane({ meeting, tasks, turns }: MemberPaneProps) {
   const executionExact = !!(associatedTaskId && selectedTurn?.runId && selectedTurn?.executionTurnId)
   const turnGone = !!requestedTurnId && turnState && turnState.turnId === requestedTurnId && !turnState.turn
 
+  // 成员执行不可独立重跑（由会议驱动）：失败/暂停的会议在分栏里就地给会议级控制，
+  // 否则用户盯着挂掉的成员执行找不到任何重试入口（zcode 输出超限实战）
+  const [controlBusy, setControlBusy] = useState(false)
+  const runMeetingControl = async (action: () => Promise<{ ok: boolean; error?: string }>, failure: string) => {
+    setControlBusy(true)
+    try {
+      const result = await action()
+      if (!result.ok && result.error) ui.toast.error(`${failure}：${result.error}`)
+    } catch (error) {
+      ui.toast.error(error instanceof Error ? error.message : String(error))
+    } finally { setControlBusy(false) }
+  }
+
   return <div className="mtd-pane" data-member-pane={agentId}>
     <div className="mtd-pane-person">
       <span className="mtd-avatar" aria-hidden="true">{memberName.slice(0, 1)}</span>
       <div><strong>{memberName}</strong><span>{roleText || '会议成员'} · 会议范围会话</span></div>
     </div>
+    {(meeting.status === 'failed' || meeting.status === 'waiting_user') && <div className="mtd-pane-control" data-meeting-control>
+      {meeting.status === 'failed'
+        ? <button type="button" className="btn" disabled={controlBusy} data-control="restart-meeting" title={`会议在第 ${meeting.round} 轮失败：${meeting.blockedReason ?? '原因未知'}。成员执行由会议驱动，重启会议即重试`} onClick={() => void runMeetingControl(() => bridge.meetings.start(meetingId), '重新开始会议失败')}><RefreshCw size={13} aria-hidden="true" /> 重新开始会议</button>
+        : <button type="button" className="btn" disabled={controlBusy} data-control="resume-meeting" title="继续这场暂停中的会议" onClick={() => void runMeetingControl(() => bridge.meetings.resume(meetingId), '继续会议失败')}><Play size={13} aria-hidden="true" /> 继续会议</button>}
+      {meeting.status === 'failed' && meeting.blockedReason && <span className="mtd-pane-control-reason" title={meeting.blockedReason}>{meeting.blockedReason}</span>}
+    </div>}
     <div className="mtd-pane-mode">
       <span data-mode-label={followChecked ? 'follow' : 'fixed'}>{followChecked ? '跟随正式发言' : '固定所选成员'}</span>
       <label><input type="checkbox" checked={followChecked} onChange={onToggleFollow} aria-label="跟随当前发言者" />跟随当前发言者</label>
