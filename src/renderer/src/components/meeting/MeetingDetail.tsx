@@ -136,7 +136,9 @@ export function MeetingDetail({ meeting, tasks, onDeleted }: {
     }
   }
 
-  const canStart = meeting.status === 'draft'
+  // start() 本就支持从 failed 重启（落败会议重开新一轮）；只认 draft 会把失败会议
+  // 变成看板上的「无按钮可救」态——只能删了重建
+  const canStart = meeting.status === 'draft' || meeting.status === 'failed'
   const canPause = meeting.status === 'active'
   const canResume = meeting.status === 'waiting_user'
   // 删除失败后（deleteFailed）放开停止/删除按钮：deleting 本身保留——它是重启恢复续删的
@@ -232,7 +234,7 @@ export function MeetingDetail({ meeting, tasks, onDeleted }: {
           <span className="meta-chip">发言水位 v{latestVersion ?? 0}</span>
         </div>}
         actions={<>
-          {canStart && <button type="button" className="btn primary" disabled={pendingName === 'start'} data-control="start" onClick={() => void runLongControl('start', () => bridge.meetings.start(meeting.id), '会议启动失败')}><Play size={13} aria-hidden="true" /> 开始会议</button>}
+          {canStart && <button type="button" className="btn primary" disabled={pendingName === 'start'} data-control="start" onClick={() => void runLongControl('start', () => bridge.meetings.start(meeting.id), '会议启动失败')}><Play size={13} aria-hidden="true" /> {meeting.status === 'failed' ? '重新开始会议' : '开始会议'}</button>}
           {canResume && <button type="button" className="btn primary" disabled={pendingName === 'resume'} data-control="resume" onClick={() => void runLongControl('resume', () => bridge.meetings.resume(meeting.id), '会议继续失败')}><Play size={13} aria-hidden="true" /> 继续会议</button>}
           {canPause && <button type="button" className="btn" disabled={shortBusy} data-control="pause" onClick={() => void runControl('pause', () => bridge.meetings.pause(meeting.id), '暂停会议失败')}><Pause size={13} aria-hidden="true" /> 暂停</button>}
           {stoppable && <button type="button" className="btn danger" disabled={shortBusy} data-control="stop" title={meeting.stopState === 'failed' ? '上一次停止未取得退出确认，可重试' : '停止整场会议并等待退出确认'} onClick={() => void runControl('stop', () => bridge.meetings.cancel(meeting.id), '停止失败：会议仍未取得退出确认，可重试', {
