@@ -150,7 +150,7 @@ function WorkerDetail({ task, onOpen, readOnly, dockRootId, execution }: { task:
       <div className="worker-pane-title">
         <h2 title={task.title}>{task.title}</h2>
         {stoppable && <button type="button" className="btn danger worker-pane-stop" disabled={stopBusy} onClick={() => setInterrupting(true)} title="打断该队员任务（可附回执）"><Square size={12} aria-hidden="true" /><span className="worker-pane-stop-text">停止</span></button>}
-        {!readOnly && (task.status === 'failed' || task.status === 'cancelled') && <button type="button" className="btn worker-pane-retry" disabled={retryBusy} onClick={() => void rerun()} title={task.meetingTaskRole === 'container' ? '重新开始会议（整场重跑）' : '重新运行本执行'}><RefreshCw size={12} aria-hidden="true" /><span className="worker-pane-retry-text">重新运行</span></button>}
+        {!readOnly && (task.status === 'failed' || task.status === 'cancelled') && <button type="button" className="btn worker-pane-retry" disabled={retryBusy} onClick={() => void rerun()} title={task.meetingTaskRole === 'container' ? '从会议失败处继续：保留发言、上下文与成员会话（不是从头开始）' : task.meetingTaskRole === 'member' ? '会议成员执行由会议驱动，请在会议页继续' : '重新运行本执行'}><RefreshCw size={12} aria-hidden="true" /><span className="worker-pane-retry-text">{task.meetingTaskRole === 'container' ? '从失败处继续' : '重新运行'}</span></button>}
         {!readOnly && <button type="button" onClick={() => onOpen(task.id)} title="打开完整详情" aria-label="打开子任务完整详情"><ExternalLink size={14} aria-hidden="true" /><span className="worker-pane-open-text">完整详情</span></button>}
       </div>
       <div className="worker-pane-meta">

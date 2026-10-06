@@ -293,6 +293,14 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
       if (!result.ok) ui.toast.error(result.error ?? '重新运行失败')
     } catch { ui.toast.error('重新运行失败') } finally { setStarting(null) }
   }
+  /** 会议卡片（虚拟根）的失败续跑：保留发言与成员会话，从失败处继续 */
+  const continueMeeting = async (meetingId: string, cardId: string) => {
+    setStarting(cardId)
+    try {
+      const result = await bridge.meetings.start(meetingId)
+      if (!result.ok && result.error) ui.toast.error(result.error)
+    } catch { ui.toast.error('从失败处继续失败') } finally { setStarting(null) }
+  }
   const toggle = (id: string) => setExpanded((current) => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next })
   /** 子单两行迷你卡：改动徽标只来自本次执行的有效 Git 快照。 */
   const diffBadge = (task: Task) => {
@@ -338,7 +346,7 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
       <div className="board-card-tags"><span className="board-kind-badge">{KIND_LABELS[kind]}</span>{meeting && <span className="badge badge-meta" title={meetingPresentation(meeting).detail}>{meetingPresentation(meeting).label}</span>}{parked && <span className="badge badge-parked">{PARKED_QUEUED_LABEL}</span>}{!meeting && task.status === 'running' && <span className="board-running-label">运行中</span>}{issue?.labels.filter((label) => label !== '委派').slice(0, 2).map((label) => <span className="badge badge-meta" key={label}>{label}</span>)}</div>
       <div className="board-card-meta"><span className="badge board-backend">{task.backend}</span><span className="board-elapsed" title="执行耗时">{elapsed(task, now)}</span><time className="board-updated" dateTime={new Date(updatedAt(node)).toISOString()} title={new Date(updatedAt(node)).toLocaleString()}>{relativeBoardTime(updatedAt(node), now)}</time></div>
       {parked && <button className="btn board-card-start" disabled={starting === task.id} onClick={() => void startTask(task.id)}>▶ 启动</button>}
-      {(task.status === 'failed' || task.status === 'cancelled') && !navigationOnly && <button className="btn board-card-start" disabled={starting === task.id} title={task.status === 'failed' ? '重跑本执行（会议卡片会重启整场会议）' : '重跑本执行'} onClick={() => void retryTask(task.id)}>⟳ 重新运行</button>}
+      {(meeting ? meeting.status === 'failed' : !navigationOnly && (task.status === 'failed' || task.status === 'cancelled')) && <button className="btn board-card-start" disabled={starting === task.id} title={meeting ? `从会议失败处继续：保留发言、上下文与成员会话，从第 ${meeting.round} 轮失败处续跑（不是从头开始）` : '重新运行本执行'} onClick={() => void (meeting ? continueMeeting(meeting.id, task.id) : retryTask(task.id))}>{meeting ? '⟳ 从失败处继续' : '⟳ 重新运行'}</button>}
       {workers.length > 0 && <section className="board-workers">
         <button className="board-workers-toggle" aria-expanded={open} aria-controls={`workers-${task.id}`} onClick={() => toggle(task.id)} disabled={filtering} title={filtering ? '筛选时展开子单以保留匹配上下文' : '展开或折叠子派单'}>{open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}<span>子单</span><strong>{done}/{workers.length}</strong><span className="board-worker-progress" role="progressbar" aria-label="子单完成进度" aria-valuenow={done} aria-valuemin={0} aria-valuemax={workers.length}><span style={{ width: `${done / workers.length * 100}%` }} /></span></button>
         {open && <div className="board-child-root" id={`workers-${task.id}`}>{childCards(node.children)}</div>}

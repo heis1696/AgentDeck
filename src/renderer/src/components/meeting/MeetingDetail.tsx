@@ -234,7 +234,7 @@ export function MeetingDetail({ meeting, tasks, onDeleted }: {
           <span className="meta-chip">发言水位 v{latestVersion ?? 0}</span>
         </div>}
         actions={<>
-          {canStart && <button type="button" className="btn primary" disabled={pendingName === 'start'} data-control="start" onClick={() => void runLongControl('start', () => bridge.meetings.start(meeting.id), '会议启动失败')}><Play size={13} aria-hidden="true" /> {meeting.status === 'failed' ? '重新开始会议' : '开始会议'}</button>}
+          {canStart && <button type="button" className="btn primary" disabled={pendingName === 'start'} data-control="start" title={meeting.status === 'failed' ? `保留已开轮次、全部发言与成员会话，从第 ${meeting.round} 轮失败处续跑（不是从头开始）` : undefined} onClick={() => void runLongControl('start', () => bridge.meetings.start(meeting.id), '会议启动失败')}><Play size={13} aria-hidden="true" /> {meeting.status === 'failed' ? '从失败处继续' : '开始会议'}</button>}
           {canResume && <button type="button" className="btn primary" disabled={pendingName === 'resume'} data-control="resume" onClick={() => void runLongControl('resume', () => bridge.meetings.resume(meeting.id), '会议继续失败')}><Play size={13} aria-hidden="true" /> 继续会议</button>}
           {canPause && <button type="button" className="btn" disabled={shortBusy} data-control="pause" onClick={() => void runControl('pause', () => bridge.meetings.pause(meeting.id), '暂停会议失败')}><Pause size={13} aria-hidden="true" /> 暂停</button>}
           {stoppable && <button type="button" className="btn danger" disabled={shortBusy} data-control="stop" title={meeting.stopState === 'failed' ? '上一次停止未取得退出确认，可重试' : '停止整场会议并等待退出确认'} onClick={() => void runControl('stop', () => bridge.meetings.cancel(meeting.id), '停止失败：会议仍未取得退出确认，可重试', {

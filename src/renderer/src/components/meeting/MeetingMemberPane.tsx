@@ -191,7 +191,7 @@ export function MeetingMemberPane({ meeting, tasks, turns }: MemberPaneProps) {
     </div>
     {(meeting.status === 'failed' || meeting.status === 'waiting_user') && <div className="mtd-pane-control" data-meeting-control>
       {meeting.status === 'failed'
-        ? <button type="button" className="btn" disabled={controlBusy} data-control="restart-meeting" title={`会议在第 ${meeting.round} 轮失败：${meeting.blockedReason ?? '原因未知'}。成员执行由会议驱动，重启会议即重试`} onClick={() => void runMeetingControl(() => bridge.meetings.start(meetingId), '重新开始会议失败')}><RefreshCw size={13} aria-hidden="true" /> 重新开始会议</button>
+        ? <button type="button" className="btn" disabled={controlBusy} data-control="restart-meeting" title={`会议在第 ${meeting.round} 轮失败：${meeting.blockedReason ?? '原因未知'}。保留全部发言与成员会话，从失败处续跑（不是从头开始）`} onClick={() => void runMeetingControl(() => bridge.meetings.start(meetingId), '从失败处继续失败')}><RefreshCw size={13} aria-hidden="true" /> 从失败处继续</button>
         : <button type="button" className="btn" disabled={controlBusy} data-control="resume-meeting" title="继续这场暂停中的会议" onClick={() => void runMeetingControl(() => bridge.meetings.resume(meetingId), '继续会议失败')}><Play size={13} aria-hidden="true" /> 继续会议</button>}
       {meeting.status === 'failed' && meeting.blockedReason && <span className="mtd-pane-control-reason" title={meeting.blockedReason}>{meeting.blockedReason}</span>}
     </div>}

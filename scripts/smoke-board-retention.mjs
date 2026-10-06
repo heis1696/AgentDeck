@@ -25,9 +25,13 @@ try {
   const meetingNavigationSource = fs.readFileSync(path.join(root, 'src/renderer/src/components/meeting/meetingViewState.ts'), 'utf8')
   assert.match(meetingNavigationSource, /meetingNavigationTasks\(tasks, meetings, issues\)\.map/, 'unified catalog keeps the complete raw task directory plus meeting roots')
   assert.match(issuesViewSource, /publicTasksOf\(tasks\)/, 'Issue opened and recent task entries share public visibility')
-  // 失败/取消的看板卡片必须有就地重跑入口（zcode 输出超限实战：只能点进详情才能重跑）
+  // 失败/取消的看板卡片必须有就地重跑入口（zcode 输出超限实战：只能点进详情才能重跑）；
+  // 会议卡片是「从失败处继续」（保留轮次/发言/成员会话续跑）——与普通任务的清会话重跑
+  // 语义不同，命名不得歧义（用户实战误以为会议重启=从头开始而不敢点）
   const boardSource = fs.readFileSync(path.join(root, 'src/renderer/src/components/BoardView.tsx'), 'utf8')
-  assert.match(boardSource, /task\.status === 'failed' \|\| task\.status === 'cancelled'[\s\S]{0,400}retryTask\(task\.id\)/, 'failed and cancelled board cards expose an in-place rerun wired to tasks:retry')
+  assert.match(boardSource, /!navigationOnly && \(task\.status === 'failed' \|\| task\.status === 'cancelled'\)[\s\S]{0,500}retryTask\(task\.id\)/, 'failed and cancelled board cards expose an in-place rerun wired to tasks:retry')
+  assert.match(boardSource, /meeting\.status === 'failed'[\s\S]{0,400}continueMeeting\(meeting\.id, task\.id\)/, 'failed meeting cards expose continue-from-failure wired to meetings:start')
+  assert.match(boardSource, /meeting \? '⟳ 从失败处继续' : '⟳ 重新运行'/, 'meeting cards label the action continue-from-failure, not ambiguous restart')
   assert.match(boardSource, /node\.task\.status === 'failed' \|\| node\.task\.status === 'cancelled'[\s\S]{0,300}retryTask\(node\.task\.id\)/, 'failed and cancelled delegate child rows expose an in-place rerun too')
   const data = path.join(temp, 'data')
   store = new TaskStore(data)
