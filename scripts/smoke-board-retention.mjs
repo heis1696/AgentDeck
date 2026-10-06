@@ -25,6 +25,9 @@ try {
   const meetingNavigationSource = fs.readFileSync(path.join(root, 'src/renderer/src/components/meeting/meetingViewState.ts'), 'utf8')
   assert.match(meetingNavigationSource, /meetingNavigationTasks\(tasks, meetings, issues\)\.map/, 'unified catalog keeps the complete raw task directory plus meeting roots')
   assert.match(issuesViewSource, /publicTasksOf\(tasks\)/, 'Issue opened and recent task entries share public visibility')
+  // 失败/取消的看板卡片必须有就地重跑入口（zcode 输出超限实战：只能点进详情才能重跑）
+  const boardSource = fs.readFileSync(path.join(root, 'src/renderer/src/components/BoardView.tsx'), 'utf8')
+  assert.match(boardSource, /task\.status === 'failed' \|\| task\.status === 'cancelled'[\s\S]{0,400}retryTask\(task\.id\)/, 'failed and cancelled board cards expose an in-place rerun wired to tasks:retry')
   const data = path.join(temp, 'data')
   store = new TaskStore(data)
   const fixtureIssues = new IssueStore(data)

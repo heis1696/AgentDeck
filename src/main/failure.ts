@@ -69,9 +69,9 @@ const RULES: Rule[] = [
   },
   {
     code: 'output_limit',
-    re: /输出超过|疑似模型生成循环|输出上限|maxBytes|5MB/i,
-    title: '输出超限（疑似生成循环）',
-    hint: '回合输出被强制截断；请缩小任务范围或拆分后重试。',
+    re: /输出超过|疑似模型生成循环|输出上限|exceeded the output token|output token (?:limit|maximum|cap)|maxBytes|5MB/i,
+    title: '输出超限',
+    hint: '单次输出超过上限（生成循环或单条回复过长）；直接「重新运行」通常可恢复，反复出现请缩小任务范围或拆分任务。',
     retryable: false
   },
   {

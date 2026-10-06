@@ -37,6 +37,7 @@ const cases = [
   ['等待回合结束超时（30 分钟）', 'timeout'],
   ['resume 超时（120s）', 'timeout'],
   ['输出超过 300KB，疑似模型生成循环，强制停止本回合', 'output_limit'],
+  ["The model's response exceeded the output token maximum.", 'output_limit'],
   ['model error: maximum context length exceeded', 'context_overflow'],
   ['codex exec failed: exit code -1 (sandbox)', 'sandbox'],
   ['claude 进程退出 (code 2): panic: crash', 'process_crash'],
