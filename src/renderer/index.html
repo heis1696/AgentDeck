@@ -4,8 +4,33 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>AgentDeck</title>
+    <script>
+      // 桌宠窗（#/pet、#/pet-settings）与主窗共用本页：开机动画只属于主窗，
+      // 透明舞台不能被不透明动画层盖住——解析期就地隐藏，不等 JS bundle
+      if (/pet/.test(window.location.hash + window.location.search)) {
+        document.documentElement.className += ' no-splash'
+      }
+    </script>
+    <style>
+      /* 开机动画层：纯静态（不依赖 JS bundle），React 数据就绪后由 App 加 splash-done 淡出移除。
+         样式自包含于本页：不在 src/renderer/src 扫描面内，也不进组件令牌体系 */
+      #splash { position: fixed; inset: 0; z-index: 2147483647; background: #0f1115; display: flex; align-items: center; justify-content: center; transition: opacity 0.6s ease; }
+      #splash video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+      #splash .splash-brand { position: relative; display: flex; flex-direction: column; align-items: center; gap: 7px; pointer-events: none; }
+      #splash .splash-title { color: #e8edf5; font-size: 30px; font-weight: 700; letter-spacing: 0.16em; font-family: system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif; text-shadow: 0 2px 24px rgba(15, 17, 21, 0.85); }
+      #splash .splash-sub { color: rgba(214, 224, 238, 0.72); font-size: 12.5px; font-weight: 500; letter-spacing: 0.42em; text-indent: 0.42em; font-family: system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif; text-shadow: 0 1px 12px rgba(15, 17, 21, 0.9); }
+      #splash.splash-done { opacity: 0; pointer-events: none; }
+      html.no-splash #splash { display: none; }
+    </style>
   </head>
   <body>
+    <div id="splash" aria-hidden="true">
+      <video src="splash.mp4" autoplay muted loop playsinline></video>
+      <div class="splash-brand">
+        <span class="splash-title">AgentDeck</span>
+        <span class="splash-sub">本地任务看板</span>
+      </div>
+    </div>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

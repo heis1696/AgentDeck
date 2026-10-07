@@ -2,6 +2,7 @@ import React from 'react'
 import { createRoot } from 'react-dom/client'
 import { App } from './App'
 import { bridge } from './api'
+import { dismissSplash } from './splash'
 import { setSharedPathKeyPlatform } from '../../shared/path-key'
 import './styles.css'
 import './tokens.css'
@@ -25,3 +26,8 @@ createRoot(document.getElementById('root')!).render(
     <App />
   </React.StrictMode>
 )
+
+// 开机动画兜底：数据就绪的快路径在 App（tasksReady 即淡出），但 React 树若在
+// 装载期崩溃（effect 不执行，splash 会永远盖住空页面），这里在 bundle 顶层
+// 保底收场——动画最长多停留 10 秒，不把故障界面挡死
+window.setTimeout(dismissSplash, 10_000)

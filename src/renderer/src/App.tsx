@@ -24,6 +24,7 @@ import { PetSettingsPage } from './pet/PetSettingsPage'
 import type { Task } from '../../shared/types'
 import { extendRecentWorkspaces, pushRecentWorkspace } from '../../shared/path-key'
 import { publicTasksOf } from '../../shared/task-visibility'
+import { dismissSplash } from './splash'
 import { useMeetings } from './hooks/useMeetings'
 import { MeetingDetail } from './components/meeting/MeetingDetail'
 import { isMeetingInternalTask, meetingForNavigation, meetingNavigationCatalog, meetingNavigationEntries, meetingNavigationTasks, meetingRootId } from './components/meeting/meetingViewState'
@@ -85,6 +86,13 @@ export function App() {
     apply()
     if (theme === 'system') { mq.addEventListener('change', apply); return () => mq.removeEventListener('change', apply) }
   }, [settings?.theme])
+
+  // 开机动画（index.html 静态层，盖住 bundle 加载与首屏数据装载期的白屏）收场：
+  // 任务目录拿到第一份真实快照即淡出让首屏接棒；加载故障/渲染崩溃的兜底在
+  // main.tsx 顶层（不随 React 树陪葬），桌宠窗在 index.html 解析期就 display:none
+  useEffect(() => {
+    if (ready) dismissSplash()
+  }, [ready])
 
   // 界面字号：只改 --ui-font-size 这一个变量（字阶令牌全部由它推导），
   // 绝不动 html 自身 font-size——图标/间距/圆角不随字号缩放。
