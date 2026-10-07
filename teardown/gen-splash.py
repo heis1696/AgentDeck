@@ -34,9 +34,9 @@ prompt = {
     "1128": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "type": "minimax", "device": "default"}},
     "1129": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
     "1130": {"class_type": "CreateVideo", "inputs": {"images": ["1122", 0], "fps": 24, "audio": ["1121", 0], "bit_depth": 8}},
-    "1131": {"class_type": "MiniMaxH3ImageToVideo", "inputs": {"clip": ["1128", 0], "vae": ["1119", 0], "prompt": PROMPT, "width": 1184, "height": 768, "length": ["1132", 1]}},
-    "1132": {"class_type": "ComfyMathExpression", "inputs": {"expression": "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17", "values": {"a": ["1133", 0]}}},
-    "1133": {"class_type": "PrimitiveFloat", "inputs": {"value": 5}},
+    # length=124：5s@24fps 经 17k+5 网格 snap 的结果（原工作流 ComfyMathExpression 算的
+    # 就是 max(5, round(a*24)) + (5 - max(5, round(a*24)) % 17) % 17 = 124，直传更稳）
+    "1131": {"class_type": "MiniMaxH3ImageToVideo", "inputs": {"clip": ["1128", 0], "vae": ["1119", 0], "prompt": PROMPT, "width": 1184, "height": 768, "length": 124}},
     "1134": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["1127", 0], "lora_name": "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors", "strength_model": 1.0}},
     "92": {"class_type": "SaveVideo", "inputs": {"video": ["1130", 0], "filename_prefix": "video/AgentDeck_Splash", "format": "auto"}},
 }
