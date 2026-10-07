@@ -157,18 +157,22 @@
 .board-orphans-head { display: flex; align-items: center; gap: 8px; margin: 0 2px 1px; font-size: var(--text-micro); font-weight: 500; color: var(--text-dim); }
 .board-orphans-head span { margin-left: auto; font-family: var(--mono); }
 
-/* ---------- 单日视图：顶栏日期导航（‹ / 日期 / › / 今天 / 日期下拉） ---------- */
-.board-day-nav { display: inline-flex; align-items: center; gap: 2px; margin-left: auto; height: 30px; padding: 0 3px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-inset); }
-.board-day-nav-caption { padding: 0 5px 0 7px; color: var(--text-faint); font-size: var(--text-micro); white-space: nowrap; }
-.board-day-nav-btn { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-dim); cursor: pointer; }
+/* ---------- 单日视图：顶栏日期导航（‹ / 日期 / › / 今天 / 日期下拉） ----------
+   视觉强化：抬升底面 + 强边框 + 加重字重，让日期导航在工具栏里一眼可辨；
+   选中态（今天 chip / 全部日期）用实底或柔和 accent 呈现，与全局 active 语言一致。 */
+.board-day-nav { display: inline-flex; align-items: center; gap: 2px; margin-left: auto; height: 32px; padding: 0 5px; border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--bg-raised); }
+.board-day-nav-caption { padding: 0 6px 0 8px; color: var(--text-dim); font-size: var(--text-micro); font-weight: 600; white-space: nowrap; }
+.board-day-nav-btn { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text); cursor: pointer; }
 .board-day-nav-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
 .board-day-nav-btn:disabled { opacity: 0.4; cursor: default; }
-.board-day-nav-label { min-width: 92px; color: var(--text); font-size: var(--text-caption); font-weight: 600; font-variant-numeric: tabular-nums; text-align: center; white-space: nowrap; }
-.board-day-nav-today { min-height: 22px; padding: 0 8px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: transparent; color: var(--text-dim); font-size: var(--text-micro); font-weight: 600; cursor: pointer; }
+.board-day-nav-label { min-width: 92px; color: var(--text); font-size: var(--text-caption); font-weight: 700; font-variant-numeric: tabular-nums; text-align: center; white-space: nowrap; }
+.board-day-nav-label.is-today { color: var(--accent); }
+.board-day-nav-today { min-height: 22px; padding: 0 9px; border: 1px solid var(--border-strong); border-radius: var(--radius-pill); background: transparent; color: var(--text); font-size: var(--text-micro); font-weight: 600; cursor: pointer; }
 .board-day-nav-today:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
-.board-day-nav-today:disabled { opacity: 0.4; cursor: default; }
+/* disabled ⇔ 今天已被选中（该按钮唯一的禁用条件）：以实底 accent 呈现选中态，不再灰掉 */
+.board-day-nav-today:disabled { border-color: var(--accent); background: var(--accent); color: var(--accent-ink); cursor: default; }
 /* 实底背景（反馈三轮5）：透明底在 Windows 原生 select 失焦/离开时会闪白 */
-.board-day-nav-select { max-width: 112px; height: 24px; padding: 0 4px; border: 1px solid transparent; border-radius: var(--radius-sm); background: var(--bg-inset); color: var(--text-dim); font-size: 11px; cursor: pointer; }
+.board-day-nav-select { max-width: 112px; height: 24px; padding: 0 4px; border: 1px solid transparent; border-radius: var(--radius-sm); background: var(--bg-raised); color: var(--text); font-size: 11px; cursor: pointer; }
 .board-day-nav-select:hover, .board-day-nav-select:focus { background: var(--bg-hover); color: var(--text); }
 .board-day-nav-btn:focus-visible, .board-day-nav-today:focus-visible, .board-day-nav-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
@@ -255,9 +259,10 @@
 .board-child-backend { max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .board-child-diff { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .board-child-state, .board-child-time { white-space: nowrap; }
-.board-day-nav-all { min-height: 22px; padding: 0 8px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: transparent; color: var(--text-dim); font-size: var(--text-micro); font-weight: 600; cursor: pointer; }
+.board-day-nav-all { min-height: 22px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: var(--radius-pill); background: transparent; color: var(--text); font-size: var(--text-micro); font-weight: 600; cursor: pointer; }
 .board-day-nav-all:hover { border-color: var(--accent); color: var(--accent); }
-.board-day-nav-all.is-active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.board-day-nav-all.is-active { border-color: var(--accent); background: var(--accent); color: var(--accent-ink); }
+.board-day-nav-all.is-active:hover { color: var(--accent-ink); } /* 实底 accent 上只允许墨色文字，:hover 不得改回 accent 字色 */
 
 /* ---------- 看板工作台：工具栏层级、同步态与明确落点 ---------- */
 .board-toolbar { align-items: center; gap: 8px; padding-top: 9px; padding-bottom: 9px; }

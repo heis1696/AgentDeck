@@ -182,8 +182,8 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
   const { meetings, error: meetingsError, refresh: refreshMeetings } = useMeetings()
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [now, setNow] = useState(Date.now)
-  // 默认展示所有保留日期，避免用户首次打开看板只能看到今天。
-  const [selectedDay, setSelectedDay] = useState<number | null>(null)
+  // 默认落在今天（首次打开即当日视图）；null 仍是「全部日期」档，顶栏按钮与 clearFilters 可切回。
+  const [selectedDay, setSelectedDay] = useState<number | null>(() => boardDayFloor(Date.now()))
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null)
   const [dropTarget, setDropTarget] = useState<IssueStatus | null>(null)
   const [draggingTask, setDraggingTask] = useState<string | null>(null)
@@ -366,7 +366,7 @@ export function BoardView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: strin
         <span className="board-day-nav-caption">最后更新</span>
         <button type="button" className={`board-day-nav-all${selectedDay == null ? ' is-active' : ''}`} aria-pressed={selectedDay == null} title="显示保留窗内全部日期的 Issue" onClick={() => setSelectedDay(null)}>全部日期</button>
         <button type="button" className="board-day-nav-btn" aria-label="前一天" title="前一天" disabled={selectedDay == null} onClick={() => setSelectedDay((day) => day == null ? day : shiftBoardDay(day, -1, todayFloor))}><ChevronLeft size={14} /></button>
-         {selectedDay != null && <span className="board-day-nav-label" aria-live="polite">{formatBoardDay(selectedDay, todayFloor)}</span>}
+         {selectedDay != null && <span className={`board-day-nav-label${selectedDay === todayFloor ? ' is-today' : ''}`} aria-live="polite">{formatBoardDay(selectedDay, todayFloor)}</span>}
         <button type="button" className="board-day-nav-btn" aria-label="后一天" title="后一天" disabled={selectedDay == null || selectedDay >= todayFloor} onClick={() => setSelectedDay((day) => day == null ? day : shiftBoardDay(day, 1, todayFloor))}><ChevronRight size={14} /></button>
         <button type="button" className="board-day-nav-today" disabled={selectedDay === todayFloor} onClick={() => setSelectedDay(todayFloor)}>今天</button>
         <select className="board-day-nav-select" aria-label="按最后更新时间跳转日期" value={selectedDay == null ? 'all' : String(selectedDay)} onChange={(event) => setSelectedDay(event.target.value === 'all' ? null : Number(event.target.value))}>
