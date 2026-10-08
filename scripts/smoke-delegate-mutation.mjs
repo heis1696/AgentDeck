@@ -1396,12 +1396,12 @@ const MUTATIONS = [
     mutations: [
       {
         file: 'src/main/index.ts',
-        find: '  try {\n    await reconcileStartupTasks({',
-        replace: '  await reconcileStartupTasks({'
+        find: '    try {\n      await reconcileStartupTasks({',
+        replace: '    await reconcileStartupTasks({'
       },
       {
         file: 'src/main/index.ts',
-        find: "  } catch (error) {\n    console.error('[startup] 启动对账失败（应用继续启动，遗留任务保留可手动处理）', error)\n  }",
+        find: "    } catch (error) {\n      console.error('[startup] 启动对账失败（应用继续启动，遗留任务保留可手动处理）', error)\n    }",
         replace: ''
       }
     ],
