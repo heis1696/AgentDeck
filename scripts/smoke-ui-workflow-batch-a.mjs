@@ -109,7 +109,8 @@ assert.equal(active(), pickerTrigger, 'Agent picker returns focus to its trigger
 assert.match(pickerTrigger.textContent, /Long named execution Agent 19/)
 
 await act(async () => { ui.navigate('board'); await sleep(80) })
-// BoardView 自 86a29d7 起默认选中「今天」（selectedDay 初始 boardDayFloor(Date.now())），null 只是可切回的全部档
+// BoardView 自 86a29d7 起默认选中「今天」（selectedDay 初始 boardDayFloor(Date.now())），null 只是可切回的全部档；
+// 这里对齐该已定产品行为，产品代码不动。
 const todayFloor = new Date().setHours(0, 0, 0, 0)
 assert.match(query('.board-day-head-date').textContent, /最后更新：今天·/, 'board opens on today by default')
 assert.equal(query('.board-day-nav-select').value, String(todayFloor), 'board day nav starts on today instead of all')

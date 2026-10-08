@@ -56,15 +56,30 @@ export function AgentPicker({ agents, value, onChange }: {
     }
   }, [open])
 
+  // 选中项滚入可视区：同步首修后还要按帧校验收敛。reduced-motion 会把全局过渡压成 0.01ms
+  // 微过渡，重开菜单时 max-height 的首次测量可能仍返回旧几何（按它算出的 scrollTop 恰被钳制成
+  // 「看起来不用再修」的稳定错误值），因此以实测几何为准逐帧重修，直到选中项稳定入区（有界）。
   useEffect(() => {
     if (!open || activeIndex < 0) return
     const list = optionsRef.current
-    const item = list?.querySelector<HTMLElement>('.agent-picker-option.active')
-    if (!list || !item) return
-    const bounds = list.getBoundingClientRect()
-    const target = item.getBoundingClientRect()
-    if (target.top < bounds.top) list.scrollTop += target.top - bounds.top
-    else if (target.bottom > bounds.bottom) list.scrollTop += target.bottom - bounds.bottom
+    if (!list) return
+    const alignActive = () => {
+      const item = list.querySelector<HTMLElement>('.agent-picker-option.active')
+      if (!item) return true
+      const bounds = list.getBoundingClientRect()
+      const target = item.getBoundingClientRect()
+      if (target.top < bounds.top) list.scrollTop += target.top - bounds.top
+      else if (target.bottom > bounds.bottom) list.scrollTop += target.bottom - bounds.bottom
+      else return true
+      return false
+    }
+    alignActive()
+    let frames = 0
+    let raf = requestAnimationFrame(function verify() {
+      if (alignActive() || ++frames >= 8) return
+      raf = requestAnimationFrame(verify)
+    })
+    return () => cancelAnimationFrame(raf)
   }, [activeIndex, menuLayout, open, options])
 
   useInteractionLayer<HTMLDivElement>({
