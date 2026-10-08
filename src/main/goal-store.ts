@@ -3,6 +3,7 @@ import path from 'node:path'
 import { isGoalStatus, type AcceptanceCriterion, type Goal, type GoalApprovalSnapshot, type GoalCheckpoint, type GoalRun, type GoalSpecDecision, type GoalSpecSnapshot, type GoalStatus, type Task, type TaskEvent, type TaskUsage } from '../shared/types'
 import { executionRecordFromTask } from '../shared/taskflow'
 import { EventLog } from './event-log'
+import { atomicWriteJson, withStorageTransaction } from './persistence'
 
 /** Versioned durable index for long-running goals. */
 export const GOAL_INDEX_SCHEMA_VERSION = 1 as const
@@ -102,20 +103,38 @@ function validGoal(value: unknown): value is Goal {
  * the same temporary-file + rename discipline as TaskStore/IssueStore.
  */
 export class GoalStore {
+  private readonly userDataDir: string
   private readonly dir: string
   private readonly file: string
   private readonly eventLog: EventLog
   private data: GoalIndexDocument = { schemaVersion: GOAL_INDEX_SCHEMA_VERSION, goals: [], runs: [], checkpoints: [], specSnapshots: [], specDecisions: [], specApprovals: [] }
+  /** 与 this.data 配对的索引文件磁盘身份（dev:ino:size:mtimeMs，同 TaskStore/IssueStore）：
+   *  主进程与 sidecar 双写者共用一份 goals/index.json，他进程落盘（或本进程再落盘）
+   *  即换身份——读前失效重载、写前锁内重载，双方不再各自抱死装载时的内存。 */
+  private dataIdentity: string | undefined
 
   constructor(userDataDir: string) {
+    this.userDataDir = userDataDir
     this.dir = path.join(userDataDir, 'goals')
     this.file = path.join(this.dir, 'index.json')
     this.eventLog = new EventLog(path.join(this.dir, 'events.jsonl'))
     fs.mkdirSync(this.dir, { recursive: true })
-    this.load()
+    withStorageTransaction(userDataDir, () => this.load())
+  }
+
+  /** 索引文件磁盘身份复合键；stat 不可读视为已变（朝安全方向失效）。 */
+  private fileIdentity(): string | undefined {
+    try {
+      const stat = fs.statSync(this.file, { bigint: true })
+      return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`
+    } catch {
+      return undefined
+    }
   }
 
   private load() {
+    const identity = this.fileIdentity()
+    if (this.dataIdentity !== undefined && identity === this.dataIdentity) return
     let raw: string
     try {
       raw = fs.readFileSync(this.file, 'utf8')
@@ -196,6 +215,7 @@ export class GoalStore {
         ? parsed.specApprovals.map(normalizeApprovalSnapshot).filter((item): item is GoalApprovalSnapshot => !!item)
         : []
       this.data = { schemaVersion: GOAL_INDEX_SCHEMA_VERSION, goals, runs, checkpoints, specSnapshots, specDecisions, specApprovals }
+      this.dataIdentity = identity
       // Legacy v1 goals predate Loop 4 snapshots. Materialize their current
       // spec as generation 1 so later rollback/replay has a complete lineage.
       let backfilled = false
@@ -217,17 +237,19 @@ export class GoalStore {
         })
         backfilled = true
       }
-      if (backfilled) this.save()
+      // 读路径（无锁）也可能触发这份一次性补档落盘：先确认读取期间磁盘身份未再变，
+      // 避免把基于旧底版的补档覆写到他人已提交的版本上（写路径持锁，不受此限）。
+      if (backfilled && this.fileIdentity() === identity) this.save()
     } catch (error) {
       throw error instanceof Error ? error : new Error(String(error))
     }
   }
 
   private save() {
-    fs.mkdirSync(this.dir, { recursive: true })
-    const tmp = `${this.file}.tmp`
-    fs.writeFileSync(tmp, JSON.stringify(this.data, null, 2))
-    fs.renameSync(tmp, this.file)
+    // 唯一临时名 + fsync + 原子替换：双写者不再互踩固定 .tmp，目标文件也不会因
+    // 写一半失败而损坏（TaskStore/IssueStore 同款纪律）。
+    atomicWriteJson(this.file, this.data)
+    this.dataIdentity = this.fileIdentity()
   }
 
   private appendGoalEvent(goalId: string, text: string, data: Record<string, unknown> = {}) {
@@ -246,85 +268,122 @@ export class GoalStore {
   }
 
   list() {
+    this.load()
     return [...this.data.goals].sort((a, b) => b.updatedAt - a.updatedAt)
   }
 
   get(id: string) {
+    this.load()
     return this.data.goals.find((goal) => goal.id === id) ?? null
   }
 
   create(input: GoalCreateRecord): Goal {
-    const now = Date.now()
-    const goal: Goal = {
-      id: this.id('goal'),
-      issueId: input.issueId,
-      text: input.text,
-      completionConditions: [...input.completionConditions],
-      acceptanceCriteria: normalizeAcceptance(input.acceptanceCriteria, input.completionConditions),
-      stopConditions: [...input.stopConditions],
-      maxRuns: input.maxRuns,
-      maxDurationMs: input.maxDurationMs,
-      blockCap: input.blockCap ?? 8,
-      status: input.status ?? 'draft',
-      runCount: 0,
-      totalDurationMs: 0,
-      noProgress: 0,
-      noProgressCap: input.noProgressCap ?? 2,
-      blockCount: 0,
-      ...(input.agentId ? { agentId: input.agentId } : {}),
-      ...(input.backend ? { backend: input.backend } : {}),
-      ...(input.workdir ? { workdir: input.workdir } : {}),
-      createdAt: now,
-      updatedAt: now
-    }
-    this.data.goals.push(goal)
-    this.saveSpecSnapshot({
-      goalId: goal.id,
-      generation: 1,
-      text: goal.text,
-      acceptanceCriteria: goal.acceptanceCriteria ?? [],
-      completionConditions: goal.completionConditions,
-      stopConditions: goal.stopConditions,
-      outcomeGatePassed: false,
-      decision: 'initial',
-      goalSnapshot: { ...goal, acceptanceCriteria: goal.acceptanceCriteria?.map((criterion) => ({ ...criterion })) }
+    return withStorageTransaction(this.userDataDir, () => {
+      this.load()
+      const now = Date.now()
+      const goal: Goal = {
+        id: this.id('goal'),
+        issueId: input.issueId,
+        text: input.text,
+        completionConditions: [...input.completionConditions],
+        acceptanceCriteria: normalizeAcceptance(input.acceptanceCriteria, input.completionConditions),
+        stopConditions: [...input.stopConditions],
+        maxRuns: input.maxRuns,
+        maxDurationMs: input.maxDurationMs,
+        blockCap: input.blockCap ?? 8,
+        status: input.status ?? 'draft',
+        runCount: 0,
+        totalDurationMs: 0,
+        noProgress: 0,
+        noProgressCap: input.noProgressCap ?? 2,
+        blockCount: 0,
+        ...(input.agentId ? { agentId: input.agentId } : {}),
+        ...(input.backend ? { backend: input.backend } : {}),
+        ...(input.workdir ? { workdir: input.workdir } : {}),
+        createdAt: now,
+        updatedAt: now
+      }
+      this.data.goals.push(goal)
+      this.writeSpecSnapshot({
+        goalId: goal.id,
+        generation: 1,
+        text: goal.text,
+        acceptanceCriteria: goal.acceptanceCriteria ?? [],
+        completionConditions: goal.completionConditions,
+        stopConditions: goal.stopConditions,
+        outcomeGatePassed: false,
+        decision: 'initial',
+        goalSnapshot: { ...goal, acceptanceCriteria: goal.acceptanceCriteria?.map((criterion) => ({ ...criterion })) }
+      })
+      this.save()
+      return goal
     })
-    this.save()
-    return goal
   }
 
   update(id: string, patch: Partial<Omit<Goal, 'id' | 'createdAt'>>): Goal | null {
-    const goal = this.get(id)
-    if (!goal) return null
-    Object.assign(goal, patch, { updatedAt: Date.now() })
-    this.save()
-    return goal
+    return withStorageTransaction(this.userDataDir, () => {
+      this.load()
+      const goal = this.get(id)
+      if (!goal) return null
+      Object.assign(goal, patch, { updatedAt: Date.now() })
+      this.save()
+      return goal
+    })
   }
 
   /** 删除目标及其全部运行/检查点记录（「清除目标模式」用）；id 不存在返回 false */
   delete(id: string): boolean {
-    const before = this.data.goals.length
-    this.data.goals = this.data.goals.filter((goal) => goal.id !== id)
-    if (this.data.goals.length === before) return false
-    this.data.runs = this.data.runs.filter((run) => run.goalId !== id)
-    this.data.checkpoints = this.data.checkpoints.filter((checkpoint) => checkpoint.goalId !== id)
-    this.data.specSnapshots = (this.data.specSnapshots ?? []).filter((snapshot) => snapshot.goalId !== id)
-    this.data.specDecisions = (this.data.specDecisions ?? []).filter((decision) => decision.goalId !== id)
-    this.data.specApprovals = (this.data.specApprovals ?? []).filter((approval) => approval.goalId !== id)
-    this.save()
-    return true
+    return withStorageTransaction(this.userDataDir, () => {
+      this.load()
+      const before = this.data.goals.length
+      this.data.goals = this.data.goals.filter((goal) => goal.id !== id)
+      if (this.data.goals.length === before) return false
+      this.data.runs = this.data.runs.filter((run) => run.goalId !== id)
+      this.data.checkpoints = this.data.checkpoints.filter((checkpoint) => checkpoint.goalId !== id)
+      this.data.specSnapshots = (this.data.specSnapshots ?? []).filter((snapshot) => snapshot.goalId !== id)
+      this.data.specDecisions = (this.data.specDecisions ?? []).filter((decision) => decision.goalId !== id)
+      this.data.specApprovals = (this.data.specApprovals ?? []).filter((approval) => approval.goalId !== id)
+      this.save()
+      return true
+    })
   }
 
   runs(goalId: string): GoalRun[] {
+    this.load()
     return this.data.runs.filter((run) => run.goalId === goalId).sort((a, b) => (a.phaseIndex - b.phaseIndex) || ((a.startedAt ?? 0) - (b.startedAt ?? 0)))
   }
 
   getRun(id: string) {
+    this.load()
     return this.data.runs.find((run) => run.id === id) ?? null
   }
 
   /** Upsert is keyed by execution id so repeated TaskChanged events are safe. */
   upsertRun(run: GoalRun): GoalRun {
+    return withStorageTransaction(this.userDataDir, () => {
+      this.load()
+      return this.writeRun(run)
+    })
+  }
+
+  /** Project the compatibility Task shape into a goal-owned Run. */
+  upsertRunFromTask(task: Task): GoalRun | null {
+    if (!task.goalId) return null
+    const goalId = task.goalId
+    return withStorageTransaction(this.userDataDir, () => {
+      this.load()
+      const execution = executionRecordFromTask(task)
+      const run: GoalRun = {
+        ...execution,
+        goalId,
+        phaseIndex: task.phaseIndex ?? this.runs(goalId).length
+      }
+      return this.writeRun(run)
+    })
+  }
+
+  /** 锁内私有核：追加/更新一条 run 并落盘。upsertRunFromTask 复用以免公共方法嵌套加锁。 */
+  private writeRun(run: GoalRun): GoalRun {
     const current = this.getRun(run.id)
     if (current) Object.assign(current, run)
     else this.data.runs.push({ ...run })
@@ -332,24 +391,14 @@ export class GoalStore {
     return current ?? run
   }
 
-  /** Project the compatibility Task shape into a goal-owned Run. */
-  upsertRunFromTask(task: Task): GoalRun | null {
-    if (!task.goalId) return null
-    const execution = executionRecordFromTask(task)
-    const run: GoalRun = {
-      ...execution,
-      goalId: task.goalId,
-      phaseIndex: task.phaseIndex ?? this.runs(task.goalId).length
-    }
-    return this.upsertRun(run)
-  }
-
   checkpoints(goalId: string): GoalCheckpoint[] {
+    this.load()
     return this.data.checkpoints.filter((checkpoint) => checkpoint.goalId === goalId).sort((a, b) => (a.phaseIndex - b.phaseIndex) || (a.createdAt - b.createdAt))
   }
 
   /** Return immutable Loop 4 specification snapshots in generation order. */
   snapshots(goalId: string): GoalSpecSnapshot[] {
+    this.load()
     return (this.data.specSnapshots ?? []).filter((snapshot) => snapshot.goalId === goalId)
       .sort((a, b) => (a.generation - b.generation) || (a.createdAt - b.createdAt))
       .map(cloneJson)
@@ -360,6 +409,14 @@ export class GoalStore {
   }
 
   saveSpecSnapshot(input: Omit<GoalSpecSnapshot, 'id' | 'createdAt'> & { id?: string; createdAt?: number }): GoalSpecSnapshot {
+    return withStorageTransaction(this.userDataDir, () => {
+      this.load()
+      return this.writeSpecSnapshot(input)
+    })
+  }
+
+  /** 锁内私有核：构建、幂等校验、追加、落盘、发事件。create() 复用以免公共方法嵌套加锁。 */
+  private writeSpecSnapshot(input: Omit<GoalSpecSnapshot, 'id' | 'createdAt'> & { id?: string; createdAt?: number }): GoalSpecSnapshot {
     const snapshot: GoalSpecSnapshot = {
       ...input,
       id: input.id ?? this.id('spec'),
@@ -386,13 +443,16 @@ export class GoalStore {
 
   /** Update the current generation with runtime evidence without creating a new generation. */
   updateSpecSnapshot(goalId: string, generation: number, patch: Partial<Pick<GoalSpecSnapshot, 'outcomeGatePassed' | 'checkpoint' | 'goalSnapshot'>>): GoalSpecSnapshot | null {
-    const snapshots = this.data.specSnapshots ?? []
-    const snapshot = snapshots.find((item) => item.goalId === goalId && item.generation === generation)
-    if (!snapshot) return null
-    Object.assign(snapshot, cloneJson(patch))
-    this.save()
-    this.appendGoalEvent(goalId, 'goal.spec.evidence', { generation, checkpointId: patch.checkpoint?.id, outcomeGatePassed: patch.outcomeGatePassed === true })
-    return cloneJson(snapshot)
+    return withStorageTransaction(this.userDataDir, () => {
+      this.load()
+      const snapshots = this.data.specSnapshots ?? []
+      const snapshot = snapshots.find((item) => item.goalId === goalId && item.generation === generation)
+      if (!snapshot) return null
+      Object.assign(snapshot, cloneJson(patch))
+      this.save()
+      this.appendGoalEvent(goalId, 'goal.spec.evidence', { generation, checkpointId: patch.checkpoint?.id, outcomeGatePassed: patch.outcomeGatePassed === true })
+      return cloneJson(snapshot)
+    })
   }
 
   /** Atomically commit a new Goal specification, its snapshot, and decision. */
@@ -402,49 +462,56 @@ export class GoalStore {
     snapshot: Omit<GoalSpecSnapshot, 'id' | 'createdAt'> & { id?: string; createdAt?: number }
     decision: Omit<GoalSpecDecision, 'id' | 'createdAt'> & { id?: string; createdAt?: number }
   }): GoalSpecSnapshot | null {
-    const goal = this.get(input.goalId)
-    if (!goal) return null
-    const snapshot: GoalSpecSnapshot = {
-      ...input.snapshot,
-      id: input.snapshot.id ?? this.id('spec'),
-      createdAt: input.snapshot.createdAt ?? Date.now(),
-      acceptanceCriteria: input.snapshot.acceptanceCriteria.map((criterion) => ({ ...criterion })),
-      completionConditions: [...input.snapshot.completionConditions],
-      stopConditions: [...input.snapshot.stopConditions]
-    }
-    const decision: GoalSpecDecision = {
-      ...input.decision,
-      id: input.decision.id ?? this.id('decision'),
-      createdAt: input.decision.createdAt ?? Date.now()
-    }
-    const snapshots = this.data.specSnapshots ?? (this.data.specSnapshots = [])
-    const decisions = this.data.specDecisions ?? (this.data.specDecisions = [])
-    if (snapshots.some((item) => item.id === snapshot.id) || decisions.some((item) => item.id === decision.id)) throw new Error('spec evolution record already exists')
-    Object.assign(goal, input.goalPatch, { updatedAt: Date.now() })
-    snapshots.push(cloneJson(snapshot))
-    decisions.push(cloneJson(decision))
-    this.save()
-    this.appendGoalEvent(input.goalId, `goal.spec.${decision.decision}`, { generation: snapshot.generation, snapshotId: snapshot.id, decisionId: decision.id })
-    return cloneJson(snapshot)
+    return withStorageTransaction(this.userDataDir, () => {
+      this.load()
+      const goal = this.get(input.goalId)
+      if (!goal) return null
+      const snapshot: GoalSpecSnapshot = {
+        ...input.snapshot,
+        id: input.snapshot.id ?? this.id('spec'),
+        createdAt: input.snapshot.createdAt ?? Date.now(),
+        acceptanceCriteria: input.snapshot.acceptanceCriteria.map((criterion) => ({ ...criterion })),
+        completionConditions: [...input.snapshot.completionConditions],
+        stopConditions: [...input.snapshot.stopConditions]
+      }
+      const decision: GoalSpecDecision = {
+        ...input.decision,
+        id: input.decision.id ?? this.id('decision'),
+        createdAt: input.decision.createdAt ?? Date.now()
+      }
+      const snapshots = this.data.specSnapshots ?? (this.data.specSnapshots = [])
+      const decisions = this.data.specDecisions ?? (this.data.specDecisions = [])
+      if (snapshots.some((item) => item.id === snapshot.id) || decisions.some((item) => item.id === decision.id)) throw new Error('spec evolution record already exists')
+      Object.assign(goal, input.goalPatch, { updatedAt: Date.now() })
+      snapshots.push(cloneJson(snapshot))
+      decisions.push(cloneJson(decision))
+      this.save()
+      this.appendGoalEvent(input.goalId, `goal.spec.${decision.decision}`, { generation: snapshot.generation, snapshotId: snapshot.id, decisionId: decision.id })
+      return cloneJson(snapshot)
+    })
   }
 
   /** Record an accepted/rejected decision independently of committed snapshots. */
   recordSpecDecision(input: Omit<GoalSpecDecision, 'id' | 'createdAt'> & { id?: string; createdAt?: number }): GoalSpecDecision {
-    const decision: GoalSpecDecision = { ...input, id: input.id ?? this.id('decision'), createdAt: input.createdAt ?? Date.now() }
-    const decisions = this.data.specDecisions ?? (this.data.specDecisions = [])
-    const existing = decisions.find((item) => item.id === decision.id)
-    if (existing) {
-      if (JSON.stringify(existing) !== JSON.stringify(decision)) throw new Error(`spec decision id already exists: ${decision.id}`)
-      return cloneJson(existing)
-    }
-    decisions.push(cloneJson(decision))
-    this.save()
-    this.appendGoalEvent(decision.goalId, `goal.spec.${decision.decision}`, { generation: decision.generation, decisionId: decision.id })
-    return cloneJson(decision)
+    return withStorageTransaction(this.userDataDir, () => {
+      this.load()
+      const decision: GoalSpecDecision = { ...input, id: input.id ?? this.id('decision'), createdAt: input.createdAt ?? Date.now() }
+      const decisions = this.data.specDecisions ?? (this.data.specDecisions = [])
+      const existing = decisions.find((item) => item.id === decision.id)
+      if (existing) {
+        if (JSON.stringify(existing) !== JSON.stringify(decision)) throw new Error(`spec decision id already exists: ${decision.id}`)
+        return cloneJson(existing)
+      }
+      decisions.push(cloneJson(decision))
+      this.save()
+      this.appendGoalEvent(decision.goalId, `goal.spec.${decision.decision}`, { generation: decision.generation, decisionId: decision.id })
+      return cloneJson(decision)
+    })
   }
 
   /** Replayable decision history, including rejected proposals. */
   decisions(goalId: string): GoalSpecDecision[] {
+    this.load()
     return (this.data.specDecisions ?? []).filter((decision) => decision.goalId === goalId)
       .sort((a, b) => (a.generation - b.generation) || (a.createdAt - b.createdAt))
       .map(cloneJson)
@@ -453,53 +520,62 @@ export class GoalStore {
   replaySpecDecisions(goalId: string) { return this.decisions(goalId) }
 
   saveSpecApproval(approval: GoalApprovalSnapshot) {
-    const approvals = this.data.specApprovals ?? (this.data.specApprovals = [])
-    if (approvals.some((item) => item.requestId === approval.requestId)) throw new Error('approval requestId already exists')
-    approvals.push(cloneJson(approval))
-    this.save()
-    this.appendGoalEvent(approval.goalId, 'goal.spec.approval', { generation: approval.specGeneration, requestId: approval.requestId })
-    return cloneJson(approval)
+    return withStorageTransaction(this.userDataDir, () => {
+      this.load()
+      const approvals = this.data.specApprovals ?? (this.data.specApprovals = [])
+      if (approvals.some((item) => item.requestId === approval.requestId)) throw new Error('approval requestId already exists')
+      approvals.push(cloneJson(approval))
+      this.save()
+      this.appendGoalEvent(approval.goalId, 'goal.spec.approval', { generation: approval.specGeneration, requestId: approval.requestId })
+      return cloneJson(approval)
+    })
   }
 
   specApproval(requestId: string) {
+    this.load()
     const approval = (this.data.specApprovals ?? []).find((item) => item.requestId === requestId)
     return approval ? cloneJson(approval) : null
   }
 
   specApprovals(goalId: string) {
+    this.load()
     return (this.data.specApprovals ?? []).filter((approval) => approval.goalId === goalId).map(cloneJson)
   }
 
   checkpointForRun(runId: string) {
+    this.load()
     return this.data.checkpoints.find((checkpoint) => checkpoint.runId === runId) ?? null
   }
 
   /** Persist exactly one checkpoint for each phase/run. */
   addCheckpoint(input: GoalCheckpointRecord): GoalCheckpoint {
-    const existing = this.checkpointForRun(input.runId)
-    const checkpoint: GoalCheckpoint = {
-      id: existing?.id ?? this.id('checkpoint'),
-      goalId: input.goalId,
-      runId: input.runId,
-      phaseIndex: input.phaseIndex,
-      summary: input.summary,
-      completedConditions: [...input.completedConditions],
-      incompleteConditions: [...input.incompleteConditions],
-      nextPlan: input.nextPlan,
-      blockers: [...input.blockers],
-      createdAt: existing?.createdAt ?? input.createdAt ?? Date.now(),
-      ...(input.durationMs !== undefined ? { durationMs: input.durationMs } : {}),
-      ...(input.usage ? { usage: input.usage } : {})
-    }
-    if (existing) Object.assign(existing, checkpoint)
-    else this.data.checkpoints.push(checkpoint)
-    this.save()
-    this.appendGoalEvent(input.goalId, 'goal.checkpoint', { runId: input.runId, phaseIndex: input.phaseIndex, checkpointId: checkpoint.id })
-    return existing ?? checkpoint
+    return withStorageTransaction(this.userDataDir, () => {
+      this.load()
+      const existing = this.checkpointForRun(input.runId)
+      const checkpoint: GoalCheckpoint = {
+        id: existing?.id ?? this.id('checkpoint'),
+        goalId: input.goalId,
+        runId: input.runId,
+        phaseIndex: input.phaseIndex,
+        summary: input.summary,
+        completedConditions: [...input.completedConditions],
+        incompleteConditions: [...input.incompleteConditions],
+        nextPlan: input.nextPlan,
+        blockers: [...input.blockers],
+        createdAt: existing?.createdAt ?? input.createdAt ?? Date.now(),
+        ...(input.durationMs !== undefined ? { durationMs: input.durationMs } : {}),
+        ...(input.usage ? { usage: input.usage } : {})
+      }
+      if (existing) Object.assign(existing, checkpoint)
+      else this.data.checkpoints.push(checkpoint)
+      this.save()
+      this.appendGoalEvent(input.goalId, 'goal.checkpoint', { runId: input.runId, phaseIndex: input.phaseIndex, checkpointId: checkpoint.id })
+      return existing ?? checkpoint
+    })
   }
 
   /** Tests and restart recovery can force a clean reload. */
   reload() {
-    this.load()
+    withStorageTransaction(this.userDataDir, () => this.load())
   }
 }
