@@ -227,14 +227,9 @@ export function readJsonFile<T>(file: string, fallback: T): T {
 }
 
 /** The destination remains valid when write, fsync or rename fails.
- *  - `mode`：tmp 写入与改盘后的权限位；给了就 rename 后再 chmod 兜底（对抗 umask 抠位），不给则保持既有的 0600 默认、不做 chmod。
- *  - `backup`：rename 前把现存旧文件复制一份（true = `<file>.bak`，字符串 = 自定路径）；源不存在（首次写）则跳过，其余复制失败照抛——备份不净写不落。 */
-export function atomicWriteJson(file: string, value: unknown, options: { backup?: boolean | string; mode?: number } = {}): void {
+ *  - `mode`：tmp 写入与改盘后的权限位；给了就 rename 后再 chmod 兜底（对抗 umask 抠位），不给则保持既有的 0600 默认、不做 chmod。 */
+export function atomicWriteJson(file: string, value: unknown, options: { mode?: number } = {}): void {
   fs.mkdirSync(path.dirname(file), { recursive: true })
-  if (options.backup) {
-    const backupFile = typeof options.backup === 'string' ? options.backup : `${file}.bak`
-    try { fs.copyFileSync(file, backupFile) } catch (error) { if (errorCode(error) !== 'ENOENT') throw error }
-  }
   const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`
   try {
     fs.writeFileSync(temporary, JSON.stringify(value, null, 2), { encoding: 'utf8', flag: 'wx', mode: options.mode ?? 0o600 })
