@@ -287,9 +287,9 @@ export class GoalController {
   rejectEvolution(id: string, reason: string) {
     const goal = this.goals.get(id)
     if (!goal) return { ok: false as const, error: '目标不存在' }
+    // generation 由 GoalStore 在写事务锁内分配（双写者并发下锁外读算会撞代，已复现）
     this.goals.recordSpecDecision({
       goalId: id,
-      generation: this.nextGeneration(id),
       decision: 'rejected',
       reason: reason.trim() || 'invalid evolution proposal'
     })
@@ -322,7 +322,6 @@ export class GoalController {
     const reject = (reason: string, patch?: GoalEvolveInput['patch']) => {
       this.goals.recordSpecDecision({
         goalId: goal.id,
-        generation: this.nextGeneration(goal.id),
         decision: 'rejected',
         reason,
         ...(patch ? { patch, provenance: patch.provenance } : {})
@@ -408,7 +407,6 @@ export class GoalController {
     const checkpoint = this.goals.checkpoints(goal.id).at(-1)
     const snapshotInput = {
       goalId: goal.id,
-      generation: this.nextGeneration(goal.id),
       text,
       acceptanceCriteria: criteria,
       completionConditions: goal.completionConditions,
@@ -423,7 +421,6 @@ export class GoalController {
     }
     const decisionInput = {
       goalId: goal.id,
-      generation: snapshotInput.generation,
       decision: 'applied' as const,
       reason: patch.provenance.rationale,
       patch,
@@ -457,7 +454,7 @@ export class GoalController {
     const passedBeforeRollback = (goal.acceptanceCriteria ?? []).filter((criterion) => criterion.status === 'passed')
     const rollbackTargets = base ? new Map(base.acceptanceCriteria.map((criterion) => [criterion.id, criterion])) : new Map<string, { text: string }>()
     if (base && passedBeforeRollback.some((criterion) => rollbackTargets.get(criterion.id)?.text !== criterion.text)) {
-      this.goals.recordSpecDecision({ goalId: goal.id, generation: this.nextGeneration(goal.id), decision: 'rejected', reason: 'cannot weaken a passed acceptance criterion' })
+      this.goals.recordSpecDecision({ goalId: goal.id, decision: 'rejected', reason: 'cannot weaken a passed acceptance criterion' })
       return { ok: false, error: 'cannot weaken a passed acceptance criterion' }
     }
     const preservedPassed = new Map(passedBeforeRollback.map((criterion) => [criterion.id, criterion]))
@@ -479,7 +476,6 @@ export class GoalController {
     }
     const snapshotInput = {
       goalId: goal.id,
-      generation: this.nextGeneration(goal.id),
       text: base.text,
       acceptanceCriteria: rollbackCriteria,
       completionConditions: base.completionConditions,
@@ -492,7 +488,6 @@ export class GoalController {
     }
     const decisionInput = {
       goalId: goal.id,
-      generation: snapshotInput.generation,
       decision: 'rollback' as const,
       reason: `回滚到 generation ${generation}`
     }
@@ -500,11 +495,6 @@ export class GoalController {
     const updated = this.goals.get(goal.id)!
     this.emit(updated)
     return { ok: true, goal: updated, snapshot }
-  }
-
-  /** 下一快照代数：现有最大 generation + 1（建目标时的初始快照为 1）。 */
-  private nextGeneration(goalId: string): number {
-    return this.goals.snapshots(goalId).reduce((max, snapshot) => Math.max(max, snapshot.generation), 0) + 1
   }
 
   /** doom-loop 阈值：设置取值函数实时读，未配置回落到常量 */

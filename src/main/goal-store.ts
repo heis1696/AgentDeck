@@ -451,19 +451,24 @@ export class GoalStore {
     })
   }
 
-  /** Atomically commit a new Goal specification, its snapshot, and decision. */
+  /** Atomically commit a new Goal specification, its snapshot, and decision.
+   *  `snapshot`/`decision` 的 `generation` 均可省略——一律由本方法在锁内分配，调用方传入的值会被覆盖。 */
   commitSpecEvolution(input: {
     goalId: string
     goalPatch: Partial<Omit<Goal, 'id' | 'createdAt'>>
-    snapshot: Omit<GoalSpecSnapshot, 'id' | 'createdAt'> & { id?: string; createdAt?: number }
-    decision: Omit<GoalSpecDecision, 'id' | 'createdAt'> & { id?: string; createdAt?: number }
+    snapshot: Omit<GoalSpecSnapshot, 'id' | 'createdAt' | 'generation'> & { id?: string; createdAt?: number; generation?: number }
+    decision: Omit<GoalSpecDecision, 'id' | 'createdAt' | 'generation'> & { id?: string; createdAt?: number; generation?: number }
   }): GoalSpecSnapshot | null {
     return withStorageTransaction(this.userDataDir, () => {
       this.load()
       const goal = this.get(input.goalId)
       if (!goal) return null
+      // 代数在锁内分配（与 recordSpecDecision 同口径）：调用方传入的 generation 可能是
+      // 锁外读算的陈旧值，并发写者会撞成同一代。以锁内实测最大值为准，两处始终一致。
+      const generation = this.nextSpecGeneration(input.goalId)
       const snapshot: GoalSpecSnapshot = {
         ...input.snapshot,
+        generation,
         id: input.snapshot.id ?? this.id('spec'),
         createdAt: input.snapshot.createdAt ?? Date.now(),
         acceptanceCriteria: input.snapshot.acceptanceCriteria.map((criterion) => ({ ...criterion })),
@@ -472,6 +477,7 @@ export class GoalStore {
       }
       const decision: GoalSpecDecision = {
         ...input.decision,
+        generation,
         id: input.decision.id ?? this.id('decision'),
         createdAt: input.decision.createdAt ?? Date.now()
       }
@@ -487,11 +493,33 @@ export class GoalStore {
     })
   }
 
-  /** Record an accepted/rejected decision independently of committed snapshots. */
-  recordSpecDecision(input: Omit<GoalSpecDecision, 'id' | 'createdAt'> & { id?: string; createdAt?: number }): GoalSpecDecision {
+  /**
+   * 下一快照代数：**现有快照**的最大 generation + 1（建目标时的初始快照为 1）。
+   *
+   * 语义约束（不得改动）：代数由**快照**推进，被拒提案（只有 decision、无 snapshot）
+   * 复用当前代数——这是既有契约，`decisions()` 的排序 `(generation) || (createdAt)`
+   * 正是为同代决策提供稳定次序。不要把 decision 的 generation 计入最大值。
+   *
+   * ⚠ 必须在**写事务锁内**调用（`commitSpecEvolution` / `recordSpecDecision` 内部）。
+   * 历史缺陷：调用方先在锁外 `snapshots()` 读 max、再另起一次锁写入——两个写者
+   * （主进程 / sidecar）并发时会各自读到同一 max，快照撞成同一代数（已复现）。
+   * 现由本方法在锁内计算，分配与写入原子化。
+   */
+  nextSpecGeneration(goalId: string): number {
+    this.load()
+    return (this.data.specSnapshots ?? [])
+      .filter((snapshot) => snapshot.goalId === goalId)
+      .reduce((max, snapshot) => Math.max(max, snapshot.generation), 0) + 1
+  }
+
+  /** Record an accepted/rejected decision independently of committed snapshots.
+   *  `generation` 一律在锁内按当前快照代数分配、**忽略调用方传入值**——调用方在锁外
+   *  读算的代数并发下会陈旧（历史缺陷：两个写者撞成一代）。 */
+  recordSpecDecision(input: Omit<GoalSpecDecision, 'id' | 'createdAt' | 'generation'> & { id?: string; createdAt?: number; generation?: number }): GoalSpecDecision {
     return withStorageTransaction(this.userDataDir, () => {
       this.load()
-      const decision: GoalSpecDecision = { ...input, id: input.id ?? this.id('decision'), createdAt: input.createdAt ?? Date.now() }
+      const generation = this.nextSpecGeneration(input.goalId)
+      const decision: GoalSpecDecision = { ...input, generation, id: input.id ?? this.id('decision'), createdAt: input.createdAt ?? Date.now() }
       const decisions = this.data.specDecisions ?? (this.data.specDecisions = [])
       const existing = decisions.find((item) => item.id === decision.id)
       if (existing) {

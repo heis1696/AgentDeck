@@ -91,6 +91,32 @@ const baseInput = (text) => ({
   ok(a.checkpoints(goal.id).length === 1, 'checkpoint written by B survives A reads')
 }
 
+// === 场景 N：快照代数分配必须原子（锁外读算会撞代）===
+// 历史缺陷：调用方在锁外 snapshots() 读 max、再另起一次锁写快照，两个 writer
+// 并发时各自读到同一 max，快照撞成同一 generation。现由 GoalStore 在写事务锁内分配。
+// 注意：被拒提案（只有 decision 无 snapshot）**复用**当前代数属既有契约，不在本场景。
+{
+  const dir = path.join(outDir, 'generation')
+  const a = new GoalStore(dir)
+  const b = new GoalStore(dir)
+  const goal = a.create(baseInput('generation race'))
+
+  const snapshotInput = (text) => ({
+    goalId: goal.id, text, acceptanceCriteria: [], completionConditions: ['x'], stopConditions: [], outcomeGatePassed: false, decision: 'applied'
+  })
+  const decisionInput = (reason) => ({ goalId: goal.id, decision: 'applied', reason })
+
+  // 两个 writer 各自提交快照：显式传入同一（陈旧的）generation，模拟锁外读算撞代
+  const sa = a.commitSpecEvolution({ goalId: goal.id, goalPatch: { text: 'A' }, snapshot: { ...snapshotInput('A'), generation: 2 }, decision: { ...decisionInput('A'), generation: 2 } })
+  const sb = b.commitSpecEvolution({ goalId: goal.id, goalPatch: { text: 'B' }, snapshot: { ...snapshotInput('B'), generation: 2 }, decision: { ...decisionInput('B'), generation: 2 } })
+
+  const gens = [sa?.generation, sb?.generation].sort((x, y) => x - y)
+  ok(new Set(gens).size === gens.length, 'concurrent snapshots get distinct generations (no allocation race)')
+  const persisted = a.snapshots(goal.id).map((s) => s.generation)
+  ok(new Set(persisted).size === persisted.length, 'persisted snapshot generations are unique')
+  ok(a.nextSpecGeneration(goal.id) > Math.max(...persisted), 'next allocation exceeds every recorded snapshot generation')
+}
+
 fs.rmSync(outDir, { recursive: true, force: true })
 if (failed) process.exitCode = 1
 else console.log('\n✅ GOAL CONCURRENCY SMOKE PASSED')
