@@ -61,9 +61,8 @@ import { IssuePipeline } from './pipeline/issue-pipeline'
 import { FlowEngine, type FlowState } from './pipeline/flow'
 import { StartNode, RunningNode, FinalizeNode, type ExecutionPorts } from './pipeline/nodes'
 import { decideRetry } from './retry-policy'
-import type { EventGateToken } from './turn-lifecycle'
 import { DSH_TURN_BUDGET_MS } from './backends/dsh'
-import { BoundedEventBatcher } from './event-batcher'
+import { createTurnEvents, type RunnerEvent } from './execution/turn-events'
 
 /** Main-process task creation dependency. Kept structural to avoid coupling
  * the runner to persistence/projection implementation details. */
@@ -94,49 +93,11 @@ export interface RunnerPorts {
   onTaskEvent?: (taskId: string, event: Omit<TaskEvent, 'seq'>) => void
 }
 
-type RunnerEvent = Omit<TaskEvent, 'seq'>
-
-const STREAM_DELTA_TYPES = new Set(['text.delta', 'reasoning.delta', 'tool.input.delta', 'compaction.delta'])
-
-function isStreamDeltaEvent(event: RunnerEvent): boolean {
-  return event.kind === 'text' && (!event.type || event.type.endsWith('.delta') || STREAM_DELTA_TYPES.has(event.type))
-}
-
-function hasStableEventIdentity(event: RunnerEvent): boolean {
-  return (typeof event.eventId === 'string' && event.eventId.length > 0)
-    || (typeof event.id === 'string' && event.id.length > 0)
-}
-
-/** 接受即恢复边界（onPending 正常路径）给无身份事件暂存的批身份前缀：崩溃重放/
- * 重试幂等用它当稳定身份，但它不算「提供方身份」——合并判定必须放行，否则每个
- * delta 在接受时被派 id 后即终结合并链（IPC 每 token 一包）。 */
-const STAGED_BATCH_ID_PREFIX = 'agentdeck:batch:'
-
-function hasStagedBatchIdentity(event: RunnerEvent): boolean {
-  return typeof event.eventId === 'string' && event.eventId.startsWith(STAGED_BATCH_ID_PREFIX)
-}
-
-function streamType(event: RunnerEvent): string {
-  return event.type || 'text.delta'
-}
-
-function streamPersistence(event: RunnerEvent): 'live' | 'durable' {
-  if (event.durability === 'durable' || event.durable === true || (event.durable && typeof event.durable === 'object')) return 'durable'
-  if (event.durability === 'live' || event.durable === false || STREAM_DELTA_TYPES.has(event.type ?? '')) return 'live'
-  return 'durable'
-}
-
-function mergeStreamEvents(previous: RunnerEvent, next: RunnerEvent): RunnerEvent {
-  return {
-    ...previous,
-    text: `${previous.text ?? ''}${next.text ?? ''}`,
-    data: next.data ?? previous.data
-  }
-}
-
-function eventSize(event: RunnerEvent): number {
-  return Buffer.byteLength(JSON.stringify(event), 'utf8') + 1
-}
+// 回合事件组装面已外移 execution/turn-events.ts（批次 3b）：RunnerEvent 类型与
+// STREAM_DELTA_TYPES/isStreamDeltaEvent/hasStableEventIdentity/STAGED_BATCH_ID_PREFIX/
+// hasStagedBatchIdentity/streamType/streamPersistence/mergeStreamEvents/eventSize
+// 九个模块级 helper 随 makeTurnEvents 整体搬迁；runner 按 §5.2 正向 import
+// createTurnEvents/RunnerEvent，execution/turn-events 严禁反向 import runner。
 
 /**
  * 标题回合硬预算：改标题是装饰性收尾，且在 titleMode 下事件不落日志——它一挂，
@@ -182,6 +143,9 @@ export class TaskRunner {
   /** 执行内核（批次 2）：会话/回合身份/句柄/失效/退出确认原语的状态唯一所有者，
    *  在构造函数最前装配（端口回调引用 runner 编排面，惰性生效）。 */
   private kernel: ExecutionKernel
+  /** 回合事件工厂（批次 3b）：makeTurnEvents 整体外移至 execution/turn-events.ts，
+   *  依赖全部经窄端口注入（§6.3 3b）；在内核之前装配，composeTurnEvents 端口直连。 */
+  private turnEvents: ReturnType<typeof createTurnEvents>
   private permissionBroker: PermissionBroker
   private getTeam: (() => AgentLike[]) | null = null
   private scheduler: Scheduler
@@ -233,6 +197,38 @@ export class TaskRunner {
     const send = ports.send ?? (() => {})
     const notify = ports.notify ?? (() => {})
     this.ports = { send, notify, onTaskEvent: ports.onTaskEvent }
+    // 回合事件工厂（批次 3b）先于内核装配：端口回调引用 runner 编排面（惰性调用，
+    // 构造期不触发）；store/kernel/pump 的访问全部经窄端口注入（§6.3 3b 端口清单）
+    this.turnEvents = createTurnEvents({
+      // store 持久化写路径
+      stagePendingEvents: (taskId, turnId, runId, events, expected, openedAt) => this.store.stagePendingEvents(taskId, turnId, runId, events, expected, openedAt),
+      appendEvents: (taskId, events, expected) => this.store.appendEvents(taskId, events, expected),
+      clearPendingEvents: (taskId, turnId) => this.store.clearPendingEvents(taskId, turnId),
+      // store 只读探针与条件写（onSessionId 的 resume 身份绑定）
+      taskOf: (taskId) => this.store.get(taskId),
+      updateIf: (taskId, expected, patch) => this.store.updateIf(taskId, expected, patch),
+      // kernel 原语
+      lifecycle: (taskId) => this.kernel.lifecycle(taskId),
+      isCurrentRun: (claim) => this.kernel.isCurrentRun(claim),
+      claimOf: (taskId) => this.kernel.claimOf(taskId),
+      touchWatchdog: (taskId) => this.kernel.touchWatchdog(taskId),
+      lastTerminalResponse: (taskId) => this.kernel.lastTerminalResponse(taskId),
+      rememberTerminalResponse: (taskId, response) => this.kernel.rememberTerminalResponse(taskId, response),
+      // runner 编排回调（业务裁决留在 runner）
+      sniffDelegates: (taskId, delta) => this.sniffDelegates(taskId, delta),
+      observeToolCall: (taskId, event, claim) => this.observeToolCall(taskId, event, claim),
+      pushEvent: (taskId, e) => this.pushEvent(taskId, e),
+      onTaskEvent: (taskId, event) => this.ports.onTaskEvent?.(taskId, event),
+      pushTask: (taskId) => this.pushTask(taskId),
+      askPermission: (taskId, req) => this.askPermission(taskId, req),
+      // 只读探针（取消/关机编排态）
+      isCancelling: (taskId) => this.cancellationDrains.has(taskId),
+      isShuttingDown: () => this.shuttingDown,
+      // 事件批登记（批次 3a EventPump 窄面：revoke=dispose+摘账，forget=仅摘账）
+      register: (batcher, taskId) => this.eventPump.register(batcher, taskId),
+      revoke: (batcher) => this.eventPump.revoke(batcher),
+      forget: (batcher) => this.eventPump.forget(batcher)
+    })
     // 执行内核先于一切编排组件装配：端口回调引用 runner 编排面（惰性调用，构造期不触发）
     this.kernel = new ExecutionKernel({
       matches: (taskId, expected) => this.store.matches(taskId, expected),
@@ -245,7 +241,8 @@ export class TaskRunner {
       onSessionInstalled: (taskId) => this.pushTask(taskId),
       purgeTaskWorkflowState: (taskId, scope) => this.purgeTaskWorkflowState(taskId, scope),
       drainEvents: (taskId, timeoutMs) => this.eventPump.close(taskId, timeoutMs),
-      composeTurnEvents: (req) => this.makeTurnEvents(req.taskId, req.router, req.claim, req.token, req.stamp, req.onTurnEnd),
+      // 回合事件组装（批次 3b 起由 turn-events 工厂提供；台账登记收口在 3a 的 EventPump）
+      composeTurnEvents: this.turnEvents,
       parkRetiredSession: (key, entry) => {
         if (entry.session.detach && this.store.get(entry.taskId)?.meetingId) this.retiredProviderSessions.set(key, entry)
       },
@@ -348,205 +345,6 @@ export class TaskRunner {
 
   private lifecycle(taskId: string) {
     return this.kernel.lifecycle(taskId)
-  }
-
-  /**
-   * 事件管道：落盘 + 推 UI；onTurnEnd 可挂回调。
-   *
-   * 闭包只读本回合的不可变身份（claim / generation / token），运行器任何时刻都不再
-   * 改写它——给旧回调"重新授权"的唯一途径因此消失。
-   */
-  private makeTurnEvents(
-    taskId: string,
-    router: SessionTurnRouter,
-    claim: RunClaim,
-    token: EventGateToken,
-    stamp: BackendTurnStamp,
-    onTurnEnd?: (r: BackendTurnResult) => void
-  ): BackendSessionEvents {
-    const life = this.lifecycle(taskId)
-    const active = (kind?: string, terminal = false) => {
-      if (this.kernel.claimOf(taskId) !== claim) return false
-      return life.accepts(token, { kind, terminal })
-    }
-    let ownershipCheckedAt = 0
-    let ownershipValid = true
-    const durableActive = (kind?: string, terminal = false, throttleMs = 0) => {
-      if (!active(kind, terminal)) return false
-      const now = Date.now()
-      if (throttleMs > 0 && now - ownershipCheckedAt < throttleMs) return ownershipValid
-      ownershipCheckedAt = now
-      ownershipValid = this.isCurrentRun(claim)
-      if (ownershipValid) life.setStatus('running')
-      return ownershipValid && life.accepts(token, { kind, terminal })
-    }
-    let eventSequence = 0
-    let terminalStarted = false
-    let persistenceProblem = ''
-    const turnOpenedAt = Date.now()
-    const meetingExecution = this.store.get(taskId)?.meetingId ? { runId: claim.runId, turnId: stamp.id } : undefined
-    const stagePending = (events: readonly RunnerEvent[]) => {
-      for (const event of events) {
-        if (!hasStableEventIdentity(event)) event.eventId = `${STAGED_BATCH_ID_PREFIX}${stamp.id}:${++eventSequence}`
-      }
-      try {
-        if (this.store.stagePendingEvents(taskId, stamp.id, claim.runId, events, runCondition(claim), turnOpenedAt)) return true
-      } catch (error) {
-        console.error('[TaskRunner] Pending event backup failed', taskId, error)
-      }
-      if (!persistenceProblem.includes('日志与恢复副本均写入失败')) persistenceProblem = '事件恢复副本无法写入；本轮记录可能不完整'
-      return false
-    }
-    let batcher!: BoundedEventBatcher<RunnerEvent>
-    batcher = new BoundedEventBatcher<RunnerEvent>({
-      // Ten UI updates per second remain visually responsive while keeping
-      // synchronous durable commits off the per-token cadence.
-      maxDelayMs: 100,
-      maxRetryDelayMs: 5_000,
-      maxItems: 64,
-      maxBytes: 128 * 1024,
-      maxPendingBytes: 1024 * 1024,
-      onPending: stagePending,
-      sizeOf: eventSize,
-      // 接受即恢复边界会给合并组领导暂存批身份（接受时同步写恢复副本需要稳定身份，
-      // 崩溃重放与重试幂等都靠它）——这类暂存身份不算稳定身份：合并链照常延续，
-      // 否则每个 delta 都因领导带 id 被拆成独立事件，IPC/UI 每 token 一包。
-      canMerge: (previous, next) => isStreamDeltaEvent(previous)
-        && isStreamDeltaEvent(next)
-        && (!hasStableEventIdentity(previous) || hasStagedBatchIdentity(previous))
-        && !hasStableEventIdentity(next)
-        && streamType(previous) === streamType(next)
-        && streamPersistence(previous) === streamPersistence(next),
-      merge: mergeStreamEvents,
-      onFlush: (events) => {
-        // Local lifecycle checks stay memory-only on the per-delta hot path.
-        // The conditional batch append below is the durable ownership gate.
-        if (!events.length) return true
-        if (!active(events[0].kind)) return true
-        const protectedEvents = stagePending(events)
-        let full: TaskEvent[]
-        try {
-          full = this.store.appendEvents(taskId, events, runCondition(claim))
-        } catch (error) {
-          persistenceProblem = protectedEvents ? '事件日志写入失败，事件已保存在本地恢复副本' : '事件日志与恢复副本均写入失败，本轮记录可能丢失'
-          console.error('[TaskRunner] Event log write failed', taskId, error)
-          return false
-        }
-        if (full.length !== events.length) {
-          // A replaced Run must discard its stale batch. A still-current Run
-          // retains the same identified events and retries with backoff.
-          if (!durableActive(events[0].kind)) return true
-          persistenceProblem = protectedEvents ? '事件日志未完整写入，事件已保存在本地恢复副本' : '事件日志与恢复副本均写入失败，本轮记录可能丢失'
-          return false
-        }
-        persistenceProblem = ''
-        try { this.store.clearPendingEvents(taskId, stamp.id) }
-        catch (error) { console.error('[TaskRunner] Pending event cleanup failed', taskId, error) }
-        ownershipCheckedAt = Date.now()
-        ownershipValid = true
-        for (let index = 0; index < events.length; index++) {
-          const event = events[index]
-          if (!active(event.kind)) continue
-          try {
-            this.touchWatchdog(taskId)
-            if (event.kind === 'text') this.sniffDelegates(taskId, event.text)
-            if (event.kind === 'tool') this.observeToolCall(taskId, event, claim)
-            this.ports.onTaskEvent?.(taskId, event)
-            this.pushEvent(taskId, full[index])
-          } catch (error) {
-            // The batch is already durable. Do not retry it after a host/UI
-            // callback failure, or the same events could be appended twice.
-            console.error('[TaskRunner] Event delivery failed after commit', error)
-          }
-        }
-        return true
-      }
-    })
-    this.eventPump.register(batcher, taskId)
-    return {
-      onEvent: (incoming: RunnerEvent) => {
-        // Legacy zcode, dsh ACP, and OpenCode CLI fallback text events are
-        // durable by contract. Explicit provider live markers stay live, but
-        // ordinary text is merged without changing its persistence semantics.
-        let e = { ...incoming, ...(meetingExecution ? { execution: meetingExecution } : {}) }
-        if (!active(e.kind)) {
-          // 标题回合的普通事件被静默，但线级进展照样给看门狗续命
-          if (life.gate.state.titleMode && life.accepts(token)) this.touchWatchdog(taskId)
-          return
-        }
-        if (e.kind === 'tool') {
-          // The runner owns the live PermissionBroker decision in production.
-          // Mark the forwarded event so GoalController does not run a second
-          // doom-loop state machine for the same tool invocation.
-          const data = e.data && typeof e.data === 'object' ? e.data as Record<string, unknown> : {}
-          e = { ...e, data: { ...data, runnerDoomHandled: true } }
-        }
-        // The append, side effects, and renderer broadcast happen once per
-        // bounded batch. A final event remains in the same ordered queue and
-        // is flushed synchronously by onTurnEnd below.
-        if (!batcher.add(e) && !this.shuttingDown && !terminalStarted && durableActive(e.kind)) {
-          terminalStarted = true
-          this.eventPump.revoke(batcher)
-          const failure: BackendTurnResult = { ok: false, response: '', error: persistenceProblem || '事件恢复副本写入失败或待写事件超过上限' }
-          router.closeTurn(stamp.id)
-          onTurnEnd?.(failure)
-          life.resolveResume(token, failure)
-        }
-      },
-      onHeartbeat: () => { if (durableActive(undefined, false, 1_000)) this.touchWatchdog(taskId) },
-      onTurnEnd: (r: BackendTurnResult) => {
-        if (terminalStarted) return
-        const response = typeof r.response === 'string' ? r.response.trim() : ''
-        if (life.gate.state.titleMode && this.kernel.lastTerminalResponse(taskId) === response) return
-        terminalStarted = true
-        if (!durableActive('final', true)) {
-          this.eventPump.revoke(batcher)
-          // 终态没被接受（运行器已换代/任务已终态）：本回合就此作废，回调不再可投递
-          router.abandonTurn(stamp.id)
-          return
-        }
-        void batcher.close(5_000).then((committed) => {
-          this.eventPump.forget(batcher)
-          if (!committed) {
-            batcher.dispose()
-            if (!this.shuttingDown && !this.cancellationDrains.has(taskId) && durableActive('final', true)) {
-              const failure: BackendTurnResult = { ok: false, response: '', error: persistenceProblem || '事件日志未能写入，待本地恢复' }
-              router.closeTurn(stamp.id)
-              onTurnEnd?.(failure)
-              life.resolveResume(token, failure)
-            } else router.abandonTurn(stamp.id)
-            return
-          }
-          if (!durableActive('final', true)) {
-            router.abandonTurn(stamp.id)
-            return
-          }
-          // 同一回合的重复终态按内容去重（标题回合不可被复述的旧终态顶掉）。回合保持
-          // 开启，真正属于它的终态仍能落地。回合身份明确的适配器不需要这条，退回复用
-          // 连接的老后端仍然依赖它。
-          this.kernel.rememberTerminalResponse(taskId, response)
-          // 先收口本回合再投递：投递可能同步开启下一回合（标题/回灌）。
-          router.closeTurn(stamp.id)
-          onTurnEnd?.(r)
-          // TurnLifecycle owns the one-shot waiter and generation check. This
-          // keeps terminal admission on the same gate as ordinary events.
-          life.resolveResume(token, r)
-        })
-      },
-      onSessionId: (sessionId: string) => {
-        if (!active() || !sessionId) return
-        const task = this.store.get(taskId)
-        if (!task || task.sessionId === sessionId) return
-        // A resume id belongs to one Run. Binding it conditionally keeps a
-        // delayed session callback from repointing a newer Run.
-        if (!this.store.updateIf(taskId, runCondition(claim), { sessionId })) return
-        life.gate.setSessionOwner(sessionId)
-        this.pushTask(taskId)
-      },
-      onPermission: (req: PermissionRequest) => durableActive()
-        ? this.askPermission(taskId, req)
-        : Promise.resolve({ decision: 'deny' as const })
-    }
   }
 
   /** facade：会话级通道组装已迁内核（状态唯一所有者），编排层只留委托 */
