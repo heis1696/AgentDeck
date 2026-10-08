@@ -21,7 +21,8 @@ try {
   const issuesViewSource = fs.readFileSync(path.join(root, 'src/renderer/src/components/IssuesView.tsx'), 'utf8')
   assert.match(appSource, /\.\.\.publicTasksOf\(navigationEntries\)\.map/, 'command palette searches only public navigation entries')
   assert.match(appSource, /meetingNavigationEntries\(tasks, meetings, issues\)/, 'public navigation entries derive from the complete task and meeting catalog')
-  assert.match(appSource, /ui\.setTasks\(catalog\)/, 'interaction center uses the unified catalog, retaining raw execution tasks for scoped sidebars')
+  // 喂的仍是统一目录 catalog；4b53eca 起附带目录提交戳（source/version，拒收旧快照写回）
+  assert.match(appSource, /ui\.setTasks\(catalog,\s*\{\s*source:\s*tasksSource,\s*version:\s*tasksVersion\s*\}\)/, 'interaction center uses the unified catalog (with commit stamp), retaining raw execution tasks for scoped sidebars')
   const meetingNavigationSource = fs.readFileSync(path.join(root, 'src/renderer/src/components/meeting/meetingViewState.ts'), 'utf8')
   assert.match(meetingNavigationSource, /meetingNavigationTasks\(tasks, meetings, issues\)\.map/, 'unified catalog keeps the complete raw task directory plus meeting roots')
   assert.match(issuesViewSource, /publicTasksOf\(tasks\)/, 'Issue opened and recent task entries share public visibility')
