@@ -529,6 +529,11 @@ export class ExecutionKernel {
       this.clearRetry(taskId)
       this.bumpTurnGen(taskId)
       this.retireSession(session, 'replaced')
+      // F1（§8）：与 closeSession 的 detachSession 对称——release 摘 runner 侧登记时
+      // 同步解除 lifecycle 挂载。缺口后果：已 detach 保留的 provider 会话仍挂在
+      // sessionValue 上，后继 attachSession 的 previous 清扫会把它当旧会话 stop/close，
+      // detach 保留语义被抵消；lifecycle.cancel() 同理会二次关闭已释放会话。
+      this.turnLifecycles.get(taskId)?.detachSession(session)
       const promise = this.trackSessionRelease(session, workdir, async () => {
         if (session.detach) await session.detach()
         else {
