@@ -1,10 +1,11 @@
 // 渲染层 API 封装：window.agentdeck 的类型 + 常用 hooks
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import type { AgentDeckApi, AgentInfo, AgentModelCatalog, FileDiffResult, PresetInfo, PermissionRequest } from '../../shared/contracts'
 import type { Task, TaskEvent, AppSettings, Issue, Run, Comment, Automation, RuntimeSnapshot, AnalyticsSummary, IssuePriority, IssueStatus, RunTrigger } from '../../shared/types'
 import type { PackAssets, PetSayPayload, PetStateSnapshot } from '../../shared/pet'
 import { createDeltaList } from './data-store'
 import type { DeltaList } from './data-store'
+import { useDeltaCatalog, type DeltaCatalogSources } from './hooks/useDeltaCatalog'
 
 /** 队员（agent 身份）——与主进程 agents.ts 的 Agent 对齐 */
 export type { AgentInfo, AgentModelCatalog }
@@ -165,34 +166,23 @@ export async function getTaskWhenReady(id: string, opts: { attempts?: number; de
  *  对账兜底：保留窗 GC 删除 Issue 不广播（主进程仅 deleteIssue 落盘），但 GC 会级联删
  *  任务并逐个广播 task:deleted——借此低频触发一次全量刷新，防止 GC 残影长期滞留。 */
 export function useIssues() {
-  const [issues, setIssues] = useState<Issue[]>([])
-  const storeRef = useRef<DeltaList<Issue> | null>(null)
-  if (storeRef.current === null) storeRef.current = createDeltaList<Issue>((issue) => issue.id, (left, right) => right.updatedAt - left.updatedAt)
-  const refresh = useCallback(async () => {
-    try {
-      return await storeRef.current!.read(() => bridge.issues.list())
-    } catch {
-      return null
-    }
-  }, [])
-  useEffect(() => {
-    const store = storeRef.current!
-    let disposed = false
-    const unsubscribe = store.subscribe((items) => { if (!disposed) setIssues(items) })
-    const off = bridge.issues.onUpdated((payload) => {
-      if (payload.issue) store.upsert(payload.issue)
-      else store.remove(payload.issueId)
-    })
-    const offTasks = bridge.tasks.onDeleted(() => { void refresh() })
-    void refresh()
-    return () => {
-      disposed = true
-      unsubscribe()
-      off()
-      offTasks()
-      store.invalidateReads()
-    }
-  }, [refresh])
+  // 数据面收敛到 useDeltaCatalog（与 useMeetings / BoardView 共用同一编排）；
+  // 广播是 payload 形态（issue 或 issueId），在此适配成 upsert/remove 两个端口。
+  const sources = useMemo<DeltaCatalogSources<Issue>>(() => ({
+    list: () => bridge.issues.list(),
+    // 单次订阅、单次过滤：issues:updated 的 payload 自带整条 issue（null 表示删除）
+    onChanged: (listener) => bridge.issues.onUpdated((payload) => {
+      if (payload.issue) listener({ kind: 'upsert', item: payload.issue })
+      else listener({ kind: 'remove', id: payload.issueId })
+    }),
+    // 对账兜底：GC 删 Issue 不广播，但会级联广播 task:deleted——借此全量刷新防残影
+    onCascadeDeleted: (refresh) => bridge.tasks.onDeleted(() => refresh())
+  }), [])
+  const { items: issues, refresh } = useDeltaCatalog<Issue>(
+    (issue) => issue.id,
+    (left, right) => right.updatedAt - left.updatedAt,
+    sources
+  )
   return { issues, refresh }
 }
 
