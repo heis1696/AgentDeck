@@ -10,7 +10,20 @@ import { runDelegationLoop, parseContinueMerged, stripContinue, parseDelegates, 
 import { buildAgentPrompt, buildDelegationBlock, buildChildPrompt, sharedWorkspaceInstruction, handoffNoteBlock, delegateRecoveryNotice, consultReplyFeedback, investigationTaskPrompt, investigationFeedback, CONTINUE_BLOCK, HANDOFF_CUE, HANDOFF_RECEIVE_CUE, HANDOFF_START_CONFIRMED_CUE, RETITLE_PROMPT } from './prompts'
 import { isOfficeTask } from './agent-sessions'
 import { findHandoffSuccessor, prepareManualTaskStart, repeatsHandoffPhase } from './handoff'
-import { probeGitRepository, probeCurrentBranch, createWorktree, setWorktreeOwner, reclaimWorktree, replayLeaderBaseline, sameWorktreePath, worktreePathKey, type GitRepositoryProbeResult, type WorktreeSparseOutcome } from './git'
+import { probeCurrentBranch, createWorktree, setWorktreeOwner, reclaimWorktree, replayLeaderBaseline, sameWorktreePath, type GitRepositoryProbeResult, type WorktreeSparseOutcome } from './git'
+import { runCondition, runIdentity, TURN_ISOLATION_REQUIRED, RESUME_UNSUPPORTED_MESSAGE } from './execution/identity'
+import type { RunClaim, TurnRecord } from './execution/identity'
+import { SessionTurnRouter } from './execution/session-turn-router'
+import { awaitCleanup, strictCleanup, awaitExit, checkedCleanup } from './execution/cleanup'
+import { gitRepositoryProbe } from './execution/git-probe-cache'
+
+// 冻结面：以下符号的 smoke 直连消费以 `./runner` 为准（AGENTS.md 铁律），实现已在批次 1
+// 迁入 src/main/execution/*，这里按原名 re-export——调用方与 smoke 零改动。
+export { TURN_ISOLATION_REQUIRED, RESUME_UNSUPPORTED_MESSAGE } from './execution/identity'
+export type { RunClaim, TurnRecord } from './execution/identity'
+export { SessionTurnRouter } from './execution/session-turn-router'
+export { setGitRepositoryProbeCacheProbeForTest } from './execution/git-probe-cache'
+export type { GitRepositoryProbeCacheEvent } from './execution/git-probe-cache'
 
 /** API 预设（主进程 presets.ts 的 ApiPreset 的运行时子集，避免环依赖） */
 interface PresetLike {
@@ -152,165 +165,6 @@ const SUMMARY_TURN_BUDGET_MS = 120_000
 /** 后端连接已死的特征：命中后丢弃内存会话、降级 resume 重建（不再需要重启应用） */
 const SESSION_DEAD_RE = /连接已关闭|进程退出|EPIPE|ENOTCONN|ECONNRESET|ECONNREFUSED|disconnected/i
 
-/**
- * One execution Run, captured when its conditional claim committed.
- *
- * Every durable write produced by that Run's asynchronous work carries this
- * identity as its `expected` condition. A stale callback therefore cannot
- * finish, re-label or re-session a newer Run on the same compatibility Task,
- * no matter which process it came from. The owner is absent only for legacy or
- * hand-authored records whose identity is unknown; such a record only matches
- * other owner-less records, so an unknown owner is never silently adopted.
- */
-interface RunClaim {
-  taskId: string
-  runId: string
-  owner?: ExecutionOwner
-}
-
-/** A write that is only valid while the claimed Run is still the running one. */
-function runCondition(claim: RunClaim, extra: TaskExpectation = {}): TaskExpectation {
-  return { ...extra, status: 'running', runId: claim.runId, executionOwner: claim.owner }
-}
-
-/** A write that belongs to the claimed Run regardless of its current status. */
-function runIdentity(claim: RunClaim, extra: TaskExpectation = {}): TaskExpectation {
-  return { ...extra, runId: claim.runId, executionOwner: claim.owner }
-}
-
-/**
- * One accepted prompt→reply turn on one backend session.
- *
- * The record is immutable: `claim`, `generation`, `stamp` and its callback set
- * are fixed when the turn opens and are never re-pointed. A callback is judged
- * against the record it was stamped with, so opening a later turn can never
- * re-authorize the closures of an earlier one — the failure mode of the old
- * shared-and-mutated `EventContext`.
- */
-interface TurnRecord {
-  readonly taskId: string
-  readonly seq: number
-  readonly stamp: BackendTurnStamp
-  readonly generation: number
-  readonly claim: RunClaim
-  readonly token: EventGateToken
-  readonly events: BackendSessionEvents
-  /** 回合没等到终态就被撤销（被后继回合顶掉/连接退役/显式放弃）时，等待方经此立即落败，
-   *  不必各自等到预算兜底；可选——常规回合由看门狗与一次性 waiter 护送，无需此钩子。 */
-  readonly onRevoked?: () => void
-}
-
-/** Reported when a session cannot prove which turn a callback belongs to. */
-export const TURN_ISOLATION_REQUIRED = 'session-turn-identity-unavailable'
-
-/**
- * 追问重建路径的诚实降级：后端不支持跨进程恢复（supportsResume=false）而旧会话已退役时，
- * 回合按失败收场并给出可行动出口——绝不静默开新会话冒充恢复成功。
- */
-export const RESUME_UNSUPPORTED_MESSAGE = '该会话已退役且此后端不支持跨进程恢复，可基于报告全文/Issue 评论重新派单带上下文'
-
-/**
- * Correlates the callbacks of one `BackendSession` with the turn that produced
- * them. The session-level channel (created once, handed to the adapter at
- * start) forwards into this router; only the router decides which immutable
- * `TurnRecord` — if any — receives a callback:
- *
- * - a callback stamped with a known, still-open turn id goes to that turn;
- * - an unknown or already-closed id is dropped, never re-credited to the
- *   newest turn;
- * - a session that did **not** declare `turnScoped` cannot distinguish turns at
- *   all, so it is used for its isolated first turn only. Every later turn
- *   rebuilds the connection from its session id instead of guessing.
- */
-class SessionTurnRouter {
-  private readonly open = new Map<string, TurnRecord>()
-  private currentId?: string
-  private seq = 0
-  /** 未声明回合身份的连接：未标记回调只能归给当时唯一在飞的回合 */
-  legacy = true
-  /** 有回合没收终态就被放弃：未标记回调的归属不再可信 */
-  ambiguous = false
-  /** 会话 id（登记后可知；回合 token 用它做 owner 门禁） */
-  owner?: string
-  /** 最近一次开在此连接上的运行身份（closeSession 的归属兜底） */
-  lastClaim?: RunClaim
-
-  nextSeq() {
-    return ++this.seq
-  }
-
-  openTurn(record: TurnRecord) {
-    // 同一会话同时只允许一个在飞回合：开新回合时仍开着的旧记录都是被顶掉的，
-    // 在此可靠撤销（等待方经 onRevoked 立即落败），而不是留在 open 表里继续抢收回调。
-    for (const id of [...this.open.keys()]) this.revoke(id)
-    this.open.set(record.stamp.id, record)
-    this.currentId = record.stamp.id
-  }
-
-  /** Terminal admitted: the turn may no longer receive anything. */
-  closeTurn(id: string) {
-    this.open.delete(id)
-  }
-
-  /**
-   * The turn was given up (watchdog, cancel, send failure) before any terminal.
-   * Its callbacks are dropped from now on, and a connection that cannot stamp
-   * callbacks is marked unpinnable so the next turn rebuilds it.
-   * 带 id 时按 id 精确撤销——被后继回合顶掉的旧记录不再是 currentId，
-   * 只认 currentId 的旧语义会让它永远留在 open 表里继续抢收回调。
-   */
-  abandonTurn(id?: string) {
-    const target = id !== undefined ? id : this.currentId
-    if (!target) return
-    this.revoke(target)
-  }
-
-  /** 撤销一个在飞回合：移出路由表；legacy 连接失去当前归属锚点时标记不可复用；
-   *  最后才通知等待方（onRevoked 里若同步开新回合，看到的是已清空的 open 表）。 */
-  private revoke(id: string) {
-    const record = this.open.get(id)
-    if (!record) return
-    this.open.delete(id)
-    if (id === this.currentId && this.legacy) this.ambiguous = true
-    record.onRevoked?.()
-  }
-
-  abandonOpen() {
-    this.abandonTurn()
-  }
-
-  hasOpenTurn() {
-    return this.open.size > 0
-  }
-
-  /** Drop every callback still associated with this connection. */
-  retire(reason: 'closed' | 'replaced' = 'closed') {
-    for (const id of [...this.open.keys()]) this.revoke(id)
-    this.currentId = undefined
-    if (reason === 'replaced') this.ambiguous = true
-  }
-
-  /** Immutable routing decision for one adapter callback. */
-  resolve(stamp?: BackendTurnStamp): TurnRecord | undefined {
-    if (stamp && typeof stamp.id === 'string') return this.open.get(stamp.id)
-    if (!this.legacy) return undefined
-    if (this.ambiguous) return undefined
-    return this.currentId ? this.open.get(this.currentId) : undefined
-  }
-
-  current(): TurnRecord | undefined {
-    return this.currentId ? this.open.get(this.currentId) : undefined
-  }
-
-  /** A connection without turn identity may only be reused while unambiguous;
-   *  且同一时刻只允许一个在飞回合——仍有回合没收终态就不得开新回合
-   *  （总结轮×总结轮、总结轮×追问在此互斥；入口检查到 openTurn 之间零 await，
-   *  检查通过即占住唯一名额，窗口就此收口）。 */
-  mayOpenNewTurn() {
-    return !this.ambiguous && this.open.size === 0
-  }
-}
-
 interface TerminationTarget {
   task: Task
   session?: BackendSession
@@ -396,23 +250,6 @@ export class TaskRunner {
   /** Consecutive tool-call signatures used by the doom-loop approval guard. */
   private toolWindows = new Map<string, { key: string; count: number; requested: boolean }>()
   private doomRequestSeq = 0
-
-  /** Cleanup must be awaited, but a broken provider must not block cancellation
-   * or application shutdown indefinitely. */
-  private awaitCleanup(action: () => Promise<unknown> | void, timeoutMs = 2_000): Promise<boolean> {
-    return new Promise((resolve) => {
-      let settled = false
-      let timer: NodeJS.Timeout
-      const finish = (ok: boolean) => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        resolve(ok)
-      }
-      timer = setTimeout(() => finish(false), timeoutMs)
-      Promise.resolve().then(action).then(() => finish(true), () => finish(false))
-    })
-  }
 
   private trackSessionRelease(session: BackendSession, workdir: string, release: () => Promise<void>): Promise<void> {
     const previous = this.worktreeSessionReleases.get(session)
@@ -760,7 +597,7 @@ export class TaskRunner {
         const record = router.current()
         if (!record || !this.isCurrentRun(record.claim) || !this.lifecycle(record.taskId).accepts(record.token)) {
           const claim = record?.claim ?? router.lastClaim
-          this.executor.registerCleanup(claim ? `${claim.taskId}:${claim.runId}` : undefined, () => this.checkedCleanup(() => handle.stop()))
+          this.executor.registerCleanup(claim ? `${claim.taskId}:${claim.runId}` : undefined, () => checkedCleanup(() => handle.stop()))
           return
         }
         this.launchHandles.set(record.taskId, handle)
@@ -989,12 +826,12 @@ export class TaskRunner {
     const cleanup = this.executor.registerCleanup(claim ? `${claim.taskId}:${claim.runId}` : undefined, async () => {
       if (closed) return
       let stopError: unknown
-      try { await this.checkedCleanup(() => session.stop()) } catch (error) { stopError = error }
-      await this.checkedCleanup(() => session.close())
+      try { await checkedCleanup(() => session.stop()) } catch (error) { stopError = error }
+      await checkedCleanup(() => session.close())
       closed = true
       if (stopError) throw stopError
     })
-    await this.awaitCleanup(() => cleanup)
+    await awaitCleanup(() => cleanup)
   }
 
   /** 关闭并移除内存会话（容错）：防止放弃的会话继续在后台跑、往任务日志里交错写事件 */
@@ -1021,9 +858,9 @@ export class TaskRunner {
     this.retireSession(s)
     // 会话在此处释放（close 或 detach），从 lifecycle 解绑防 attachSession 前会话清扫二次释放
     this.turnLifecycles.get(taskId)?.detachSession(s)
-    await this.awaitCleanup(() => this.trackSessionRelease(s, workdir, async () => {
-      await this.awaitCleanup(() => s.stop())
-      await this.checkedCleanup(() => preserveProviderSession && s.detach ? s.detach() : s.close())
+    await awaitCleanup(() => this.trackSessionRelease(s, workdir, async () => {
+      await awaitCleanup(() => s.stop())
+      await checkedCleanup(() => preserveProviderSession && s.detach ? s.detach() : s.close())
     }), 4_000)
   }
 
@@ -1046,7 +883,7 @@ export class TaskRunner {
       const promise = this.trackSessionRelease(session, workdir, async () => {
         if (session.detach) await session.detach()
         else {
-          await this.awaitCleanup(() => session.stop())
+          await awaitCleanup(() => session.stop())
           await session.close()
         }
       })
@@ -1062,7 +899,7 @@ export class TaskRunner {
     const pending = [...this.worktreeSessionReleases].filter(([, entry]) => sameWorktreePath(entry.workdir, workdir))
     const results = await Promise.all(pending.map(([session, entry]) => {
       const promise = entry.failed ? this.trackSessionRelease(session, entry.workdir, entry.release) : entry.promise
-      return this.awaitCleanup(() => promise, 4_000)
+      return awaitCleanup(() => promise, 4_000)
     }))
     return results.every(Boolean)
   }
@@ -1094,8 +931,8 @@ export class TaskRunner {
     this.turnLifecycles.get(taskId)?.dispose()
     this.turnLifecycles.delete(taskId)
     if (session) {
-      await this.awaitCleanup(() => this.trackSessionRelease(session, workdir, async () => {
-        await this.awaitCleanup(() => session.stop())
+      await awaitCleanup(() => this.trackSessionRelease(session, workdir, async () => {
+        await awaitCleanup(() => session.stop())
         await session.close()
       }), 4_000)
     }
@@ -1626,7 +1463,7 @@ export class TaskRunner {
       guardedNote(`⚠ sparse 属性格式非法（${sparseSpec.reason}），本单回落全量检出`)
     }
     const sparseDirs = sparseSpec.kind === 'dirs' ? sparseSpec.dirs : []
-    const gitProbe = !target.sharedWorkspace && task.workdir ? await this.gitRepositoryProbe(task.workdir) : undefined
+    const gitProbe = !target.sharedWorkspace && task.workdir ? await gitRepositoryProbe(task.workdir) : undefined
     if (gitProbe && !active()) return null
     if (gitProbe?.status === 'error') {
       const why = `无法确认工作区是否可安全隔离，拒绝共享工作区派单——${gitProbe.reason}`
@@ -1939,26 +1776,9 @@ export class TaskRunner {
     this.workerIndexReservations.set(taskId, next)
     return next
   }
-  /** Git 工作区探测（成功/非仓库带缓存；临时探测错误不缓存）。
-   *  缓存键与 git.ts 的路径键同源折叠：同一目录按别名写法（大小写/盘符差异）调用
-   *  必须命中同一份缓存，绝不重复探测。 */
-  private gitUsableCache = new Map<string, GitRepositoryProbeResult>()
-  private async gitRepositoryProbe(dir: string): Promise<GitRepositoryProbeResult> {
-    const key = worktreePathKey(dir)
-    const cached = this.gitUsableCache.get(key)
-    if (cached) {
-      gitRepositoryProbeCacheProbe?.('hit')
-      return cached
-    }
-    gitRepositoryProbeCacheProbe?.('miss')
-    const probe = await probeGitRepository(dir)
-    if (probe.status !== 'error') this.gitUsableCache.set(key, probe)
-    return probe
-  }
-
   /** 测试出口：直连探测缓存（配 setGitRepositoryProbeCacheProbeForTest 观测命中/未命中）。 */
   gitRepositoryProbeForTest(dir: string): Promise<GitRepositoryProbeResult> {
-    return this.gitRepositoryProbe(dir)
+    return gitRepositoryProbe(dir)
   }
 
   /** agent 引用的 API 预设 → 会话连接覆盖（预设 + 模型须同时具备） */
@@ -2298,8 +2118,8 @@ export class TaskRunner {
       this.sessionWorkdirs.delete(taskId)
       this.retireSession(previous, 'replaced')
       this.launchHandles.delete(taskId)
-      await this.awaitCleanup(() => previous.stop())
-      await this.awaitCleanup(() => previous.detach ? previous.detach() : previous.close())
+      await awaitCleanup(() => previous.stop())
+      await awaitCleanup(() => previous.detach ? previous.detach() : previous.close())
     }
     if (!this.isCurrentRun(claim)) return { ok: false, response: '', error: 'Task execution is no longer active' }
 
@@ -3150,10 +2970,10 @@ export class TaskRunner {
       this.lastTerminalResponses.delete(taskId)
       this.pushTask(taskId)
       if (!session) {
-        try { await this.awaitCleanup(() => launchHandle?.stop()) } catch {}
+        try { await awaitCleanup(() => launchHandle?.stop()) } catch {}
       }
-      if (session) await this.awaitCleanup(() => this.trackSessionRelease(session, sessionWorkdir, async () => {
-        await this.awaitCleanup(() => session.stop())
+      if (session) await awaitCleanup(() => this.trackSessionRelease(session, sessionWorkdir, async () => {
+        await awaitCleanup(() => session.stop())
         await session.close()
       }), 4_000)
       this.store.flushEvents(taskId)
@@ -3171,52 +2991,6 @@ export class TaskRunner {
       if (map.get(taskId) === promise) map.delete(taskId)
     })
     return promise
-  }
-
-  private strictCleanup(action: () => Promise<unknown> | unknown, label: string, problems: string[], timeoutMs = 4_000): Promise<void> {
-    return new Promise((resolve) => {
-      let settled = false
-      const timer = setTimeout(() => {
-        if (settled) return
-        settled = true
-        problems.push(`${label}: 超时（${Math.round(timeoutMs / 1000)}s）`)
-        resolve()
-      }, timeoutMs)
-      Promise.resolve().then(action).then((value) => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        if (value === false || value && typeof value === 'object' && (value as { ok?: unknown }).ok === false) {
-          problems.push(`${label}: ${String((value as { error?: unknown }).error ?? '操作未成功')}`)
-        }
-        resolve()
-      }, (error) => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        problems.push(`${label}: ${error instanceof Error ? error.message : String(error)}`)
-        resolve()
-      })
-    })
-  }
-
-  private async awaitExit(promise: Promise<unknown> | undefined, label: string, problems: string[], timeoutMs: number): Promise<void> {
-    if (!promise) return
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(() => { problems.push(`${label}: 超时`); resolve() }, timeoutMs)
-      void promise.then(() => { clearTimeout(timer); resolve() }, (error) => {
-        clearTimeout(timer)
-        problems.push(`${label}: ${String(error)}`)
-        resolve()
-      })
-    })
-  }
-
-  private async checkedCleanup(action: () => Promise<unknown> | unknown): Promise<void> {
-    const value = await action()
-    if (value === false || value && typeof value === 'object' && (value as { ok?: unknown }).ok === false) {
-      throw new Error(value && typeof value === 'object' ? String((value as { error?: unknown }).error ?? '退出未确认') : '退出未确认')
-    }
   }
 
   private retireExecutionState(taskId: string) {
@@ -3250,12 +3024,12 @@ export class TaskRunner {
       this.sessionWorkdirs.delete(taskId)
     }
     this.retireSession(session)
-    await this.strictCleanup(() => this.trackSessionRelease(session, target.workdir, async () => {
+    await strictCleanup(() => this.trackSessionRelease(session, target.workdir, async () => {
       let stopError: unknown
       const stopProblems: string[] = []
-      await this.strictCleanup(() => this.checkedCleanup(() => session.stop()), '会话中止', stopProblems, this.opts().terminationTimeoutMs ?? 4_000)
+      await strictCleanup(() => checkedCleanup(() => session.stop()), '会话中止', stopProblems, this.opts().terminationTimeoutMs ?? 4_000)
       if (stopProblems.length) stopError = new Error(stopProblems.join('；'))
-      await this.checkedCleanup(() => session.close())
+      await checkedCleanup(() => session.close())
       target.sessionClosed = true
       if (stopError) throw stopError
     }), '会话关闭', problems, this.opts().terminationTimeoutMs ?? 8_000)
@@ -3337,10 +3111,10 @@ export class TaskRunner {
     this.pushTask(taskId)
     if (target.launch && !target.launchStopped) {
       const captured = target
-      captured.launchCleanup ??= this.checkedCleanup(() => captured.launch!.stop()).then(() => {
+      captured.launchCleanup ??= checkedCleanup(() => captured.launch!.stop()).then(() => {
         captured.launchStopped = true
       }, (error) => { captured.launchCleanup = undefined; throw error })
-      await this.strictCleanup(() => captured.launchCleanup, '初始化中止', problems, this.opts().terminationTimeoutMs ?? 4_000)
+      await strictCleanup(() => captured.launchCleanup, '初始化中止', problems, this.opts().terminationTimeoutMs ?? 4_000)
     }
     await this.terminateSession(taskId, target, problems)
     for (const child of this.store.list().filter((item) => item.parentTaskId === taskId)) {
@@ -3352,24 +3126,24 @@ export class TaskRunner {
       if (!result.ok) problems.push(`${child.title || child.id}: ${result.error ?? '终止未确认'}`)
     }
     for (const tracked of [target.activeRun, target.activeTurn]) {
-      await this.awaitExit(tracked, '执行退出确认', problems, this.opts().terminationTimeoutMs ?? 15_000)
+      await awaitExit(tracked, '执行退出确认', problems, this.opts().terminationTimeoutMs ?? 15_000)
     }
     for (const [session, entry] of this.worktreeSessionReleases) {
       if (this.sessionTurns.get(session)?.lastClaim?.taskId !== taskId) continue
       if (session === target.session && target.sessionClosed) { this.worktreeSessionReleases.delete(session); continue }
-      await this.strictCleanup(() => entry.failed ? this.trackSessionRelease(session, entry.workdir, entry.release) : entry.promise,
+      await strictCleanup(() => entry.failed ? this.trackSessionRelease(session, entry.workdir, entry.release) : entry.promise,
         '已移除会话退出确认', problems, this.opts().terminationTimeoutMs ?? 8_000)
     }
     for (const [key, entry] of this.retiredProviderSessions) {
       if (entry.taskId !== taskId) continue
-      entry.closing ??= this.checkedCleanup(() => entry.session.close()).then(() => { entry.closed = true }, (error) => {
+      entry.closing ??= checkedCleanup(() => entry.session.close()).then(() => { entry.closed = true }, (error) => {
         entry.closing = undefined
         throw error
       })
-      await this.strictCleanup(() => entry.closing, '已断开平台会话关闭', problems, this.opts().terminationTimeoutMs ?? 8_000)
+      await strictCleanup(() => entry.closing, '已断开平台会话关闭', problems, this.opts().terminationTimeoutMs ?? 8_000)
       if (entry.closed && this.retiredProviderSessions.get(key) === entry) this.retiredProviderSessions.delete(key)
     }
-    await this.strictCleanup(() => this.executor.drain(`${taskId}:${task.runId}`), '晚到会话回收', problems, this.opts().terminationTimeoutMs ?? 5_000)
+    await strictCleanup(() => this.executor.drain(`${taskId}:${task.runId}`), '晚到会话回收', problems, this.opts().terminationTimeoutMs ?? 5_000)
     if (problems.length) return { ok: false, error: problems.join('；') }
     if (!this.store.updateIf(taskId, { runId: task.runId, executionOwner: task.executionOwner }, { terminatedRunId: task.runId })) {
       return { ok: false, error: '退出确认时任务已被替换，未清除诊断记录' }
@@ -3410,7 +3184,7 @@ export class TaskRunner {
     for (const [taskId, handle] of this.launchHandles) {
       this.bumpTurnGen(taskId)
       if (!this.sessions.has(taskId)) {
-        await this.awaitCleanup(() => handle.stop())
+        await awaitCleanup(() => handle.stop())
       }
     }
     this.launchHandles.clear()
@@ -3424,12 +3198,12 @@ export class TaskRunner {
     this.turnWatchdogs.clear()
     for (const [, s] of this.sessions) {
       this.retireSession(s, 'replaced')
-      await this.awaitCleanup(() => s.stop())
-      await this.awaitCleanup(() => s.close())
+      await awaitCleanup(() => s.stop())
+      await awaitCleanup(() => s.close())
     }
     await Promise.all([...this.worktreeSessionReleases].map(([session, entry]) => {
       const promise = entry.failed ? this.trackSessionRelease(session, entry.workdir, entry.release) : entry.promise
-      return this.awaitCleanup(() => promise, 4_000)
+      return awaitCleanup(() => promise, 4_000)
     }))
     this.sessions.clear()
     this.activeRuns.clear()
@@ -3451,12 +3225,4 @@ export class TaskRunner {
   sessionCount() {
     return this.sessions.size
   }
-}
-
-/** 测试探针出口：观测 Git 工作区探测缓存的命中/未命中（同一目录按别名写法调用必须
- *  命中同一缓存键——事件序 hit 前必有且仅有一次 miss）。 */
-export type GitRepositoryProbeCacheEvent = 'hit' | 'miss'
-let gitRepositoryProbeCacheProbe: ((event: GitRepositoryProbeCacheEvent) => void) | undefined
-export function setGitRepositoryProbeCacheProbeForTest(listener: ((event: GitRepositoryProbeCacheEvent) => void) | undefined): void {
-  gitRepositoryProbeCacheProbe = listener
 }
