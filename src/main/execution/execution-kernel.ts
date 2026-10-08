@@ -22,7 +22,8 @@ export interface TurnEventsRequest {
   onTurnEnd?: (r: BackendTurnResult) => void
 }
 
-/** closeSession 的退役会话暂存条目（批次 2 由 runner 持 retiredProviderSessions 台账，批次 5 移入 termination 后收窄） */
+/** closeSession 的退役会话暂存条目（批次 5 起台账归 execution/termination.ts 唯一所有，
+ *  内核只经 retainRetiredSession 端口上报候选，判定与落账都在协调器单点） */
 export interface RetiredSessionEntry {
   taskId: string
   session: BackendSession
@@ -68,8 +69,9 @@ export interface ExecutionKernelPorts {
   drainEvents(taskId: string, timeoutMs?: number): Promise<boolean>
   /** 回合事件组装（批次 2 由 runner 提供 makeTurnEvents，批次 3 后由 turn-events 模块提供） */
   composeTurnEvents(req: TurnEventsRequest): BackendSessionEvents
-  /** closeSession 的退役会话暂存裁决与落账（runner：meetingId 判定 + retiredProviderSessions） */
-  parkRetiredSession(key: string, entry: RetiredSessionEntry): void
+  /** closeSession 的平台会话保留候选（批次 5 起经 termination 协调器：meetingId 判定
+   *  与 retiredProviderSessions 台账都在协调器单点，内核只上报不落账） */
+  retainRetiredSession(key: string, entry: RetiredSessionEntry): void
   /** 孤儿启动句柄兜底（runner：executor.registerCleanup） */
   registerOrphanLaunchCleanup(key: string | undefined, action: () => Promise<void>): Promise<void>
 }
@@ -502,7 +504,7 @@ export class ExecutionKernel {
     this.sweepTaskExecutionState(taskId, { invalidateTurns: true, retry: true, workflow: { delegationLedger: true }, terminal: true })
     if (!s) return
     if (preserveProviderSession && s.detach) {
-      this.ports.parkRetiredSession(`${taskId}:${s.sessionId ?? claim?.runId}`, { taskId, session: s, closed: false })
+      this.ports.retainRetiredSession(`${taskId}:${s.sessionId ?? claim?.runId}`, { taskId, session: s, closed: false })
     }
     this.dropInstalledSession(taskId)
     // 会话在此处释放（close 或 detach），从 lifecycle 解绑防 attachSession 前会话清扫二次释放
@@ -557,7 +559,10 @@ export class ExecutionKernel {
     return results.every(Boolean)
   }
 
-  // ---------------------------------------------------------------- 只读视图（批次 5 随终止协调迁入后收窄删除）
+  // ---------------------------------------------------------------- 只读视图（termination 协调器的专用窄面）
+
+  /** 释放台账的派生快照，按 lastClaim 过滤——不暴露 worktreeSessionReleases Map 本体；
+   *  批次 5 起只被 execution/termination.ts 经同名窄端口消费。 */
 
   /** terminateTask 专用的释放台账判定：该任务身份的会话是否有在途/失败释放 */
   hasSessionReleaseClaimedBy(taskId: string, runId: string | undefined, owner: ExecutionOwner | undefined): boolean {

@@ -2,8 +2,8 @@
 // 状态机：queued → running → done | failed | cancelled
 import type { ExecutionOwner, Task, TaskEvent } from '../shared/types'
 import { createHash } from 'node:crypto'
-import { sameExecutionOwner, type TaskExpectation, type TaskStore } from './store'
-import { createExecutionOwner, processOwnerState } from './persistence'
+import { type TaskExpectation, type TaskStore } from './store'
+import { createExecutionOwner } from './persistence'
 import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnStamp, PermissionRequest, BackendTurnResult } from './backends/types'
 import { runDelegationLoop, parseContinueMerged, stripContinue, parseDelegates, stripDelegates, stripRoundNotes, stripReviews, parseConsultsMerged, stripConsults, parseInvestigatesMerged, stripInvestigates, ancestorBudget, escapeProtocolLiterals, findUnmatchedConsultOpens, findUnmatchedInvestigateOpens, unmatchedConsultOpenReason, unmatchedInvestigateOpenReason, type AgentLike, type DelegateCall, type ConsultCall, type InvestigateCall, type IssueCommentLike } from './delegate'
 import { buildAgentPrompt, buildDelegationBlock, handoffNoteBlock, delegateRecoveryNotice, consultReplyFeedback, investigationFeedback, CONTINUE_BLOCK, HANDOFF_CUE, HANDOFF_RECEIVE_CUE, HANDOFF_START_CONFIRMED_CUE, RETITLE_PROMPT } from './prompts'
@@ -13,12 +13,13 @@ import { sameWorktreePath, type GitRepositoryProbeResult } from './git'
 import { runCondition, runIdentity, TURN_ISOLATION_REQUIRED, RESUME_UNSUPPORTED_MESSAGE } from './execution/identity'
 import type { RunClaim, TurnRecord } from './execution/identity'
 import { SessionTurnRouter } from './execution/session-turn-router'
-import { awaitCleanup, strictCleanup, awaitExit, checkedCleanup } from './execution/cleanup'
+import { awaitCleanup } from './execution/cleanup'
 import { gitRepositoryProbe } from './execution/git-probe-cache'
-import { ExecutionKernel, turnTimeoutError, type RetiredSessionEntry } from './execution/execution-kernel'
+import { ExecutionKernel, turnTimeoutError } from './execution/execution-kernel'
 import { EventPump } from './execution/event-pump'
 import { DelegateLedger } from './execution/delegate-ledger'
 import { ChildSpawner, type TaskCreator } from './execution/child-spawner'
+import { TerminationCoordinator } from './execution/termination'
 
 // 冻结面：以下符号的 smoke 直连消费以 `./runner` 为准（AGENTS.md 铁律），实现已在批次 1
 // 迁入 src/main/execution/*，这里按原名 re-export——调用方与 smoke 零改动。
@@ -99,18 +100,6 @@ const SUMMARY_TURN_BUDGET_MS = 120_000
 /** 后端连接已死的特征：命中后丢弃内存会话、降级 resume 重建（不再需要重启应用） */
 const SESSION_DEAD_RE = /连接已关闭|进程退出|EPIPE|ENOTCONN|ECONNRESET|ECONNREFUSED|disconnected/i
 
-interface TerminationTarget {
-  task: Task
-  session?: BackendSession
-  workdir: string
-  launch?: { stop: () => void | Promise<unknown> }
-  launchCleanup?: Promise<void>
-  launchStopped: boolean
-  sessionClosed: boolean
-  activeRun?: Promise<unknown>
-  activeTurn?: Promise<unknown>
-}
-
 export class TaskRunner {
   private store: TaskStore
   private backends: Map<string, AgentBackend>
@@ -151,14 +140,16 @@ export class TaskRunner {
    *  execution/child-spawner.ts；runner 留两个 smoke 直连的签名冻结门面。依赖全部经窄端口
    *  注入（§6.4 4b），spawner 绝不反向 import runner。 */
   private readonly childSpawner: ChildSpawner
+  /** 终止协调（批次 5）：terminating/terminationTargets/retiredProviderSessions 的唯一
+   *  所有者与严格终止全量编排迁入 execution/termination.ts；runner 留 smoke 直连的
+   *  terminateTask 签名冻结门面。activeRuns/activeTurns 所有权留在 runner（§5.1：
+   *  Scheduler 回调写、pipeline sources 读），以只读快照端口现取。 */
+  private readonly termination: TerminationCoordinator
   private shuttingDown = false
   private cancellationDrains = new Map<string, number>()
   private meetingGuard: ((task: Task) => boolean) | null = null
-  private terminating = new Map<string, Promise<{ ok: boolean; error?: string; warning?: string }>>()
-  private activeRuns = new Map<string, Promise<unknown>>()
+  private activeRunsMap = new Map<string, Promise<unknown>>()
   private activeTurns = new Map<string, Promise<unknown>>()
-  private terminationTargets = new Map<string, TerminationTarget>()
-  private retiredProviderSessions = new Map<string, RetiredSessionEntry>()
   private readonly onTaskChanged?: (task: Task) => void
   /** Consecutive tool-call signatures used by the doom-loop approval guard. */
   private toolWindows = new Map<string, { key: string; count: number; requested: boolean }>()
@@ -236,10 +227,49 @@ export class TaskRunner {
       drainEvents: (taskId, timeoutMs) => this.eventPump.close(taskId, timeoutMs),
       // 回合事件组装（批次 3b 起由 turn-events 工厂提供；台账登记收口在 3a 的 EventPump）
       composeTurnEvents: this.turnEvents,
-      parkRetiredSession: (key, entry) => {
-        if (entry.session.detach && this.store.get(entry.taskId)?.meetingId) this.retiredProviderSessions.set(key, entry)
-      },
+      retainRetiredSession: (key, entry) => this.termination.parkRetiredSession(key, entry),
       registerOrphanLaunchCleanup: (key, action) => this.executor.registerCleanup(key, action)
+    })
+    // 终止协调（批次 5）在内核之后装配：端口回调引用内核原语与 runner 编排面（惰性调用，
+    // 构造期不触发）；activeRuns/activeTurns 只读快照每次调用现取（§6.5），不长期持有引用
+    this.termination = new TerminationCoordinator({
+      // 持久层窄探针/条件写
+      taskOf: (taskId) => this.store.get(taskId),
+      matches: (taskId, expected) => this.store.matches(taskId, expected),
+      updateIf: (taskId, expected, patch) => this.store.updateIf(taskId, expected, patch),
+      childTasks: (parentTaskId) => this.store.list().filter((task) => task.parentTaskId === parentTaskId),
+      // 内核原语（身份/会话/释放台账）
+      claimOf: (taskId) => this.kernel.claimOf(taskId),
+      isCurrentRun: (claim) => this.kernel.isCurrentRun(claim),
+      sessionOf: (taskId) => this.kernel.sessionOf(taskId),
+      workdirOf: (taskId) => this.kernel.workdirOf(taskId),
+      launchHandleOf: (taskId) => this.kernel.launchHandleOf(taskId),
+      hasRetryTimer: (taskId) => this.kernel.hasRetryTimer(taskId),
+      lastClaimOf: (session) => this.kernel.routerOf(session)?.lastClaim,
+      dropSessionIfCurrent: (taskId, session) => this.kernel.dropSessionIfCurrent(taskId, session),
+      retireSession: (session) => this.kernel.retireSession(session),
+      sweepTaskExecutionState: (taskId, o) => this.kernel.sweepTaskExecutionState(taskId, o),
+      trackSessionRelease: (session, workdir, release) => this.kernel.trackSessionRelease(session, workdir, release),
+      hasSessionReleaseClaimedBy: (taskId, runId, owner) => this.kernel.hasSessionReleaseClaimedBy(taskId, runId, owner),
+      sessionReleasesForTask: (taskId) => this.kernel.sessionReleasesForTask(taskId),
+      dropSessionRelease: (session) => this.kernel.dropSessionRelease(session),
+      // runner 编排回调（业务裁决留在 runner）
+      pushTask: (taskId) => this.pushTask(taskId),
+      drainEvents: (taskId, timeoutMs) => this.eventPump.close(taskId, timeoutMs),
+      runUnderCancellationDrain: async (taskId, body) => {
+        this.cancellationDrains.set(taskId, (this.cancellationDrains.get(taskId) ?? 0) + 1)
+        try {
+          return await body()
+        } finally {
+          const remaining = (this.cancellationDrains.get(taskId) ?? 1) - 1
+          if (remaining) this.cancellationDrains.set(taskId, remaining)
+          else this.cancellationDrains.delete(taskId)
+        }
+      },
+      drainLateSessions: (key) => this.executor.drain(key),
+      settleTask: (taskId, outcome, context) => this.pipeline.settle(taskId, outcome, context),
+      getActiveExecutions: (taskId) => ({ run: this.activeRunsMap.get(taskId), turn: this.activeTurns.get(taskId) }),
+      terminationTimeoutMs: () => this.opts().terminationTimeoutMs
     })
     // 委派建单器（批次 4b）在内核之后装配：端口回调引用 runner 编排面与台账（惰性调用，
     // 构造期不触发）；taskCreator 惰性读取——attachTaskCreator 在构造之后才挂接
@@ -279,7 +309,7 @@ export class TaskRunner {
       sources: [
         { label: 'launchHandles', size: () => this.kernel.launchCount() },
         { label: 'eventBatchers', size: () => this.eventPump.size },
-        { label: 'terminationTargets', size: () => this.terminationTargets.size },
+        { label: 'terminationTargets', size: () => this.termination.targetCount },
         { label: 'executorCleanups', size: () => (this.executor.isIdle() ? 0 : 1) }
       ]
     })
@@ -304,7 +334,7 @@ export class TaskRunner {
     this.scheduler = new Scheduler(
       () => this.store.list().filter((task) => this.meetingGuardAllows(task)),
       () => ({ concurrency: this.opts().concurrency, workerConcurrency: this.opts().workerConcurrency }),
-      (taskId) => this.trackMap(this.activeRuns, taskId, this.run(taskId).catch((error) => {
+      (taskId) => this.trackMap(this.activeRunsMap, taskId, this.run(taskId).catch((error) => {
         console.error('[Scheduler] Task launch failed', error)
       }))
     )
@@ -324,6 +354,12 @@ export class TaskRunner {
   /** 台账已迁 EventPump（批次 3a）：smoke-event-pipeline.mjs:342-357 与
    *  smoke-hot-transaction.mjs:365/463 直读，getter 返回其活 Map 引用。 */
   get eventBatchers() { return this.eventPump.batches }
+  /** 冻结面（批次 5）：smoke-meeting-termination.mjs:347 写入 activeRuns.set(...) 造在途
+   *  假状态、:396/400 与 smoke-continue.mjs:375 直读 retiredProviderSessions——两个 getter
+   *  都返回同一活 Map 引用（可写），不是拷贝/快照（§3 第 3 条）。retiredProviderSessions
+   *  的所有权已随终止协调迁入 execution/termination.ts，activeRuns 留在 runner。 */
+  get retiredProviderSessions() { return this.termination.retiredSessions }
+  get activeRuns() { return this.activeRunsMap }
 
   pushTask(taskId: string) {
     const task = this.store.get(taskId)
@@ -540,10 +576,9 @@ export class TaskRunner {
     })
     // 管线侧同步销账：任务移除后无人能再触发 settle，在途与流水账随行清除
     this.pipeline.drop(taskId)
-    // 台账只服务 terminateTask 的平台会话收尾；任务移除后无人能再触发终止，随行清除防累积。
-    for (const [key, entry] of this.retiredProviderSessions) {
-      if (entry.taskId === taskId) this.retiredProviderSessions.delete(key)
-    }
+    // 台账只服务 terminateTask 的平台会话收尾；任务移除后无人能再触发终止，随行清除防累积
+    // （台账已迁 execution/termination.ts，批次 5）
+    this.termination.forgetTask(taskId)
     if (session) {
       await awaitCleanup(() => this.kernel.trackSessionRelease(session, workdir, async () => {
         await awaitCleanup(() => session.stop())
@@ -1961,158 +1996,11 @@ export class TaskRunner {
     return promise
   }
 
-  /** 终止前的执行态退役：单点 sweep（批次 5 随终止协调整体外移） */
-  private retireExecutionState(taskId: string) {
-    this.kernel.sweepTaskExecutionState(taskId, {
-      watchdog: 'expire', invalidateTurns: true, retry: true, claim: true, launch: true,
-      session: 'retireOnly', workflow: { permissions: true, delegationLedger: true },
-      terminal: true, lifecycle: 'dispose'
-    })
-  }
-
-  private async terminateSession(taskId: string, target: TerminationTarget, problems: string[]): Promise<void> {
-    if (target.sessionClosed) return
-    const session = target.session ?? this.kernel.sessionOf(taskId)
-    if (!session) return
-    const claim = this.kernel.routerOf(session)?.lastClaim
-    if (claim && (claim.runId !== target.task.runId || !sameExecutionOwner(claim.owner, target.task.executionOwner))) {
-      problems.push('会话已属于替换执行，未关闭')
-      return
-    }
-    target.session = session
-    this.kernel.dropSessionIfCurrent(taskId, session)
-    this.retireSession(session)
-    await strictCleanup(() => this.kernel.trackSessionRelease(session, target.workdir, async () => {
-      let stopError: unknown
-      const stopProblems: string[] = []
-      await strictCleanup(() => checkedCleanup(() => session.stop()), '会话中止', stopProblems, this.opts().terminationTimeoutMs ?? 4_000)
-      if (stopProblems.length) stopError = new Error(stopProblems.join('；'))
-      await checkedCleanup(() => session.close())
-      target.sessionClosed = true
-      if (stopError) throw stopError
-    }), '会话关闭', problems, this.opts().terminationTimeoutMs ?? 8_000)
-  }
-
+  /** facade：严格终止已迁 execution/termination.ts（批次 5，含 terminateSession/
+   *  retireExecutionState/terminateTaskExclusive 与 terminating/terminationTargets/
+   *  retiredProviderSessions 三组状态）。公共 API 签名冻结（§3 第 2 条，smoke 直连）。 */
   async terminateTask(taskId: string): Promise<{ ok: boolean; error?: string; warning?: string }> {
-    const pending = this.terminating.get(taskId)
-    if (pending) return pending
-    const task = this.store.get(taskId)
-    if (!task) return { ok: false, error: '任务不存在' }
-    const execution = this.terminateTaskExclusive(taskId)
-    this.terminating.set(taskId, execution)
-    void execution.finally(() => {
-      if (this.terminating.get(taskId) === execution) this.terminating.delete(taskId)
-    }).catch(() => {})
-    return execution
-  }
-
-  private async terminateTaskExclusive(taskId: string): Promise<{ ok: boolean; error?: string; warning?: string }> {
-    const current = this.store.get(taskId)
-    if (!current) return { ok: false, error: '任务不存在' }
-    let target = this.terminationTargets.get(taskId)
-    if (target && !this.store.matches(taskId, { runId: target.task.runId, executionOwner: target.task.executionOwner })) {
-      return { ok: false, error: '任务已被替换执行接手，旧终止请求未触碰替换执行' }
-    }
-    const claim = current.status === 'running' ? this.kernel.claimOf(taskId) : undefined
-    if (current.status === 'running' && (!claim || !this.isCurrentRun(claim))) {
-      return { ok: false, error: '执行归属不在当前运行器，终止未生效' }
-    }
-    const registered = this.kernel.claimOf(taskId)
-    const knownRelease = this.kernel.hasSessionReleaseClaimedBy(taskId, current.runId, current.executionOwner)
-    if (!target && current.meetingId && current.runId && current.terminatedRunId !== current.runId
-      && processOwnerState(current.executionOwner) !== 'dead'
-      && !(registered?.runId === current.runId && sameExecutionOwner(registered.owner, current.executionOwner))
-      && !this.kernel.sessionOf(taskId) && !this.activeRuns.has(taskId) && !this.activeTurns.has(taskId) && !knownRelease) {
-      // owner 进程已死时不再拒停：没有任何进程能补上退出确认，等下去是永久死锁
-      // （会议既停不掉也删不掉）。owner 存活且无凭据时维持拒停——它的关闭流程可能还在途。
-      return { ok: false, error: '历史会议执行退出未确认，已保留任务与日志' }
-    }
-    if (!target) {
-      target = {
-        task: { ...current }, session: this.kernel.sessionOf(taskId),
-        workdir: this.kernel.workdirOf(taskId) ?? current.workdir,
-        launch: this.kernel.launchHandleOf(taskId), launchStopped: false, sessionClosed: false,
-        activeRun: this.activeRuns.get(taskId), activeTurn: this.activeTurns.get(taskId)
-      }
-      this.terminationTargets.set(taskId, target)
-    }
-    const task = target.task
-    const problems: string[] = []
-    const warnings: string[] = []
-    if (current.status === 'running' && claim) {
-      this.cancellationDrains.set(taskId, (this.cancellationDrains.get(taskId) ?? 0) + 1)
-      try {
-        if (!await this.closeEventBatches(taskId)) warnings.push('部分事件日志写入失败，已保存的恢复副本将在重启时回放')
-        if (!this.store.updateIf(taskId, runCondition(claim), { status: 'cancelled', endedAt: Date.now() })) {
-          const latest = this.store.get(taskId)
-          if (!latest || latest.status === 'running' || !this.store.matches(taskId, { runId: task.runId, executionOwner: task.executionOwner })) {
-            return { ok: false, error: '任务已被替换执行接手，终止未生效；替换执行未受影响' }
-          }
-        }
-      } finally {
-        const remaining = (this.cancellationDrains.get(taskId) ?? 1) - 1
-        if (remaining) this.cancellationDrains.set(taskId, remaining)
-        else this.cancellationDrains.delete(taskId)
-      }
-    } else if (current.status === 'queued' || (current.status === 'failed' && this.kernel.hasRetryTimer(taskId))) {
-      const observed: TaskExpectation = { status: current.status, runId: task.runId, executionOwner: task.executionOwner }
-      if (!this.store.updateIf(taskId, observed, { status: 'cancelled', endedAt: Date.now() })) {
-        return { ok: false, error: '任务状态已变化，终止未生效' }
-      }
-    }
-    target.session ??= this.kernel.sessionOf(taskId)
-    target.launch ??= this.kernel.launchHandleOf(taskId)
-    this.retireExecutionState(taskId)
-    this.pushTask(taskId)
-    if (target.launch && !target.launchStopped) {
-      const captured = target
-      captured.launchCleanup ??= checkedCleanup(() => captured.launch!.stop()).then(() => {
-        captured.launchStopped = true
-      }, (error) => { captured.launchCleanup = undefined; throw error })
-      await strictCleanup(() => captured.launchCleanup, '初始化中止', problems, this.opts().terminationTimeoutMs ?? 4_000)
-    }
-    await this.terminateSession(taskId, target, problems)
-    for (const child of this.store.list().filter((item) => item.parentTaskId === taskId)) {
-      if (task.meetingId && child.meetingId !== task.meetingId) {
-        problems.push(`${child.id}: 后代会议归属不一致，已保留`)
-        continue
-      }
-      const result = await this.terminateTask(child.id)
-      if (!result.ok) problems.push(`${child.title || child.id}: ${result.error ?? '终止未确认'}`)
-    }
-    for (const tracked of [target.activeRun, target.activeTurn]) {
-      await awaitExit(tracked, '执行退出确认', problems, this.opts().terminationTimeoutMs ?? 15_000)
-    }
-    for (const [session, entry] of this.kernel.sessionReleasesForTask(taskId)) {
-      if (session === target.session && target.sessionClosed) { this.kernel.dropSessionRelease(session); continue }
-      await strictCleanup(() => entry.failed ? this.kernel.trackSessionRelease(session, entry.workdir, entry.release) : entry.promise,
-        '已移除会话退出确认', problems, this.opts().terminationTimeoutMs ?? 8_000)
-    }
-    for (const [key, entry] of this.retiredProviderSessions) {
-      if (entry.taskId !== taskId) continue
-      entry.closing ??= checkedCleanup(() => entry.session.close()).then(() => { entry.closed = true }, (error) => {
-        entry.closing = undefined
-        throw error
-      })
-      await strictCleanup(() => entry.closing, '已断开平台会话关闭', problems, this.opts().terminationTimeoutMs ?? 8_000)
-      if (entry.closed && this.retiredProviderSessions.get(key) === entry) this.retiredProviderSessions.delete(key)
-    }
-    await strictCleanup(() => this.executor.drain(`${taskId}:${task.runId}`), '晚到会话回收', problems, this.opts().terminationTimeoutMs ?? 5_000)
-    if (problems.length) return { ok: false, error: problems.join('；') }
-    if (!this.store.updateIf(taskId, { runId: task.runId, executionOwner: task.executionOwner }, { terminatedRunId: task.runId })) {
-      return { ok: false, error: '退出确认时任务已被替换，未清除诊断记录' }
-    }
-    if (target.session && target.sessionClosed) this.kernel.dropSessionRelease(target.session)
-    if (this.terminationTargets.get(taskId) === target) this.terminationTargets.delete(taskId)
-    // 终点处理走管线单点：终止验证完成后的收尾（清在途 + 变体钩子 + 流水账）。
-    // 任务若本就终态（done 后补停），settle 幂等只补记账，不改写结果。
-    {
-      const settled = this.store.get(taskId)
-      const outcome = settled?.status === 'done' || settled?.status === 'failed' ? settled.status : 'cancelled'
-      await this.pipeline.settle(taskId, outcome, { actor: 'runner', reason: 'termination verified' })
-    }
-    if (warnings.length) return { ok: true, warning: warnings.join('；') }
-    return { ok: true }
+    return this.termination.terminateTask(taskId)
   }
 
   /** 空闲判定（热更 L1 apply 门控，设计 §7.4）——委托 Issue 管线单点裁决：
@@ -2136,7 +2024,7 @@ export class TaskRunner {
     // —— 执行态半部在内核 shutdownExecutionState 单点收口（F2）；runner 只清
     // 自己持有的工作流态与 executor/permissionBroker。
     await this.kernel.shutdownExecutionState()
-    this.activeRuns.clear()
+    this.activeRunsMap.clear()
     this.activeTurns.clear()
     this.delegateLedger.clearSessionState()
     this.permissionBroker.shutdown()
