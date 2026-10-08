@@ -1277,7 +1277,7 @@ const MUTATIONS = [
     name: '红4｜嗅探暂停缓冲：旧代码（suspended 早退不清缓冲）下「不持续占内存」断言必红',
     mutations: [
       {
-        file: 'src/main/runner.ts',
+        file: 'src/main/execution/delegate-ledger.ts',
         find: '    if (state.suspended) {\n      releaseSuspendedBuffer()\n      return\n    }',
         replace: '    if (state.suspended) return'
       }
