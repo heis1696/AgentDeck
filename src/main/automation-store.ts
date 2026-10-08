@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import type { Automation } from '../shared/types'
+import { atomicWriteJson } from './persistence'
 
 export class AutomationStore {
   private readonly file: string
@@ -14,7 +15,7 @@ export class AutomationStore {
       if (Array.isArray(parsed)) this.items = parsed.filter(isAutomation)
     } catch { /* first launch */ }
   }
-  private save() { const tmp = `${this.file}.tmp`; fs.writeFileSync(tmp, JSON.stringify(this.items, null, 2)); fs.renameSync(tmp, this.file) }
+  private save() { atomicWriteJson(this.file, this.items) }
   list() { return [...this.items].sort((a, b) => b.createdAt - a.createdAt) }
   get(id: string) { return this.items.find((item) => item.id === id) }
   create(input: Pick<Automation, 'name' | 'prompt' | 'workdir' | 'scheduleMinutes' | 'output'> & Partial<Pick<Automation, 'agentId' | 'enabled'>>): Automation {

@@ -31,6 +31,7 @@
 //   patch 的 +/- 行统计只认行首标记：hunk 之前的 `--- `/`+++ ` 视为文件头跳过；
 //   多文件 unified diff 以 `diff `/`Index: ` 复位 hunk 状态。
 import type { ToolEditMeta } from '../../shared/types'
+import { isJsonObject } from '../persistence'
 
 /** 单个字符串字段（content/oldString/newString）的截断上限 */
 export const EDIT_FIELD_LIMIT = 64 * 1024
@@ -71,10 +72,6 @@ const PATCH_TEXT_KEYS = ['patch', 'patch_text', 'patchText', 'diff', 'text', 'in
 const PATCH_MARKER = /^\*\*\* (?:Begin|End|Update|Add|Delete|Move)/m
 const HUNK_MARKER = /^@@/m
 const UNIFIED_HEADER = /^(?:\+\+\+ |--- |diff --git )/m
-
-function isRecord(value: unknown): value is Rec {
-  return !!value && typeof value === 'object' && !Array.isArray(value)
-}
 
 /** 入参一律规整成字符串：字符串原样返回，对象 JSON 序列化，失败/空值给空串 */
 export function stringifyToolArgs(value: unknown): string {
@@ -194,14 +191,14 @@ function fromOldNew(obj: Rec | undefined, strict = false): ToolEditMeta | null {
 function fromEditsArray(obj: Rec | undefined): ToolEditMeta | null {
   const edits = obj?.edits
   if (!Array.isArray(edits) || edits.length === 0) return null
-  const first = isRecord(edits[0]) ? edits[0] : undefined
+  const first = isJsonObject(edits[0]) ? edits[0] : undefined
   const file = pickString(obj, FILE_KEYS) ?? pickString(first, FILE_KEYS)
   if (!file) return null
   let additions = 0
   let deletions = 0
   const segments: string[] = []
   for (const item of edits) {
-    if (!isRecord(item)) continue
+    if (!isJsonObject(item)) continue
     const oldString = pickString(item, OLD_KEYS, true)
     const newString = pickString(item, NEW_KEYS, true)
     additions += countEditLines(newString ?? '')
@@ -294,7 +291,7 @@ export function parseEditMeta(toolName: string, rawArgs?: string | null): ToolEd
     const raw = typeof rawArgs === 'string' ? rawArgs : ''
     if (!raw) return null
     const parsed = tryParseJson(raw)
-    const obj = isRecord(parsed) ? parsed : undefined
+    const obj = isJsonObject(parsed) ? parsed : undefined
 
     // patch 文本自描述：名称命中 patch 类，或名称未识别时靠特征兜底（codex Bash apply_patch）
     if (kind === 'patch' || kind === 'unknown') {

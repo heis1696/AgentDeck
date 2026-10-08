@@ -2,13 +2,13 @@ import type { PermissionRequest } from '../../shared/contracts'
 import type { TaskEvent } from '../../shared/types'
 import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnStamp } from './types'
 import { bindTurn } from './types'
+import { jsonObject } from './cli-common'
 import { parseEditMeta, stringifyToolArgs } from './edit-meta'
 
 type RecordValue = Record<string, unknown>
 export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 const LIVE_TYPES = new Set(['text.delta', 'reasoning.delta', 'tool.input.delta', 'compaction.delta'])
 
-function record(value: unknown): RecordValue { return value && typeof value === 'object' && !Array.isArray(value) ? value as RecordValue : {} }
 function stringValue(value: unknown, fallback = ''): string { return typeof value === 'string' ? value : fallback }
 function numberValue(value: unknown): number | undefined { return typeof value === 'number' && Number.isFinite(value) ? value : undefined }
 function parseJson(text: string): unknown { try { return JSON.parse(text) } catch { return undefined } }
@@ -18,7 +18,7 @@ function responseJson(response: Response, timeoutMs = 15_000): Promise<unknown> 
   const body = response.text().then((text) => text ? parseJson(text) : undefined)
   return Promise.race([body, timeout]).finally(() => { if (timer) clearTimeout(timer) })
 }
-function payloadOf(value: RecordValue): RecordValue { return record(value.properties ?? value.payload ?? value.data ?? value) }
+function payloadOf(value: RecordValue): RecordValue { return jsonObject(value.properties ?? value.payload ?? value.data ?? value) }
 function eventType(value: RecordValue): string { return stringValue(value.type ?? value.event ?? value.name) }
 function eventSession(value: RecordValue, payload: RecordValue): string { return stringValue(value.sessionID ?? value.sessionId ?? payload.sessionID ?? payload.sessionId) }
 function eventSequence(value: RecordValue, payload: RecordValue): number | undefined { return numberValue(value.seq) ?? numberValue(value.sequence) ?? numberValue(payload.seq) ?? numberValue(payload.sequence) }
@@ -78,9 +78,9 @@ export class OpencodeServerClient {
     for (const path of ['/global/health', '/health', '/version']) {
       try {
         const response = await this.request(path)
-        const value = record(await responseJson(response, this.requestTimeoutMs))
+        const value = jsonObject(await responseJson(response, this.requestTimeoutMs))
         if (!response.ok) { lastError = `${path} HTTP ${response.status}`; continue }
-        const data = record(value.data)
+        const data = jsonObject(value.data)
         const raw = stringValue(value.version ?? data.version ?? value.opencodeVersion)
         if (!raw) { lastError = `${path} returned no version`; continue }
         return { ok: true, version: validateOpencodeVersion(raw) }
@@ -97,7 +97,7 @@ export class OpencodeServerClient {
     catch (error) { throw new OpencodeServerUnavailableError(error instanceof Error ? error.message : String(error)) }
     const value = await responseJson(response, this.requestTimeoutMs)
     if (!response.ok) {
-      const object = record(value)
+      const object = jsonObject(value)
       throw new Error(`OpenCode ${method} ${path} failed: ${stringValue(object.message ?? object.error, `HTTP ${response.status}`)}`)
     }
     return value
@@ -107,14 +107,14 @@ export class OpencodeServerClient {
     const parsed = model?.includes('/') ? model.split('/', 2) : undefined
     if (parsed) body.model = { providerID: parsed[0], id: parsed[1] }
     let value: RecordValue
-    try { value = record(await this.json(`/session?directory=${encodeURIComponent(directory)}`, 'POST', body)) }
+    try { value = jsonObject(await this.json(`/session?directory=${encodeURIComponent(directory)}`, 'POST', body)) }
     catch (error) {
       if (!String(error).includes('HTTP 404')) throw error
-      value = record(await this.json('/session/create', 'POST', { ...body, directory }))
+      value = jsonObject(await this.json('/session/create', 'POST', { ...body, directory }))
     }
-    const data = record(value.data)
-    const session = record(value.session)
-    const result = record(value.result)
+    const data = jsonObject(value.data)
+    const session = jsonObject(value.session)
+    const result = jsonObject(value.result)
     const id = stringValue(value.id ?? value.sessionID ?? value.sessionId ?? data.id ?? data.sessionID ?? data.sessionId ?? session.id ?? session.sessionID ?? session.sessionId ?? result.id ?? result.sessionID ?? result.sessionId)
     if (!id) throw new Error('OpenCode server returned no session id')
     return id
@@ -158,7 +158,7 @@ export class OpencodeServerClient {
   }
   async messages(sessionId: string, directory = this.directory || process.cwd()): Promise<unknown[]> {
     const value = await this.json(this.query(`/session/${encodeURIComponent(sessionId)}/message`, directory), 'GET')
-    return Array.isArray(value) ? value : Array.isArray(record(value).data) ? record(value).data as unknown[] : []
+    return Array.isArray(value) ? value : Array.isArray(jsonObject(value).data) ? jsonObject(value).data as unknown[] : []
   }
   async permissionReply(requestId: string | number, decision: 'allow' | 'deny', directory = this.directory || process.cwd(), replyOverride?: 'once' | 'always' | 'reject'): Promise<void> {
     const id = encodeURIComponent(String(requestId))
@@ -219,24 +219,24 @@ export class OpencodeServerClient {
 function permissionRequest(payload: RecordValue): PermissionRequest | null {
   const requestId = payload.id ?? payload.requestID ?? payload.requestId
   if (typeof requestId !== 'string' && typeof requestId !== 'number') return null
-  const metadata = record(payload.metadata)
+  const metadata = jsonObject(payload.metadata)
   const options = Array.isArray(payload.options) ? payload.options.map((item, index) => {
-    const option = record(item)
+    const option = jsonObject(item)
     const optionId = stringValue(option.optionId ?? option.id, index === 0 ? 'allow' : 'deny')
-    const decision = stringValue(record(option.response).decision ?? option.decision, optionId === 'allow' ? 'allow' : 'deny')
+    const decision = stringValue(jsonObject(option.response).decision ?? option.decision, optionId === 'allow' ? 'allow' : 'deny')
     return { optionId, name: stringValue(option.name ?? option.label, optionId), ...(stringValue(option.description) ? { description: stringValue(option.description) } : {}), response: { decision } }
   }) : []
   if (!options.length) options.push({ optionId: 'allow', name: 'Allow', response: { decision: 'allow' } }, { optionId: 'deny', name: 'Deny', response: { decision: 'deny' } })
   return { requestId, toolName: stringValue(payload.toolName ?? payload.permission ?? payload.tool ?? metadata.tool, 'opencode'), reason: stringValue(payload.reason ?? payload.description ?? metadata.description, 'OpenCode requested permission'), riskLevel: stringValue(payload.riskLevel ?? payload.risk ?? payload.permission, 'unknown'), input: payload.input ?? metadata, options }
 }
 function usageData(payload: RecordValue): { total?: number; data: RecordValue } {
-  const tokens = record(payload.tokens)
+  const tokens = jsonObject(payload.tokens)
   const input = numberValue(tokens.input) ?? numberValue(payload.inputTokens)
   const output = numberValue(tokens.output) ?? numberValue(payload.outputTokens)
   const reasoning = numberValue(tokens.reasoning) ?? numberValue(payload.reasoningTokens)
   const total = numberValue(tokens.total) ?? numberValue(payload.totalTokens) ?? (input !== undefined || output !== undefined || reasoning !== undefined ? (input ?? 0) + (output ?? 0) + (reasoning ?? 0) : undefined)
   const cost = numberValue(payload.cost) ?? numberValue(payload.costUsd)
-  const time = record(payload.time)
+  const time = jsonObject(payload.time)
   const durationMs = numberValue(payload.durationMs) ?? (numberValue(time.end) !== undefined && numberValue(time.start) !== undefined ? (numberValue(time.end)! - numberValue(time.start)!) : undefined)
   return { total, data: { ...payload, ...(input !== undefined || output !== undefined || reasoning !== undefined || total !== undefined ? { inputTokens: input, outputTokens: output, reasoningTokens: reasoning, totalTokens: total } : {}), ...(cost !== undefined ? { costUsd: cost } : {}), ...(durationMs !== undefined ? { durationMs } : {}) } }
 }
@@ -290,7 +290,7 @@ export function createOpencodeServerBackend(options: OpencodeServerBackendOption
         turn.resolve({ ok, response, error, tokenCount: turn.tokens, durationMs })
       }
       const handleEvent = async (value: unknown) => {
-        const raw = record(value); const type = eventType(raw); const payload = payloadOf(raw); const sid = eventSession(raw, payload)
+        const raw = jsonObject(value); const type = eventType(raw); const payload = payloadOf(raw); const sid = eventSession(raw, payload)
         const seq = eventSequence(raw, payload)
         cursor = Math.max(cursor, seq ?? cursor + 1)
         if (sid && sid !== sessionId) return
@@ -317,10 +317,10 @@ export function createOpencodeServerBackend(options: OpencodeServerBackendOption
           emit({ kind: 'text', type: mapped, durability: 'live', durable: false, text: delta, data: payload }); return
         }
         if (type === 'message.updated' && Array.isArray(payload.parts)) {
-          for (const part of payload.parts) await handleEvent({ id: `part:${stringValue(record(part).id)}`, type: 'message.part.updated', properties: { sessionID: sessionId, part } })
+          for (const part of payload.parts) await handleEvent({ id: `part:${stringValue(jsonObject(part).id)}`, type: 'message.part.updated', properties: { sessionID: sessionId, part } })
           return
         }
-        const part = record(payload.part ?? raw.part); const partType = stringValue(part.type)
+        const part = jsonObject(payload.part ?? raw.part); const partType = stringValue(part.type)
         if (type === 'message.part.updated' || type === 'message.part' || (type === 'message.part.delta' && Object.keys(part).length)) {
           if (partType === 'text' && typeof part.text === 'string') {
             const id = stringValue(part.id, `text-${active?.text.size ?? 0}`); const previous = active?.text.get(id) ?? ''; active?.text.set(id, part.text)
@@ -334,7 +334,7 @@ export function createOpencodeServerBackend(options: OpencodeServerBackendOption
             if (delta) emit({ kind: 'text', type: 'reasoning.delta', durability: 'live', durable: false, text: delta, data: { reasoning: true } })
           }
           else if (partType === 'tool') {
-            const state = record(part.state); const status = stringValue(state.status ?? part.status); const name = stringValue(part.tool ?? part.name, 'tool')
+            const state = jsonObject(part.state); const status = stringValue(state.status ?? part.status); const name = stringValue(part.tool ?? part.name, 'tool')
             // 编辑元数据用**未截断**的原始入参算（完成态的 state 通常仍带 input）
             const edit = parseEditMeta(name, stringifyToolArgs(state.input ?? part.input))
             if (status === 'pending' || status === 'running') emit({ kind: 'tool', type: 'tool.started', text: name, data: { phase: 'started', args: state.input ?? part.input, ...(edit ? { edit } : {}) } })
@@ -349,14 +349,14 @@ export function createOpencodeServerBackend(options: OpencodeServerBackendOption
         if (type === 'session.next.tool.input.delta' || type === 'session.next.compaction.delta') { emit({ kind: 'text', type: type.endsWith('compaction.delta') ? 'compaction.delta' : 'tool.input.delta', durability: 'live', durable: false, text: stringValue(payload.delta ?? payload.text), data: payload }); return }
         if (type === 'session.next.step.ended' || type === 'step-finish' || type === 'step_finish') { const usage = usageData(payload); if (usage.total !== undefined && active) active.tokens = usage.total; emit({ kind: 'usage', type, durability: 'durable', durable: true, data: usage.data }); return }
         if (type === 'session.error' || type === 'error' || type === 'session.next.step.failed') {
-          const errorObject = record(payload.error); const errorData = record(errorObject.data)
+          const errorObject = jsonObject(payload.error); const errorData = jsonObject(errorObject.data)
           const message = stringValue(payload.message ?? errorObject.message ?? errorData.message ?? errorData.error ?? payload.error, 'OpenCode session error')
           emit({ kind: 'error', type: 'session.error', durability: 'durable', durable: true, text: message, data: payload }); finish(false, message); return
         }
         if (type.includes('compaction')) { const delta = stringValue(payload.delta ?? payload.text); if (type.endsWith('.delta')) emit({ kind: 'text', type: 'compaction.delta', durability: 'live', durable: false, text: delta, data: payload }); else emit({ kind: 'status', type, durability: 'durable', durable: true, text: stringValue(payload.reason ?? payload.message), data: payload }); return }
-        if (type === 'session.created' && (payload.parentID || payload.parentId || record(payload.info).parentID)) { emit({ kind: 'status', type: 'session.fork', durability: 'durable', durable: true, text: stringValue(payload.id ?? payload.sessionID ?? record(payload.info).id), data: payload }); return }
+        if (type === 'session.created' && (payload.parentID || payload.parentId || jsonObject(payload.info).parentID)) { emit({ kind: 'status', type: 'session.fork', durability: 'durable', durable: true, text: stringValue(payload.id ?? payload.sessionID ?? jsonObject(payload.info).id), data: payload }); return }
         if (type === 'session.fork' || type === 'session.forked' || type === 'fork') { emit({ kind: 'status', type: 'session.fork', durability: 'durable', durable: true, text: stringValue(payload.childID ?? payload.sessionID), data: payload }); return }
-        const status = stringValue(payload.status ?? record(payload.status).type)
+        const status = stringValue(payload.status ?? jsonObject(payload.status).type)
         if (type === 'session.idle' || (type === 'session.status' && ['idle', 'completed', 'done'].includes(status))) {
           // OpenCode can briefly become idle between tool-call steps. Treat
           // an empty idle as provisional and wait for the assistant text (or
@@ -396,19 +396,19 @@ export function createOpencodeServerBackend(options: OpencodeServerBackendOption
               let latestCompleted: string | undefined
               let latestCreated = -Infinity
               for (const item of messages) {
-                const message = record(item)
-                const info = record(message.info ?? message)
+                const message = jsonObject(item)
+                const info = jsonObject(message.info ?? message)
                 if (stringValue(info.role) !== 'assistant') continue
-                const created = numberValue(info.time && record(info.time).created)
+                const created = numberValue(info.time && jsonObject(info.time).created)
                 if (created !== undefined && created + 1000 < turn.startedAt) continue
                 const parts = Array.isArray(message.parts) ? message.parts : []
-                const hasText = parts.some((part) => stringValue(record(part).type) === 'text' && !!stringValue(record(part).text))
-                if (hasText && info.time && record(info.time).completed !== undefined && (created ?? 0) >= latestCreated) { latestCreated = created ?? 0; latestCompleted = stringValue(info.id) }
+                const hasText = parts.some((part) => stringValue(jsonObject(part).type) === 'text' && !!stringValue(jsonObject(part).text))
+                if (hasText && info.time && jsonObject(info.time).completed !== undefined && (created ?? 0) >= latestCreated) { latestCreated = created ?? 0; latestCompleted = stringValue(info.id) }
                 for (const part of parts) {
-                  const id = stringValue(record(part).id)
+                  const id = stringValue(jsonObject(part).id)
                   if (!id) continue
                   let signature = ''
-                  try { signature = JSON.stringify(part) } catch { signature = String(record(part).type) }
+                  try { signature = JSON.stringify(part) } catch { signature = String(jsonObject(part).type) }
                   if (delivered.get(id) === signature) continue
                   delivered.set(id, signature)
                   await handleEvent({ id: `poll:${id}`, type: 'message.part.updated', properties: { sessionID: sessionId, part } })

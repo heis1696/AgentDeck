@@ -10,9 +10,9 @@ import { EventLog } from './event-log'
 import type { ExecutionOwner, TaskEvent, TaskStatus } from '../shared/types'
 import type { TaskExpectation } from './store'
 import { SidecarRuntime } from './sidecar-runtime'
+import { jsonObject } from './backends/cli-common'
 
 type JsonRecord = Record<string, unknown>
-function record(value: unknown): JsonRecord { return value && typeof value === 'object' && !Array.isArray(value) ? value as JsonRecord : {} }
 /** 外部建单入口不接受内部身份字段：`officeAgentId` 是「这是办公室会话」的唯一运行期判据，
  *  建单侧拿到它就能让一张普通任务跳过派发/咨询/接力协议。与桌面 IPC 的 parseTaskCreate 白名单同一口径。 */
 const INTERNAL_TASK_FIELDS = ['officeAgentId'] as const
@@ -107,7 +107,7 @@ function durableState(userDataDir: string) {
     .concat(loadArray(path.join(userDataDir, 'tasks.json'), 'tasks'))
   const tasksById = new Map<string, unknown>()
   for (const task of rawTasks) {
-    const id = typeof record(task).id === 'string' ? String(record(task).id) : ''
+    const id = typeof jsonObject(task).id === 'string' ? String(jsonObject(task).id) : ''
     if (id) tasksById.set(id, task)
   }
   const tasks = tasksById.size ? [...tasksById.values()] : rawTasks
@@ -126,7 +126,7 @@ function durableState(userDataDir: string) {
   const specDecisions = Array.isArray(goalDocument.specDecisions) ? goalDocument.specDecisions : []
   const specApprovals = Array.isArray(goalDocument.specApprovals) ? goalDocument.specApprovals : []
   const goalEvents = sharedEventLog(path.join(userDataDir, 'goals', 'events.jsonl')).read()
-  const orphanRuns = tasks.filter((task) => record(task).status === 'running')
+  const orphanRuns = tasks.filter((task) => jsonObject(task).status === 'running')
   return { tasks, issues, runs, comments, goals, checkpoints, specSnapshots, specDecisions, specApprovals, goalEvents, orphanRuns }
 }
 
@@ -162,7 +162,7 @@ export function startSidecarServer(options: SidecarServerOptions): SidecarServer
       }
       if (!auth(req, options.token)) return json(res, 401, { error: 'invalid sidecar token' })
       if (url.pathname === '/handshake' && (req.method === 'POST' || req.method === 'GET')) {
-        const body = req.method === 'GET' ? {} : record(await readBody(req))
+        const body = req.method === 'GET' ? {} : jsonObject(await readBody(req))
         const requestedVersion = body.protocolVersion ?? Number(req.headers['x-agentdeck-protocol'])
         if (requestedVersion !== undefined && requestedVersion !== SIDECAR_PROTOCOL_VERSION) return json(res, 409, { error: 'sidecar protocol version mismatch', protocolVersion: SIDECAR_PROTOCOL_VERSION })
         if (req.method === 'POST' && body.instanceToken !== options.token) return json(res, 401, { error: 'invalid sidecar token' })
@@ -176,12 +176,12 @@ export function startSidecarServer(options: SidecarServerOptions): SidecarServer
         return
       }
       if (url.pathname !== '/rpc' || req.method !== 'POST') return json(res, 404, { error: 'not found' })
-      const body = record(await readBody(req))
+      const body = jsonObject(await readBody(req))
       const requestVersion = body.version ?? body.protocolVersion ?? (req.headers['x-agentdeck-protocol'] === undefined ? undefined : Number(req.headers['x-agentdeck-protocol']))
       if (requestVersion !== undefined && requestVersion !== SIDECAR_PROTOCOL_VERSION) return json(res, 409, { id: body.id, error: 'sidecar protocol version mismatch', protocolVersion: SIDECAR_PROTOCOL_VERSION })
       if (body.protocol !== undefined && body.protocol !== SIDECAR_PROTOCOL) return json(res, 409, { id: body.id, error: 'sidecar protocol mismatch', protocol: SIDECAR_PROTOCOL, version: SIDECAR_PROTOCOL_VERSION })
       const method = typeof body.method === 'string' ? body.method : ''
-      const params = record(body.params)
+        const params: JsonRecord = jsonObject(body.params)
       let result: unknown
       if (method === 'health') {
         result = healthPayload()
@@ -194,13 +194,13 @@ export function startSidecarServer(options: SidecarServerOptions): SidecarServer
         result = typeof params.id === 'string' ? runtime.state().tasks.find((task) => task.id === params.id) ?? null : null
       } else if (method === 'tasks.create') {
         runtime.refreshIfIdle()
-        const input = record(params.input)
+        const input = jsonObject(params.input)
         assertNoInternalIdentity(input)
         const trigger = typeof params.trigger === 'string' ? params.trigger : undefined
         result = runtime.taskService.createTask(input as never, trigger as never)
       } else if (method === 'issues.create') {
         runtime.refreshIfIdle()
-        const rawInput = record(params.input)
+        const rawInput = jsonObject(params.input)
         assertNoInternalIdentity(rawInput)
         const input = {
           ...rawInput,
@@ -262,7 +262,7 @@ export function startSidecarServer(options: SidecarServerOptions): SidecarServer
         // produced the event. Reading the latest record here would let a stale
         // event ride on whatever run currently owns the task, so a missing
         // identity only matches a record that has none (queued/legacy).
-        const expectation = record(params.expected)
+        const expectation: JsonRecord = jsonObject(params.expected)
         const runId = typeof expectation.runId === 'string'
           ? expectation.runId
           : (typeof params.runId === 'string' ? params.runId : undefined)
@@ -273,7 +273,7 @@ export function startSidecarServer(options: SidecarServerOptions): SidecarServer
           runId,
           executionOwner
         }
-        const event = runtime.store.appendEvent(taskId, record(params.event) as Omit<TaskEvent, 'seq'>, expected)
+        const event = runtime.store.appendEvent(taskId, jsonObject(params.event) as Omit<TaskEvent, 'seq'>, expected)
         if (!event) throw new Error('task does not exist, or the captured run identity no longer owns it')
         result = event
       } else if (method === 'runs.takeover' || method === 'runs.claim') {

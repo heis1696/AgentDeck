@@ -3,12 +3,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import type { MarketplacePluginInfo, MarketplaceStatus, PluginInventoryItem, RegisteredMarketplace } from '../shared/extensions'
-import { claudeSettingsFile, readJsonSafe, zcodeKnownMarketplacesFile } from './config-editor'
+import { asRecord, claudeSettingsFile, readJsonSafe, zcodeKnownMarketplacesFile } from './config-editor'
 import { browseSource, claudePluginKeys, listMarketplacePlugins, listSources, mapMarketplacePlugins, readMarketplaceAsset } from './sources'
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined
-}
 
 /** 最高语义化版本（版本段按数字逐段比，取降序第一个；非数字段按字符串比） */
 function highestVersion(versions: string[]): string {

@@ -96,8 +96,8 @@ function readJson(file: string): PersistedState | null {
 }
 
 function writeJson(file: string, value: unknown) {
-  atomicWriteJson(file, value)
-  try { fs.chmodSync(file, 0o600) } catch {}
+  // 0600 由 atomicWriteJson 的 mode 参数覆盖（写 tmp 时即带上，rename 后再 chmod 兜底 umask）
+  atomicWriteJson(file, value, { mode: 0o600 })
 }
 
 async function freePort(host = '127.0.0.1'): Promise<number> {

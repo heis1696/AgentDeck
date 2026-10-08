@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { withFileLock, type SynchronousAction } from './persistence'
+import { isJsonObject, withFileLock, type SynchronousAction } from './persistence'
 import type { TaskEvent } from '../shared/types'
 import {
   isTaskEventDurable,
@@ -35,10 +35,6 @@ export class UnsupportedTaskEventVersionError extends Error {
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value)
-}
-
 function finiteInt(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 }
@@ -53,7 +49,7 @@ function finiteNumber(value: unknown): value is number {
  * rewriting the source file until a later append/truncate.
  */
 export function migrateTaskEvent(raw: unknown, fallbackSeq?: number, now = Date.now()): TaskEvent | null {
-  if (!isRecord(raw)) return null
+  if (!isJsonObject(raw)) return null
   const sourceVersion = raw.v ?? raw.version ?? 0
   if (typeof sourceVersion !== 'number' || !Number.isInteger(sourceVersion) || sourceVersion < 0) return null
   if (sourceVersion > TASK_EVENT_SCHEMA_VERSION) throw new UnsupportedTaskEventVersionError(sourceVersion)
@@ -113,7 +109,7 @@ function canonicalEvent(event: TaskEvent): string {
   delete copy.version
   const stable = (value: unknown): unknown => {
     if (Array.isArray(value)) return value.map(stable)
-    if (!isRecord(value)) return value
+    if (!isJsonObject(value)) return value
     return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])]))
   }
   return JSON.stringify(stable(copy))

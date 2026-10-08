@@ -23,7 +23,8 @@ export function codexConfigFile(home: string): string {
   return path.join(home, '.codex', 'config.toml')
 }
 
-function asRecord(value: unknown): Record<string, unknown> | undefined {
+/** 非对象安全取对象：非对象回退 undefined（调用侧据此区分「字段缺失」）。导出供 plugin-inventory 等同语义消费方复用。 */
+export function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined
 }
 

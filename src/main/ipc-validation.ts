@@ -26,12 +26,15 @@ const settingsIntRanges: Partial<Record<keyof AppSettings, [min: number, max: nu
   worktreeMaxAgeDays: [1, 365]
 }
 
-function record(value: unknown, label: string): Record<string, unknown> {
+/** IPC 入参边界校验（抛错版，与 persistence.isJsonObject 的布尔守卫不是同义谓词）：
+ *  非对象直接抛 `${label} 必须是对象`。原 ipc/extensions.ts、ipc/skills.ts 各有一份逐字拷贝，归并于此。 */
+export function record(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} 必须是对象`)
   return value as Record<string, unknown>
 }
 
-function assertKeys(input: Record<string, unknown>, allowed: readonly string[], label: string) {
+/** 键白名单断言：出现未知字段抛 `${label}包含未知字段: ${key}`。 */
+export function assertKeys(input: Record<string, unknown>, allowed: readonly string[], label: string) {
   const keys = new Set(allowed)
   for (const key of Object.keys(input)) if (!keys.has(key)) throw new Error(`${label}包含未知字段: ${key}`)
 }
@@ -53,6 +56,15 @@ function stringValue(value: unknown, label: string, required = true): string | u
 
 function optionalString(value: unknown, label: string) {
   return stringValue(value, label, false)
+}
+
+/** 可选字符串的「原文透传」变体：undefined 合法、非字符串抛错，但**不 trim**——
+ *  供 hook/skill 正文、originName、来源名称等用户内容使用（trim 会篡改用户内容）。
+ *  这是有意与上面 trimmed 版并存的两套语义，不可互相替代。 */
+export function optionalRawString(value: unknown, label: string): string | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string') throw new Error(`${label} 必须是字符串`)
+  return value
 }
 
 function booleanValue(value: unknown, label: string, required = true): boolean | undefined {
