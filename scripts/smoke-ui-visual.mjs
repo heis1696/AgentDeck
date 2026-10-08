@@ -44,7 +44,25 @@ if (process.argv.includes('--serve')) {
     const checks = []
     const check = (ok, label, details) => { checks.push({ ok, label, ...(details ? { details } : {}) }); if (!ok) console.error(`FAIL: ${label}${details ? ` ${JSON.stringify(details)}` : ''}`) }
     const checkPopover = async (label) => {
-      const geometry = await page.locator('.meta-info-pop').evaluate((el) => {
+      const geometry = await page.locator('.meta-info-pop').evaluate(async (el) => {
+        // reduced-motion 把全局过渡压成 0.01ms 微过渡：placeInfoPopover 落定宽度后的首次测量
+        // 仍会返回起点几何（带 dock 时 420 而非 406），在过渡窗口内断言必然误判。这里先等几何
+        // 收敛——rect 连续两帧不变且宽度达到内联目标值——再测量；等不到就抛错，绝不放行。
+        const inlineWidth = parseFloat(el.style.width)
+        const settled = await new Promise((resolve) => {
+          let previous = ''
+          let frames = 0
+          const tick = () => {
+            const rect = el.getBoundingClientRect()
+            const snapshot = JSON.stringify(rect.toJSON())
+            if (Math.abs(rect.width - inlineWidth) <= 0.5 && snapshot === previous) { resolve(true); return }
+            previous = snapshot
+            if (++frames >= 120) { resolve(false); return }
+            requestAnimationFrame(tick)
+          }
+          requestAnimationFrame(tick)
+        })
+        if (!settled) throw new Error(`popover geometry did not settle to inline width ${inlineWidth} within 120 frames`)
         const pop = el.getBoundingClientRect()
         const detail = el.closest('.detail-left').getBoundingClientRect()
         const sidebar = document.querySelector('.sidebar').getBoundingClientRect()
