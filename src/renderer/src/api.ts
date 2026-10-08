@@ -49,6 +49,9 @@ export function workspaceReadFile(dir: string, file: string): Promise<import('..
   return bridge.workspace.readFile(dir, file)
 }
 
+/** 数据面实例序号：useTasks 每个实例一个稳定 source，与 version 合成目录提交戳 */
+let tasksPlaneSeq = 0
+
 /** 任务列表 + 实时更新。
  *  广播自带完整 Task（task:updated）/id（task:deleted），直接增量落位——稳态零 list 拉取；
  *  全量快照只在首次装载与显式 refresh 发生（单调序号最新读获胜 + 读期间广播缓冲重放，
@@ -59,9 +62,18 @@ export function workspaceReadFile(dir: string, file: string): Promise<import('..
  *  不完整，不能一直卡在未就绪；②issues:create「稍后创建」只广播 issues:updated、不广播
  *  task:updated（waitForTaskListed 注释即此），目录缺失该 taskId 才补一次全量。
  *  对账让位：全量读在途时广播已进缓冲、快照落地即重放，不再逐条广播补发全量读。
- *  ready 标记目录是否拿到过第一份真实列表：false = 目录未加载，宿主不应把空目录喂给交互中心。 */
+ *  ready 标记目录是否拿到过第一份真实列表：false = 目录未加载，宿主不应把空目录喂给交互中心。
+ *  version/source/latestVersion：目录提交戳（见函数内注释），供 App 给 ui.setTasks 排序。 */
 export function useTasks() {
-  const [tasks, setTasks] = useState<Task[]>([])
+  // 任务快照提交戳：source 标识数据面实例，version 是该面内单调递增的快照序号。
+  // version 必须与 tasks 在同一 React 状态里成对更新（effect 才能如实声明「这份目录
+  // 来自哪份快照」）；latestVersionRef 供显式 refresh 的调用方在落地瞬间同步取号
+  // （emit 自增与读 promise 解析之间只有微任务，无广播可插队）——两者合成
+  // ui.setTasks 的提交戳，交互中心凭它拒收渲染层目录双写里的旧快照写回。
+  const sourceRef = useRef(0)
+  if (sourceRef.current === 0) sourceRef.current = ++tasksPlaneSeq
+  const latestVersionRef = useRef(0)
+  const [snapshot, setSnapshot] = useState<{ items: Task[]; version: number }>({ items: [], version: 0 })
   const [ready, setReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const storeRef = useRef<DeltaList<Task> | null>(null)
@@ -104,7 +116,8 @@ export function useTasks() {
     }
     const unsubscribe = store.subscribe((items) => {
       if (disposed) return
-      setTasks(items)
+      latestVersionRef.current += 1
+      setSnapshot({ items, version: latestVersionRef.current })
       if (missingTaskIds.size) reconcile()
     })
     const off1 = bridge.tasks.onUpdated((task) => {
@@ -132,7 +145,7 @@ export function useTasks() {
       store.invalidateReads()
     }
   }, [refresh])
-  return { tasks, refresh, ready, error }
+  return { tasks: snapshot.items, version: snapshot.version, source: sourceRef.current, latestVersion: latestVersionRef, refresh, ready, error }
 }
 
 /** 轮询等待任务出现在桥接任务目录里（草稿创建后的导航前置条件：目录可见才进详情）。

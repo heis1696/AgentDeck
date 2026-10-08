@@ -39,7 +39,7 @@ export function App() {
   // 兼容 #/pet（dev 拼接与新版 loadFile '/pet'）与 #pet（旧主进程 loadFile 'pet'——热更错峰期防主 UI 误入宠物窗）
   if (/^#\/?pet$/.test(window.location.hash)) return <PetStage />
   if (/^#\/?pet-settings$/.test(window.location.hash)) return <PetSettingsPage />
-  const { tasks, refresh, ready, error: tasksError } = useTasks()
+  const { tasks, refresh, ready, error: tasksError, version: tasksVersion, source: tasksSource, latestVersion: tasksLatestVersion } = useTasks()
   const { settings, update } = useSettings()
   const { issues } = useIssues()
   const { meetings, ready: meetingsReady, error: meetingsError, refresh: refreshMeetings } = useMeetings()
@@ -101,18 +101,25 @@ export function App() {
   }, [settings?.uiFontSize])
 
   // 中心持有最新任务目录：祖先链解析（子任务→领队）、删除清理、dock 桶剪枝都以它为准。
+  // 目录写入带提交戳（数据面 source + 快照 version）：effect 用「本次渲染的快照」如实声明
+  // 序号，openCreatedTask 的直写用「刚落地的快照」——中心按序号只进不退拒收旧值，
+  // 渲染层目录双写（effect 写回 vs 创建链路直写）不再互相剪掉对方的页签。
   // 首份真实列表到达前不喂（ready 门控）：启动瞬间的空目录是「未加载」不是「没有任务」，
   // 喂进去会把待决路由乐观页签全部剪掉。
   useEffect(() => {
-    if (ready) ui.setTasks(catalog)
-  }, [catalog, ready])
+    if (ready) ui.setTasks(catalog, { source: tasksSource, version: tasksVersion })
+  }, [catalog, ready, tasksSource, tasksVersion])
   useEffect(() => { if (tasksError) ui.toast.error(`读取任务失败：${tasksError}`) }, [tasksError])
 
   const openTask = (id: string) => {
     const meeting = meetingForNavigation(id, tasks, meetings)
     ui.openTask(meeting ? meetingRootId(meeting.id) : id)
   }
-  /** 草稿创建只广播 Issue 更新，必须把新任务写入页面目录后再导航。 */
+  /** 草稿创建只广播 Issue 更新，必须把新任务写入页面目录后再导航。直写带提交戳
+   *  （version=本次 refresh 刚落地的快照序号）：效果等于「把这份刷新立即生效」，随后
+   *  渲染 effect 用同一份快照（相同 version）写回是幂等覆盖；任何携带更旧快照的写回
+   *  （sync 渲染带出的旧 catalog）会被中心按序号拒收——刚打开的新页签不再被剪
+   *  （渲染层目录双写竞态，见上方 effect 处注释）。 */
   const openCreatedTask = async (id: string) => {
     await waitForTaskListed(id)
     const list = await refresh()
@@ -125,7 +132,7 @@ export function App() {
       ui.toast.error('会议已创建，会议目录暂未刷新，请重试打开')
       return
     }
-    ui.setTasks(meetingNavigationCatalog(list, latestMeetings ?? meetings, issues))
+    ui.setTasks(meetingNavigationCatalog(list, latestMeetings ?? meetings, issues), { source: tasksSource, version: tasksLatestVersion.current })
     ui.openTask(id)
   }
   /** Ctrl+N/侧栏「新建任务」：导航到 Issue 主页（新建表单即主页主体）并请求聚焦输入框 */

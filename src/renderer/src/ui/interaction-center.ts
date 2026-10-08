@@ -193,6 +193,18 @@ export interface RootResolution { rootId: string; isRoot: boolean; broken: boole
 
 export type OpenTaskRoute = 'tab' | 'dock' | 'ignored'
 
+/**
+ * 目录提交戳：写入方数据面的实例标识（source）+ 该面内单调递增的任务快照序号（version）。
+ * 中心按「源内序号只进不退、换源重置基线」收敛目录写序：同一数据面内，旧序号的目录整份
+ * 拒收——渲染 effect 用渲染时捕获的旧快照写回时，不得覆盖创建链路（openCreatedTask）刚用
+ * 更新快照直写的目录与导航（渲染层目录双写竞态）；同序号写回视为幂等覆盖，照常接受。
+ * 不带戳的写入（既有测试/兼容调用方）不参与排序，总是接受。
+ */
+export interface CatalogCommit {
+  source: number
+  version: number
+}
+
 /* ------------------------------------------------- 祖先链解析（纯函数） */
 
 /** 任务目录 → 查找表 */
@@ -248,8 +260,8 @@ export function rootTabsOf(tasks: readonly CenterTask[], tabs: readonly string[]
 export interface InteractionCenter {
   subscribe(listener: () => void): () => void
   getState(): InteractionSnapshot
-  /** 最新任务目录（祖先链解析、删除清理的唯一依据） */
-  setTasks(tasks: readonly CenterTask[]): void
+  /** 最新任务目录（祖先链解析、删除清理的唯一依据）；带提交戳时按序号拒收旧快照写回 */
+  setTasks(tasks: readonly CenterTask[], commit?: CatalogCommit): void
   tasks(): readonly CenterTask[]
   /** 目录是否已就绪（宿主首次 setTasks 前，openTask/dock 只能乐观兜底并记待决） */
   isCatalogReady(): boolean
@@ -299,6 +311,9 @@ export function createInteractionCenter(options: InteractionCenterOptions = {}):
   let state: InteractionSnapshot = EMPTY_SNAPSHOT
   const listeners = new Set<() => void>()
   let catalog = new Map<string, CenterTask>()
+  /** 目录提交戳基线：当前生效目录的数据面 source 与快照序号（见 CatalogCommit） */
+  let catalogSource = 0
+  let catalogVersion = 0
   /** 目录是否已就绪：宿主第一次 setTasks 前，渲染层没有任何任务信息（区分「目录未加载」与「已加载缺失」） */
   let catalogReady = false
   /**
@@ -431,8 +446,19 @@ export function createInteractionCenter(options: InteractionCenterOptions = {}):
    * 1. 迁移键错了的 dock 桶（目录未加载时的自键兜底）；
    * 2. 重路由待决的 openTask（乐观普通页签 → 真实祖先链路由）；
    * 3. 按目录剪枝页签/活动项/dock 桶（删除的任务不保留）。
+   * 带提交戳时先按「源内序号只进不退」排序（见 CatalogCommit）：旧快照整份拒收，
+   * 不碰目录也不碰导航；换源（宿主重挂载新数据面）以新面为准重置基线。
    */
-  const setTasks = (tasks: readonly CenterTask[]): void => {
+  const setTasks = (tasks: readonly CenterTask[], commit?: CatalogCommit): void => {
+    if (commit) {
+      if (commit.source !== catalogSource) {
+        catalogSource = commit.source
+        catalogVersion = commit.version
+      } else {
+        if (commit.version < catalogVersion) return
+        catalogVersion = commit.version
+      }
+    }
     catalog = new Map(tasks.map((task) => [task.id, task]))
     catalogReady = true
     const tabs = [...new Set(state.tabs.filter((id) => !catalog.get(id)?.hidden).map((id) => {
@@ -718,6 +744,8 @@ export function createInteractionCenter(options: InteractionCenterOptions = {}):
       nextDockToken = 1
       catalog = new Map()
       catalogReady = false
+      catalogSource = 0
+      catalogVersion = 0
       pendingOpens.clear()
       state = EMPTY_SNAPSHOT
       for (const listener of listeners) listener()

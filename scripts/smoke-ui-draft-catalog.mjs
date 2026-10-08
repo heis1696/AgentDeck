@@ -138,6 +138,26 @@ section('普通任务「稍后」创建：目录刷到可见后再进详情（�
   await unmount()
 }
 
+section('目录双写竞态：创建链路打开详情后，迟到/陈旧的目录快照不得把导航剪回列表（listDelayMs=100）')
+{
+  // 判官在 b2bca7d 上的实测参数：假桥 listDelayMs=100 + 原挂载/点击/等待节奏，复现序列是
+  // 「直写目录 [t_1] → 打开 detail/t_1 → App 用旧 tasks=[] 的渲染提交 → effect 把旧目录写回
+  // → 剪回 issues/null → 新 tasks=[t_1] 最后到达但导航不恢复」。回归判据：目录里已有任务、
+  // 且额外等两轮 300ms 后导航仍停在详情。
+  // 紧跟「任务」创建节之后：本节用 task 类型，且此时 draft.kind 尚未被后面各节改动。
+  await mount()
+  bridge.listDelayMs = 100 // mount 会 reset 假桥，延迟必须挂在挂载之后再设
+  await composeLater('审查当前仓库的代码结构')
+  const raceTask = bridge.store.tasks[0]
+  await act(async () => { await sleep(300) })
+  await act(async () => { await sleep(300) })
+  ok(bridge.store.tasks.some((task) => task.id === raceTask.id), '桥目录里已有该任务')
+  ok(ui.tasks().some((task) => task.id === raceTask.id), '交互中心目录里也有该任务')
+  ok(ui.getState().view === 'detail' && ui.getState().activeId === raceTask.id, '目录延迟到达后导航仍停在详情（旧快照写回不得剪掉新页签）')
+  ok(!!byQuery('.detail-page') && byQuery('.detail-page').textContent.includes(raceTask.title), '详情页仍渲染新任务')
+  await unmount()
+}
+
 section('新建后刷新尚在途时等待目录，首次刷新失败不清空待决导航')
 {
   await mount()

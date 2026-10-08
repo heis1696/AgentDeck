@@ -247,6 +247,30 @@ section('目录晚到不覆盖用户的新导航，也不恢复已淘汰页签')
   ok(!capped.getState().tabs.includes('root') && !capped.dock.state('root').items.length, '超过页签上限被淘汰的待决任务不会复活')
 }
 
+section('目录提交戳：旧快照写回拒收、同序号幂等覆盖、换源重置基线')
+{
+  // 渲染层目录双写竞态的中心层守卫：创建链路直写新目录并打开详情后，
+  // 渲染 effect 用更旧任务快照的写回必须整份拒收（不碰目录也不碰导航）。
+  const c = createInteractionCenter({ layers: createLayerStack() })
+  c.setTasks([{ id: 't1', title: '新任务' }], { source: 7, version: 5 })
+  c.openTask('t1')
+  ok(c.getState().view === 'detail' && c.getState().activeId === 't1', '新序号直写生效，详情已打开')
+  c.setTasks([], { source: 7, version: 4 })
+  ok(c.tasks().length === 1 && c.tasks()[0].id === 't1', '旧序号写回被拒：目录不回退')
+  ok(c.getState().view === 'detail' && c.getState().activeId === 't1' && c.getState().tabs.join() === 't1', '旧序号写回被拒：导航不被剪回列表')
+  c.setTasks([{ id: 't1', title: '新任务' }, { id: 't2', title: '另一任务' }], { source: 7, version: 5 })
+  ok(c.tasks().some((task) => task.id === 't2'), '同序号写回接受（渲染 effect 用同一份快照 = 幂等覆盖）')
+  c.setTasks([{ id: 't1', title: '新任务' }], { source: 7, version: 6 })
+  ok(!c.tasks().some((task) => task.id === 't2') && c.getState().activeId === 't1', '更新序号写回接受（任务删除照常剪枝，且新页签不被误剪）')
+  c.setTasks([])
+  ok(c.tasks().length === 0, '不带戳的写入（既有测试/兼容调用方）不参与排序，总是接受')
+  c.setTasks([{ id: 'fresh', title: '新数据面' }], { source: 8, version: 1 })
+  ok(c.tasks().length === 1 && c.tasks()[0].id === 'fresh', '换源重置基线：宿主重挂载后新数据面的低序号写回生效')
+  c.reset()
+  c.setTasks([{ id: 'again', title: '重置后' }], { source: 7, version: 1 })
+  ok(c.tasks().length === 1 && c.tasks()[0].id === 'again', 'reset 清基线：同源低序号重新生效')
+}
+
 section('页签条过滤：断裂祖先任务的普通页签不能被藏掉')
 {
   const c = createInteractionCenter({ layers: createLayerStack() })
@@ -428,7 +452,8 @@ section('结构回归：导入环 / DOM 事件 / pet 路由')
   const apiSource = read('src/renderer/src/api.ts')
   const dataStoreSource = read('src/renderer/src/data-store.ts')
   const center = read('src/renderer/src/ui/interaction-center.ts')
-  ok(/if \(ready\) ui\.setTasks\(catalog\)/.test(app) && /waitForTaskListed/.test(app) && /await refreshMeetings\(\)/.test(app) && /data-meetings-retry/.test(app), 'App 按任务目录就绪喂统一目录，会议失败不阻断普通任务；草稿等统一目录可见再导航')
+  ok(/if \(ready\) ui\.setTasks\(catalog, \{ source: tasksSource, version: tasksVersion \}\)/.test(app) && /waitForTaskListed/.test(app) && /await refreshMeetings\(\)/.test(app) && /data-meetings-retry/.test(app), 'App 按任务目录就绪喂统一目录（带提交戳），会议失败不阻断普通任务；草稿等统一目录可见再导航')
+  ok(/setTasks\(tasks: readonly CenterTask\[\], commit\?: CatalogCommit\)/.test(center) && /commit\.version < catalogVersion\) return/.test(center), '目录写入带提交戳：同源旧序号整份拒收（渲染层目录双写竞态的排序守卫）')
   ok(/seq !== readSeq/.test(dataStoreSource) && /for \(const op of replay\) apply\(op/.test(dataStoreSource), '读竞态由 data-store 单调序号兜底：先发后至的旧快照整份作废，读期间广播按到达序重放')
   ok(/store\.upsert\(task\)/.test(apiSource) && !/onUpdated\(\(\) => \{? ?void refresh|onUpdated\(\(\) => refresh/.test(apiSource), 'useTasks 广播增量落位（稳态零全量重拉），全量快照只在装载/显式刷新')
   ok(/right\.createdAt - left\.createdAt/.test(apiSource), 'useTasks 增量按 createdAt 降序落位（与主进程 tasks.list 同序）')
