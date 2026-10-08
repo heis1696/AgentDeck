@@ -248,12 +248,17 @@ html.light .brand-mark {
 .workspace-title .brand-mark { background: var(--accent); color: var(--accent-ink); }
 .brand::after { display: none; }
 
-/* ---- 10. 辅助功能：降低动画强度（令牌之外再兜一层）---- */
+/* ---- 10. 辅助功能：降低动画强度（令牌之外再兜一层）----
+   transition-property: none 而非 transition-duration: 0.01ms：
+   后者仍会**创建**过渡（transition-property 初始值为 all），属性变更后的首次强制布局
+   查询会返回变更前的几何——这是 AgentPicker/弹层两次几何 flake 的共同根因
+   （见 smoke-ui-visual、smoke-ui-workflow-batch-a-browser）。none 彻底不建过渡，无测量伪影。
+   animation 侧保留 0.01ms：那是刻意的，用于让 animationend 事件照常派发而不产生可视运动。 */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
+    transition-property: none !important;
     scroll-behavior: auto !important;
   }
 }
