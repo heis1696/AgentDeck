@@ -26,7 +26,7 @@ export interface DelegateLedgerPorts {
   cancelTask(taskId: string): void
   /** 建单后的看板推送（runner：pushTask） */
   pushTask(taskId: string): void
-  /** 流式提前建单（runner：spawnDelegateChild——护栏与互斥键仍在 runner 编排层，批次 4b 外移） */
+  /** 流式提前建单（批次 4b 起经 runner facade 委托 execution/child-spawner——互斥键与护栏在 spawner） */
   spawnDelegateChild(taskId: string, call: DelegateCall): Promise<Task | null>
   /** 同父任务的现存子单快照（reserveWorkerIndex 的编号下限来源） */
   listChildTasks(parentTaskId: string): Task[]
@@ -309,8 +309,8 @@ export class DelegateLedger {
     return this.earlySpawns.get(taskId)?.seenKeys.size ?? 0
   }
 
-  // ---- 同键建单互斥（spawnCreatesInFlight 的窄面；互斥编排仍在 runner 的
-  // spawnDelegateChild，批次 4b 随 child-spawner 外移后收口到这里） ----
+  // ---- 同键建单互斥（spawnCreatesInFlight 的窄面；互斥编排自批次 4b 起在
+  // execution/child-spawner 的 spawnDelegateChild，经注入的 ledger 引用读写此窄面） ----
 
   spawnInFlightOf(key: string): Promise<Task | null> | undefined {
     return this.spawnCreatesInFlight.get(key)
