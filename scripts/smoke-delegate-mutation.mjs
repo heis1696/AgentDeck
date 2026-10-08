@@ -1238,7 +1238,7 @@ const MUTATIONS = [
     name: '红1｜建单门禁：旧代码（无 holding；绑定失败直接撤销）下「让位不撤销」断言必红',
     mutations: [
       {
-        file: 'src/main/runner.ts',
+        file: 'src/main/execution/child-spawner.ts',
         find: '      // 建单门禁：子单自创建起对调度器不可见（holding），归属绑定+登记核实三步全过才翻面入队\n      dispatchHold: true\n',
         replace: ''
       },
@@ -1248,7 +1248,7 @@ const MUTATIONS = [
         replace: "task.status === 'queued' && !task.parked && task.gitOperation === undefined"
       },
       {
-        file: 'src/main/runner.ts',
+        file: 'src/main/execution/child-spawner.ts',
         find: "      const bound = await setWorktreeOwner(worktree.path, child.id, worktree)\n      if (!bound) {\n        return this.closeSpawnedChild(taskId, child, call, expected, 'worktree 归属绑定失败', taskId)\n      }",
         replace: "      const bound = await setWorktreeOwner(worktree.path, child.id, worktree)\n      if (!bound) {\n        await this.cancel(child.id)\n        return null\n      }"
       }
@@ -1289,7 +1289,7 @@ const MUTATIONS = [
     name: '红5｜收口撤销竞态：旧代码（无条件 cancel、不看撤销结果就 force 回收）下「撤销落空让位零回收」断言必红',
     mutations: [
       {
-        file: 'src/main/runner.ts',
+        file: 'src/main/execution/child-spawner.ts',
         find: '    const cancelled = this.store.updateIf(latest.id, { status: \'queued\', runId: latest.runId, executionOwner: latest.executionOwner, dispatchHold: true }, { status: \'cancelled\', endedAt: Date.now() })\n    if (!cancelled) {\n      const claimed = this.store.get(latest.id)\n      this.note(taskId, `⚠ ${why}，但子单「${claimed?.title ?? latest.title}」已被领取（${claimed?.status ?? \'已删除\'}）——让位交还当前执行，不撤销不回收`, expected)\n      return claimed ?? null\n    }\n    this.pushTask(latest.id)',
         replace: '    await this.cancel(child.id)'
       }
