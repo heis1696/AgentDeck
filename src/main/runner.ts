@@ -17,6 +17,7 @@ import { SessionTurnRouter } from './execution/session-turn-router'
 import { awaitCleanup, strictCleanup, awaitExit, checkedCleanup } from './execution/cleanup'
 import { gitRepositoryProbe } from './execution/git-probe-cache'
 import { ExecutionKernel, turnTimeoutError, type RetiredSessionEntry } from './execution/execution-kernel'
+import { EventPump } from './execution/event-pump'
 
 // 冻结面：以下符号的 smoke 直连消费以 `./runner` 为准（AGENTS.md 铁律），实现已在批次 1
 // 迁入 src/main/execution/*，这里按原名 re-export——调用方与 smoke 零改动。
@@ -191,8 +192,9 @@ export class TaskRunner {
   /** 执行流引擎：实际运行为 FlowNode 组合（见 src/main/pipeline/flow.ts），节点在途账接管线 */
   readonly flowEngine: FlowEngine
   private ports: RunnerPorts
-  /** Pending provider batches are flushed at turn and process lifecycle boundaries. */
-  private eventBatchers = new Map<BoundedEventBatcher<RunnerEvent>, string>()
+  /** Pending provider batches are flushed at turn and process lifecycle boundaries.
+   *  批 → taskId 台账已迁 EventPump（批次 3a，唯一所有者，§6.3）；runner 只留门面委托。 */
+  private readonly eventPump = new EventPump<RunnerEvent>()
   /** 同键并发建单互斥（dedupeKey → 在途执行）：既有去重是「落盘后查册」，两条并发
    *  调用在双方都未落盘时互相看不见，各自 reserveWorkerIndex 建子单建树。进程内
    *  竞态用内存互斥关掉；跨进程仍由 store 层 dedupeKey 落盘约束兜底。执行完成后
@@ -242,7 +244,7 @@ export class TaskRunner {
       turnBudgetMs: (taskId) => this.turnBudgetMs(taskId),
       onSessionInstalled: (taskId) => this.pushTask(taskId),
       purgeTaskWorkflowState: (taskId, scope) => this.purgeTaskWorkflowState(taskId, scope),
-      drainEvents: (taskId, timeoutMs) => this.closeEventBatches(taskId, timeoutMs),
+      drainEvents: (taskId, timeoutMs) => this.eventPump.close(taskId, timeoutMs),
       composeTurnEvents: (req) => this.makeTurnEvents(req.taskId, req.router, req.claim, req.token, req.stamp, req.onTurnEnd),
       parkRetiredSession: (key, entry) => {
         if (entry.session.detach && this.store.get(entry.taskId)?.meetingId) this.retiredProviderSessions.set(key, entry)
@@ -261,7 +263,7 @@ export class TaskRunner {
       probe: { list: () => this.store.list(), get: (id) => this.store.get(id) },
       sources: [
         { label: 'launchHandles', size: () => this.kernel.launchCount() },
-        { label: 'eventBatchers', size: () => this.eventBatchers.size },
+        { label: 'eventBatchers', size: () => this.eventPump.size },
         { label: 'terminationTargets', size: () => this.terminationTargets.size },
         { label: 'executorCleanups', size: () => (this.executor.isIdle() ? 0 : 1) }
       ]
@@ -295,14 +297,18 @@ export class TaskRunner {
 
   // 冻结面（§3 第 3 条）：smoke 直读的「私有」字段——smoke-lifecycle.mjs:272/316/321/360/363
   // 直读 turnWatchdogs/turnLifecycles，smoke-issue-pipeline 直读/写入 sessions/claims，
-  // smoke-hot-transaction 直读 launchHandles.size，smoke-meeting-termination 直读
-  // turnWatchdogs/sessions。状态迁入内核后保留同名 getter 返回内核持有的同一活 Map 引用
-  // （不是拷贝、不是快照）；runner 内部代码不得经此读写，一律走 this.kernel 的窄方法。
+  // smoke-hot-transaction 直读 launchHandles.size 与 eventBatchers.size，smoke-event-pipeline
+  // 直读/迭代 eventBatchers，smoke-meeting-termination 直读 turnWatchdogs/sessions。
+  // 状态外移后保留同名 getter 返回所有者持有的同一活 Map 引用（不是拷贝、不是快照）；
+  // runner 内部代码不得经此读写，一律走所有者模块的窄方法。
   get sessions() { return this.kernel.sessions }
   get claims() { return this.kernel.claims }
   get launchHandles() { return this.kernel.launchHandles }
   get turnWatchdogs() { return this.kernel.turnWatchdogs }
   get turnLifecycles() { return this.kernel.turnLifecycles }
+  /** 台账已迁 EventPump（批次 3a）：smoke-event-pipeline.mjs:342-357 与
+   *  smoke-hot-transaction.mjs:365/463 直读，getter 返回其活 Map 引用。 */
+  get eventBatchers() { return this.eventPump.batches }
 
   pushTask(taskId: string) {
     const task = this.store.get(taskId)
@@ -331,23 +337,13 @@ export class TaskRunner {
     this.ports.send('task:event', { taskId, event: e })
   }
 
+  /** facade：事件批台账已迁 EventPump（批次 3a），drain/作废只留委托；调用方与签名不变 */
   private async closeEventBatches(taskId?: string, timeoutMs = 5_000): Promise<boolean> {
-    const selected = [...this.eventBatchers].filter(([, owner]) => taskId === undefined || owner === taskId)
-    const committed = await Promise.all(selected.map(async ([batcher]) => {
-      const ok = await batcher.close(timeoutMs)
-      if (!ok) batcher.dispose()
-      this.eventBatchers.delete(batcher)
-      return ok
-    }))
-    return committed.every(Boolean)
+    return this.eventPump.close(taskId, timeoutMs)
   }
 
   private disposeEventBatches(taskId?: string) {
-    for (const [batcher, owner] of this.eventBatchers) {
-      if (taskId !== undefined && owner !== taskId) continue
-      batcher.dispose()
-      this.eventBatchers.delete(batcher)
-    }
+    this.eventPump.dispose(taskId)
   }
 
   private lifecycle(taskId: string) {
@@ -466,7 +462,7 @@ export class TaskRunner {
         return true
       }
     })
-    this.eventBatchers.set(batcher, taskId)
+    this.eventPump.register(batcher, taskId)
     return {
       onEvent: (incoming: RunnerEvent) => {
         // Legacy zcode, dsh ACP, and OpenCode CLI fallback text events are
@@ -490,8 +486,7 @@ export class TaskRunner {
         // is flushed synchronously by onTurnEnd below.
         if (!batcher.add(e) && !this.shuttingDown && !terminalStarted && durableActive(e.kind)) {
           terminalStarted = true
-          batcher.dispose()
-          this.eventBatchers.delete(batcher)
+          this.eventPump.revoke(batcher)
           const failure: BackendTurnResult = { ok: false, response: '', error: persistenceProblem || '事件恢复副本写入失败或待写事件超过上限' }
           router.closeTurn(stamp.id)
           onTurnEnd?.(failure)
@@ -505,14 +500,13 @@ export class TaskRunner {
         if (life.gate.state.titleMode && this.kernel.lastTerminalResponse(taskId) === response) return
         terminalStarted = true
         if (!durableActive('final', true)) {
-          batcher.dispose()
-          this.eventBatchers.delete(batcher)
+          this.eventPump.revoke(batcher)
           // 终态没被接受（运行器已换代/任务已终态）：本回合就此作废，回调不再可投递
           router.abandonTurn(stamp.id)
           return
         }
         void batcher.close(5_000).then((committed) => {
-          this.eventBatchers.delete(batcher)
+          this.eventPump.forget(batcher)
           if (!committed) {
             batcher.dispose()
             if (!this.shuttingDown && !this.cancellationDrains.has(taskId) && durableActive('final', true)) {
