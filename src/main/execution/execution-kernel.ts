@@ -64,7 +64,7 @@ export interface ExecutionKernelPorts {
   /** 工作流态清扫（runner 单点实现：权限在飞/doom 窗/嗅探与拒单账/worker 编号预留）；
    *  scope 显式列出本次要清的半部——五个清扫位各自的原语义逐位保持，不偷偷扩大 */
   purgeTaskWorkflowState(taskId: string, scope: { permissions?: boolean; delegationLedger?: boolean; workerIndex?: boolean }): void
-  /** 事件批 drain（批次 2 由 runner 实现 closeEventBatches，批次 3 后委托 EventPump） */
+  /** 事件批 drain（批次 3a 起委托 EventPump.close；批次 2 曾由 runner 实现 closeEventBatches） */
   drainEvents(taskId: string, timeoutMs?: number): Promise<boolean>
   /** 回合事件组装（批次 2 由 runner 提供 makeTurnEvents，批次 3 后由 turn-events 模块提供） */
   composeTurnEvents(req: TurnEventsRequest): BackendSessionEvents
