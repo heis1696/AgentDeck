@@ -172,12 +172,27 @@
 
 1. **构造签名**：`new TaskRunner(store, backends, opts, onTaskChanged?, ports?)`（全部 smoke 按此构造）。
 2. **全部公共方法**：`enqueue`/`pushTask`/`pushEvent`/`followUp`/`cancel`/`terminateTask`/`forget`/`closeSession`/`releaseWorktreeSessions`/`shutdown`/`isIdle`/`sessionCount`/`askPermission`/`resolvePermission`/`pendingPermissions`/`attach*` 七件套/`applyChildReview`/`addIssueComment`/`spawnDelegateChild`/`spawnInvestigateChild`/`sendChildSummaryTurn`/`takeEarlySpawns`/`suspendDelegateSpawns`/`sniffBufferChars`/`delegateRejectionRecorded`/`recordDelegateRejection`/`peekDelegateRejections`/`acknowledgeDelegateRejections`/`takeDelegateRejections`/`acknowledgeDelegateReceipts`/`gitRepositoryProbeForTest`，以及字段 `pipeline`/`flowEngine`。
-3. **⚠ 两个私有字段被 smoke 直读**：`runner.turnWatchdogs`（`scripts/smoke-lifecycle.mjs:272`）、`runner.turnLifecycles`（`scripts/smoke-lifecycle.mjs:316`、`:360`）。状态迁入内核后，`TaskRunner` **必须保留这两个同名属性且返回内核持有的同一活 Map 引用**（普通 getter 即可，smoke 只用 `.has`/`.get`）。这是「smoke 不动」约束下的硬性兼容点。
+3. **⚠ 私有状态字段被 smoke 直读（完整清单，2026-10-08 全量重扫）**：原清单只列了 2 个，实测为 **9 个**——批次 2/3a 施工中各发现一处，事后对 `scripts/*.mjs` 全量扫描确认。凡状态迁入新所有者的批次，`TaskRunner` 必须保留同名 getter 返回**新所有者持有的同一活 Map 引用**（不是拷贝/快照）：
+
+   | 字段 | 读它的 smoke（频次） | getter 现状 | 迁移动向 |
+   |---|---|---|---|
+   | `sessions` | 多脚本（7） | ✅ 有 | 已随批次 2 入内核 |
+   | `claims` | 1 | ✅ 有 | 已随批次 2 入内核 |
+   | `turnWatchdogs` | `smoke-lifecycle:272` | ✅ 有 | 已随批次 2 入内核 |
+   | `turnLifecycles` | `smoke-lifecycle:316/360` | ✅ 有 | 已随批次 2 入内核 |
+   | `launchHandles` | `smoke-hot-transaction:365/463` | ✅ 有 | 已随批次 2 入内核 |
+   | `eventBatchers` | `smoke-event-pipeline:342-357`、`smoke-hot-transaction:365/463`（7） | ✅ 有（3a 补） | 已随批次 3a 入 EventPump |
+   | **`retiredProviderSessions`** | `smoke-meeting-termination:396/400` | ❌ **无** | **批次 5 目标——动手前必须先补 getter** |
+   | **`activeRuns`** | `smoke-meeting-termination:347`（**写入**：`activeRuns.set(...)`） | ❌ **无** | **批次 5 目标——注意是写入，不只是读** |
+   | `pipeline` / `flowEngine` | `smoke-issue-pipeline:306-354`（19/3） | 公开 readonly 字段（非私有） | 不迁 |
+
+   两处特别提醒：`retiredProviderSessions` 与 `activeRuns` **当前没有 getter**，而批次 5 正是要迁这两个状态——**批次 5 开工第一件事是补 getter，否则 `smoke-meeting-termination` 直接抛 `undefined`**。`activeRuns` 更棘手：smoke 会**写**它（`activeRuns.set(...)` 造在途假状态），所以批次 5 暴露的不能只是只读快照，必须保留可写引用，或改造该 smoke（后者属「改 smoke」，需领队授权）。
+   教训：**不要依赖本文档的枚举来判定冻结面，改哪批就重扫哪批的 `runner.<field>` 直读面**。
 4. **模块级导出**：`TaskRunner`、`MAX_CONSULT_ROUNDS`、`TURN_ISOLATION_REQUIRED`、`RESUME_UNSUPPORTED_MESSAGE`（`scripts/smoke-delegate.mjs` 直连消费）、`setGitRepositoryProbeCacheProbeForTest` 及类型 `GitRepositoryProbeCacheEvent`、`RunnerPorts`、`ContinueHandler`、`ConsultHandler`、`InvestigateHandler`、`ChildTaskCreator`/`TaskCreator`/`TaskCreationRequest`。批次 1 搬迁这些符号时 `runner.ts` 必须 **re-export 原名**。
 5. **依赖边现状**：`delegate.ts → runner.ts` 仅为 `import type { TaskRunner }` 的类型环（`docs/graph/INVENTORY.md` §2.6 已记录）。拆解不得加深它：新模块 `src/main/execution/*` **不得** import `delegate.ts` 的运行时值以外的解析器（`parseDelegates` 等纯函数可以，`runDelegationLoop` 只留在 runner 编排层）。
 6. **⚠ 变异红测锚点钉在 runner.ts 上**：`scripts/smoke-delegate-mutation.mjs` 按 `{file, find, replace}` 三元组对临时源码树做字符串变异，锚点未命中即抛 `变异锚点未命中`（`:20`）。其中 **4 处 `file: 'src/main/runner.ts'`**，锚的正是批次 4 要迁走的代码：建单门禁 `dispatchHold: true` 注释块（`:1241`）、`setWorktreeOwner` 绑定失败收口（`:1251`）、嗅探暂停护栏 `if (state.suspended)`（`:1280`）、`closeSpawnedChild` 条件撤销段（`:1292`）。批次 4 迁移这些函数后**必须**同步把这几条变异条目的 `file:` 重定向到新路径（`find`/`replace` 锚文随逐行搬迁原样保留，断言零改动）。这是对测试**工装**的机械路径维护，不是改断言；若领队裁定连 `file:` 重定向也不允许，则批次 4 的三个函数必须留在 `runner.ts`（仅改为委托内核台账），见 §10 第 6 条。
 
-直连 `src/main/runner.ts` 的 smoke 共 29 个（grep 核实）：`smoke-runner`、`smoke-turn-identity`、`smoke-lifecycle`、`smoke-run-ownership(-repair)`、`smoke-queue-recovery`、`smoke-event-pipeline`、`smoke-delegate(-reject/-mutation)`、`smoke-continue`、`smoke-failure`、`smoke-dsh-budget`、`smoke-retitle-cap`、`smoke-sparse-worktree`、`smoke-orchestration-matrix`、`smoke-issue-pipeline`、`smoke-task-service`、`smoke-sidecar`、`smoke-hot-transaction`、`smoke-worktree-lifecycle`、`smoke-meeting*` 六件、`e2e-delegate-real`。任何一批落地前，触达面内的这些脚本必须全绿。
+直连 `src/main/runner.ts` 的 smoke 共 **30 个**（2026-10-08 `grep -rl "main/runner" scripts/*.mjs` 实测，原文档记 29）：`smoke-runner`、`smoke-turn-identity`、`smoke-lifecycle`、`smoke-run-ownership(-repair)`、`smoke-queue-recovery`、`smoke-event-pipeline`、`smoke-delegate(-reject/-mutation)`、`smoke-continue`、`smoke-failure`、`smoke-dsh-budget`、`smoke-retitle-cap`、`smoke-sparse-worktree`、`smoke-orchestration-matrix`、`smoke-issue-pipeline`、`smoke-task-service`、`smoke-sidecar`、`smoke-hot-transaction`、`smoke-worktree-lifecycle`、**`smoke-worktree-sessions`（F1 的回归门，原清单遗漏）**、`smoke-meeting*` 六件、`e2e-delegate-real`。任何一批落地前，触达面内的这些脚本必须全绿。
 
 ---
 
