@@ -109,9 +109,11 @@ assert.equal(active(), pickerTrigger, 'Agent picker returns focus to its trigger
 assert.match(pickerTrigger.textContent, /Long named execution Agent 19/)
 
 await act(async () => { ui.navigate('board'); await sleep(80) })
-assert.match(query('.board-day-head-date').textContent, /全部日期/)
-assert.equal(query('.board-day-nav-select').value, 'all', 'board starts with all retained dates')
-assert.equal(all('.board-day-nav-select option').length, 26, 'date choices cover the retained catalog')
+// BoardView 自 86a29d7 起默认选中「今天」（selectedDay 初始 boardDayFloor(Date.now())），null 只是可切回的全部档
+const todayFloor = new Date().setHours(0, 0, 0, 0)
+assert.match(query('.board-day-head-date').textContent, /最后更新：今天·/, 'board opens on today by default')
+assert.equal(query('.board-day-nav-select').value, String(todayFloor), 'board day nav starts on today instead of all')
+assert.equal(all('.board-day-nav-select option').length, 26, 'date choices cover the retained catalog (today is among them, no extra option inserted)')
 const boardSearch = query('.issues-search input')
 await input(boardSearch, 'does-not-exist')
 assert.ok(query('.board-filter-reset'), 'filtered empty state exposes one-action recovery')
@@ -148,6 +150,6 @@ await click(query('.confirm-dialog .btn.danger'))
 assert.equal(bridge.calls.presetSave, 1, 'confirmed preset deletion writes once')
 assert.equal(bridge.store.presets.length, 0, 'confirmed preset deletion removes the preset')
 
-console.log('WORKFLOW BATCH A SMOKE PASSED: full catalog search, parked-task open, deduped recents, Agent picker, all-date board, Agent filtering and deletion confirmations')
+console.log('WORKFLOW BATCH A SMOKE PASSED: full catalog search, parked-task open, deduped recents, Agent picker, today-default board with all-date recovery, Agent filtering and deletion confirmations')
 await act(async () => appRoot.unmount())
 dom.window.close()
