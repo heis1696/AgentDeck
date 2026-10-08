@@ -20,6 +20,7 @@ import { EventPump } from './execution/event-pump'
 import { DelegateLedger } from './execution/delegate-ledger'
 import { ChildSpawner, type TaskCreator } from './execution/child-spawner'
 import { TerminationCoordinator } from './execution/termination'
+import { DoomWindow } from './execution/doom-window'
 
 // 冻结面：以下符号的 smoke 直连消费以 `./runner` 为准（AGENTS.md 铁律），实现已在批次 1
 // 迁入 src/main/execution/*，这里按原名 re-export——调用方与 smoke 零改动。
@@ -145,16 +146,16 @@ export class TaskRunner {
    *  terminateTask 签名冻结门面。activeRuns/activeTurns 所有权留在 runner（§5.1：
    *  Scheduler 回调写、pipeline sources 读），以只读快照端口现取。 */
   private readonly termination: TerminationCoordinator
+  /** doom 窗（批次 5）：toolWindows/doomRequestSeq 唯一所有者与 observeToolCall 编排
+   *  迁入 execution/doom-window.ts；I6.3 任务级清扫经 forget/clear 窄方法收口，
+   *  与 permissionBroker.cancelTask 成对（四个清扫位同经 purgeTaskWorkflowState 单点）。 */
+  private readonly doomWindows: DoomWindow
   private shuttingDown = false
   private cancellationDrains = new Map<string, number>()
   private meetingGuard: ((task: Task) => boolean) | null = null
   private activeRunsMap = new Map<string, Promise<unknown>>()
   private activeTurns = new Map<string, Promise<unknown>>()
   private readonly onTaskChanged?: (task: Task) => void
-  /** Consecutive tool-call signatures used by the doom-loop approval guard. */
-  private toolWindows = new Map<string, { key: string; count: number; requested: boolean }>()
-  private doomRequestSeq = 0
-
   constructor(
     store: TaskStore,
     backends: Map<string, AgentBackend>,
@@ -181,6 +182,18 @@ export class TaskRunner {
       spawnDelegateChild: (taskId, call) => this.spawnDelegateChild(taskId, call),
       listChildTasks: (parentTaskId) => this.store.list().filter((task) => task.parentTaskId === parentTaskId)
     })
+    // doom 窗（批次 5）先于回合事件工厂装配：observeToolCall 端口直连（惰性调用，
+    // 构造期不触发）；askPermission/isCurrentRun 经端口注入（§6.5）
+    this.doomWindows = new DoomWindow({
+      taskOf: (taskId) => this.store.get(taskId),
+      matches: (taskId, expected) => this.store.matches(taskId, expected),
+      doomLoopThreshold: () => this.opts().doomLoopThreshold,
+      appendEvent: (taskId, event, expected) => this.store.appendEvent(taskId, event, expected),
+      pushEvent: (taskId, event) => this.pushEvent(taskId, event),
+      askPermission: (taskId, request) => this.askPermission(taskId, request),
+      isCurrentRun: (claim) => this.kernel.isCurrentRun(claim),
+      stopSession: (taskId) => this.kernel.sessionOf(taskId)?.stop()
+    })
     // 回合事件工厂（批次 3b）先于内核装配：端口回调引用 runner 编排面（惰性调用，
     // 构造期不触发）；store/kernel/pump 的访问全部经窄端口注入（§6.3 3b 端口清单）
     this.turnEvents = createTurnEvents({
@@ -200,7 +213,7 @@ export class TaskRunner {
       rememberTerminalResponse: (taskId, response) => this.kernel.rememberTerminalResponse(taskId, response),
       // runner 编排回调（业务裁决留在 runner）
       sniffDelegates: (taskId, delta) => this.delegateLedger.sniffDelegates(taskId, delta),
-      observeToolCall: (taskId, event, claim) => this.observeToolCall(taskId, event, claim),
+      observeToolCall: (taskId, event, claim) => this.doomWindows.observeToolCall(taskId, event, claim),
       pushEvent: (taskId, e) => this.pushEvent(taskId, e),
       onTaskEvent: (taskId, event) => this.ports.onTaskEvent?.(taskId, event),
       pushTask: (taskId) => this.pushTask(taskId),
@@ -449,63 +462,6 @@ export class TaskRunner {
     })).digest('hex')
   }
 
-  /** Convert backend tool events into an auditable, one-shot doom-loop approval. */
-  private observeToolCall(taskId: string, event: Omit<TaskEvent, 'seq'>, claim: RunClaim) {
-    // Doom-loop is a Goal-mode guard. Ordinary Tasks retain their existing
-    // permission behavior and must not be paused by Goal policy.
-    if (!this.store.get(taskId)?.goalId) return
-    const data = event.data && typeof event.data === 'object' ? event.data as Record<string, unknown> : {}
-    if (data.phase !== 'started') return
-    let args = data.args ?? data.input ?? ''
-    if (typeof args !== 'string') {
-      try { args = JSON.stringify(args) } catch { args = String(args) }
-    }
-    const key = `${event.text ?? ''}:${args}`
-    const previous = this.toolWindows.get(taskId)
-    const state = previous?.key === key ? previous : { key, count: 0, requested: false }
-    state.count += 1
-    this.toolWindows.set(taskId, state)
-    if (state.count !== (this.opts().doomLoopThreshold ?? 3) || state.requested) return
-    state.requested = true
-    const requestId = `doom_${taskId}_${++this.doomRequestSeq}`
-    const reason = `检测到同名同参工具连续调用 ${state.count} 次，疑似 doom-loop；需要人工确认是否继续。`
-    const full = this.store.appendEvent(taskId, {
-      ts: Date.now(),
-      kind: 'status',
-      text: `doom-loop: ${reason}`,
-      data: { stopReason: 'doom_loop', toolName: event.text ?? '', args }
-    }, runCondition(claim))
-    if (!full) return
-    this.pushEvent(taskId, full)
-    const request: PermissionRequest = {
-      requestId,
-      toolName: String(event.text ?? ''),
-      reason,
-      riskLevel: 'high',
-      input: args,
-      options: [
-        { optionId: 'allow', name: '允许继续', response: { decision: 'allow' } },
-        { optionId: 'deny', name: '停止回合', response: { decision: 'deny' } }
-      ]
-    }
-    void this.askPermission(taskId, request).then((decision) => {
-      // The answer belongs to the Run that asked for it. While the prompt was
-      // pending a newer Run may have installed its own doom-loop window; a
-      // stale answer must neither clear that window nor write into it.
-      if (!this.isCurrentRun(claim)) return
-      if (decision.decision === 'allow') {
-        this.toolWindows.delete(taskId)
-        const allowed = this.store.appendEvent(taskId, { ts: Date.now(), kind: 'status', text: 'doom-loop: 人工审批通过，继续执行', data: { stopReason: 'doom_loop_approved' } }, runCondition(claim))
-        if (allowed) this.pushEvent(taskId, allowed)
-        return
-      }
-      const denied = this.store.appendEvent(taskId, { ts: Date.now(), kind: 'status', text: 'doom-loop: 未获人工审批，停止当前回合', data: { stopReason: 'doom_loop_denied' } }, runCondition(claim))
-      if (denied) this.pushEvent(taskId, denied)
-      if (!this.store.matches(taskId, runCondition(claim))) return
-      void Promise.resolve(this.kernel.sessionOf(taskId)?.stop()).catch(() => {})
-    }).catch(() => {})
-  }
-
   /** UI 应答权限请求 */
   resolvePermission(requestId: string, optionId: string, decision: 'allow' | 'deny', requestToken?: string) {
     return this.permissionBroker.resolve(requestId, optionId, decision, undefined, requestToken)
@@ -602,7 +558,7 @@ export class TaskRunner {
   ) {
     if (scope.permissions) {
       this.permissionBroker.cancelTask(taskId)
-      this.toolWindows.delete(taskId)
+      this.doomWindows.forget(taskId)
     }
     this.delegateLedger.purge(taskId, scope)
   }
@@ -1347,7 +1303,7 @@ export class TaskRunner {
     const task = this.store.get(taskId)
     if (!task || task.status !== 'queued') return
     if (!this.enforceMeetingGuard(task)) return
-    this.toolWindows.delete(taskId)
+    this.doomWindows.forget(taskId)
     const backend = this.backends.get(task.backend)
     if (!backend) {
       this.failTask(taskId, `未知后端: ${task.backend}`)
@@ -1662,7 +1618,7 @@ export class TaskRunner {
 
     const runId = this.newRunId(taskId)
     const beginRun = async (): Promise<RunClaim | null> => {
-      this.toolWindows.delete(taskId)
+      this.doomWindows.forget(taskId)
       // Claim exactly the record this follow-up was built from. Only a
       // committed claim may start the backend; a Task that already moved on
       // (another instance, an explicit cancel, a newer Run) is left untouched.
@@ -2028,7 +1984,7 @@ export class TaskRunner {
     this.activeTurns.clear()
     this.delegateLedger.clearSessionState()
     this.permissionBroker.shutdown()
-    this.toolWindows.clear()
+    this.doomWindows.clear()
     await this.executor.shutdown()
   }
 
