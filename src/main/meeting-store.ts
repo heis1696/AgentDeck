@@ -16,6 +16,7 @@ import {
   type MeetingTurnReadQuery,
   type MeetingTurnUpdatePatch
 } from '../shared/meeting'
+import { isJsonObject } from './persistence'
 
 /**
  * 索引 schema 保持 1：新字段全部可选、纯增量，旧程序可直接读新索引（回退安全），
@@ -62,10 +63,6 @@ interface TurnBodyDocument {
   updatedAt: number
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value)
-}
-
 export class MeetingStore {
   private readonly dir: string
   private readonly file: string
@@ -92,9 +89,9 @@ export class MeetingStore {
 
   private parseIndex(file: string): MeetingIndexDocument {
     const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown
-    if (!isRecord(raw) || raw.schemaVersion !== MEETING_INDEX_SCHEMA_VERSION || !Array.isArray(raw.meetings) || !Array.isArray(raw.turns)) {
+    if (!isJsonObject(raw) || raw.schemaVersion !== MEETING_INDEX_SCHEMA_VERSION || !Array.isArray(raw.meetings) || !Array.isArray(raw.turns)) {
       // 未来版本的更高 schema 是未知数据：单独标识，调用方必须拒写且不得用备份覆盖
-      if (isRecord(raw) && 'schemaVersion' in raw && raw.schemaVersion !== MEETING_INDEX_SCHEMA_VERSION) throw new MeetingIndexSchemaError(raw.schemaVersion)
+      if (isJsonObject(raw) && 'schemaVersion' in raw && raw.schemaVersion !== MEETING_INDEX_SCHEMA_VERSION) throw new MeetingIndexSchemaError(raw.schemaVersion)
       throw new Error('Invalid meeting index')
     }
     // 正文不属于整体索引：即使索引文件被外部塞入 body 字段，加载时也剥离
@@ -233,8 +230,8 @@ export class MeetingStore {
     let pending: { meetingId: string; turnId: string; version: number; previous?: TurnBodyDocument }
     try {
       const parsed: unknown = JSON.parse(fs.readFileSync(journal, 'utf8'))
-      if (!isRecord(parsed) || typeof parsed.meetingId !== 'string' || typeof parsed.turnId !== 'string' || !this.bodyFile(parsed.meetingId, parsed.turnId) || !Number.isSafeInteger(parsed.version) || (parsed.version as number) < 1) throw new Error('Invalid meeting body journal')
-      if (parsed.previous !== undefined && (!isRecord(parsed.previous) || parsed.previous.meetingId !== parsed.meetingId || parsed.previous.turnId !== parsed.turnId || parsed.previous.schemaVersion !== MEETING_TURN_BODY_SCHEMA_VERSION || parsed.previous.body !== undefined && typeof parsed.previous.body !== 'string')) throw new Error('Invalid previous meeting body')
+      if (!isJsonObject(parsed) || typeof parsed.meetingId !== 'string' || typeof parsed.turnId !== 'string' || !this.bodyFile(parsed.meetingId, parsed.turnId) || !Number.isSafeInteger(parsed.version) || (parsed.version as number) < 1) throw new Error('Invalid meeting body journal')
+      if (parsed.previous !== undefined && (!isJsonObject(parsed.previous) || parsed.previous.meetingId !== parsed.meetingId || parsed.previous.turnId !== parsed.turnId || parsed.previous.schemaVersion !== MEETING_TURN_BODY_SCHEMA_VERSION || parsed.previous.body !== undefined && typeof parsed.previous.body !== 'string')) throw new Error('Invalid previous meeting body')
       pending = parsed as unknown as typeof pending
     } catch (error) {
       fs.renameSync(journal, `${journal}.invalid-${Date.now()}`)
@@ -424,7 +421,7 @@ export class MeetingStore {
   private decodeCursor(cursor: string): { meetingId: string; latestVersion: number; afterVersion?: number; afterSequence: number; round: number; turnId: string } {
     let parsed: unknown
     try { parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) } catch { throw new Error('无效的会议发言分页 cursor') }
-    if (!isRecord(parsed) || parsed.v !== MEETING_TURN_CURSOR_VERSION || typeof parsed.meetingId !== 'string' || typeof parsed.turnId !== 'string'
+    if (!isJsonObject(parsed) || parsed.v !== MEETING_TURN_CURSOR_VERSION || typeof parsed.meetingId !== 'string' || typeof parsed.turnId !== 'string'
       || ![parsed.latestVersion, parsed.afterSequence, parsed.round].every((value) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)
       || parsed.afterVersion !== undefined && (typeof parsed.afterVersion !== 'number' || !Number.isSafeInteger(parsed.afterVersion) || parsed.afterVersion < 0)) throw new Error('无效的会议发言分页 cursor')
     return parsed as unknown as { meetingId: string; latestVersion: number; afterVersion?: number; afterSequence: number; round: number; turnId: string }

@@ -3,6 +3,7 @@ import path from 'node:path'
 import { isGoalStatus, type AcceptanceCriterion, type Goal, type GoalApprovalSnapshot, type GoalCheckpoint, type GoalRun, type GoalSpecDecision, type GoalSpecSnapshot, type GoalStatus, type Task, type TaskEvent, type TaskUsage } from '../shared/types'
 import { executionRecordFromTask } from '../shared/taskflow'
 import { EventLog } from './event-log'
+import { atomicWriteJson, isJsonObject } from './persistence'
 
 /** Versioned durable index for long-running goals. */
 export const GOAL_INDEX_SCHEMA_VERSION = 1 as const
@@ -47,10 +48,6 @@ export interface GoalCheckpointRecord {
   usage?: TaskUsage
 }
 
-function record(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value)
-}
-
 function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string').map((item) => item.trim()).filter(Boolean) : []
 }
@@ -66,7 +63,7 @@ function normalizeAcceptance(value: unknown, fallback: string[] = []): Acceptanc
       const text = item.trim()
       return text ? [{ id: `ac_${index}`, text, status: 'pending' as const }] : []
     }
-    if (!record(item) || typeof item.text !== 'string' || !item.text.trim()) return []
+    if (!isJsonObject(item) || typeof item.text !== 'string' || !item.text.trim()) return []
     const id = typeof item.id === 'string' && item.id.trim() ? item.id.trim() : `ac_${index}`
     const status = item.status === 'passed' || item.status === 'failed' ? item.status : 'pending'
     return [{ id, text: item.text.trim(), status, ...(typeof item.passedAt === 'number' && Number.isFinite(item.passedAt) ? { passedAt: item.passedAt } : {}), ...(typeof item.evidence === 'string' && item.evidence.trim() ? { evidence: item.evidence.trim() } : {}) }]
@@ -74,7 +71,7 @@ function normalizeAcceptance(value: unknown, fallback: string[] = []): Acceptanc
 }
 
 function normalizeApprovalSnapshot(value: unknown) {
-  if (!record(value)) return undefined
+  if (!isJsonObject(value)) return undefined
   if (typeof value.requestId !== 'string' || typeof value.goalId !== 'string' || typeof value.workVersion !== 'string' || typeof value.actor !== 'string') return undefined
   if (typeof value.specGeneration !== 'number' || !Number.isInteger(value.specGeneration) || value.specGeneration < 1) return undefined
   if (typeof value.approvedAt !== 'number' || !Number.isFinite(value.approvedAt) || value.approvedAt <= 0) return undefined
@@ -85,7 +82,7 @@ function normalizeApprovalSnapshot(value: unknown) {
 }
 
 function validGoal(value: unknown): value is Goal {
-  if (!record(value)) return false
+  if (!isJsonObject(value)) return false
   return typeof value.id === 'string' && !!value.id
     && typeof value.issueId === 'string' && !!value.issueId
     && typeof value.text === 'string'
@@ -142,7 +139,7 @@ export class GoalStore {
         ...(typeof goal.stopReason === 'string' && goal.stopReason ? { stopReason: goal.stopReason } : {}),
         acceptanceCriteria: normalizeAcceptance(goal.acceptanceCriteria, stringArray(goal.completionConditions))
       })) : []
-      const runs = Array.isArray(parsed.runs) ? parsed.runs.filter((run): run is GoalRun => record(run)
+      const runs = Array.isArray(parsed.runs) ? parsed.runs.filter((run): run is GoalRun => isJsonObject(run)
         && typeof run.id === 'string' && !!run.id
         && typeof run.goalId === 'string' && !!run.goalId
         && typeof run.phaseIndex === 'number' && Number.isInteger(run.phaseIndex) && run.phaseIndex >= 0
@@ -152,7 +149,7 @@ export class GoalStore {
         && typeof run.prompt === 'string'
         && typeof run.transcriptEventCount === 'number'
         && (run.status === 'running' || run.status === 'completed' || run.status === 'cancelled' || run.status === 'error')) : []
-      const checkpoints = Array.isArray(parsed.checkpoints) ? parsed.checkpoints.filter((cp): cp is GoalCheckpoint => record(cp)
+      const checkpoints = Array.isArray(parsed.checkpoints) ? parsed.checkpoints.filter((cp): cp is GoalCheckpoint => isJsonObject(cp)
         && typeof cp.id === 'string' && !!cp.id
         && typeof cp.goalId === 'string' && !!cp.goalId
         && typeof cp.runId === 'string' && !!cp.runId
@@ -164,7 +161,7 @@ export class GoalStore {
         blockers: stringArray(cp.blockers),
         nextPlan: typeof cp.nextPlan === 'string' ? cp.nextPlan : ''
       })) : []
-      const specSnapshots = Array.isArray(parsed.specSnapshots) ? parsed.specSnapshots.filter((snapshot): snapshot is GoalSpecSnapshot => record(snapshot)
+      const specSnapshots = Array.isArray(parsed.specSnapshots) ? parsed.specSnapshots.filter((snapshot): snapshot is GoalSpecSnapshot => isJsonObject(snapshot)
         && typeof snapshot.id === 'string' && !!snapshot.id
         && typeof snapshot.goalId === 'string' && !!snapshot.goalId
         && typeof snapshot.generation === 'number' && Number.isInteger(snapshot.generation) && snapshot.generation >= 0
@@ -185,7 +182,7 @@ export class GoalStore {
         if (snapshot.checkpoint) snapshot.checkpoint = { ...snapshot.checkpoint, completedConditions: stringArray(snapshot.checkpoint.completedConditions), incompleteConditions: stringArray(snapshot.checkpoint.incompleteConditions), blockers: stringArray(snapshot.checkpoint.blockers) }
         if (snapshot.approvalSnapshot) snapshot.approvalSnapshot = normalizeApprovalSnapshot(snapshot.approvalSnapshot)
       }
-      const specDecisions = Array.isArray(parsed.specDecisions) ? parsed.specDecisions.filter((item): item is GoalSpecDecision => record(item)
+      const specDecisions = Array.isArray(parsed.specDecisions) ? parsed.specDecisions.filter((item): item is GoalSpecDecision => isJsonObject(item)
         && typeof item.id === 'string' && !!item.id
         && typeof item.goalId === 'string' && !!item.goalId
         && typeof item.generation === 'number' && Number.isInteger(item.generation) && item.generation >= 1
@@ -224,10 +221,8 @@ export class GoalStore {
   }
 
   private save() {
-    fs.mkdirSync(this.dir, { recursive: true })
-    const tmp = `${this.file}.tmp`
-    fs.writeFileSync(tmp, JSON.stringify(this.data, null, 2))
-    fs.renameSync(tmp, this.file)
+    // 与 TaskStore/IssueStore 同一原子写基座：唯一 tmp 名 + wx + fsync + rename（修掉旧实现固定 .tmp 名的并发互踩）
+    atomicWriteJson(this.file, this.data)
   }
 
   private appendGoalEvent(goalId: string, text: string, data: Record<string, unknown> = {}) {

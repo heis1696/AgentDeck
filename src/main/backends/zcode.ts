@@ -32,9 +32,6 @@ import {
 } from './zcode-config'
 
 
-function asRecord(value: unknown): JsonObject {
-  return zcodeRecord(value)
-}
 const asString = zcodeString
 
 /** 回合裁决硬上限：send 之后服务端迟迟不给终态时的兜底（测试用 AGENTDECK_TURN_CAP_MS 缩短） */
@@ -225,7 +222,7 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
             handleTurnEnd({
               response: '',
               ok: false,
-              error: `zcode app-server 进程退出${asRecord(m.params).code != null ? ` (code ${asRecord(m.params).code})` : ''}${asRecord(m.params).stderr ? `：${String(asRecord(m.params).stderr).slice(0, 300)}` : ''}`
+              error: `zcode app-server 进程退出${zcodeRecord(m.params).code != null ? ` (code ${zcodeRecord(m.params).code})` : ''}${zcodeRecord(m.params).stderr ? `：${String(zcodeRecord(m.params).stderr).slice(0, 300)}` : ''}`
             })
           }
           return
@@ -244,7 +241,7 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
           const { type, payload } = event
           // 回合级错误（invalid_model_request 等）以 payload.error 单独下发、不带在终态里，
           // 先记住最近一条，终态无 errorMessage 时用它还原真实原因
-          const turnError = asRecord(payload.error)
+          const turnError = zcodeRecord(payload.error)
           if (turnError.message || turnError.code) {
             lastTurnError = asString(turnError.message) || asString(turnError.code)
             emit({ kind: 'status', text: `⚠ ${lastTurnError}` })
@@ -299,7 +296,7 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
               })
             } else if (k === 'result') {
               lastSegment = ''
-              const res = asRecord(payload.result)
+              const res = zcodeRecord(payload.result)
               const preview =
                 typeof res.content === 'string'
                   ? res.content.slice(0, 400)
@@ -313,7 +310,7 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
                   phase: 'result',
                   toolCallId,
                   ok: res.success !== false,
-                  durationMs: payload.duration ?? asRecord(res.perf).totalMs,
+                  durationMs: payload.duration ?? zcodeRecord(res.perf).totalMs,
                   preview,
                   ...(edit ? { edit } : {})
                 }
@@ -361,12 +358,12 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
           return
         }
         if (m.method === 'state.updated') {
-          const status = asRecord(asRecord(m.params).patch).status
+          const status = zcodeRecord(zcodeRecord(m.params).patch).status
           if (status) emit({ kind: 'status', text: `session:${status}` })
           return
         }
         if (m.method === 'v4/telemetry/event') {
-          const telemetry = asRecord(m.params)
+          const telemetry = zcodeRecord(m.params)
           const kind: string = String(telemetry.kind ?? '')
           if (kind === 'turn.terminal') {
             // 备用终态信号：若尚未触发 handleTurnEnd。新版 CLI 不少失败（如
@@ -389,13 +386,13 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
           return
         }
         if (m.method === 'interaction/requestPermission' && m.id !== undefined) {
-          const p = asRecord(m.params)
+          const p = zcodeRecord(m.params)
           const options: Array<{ optionId: string; name: string; description?: string; response: { decision: string } }> =
             (isJsonObject(p) && Array.isArray(p.options) ? p.options : []).filter(isJsonObject).map((o) => ({
               optionId: String(o.optionId ?? ''),
               name: String(o.name ?? o.kind ?? ''),
               description: typeof o.description === 'string' ? o.description : undefined,
-              response: asRecord(o.response) as { decision: string }
+              response: zcodeRecord(o.response) as { decision: string }
             }))
           const req = {
             requestId: m.id,
@@ -441,13 +438,13 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
           sessionId: resumeSessionId,
           workspace: { workspaceKey: cwd, workspacePath: cwd }
         })
-        sessionId = String(asRecord(resumed.session).sessionId ?? resumeSessionId)
+        sessionId = String(zcodeRecord(resumed.session).sessionId ?? resumeSessionId)
       } else {
         const created = await conn.request<JsonObject>('session/create', {
           workspace: { workspaceKey: cwd, workspacePath: cwd },
           mode: mode || 'yolo'
         })
-        sessionId = String(asRecord(created.session).sessionId ?? '')
+        sessionId = String(zcodeRecord(created.session).sessionId ?? '')
       }
       // 新协议：模型一律经 session/setModel 设置（create 的 model 参数执行期带不住
       // options，reasoning 模型会报 "Reasoning level is required"；setModel 是

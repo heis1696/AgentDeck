@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import type { Comment, Issue, IssuePriority, IssueStatus, Run, Task } from '../shared/types'
 import { executionRecordFromTask, taskStatusToIssueStatus, validateIssueMove } from '../shared/taskflow'
-import { atomicWriteJson, readJsonFile, withStorageTransaction } from './persistence'
+import { atomicWriteJson, isJsonObject, readJsonFile, withStorageTransaction } from './persistence'
 import { migrateTaskIndex, type TaskIndexDocument } from './store'
 
 type Persisted = {
@@ -15,13 +15,9 @@ type Persisted = {
   deletedTaskIds?: string[]
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value)
-}
-
 function persistedFrom(raw: unknown): Persisted {
-  if (raw !== undefined && !isRecord(raw)) throw new Error('Invalid Issue index')
-  const value = isRecord(raw) ? raw : {}
+  if (raw !== undefined && !isJsonObject(raw)) throw new Error('Invalid Issue index')
+  const value = isJsonObject(raw) ? raw : {}
   for (const field of ['issues', 'runs', 'comments']) {
     if (value[field] !== undefined && !Array.isArray(value[field])) throw new Error(`Invalid Issue index: ${field}`)
   }
@@ -48,7 +44,7 @@ function clonePersisted(value: Persisted): Persisted {
 }
 
 function taskFingerprint(tasks: Task[]): string {
-  return JSON.stringify(tasks, (_key, value: unknown) => isRecord(value)
+  return JSON.stringify(tasks, (_key, value: unknown) => isJsonObject(value)
     ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, value[key]]))
     : value)
 }

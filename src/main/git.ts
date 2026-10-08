@@ -2296,56 +2296,6 @@ export async function replayLeaderBaseline(leaderWorkdir: string, childWorkdir: 
   }
 }
 
-/** 在 repoDir 上把 sourceBranch merge 进 targetBranch（fast-forward 优先，不切换用户分支：用 worktree 上的 merge）
- *  返回 {ok, conflict, message} */
-async function mergeBranchIntoLegacy(
-  repoDir: string,
-  targetBranch: string,
-  sourceBranch: string
-): Promise<{ ok: boolean; conflict: boolean; message: string }> {
-  // 确保 target 分支存在（从当前 HEAD 建）
-  const exists = await runGit(repoDir, ['rev-parse', '--verify', targetBranch])
-  if (!exists.ok || !exists.stdout.trim()) {
-    const created = await runGit(repoDir, ['branch', targetBranch], 30000)
-    if (!created) return { ok: false, conflict: false, message: `无法创建集成分支 ${targetBranch}` }
-  }
-  // 在临时 worktree 中执行 merge，不动用户工作区
-  const tmpName = `.agentdeck-merge-${Date.now().toString(36)}`
-  const wtPath = path.join(repoDir, '.agentdeck-worktrees', tmpName)
-  const added = await new Promise<boolean>((resolve) => {
-    execFile(
-      'git',
-      ['-C', repoDir, 'worktree', 'add', wtPath, targetBranch],
-      { timeout: 60000, windowsHide: true },
-      (err) => resolve(!err)
-    )
-  })
-  if (!added) return { ok: false, conflict: false, message: '无法创建合并用 worktree' }
-  try {
-    const merged = await new Promise<{ ok: boolean; conflict: boolean; stderr: string }>((resolve) => {
-      execFile(
-        'git',
-        ['-C', wtPath, 'merge', '--no-ff', '-m', `merge ${sourceBranch} into ${targetBranch}`, sourceBranch],
-        { timeout: 60000, windowsHide: true },
-        (err, _out, stderr) => {
-          const s = (stderr || '') + String(err ?? '')
-          resolve({ ok: !err, conflict: /conflict/i.test(s), stderr: s.slice(0, 400) })
-        }
-      )
-    })
-    if (merged.conflict) {
-      await git(wtPath, ['merge', '--abort'])
-      return { ok: false, conflict: true, message: `合并 ${sourceBranch} 时有冲突，已中止` }
-    }
-    if (!merged.ok) return { ok: false, conflict: false, message: merged.stderr || 'merge 失败' }
-    return { ok: true, conflict: false, message: '' }
-  } finally {
-    await new Promise<void>((resolve) => {
-      execFile('git', ['-C', repoDir, 'worktree', 'remove', '--force', wtPath], { timeout: 30000, windowsHide: true }, () => resolve())
-    })
-  }
-}
-
 /** 集成分支 vs 基线分支的总 diff（leader 任务展示用） */
 export async function branchDiffSummary(
   repoDir: string,

@@ -28,25 +28,9 @@ import { installClaudePlugin, uninstallClaudePlugin } from '../plugin-cli'
 import { EXTENSION_CATALOG } from '../extension-catalog'
 import { addSource, browseSource, importSkillFromSource, installSkillsFromUrl, listMarketplacePlugins, listSkillGroups, listSources, quickAddSource, registerMarketplaceAsset, removeSource, syncSource } from '../sources'
 import { ensureSharedDir } from '../skills'
-import { parseContent, parseId } from '../ipc-validation'
+import { assertKeys, optionalRawString, parseContent, parseId, record } from '../ipc-validation'
 import type { HookTarget, McpTarget } from '../../shared/extensions'
 import type { IpcContext } from './context'
-
-function record(value: unknown, label: string): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} 必须是对象`)
-  return value as Record<string, unknown>
-}
-
-function assertKeys(input: Record<string, unknown>, allowed: readonly string[], label: string) {
-  const keys = new Set(allowed)
-  for (const key of Object.keys(input)) if (!keys.has(key)) throw new Error(`${label}包含未知字段: ${key}`)
-}
-
-function optionalString(value: unknown, label: string): string | undefined {
-  if (value === undefined) return undefined
-  if (typeof value !== 'string') throw new Error(`${label} 必须是字符串`)
-  return value
-}
 
 /** MCP 目标注册表（§3.8：claude/zcode/codex） */
 const MCP_TARGET_IDS = ['claude', 'zcode', 'codex'] as const
@@ -93,7 +77,7 @@ export function registerExtensionsIpc(ctx: IpcContext) {
     return saveMcp(
       ctx.sharedDir,
       { name: parseId(body.name, 'name'), description: body.description, transport: assertMcpTransport(body.transport) },
-      optionalString(originName, 'originName')
+      optionalRawString(originName, 'originName')
     )
   })
   ipcMain.handle('mcp:delete', (_e, name: unknown) => {
@@ -143,8 +127,8 @@ export function registerExtensionsIpc(ctx: IpcContext) {
   ipcMain.handle('hooks:save', (_e, name: unknown, input: unknown) => {
     const body = record(input, 'Hook 参数')
     assertKeys(body, ['description', 'body', 'events', 'originName'], 'Hook 参数')
-    const description = optionalString(body.description, 'description')
-    const hookBody = optionalString(body.body, 'body')
+    const description = optionalRawString(body.description, 'description')
+    const hookBody = optionalRawString(body.body, 'body')
     if (description === undefined || hookBody === undefined) throw new Error('description/body 不能缺省')
     return saveHook(
       ctx.sharedDir,
@@ -153,7 +137,7 @@ export function registerExtensionsIpc(ctx: IpcContext) {
         description,
         body: hookBody,
         events: assertHookEvents(body.events),
-        ...(body.originName !== undefined ? { originName: optionalString(body.originName, 'originName') } : {})
+        ...(body.originName !== undefined ? { originName: optionalRawString(body.originName, 'originName') } : {})
       }
     )
   })
@@ -239,10 +223,10 @@ export function registerExtensionsIpc(ctx: IpcContext) {
     return { groups: listSkillGroups(ctx.sharedDir) }
   })
   ipcMain.handle('sources:add', (_e, ref: unknown, name: unknown) => {
-    return addSource(ctx.sharedDir, parseContent(ref, 'ref'), optionalString(name, 'name'))
+    return addSource(ctx.sharedDir, parseContent(ref, 'ref'), optionalRawString(name, 'name'))
   })
   ipcMain.handle('sources:quick-add', (_e, ref: unknown, name: unknown) => {
-    return quickAddSource(ctx.sharedDir, parseContent(ref, 'ref'), optionalString(name, 'name'))
+    return quickAddSource(ctx.sharedDir, parseContent(ref, 'ref'), optionalRawString(name, 'name'))
   })
   // §8.6 从 URL 一键装技能（校验同 sources:add 的 ref）
   ipcMain.handle('skills:install-from-url', (_e, ref: unknown) => installSkillsFromUrl(ctx.sharedDir, parseContent(ref, 'ref')))

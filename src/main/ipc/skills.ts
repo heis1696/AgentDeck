@@ -3,24 +3,8 @@ import { ipcMain } from 'electron'
 import os from 'node:os'
 import { deleteSkill, ensureSharedDir, importSkill, listSkills, readSkill, saveSkill } from '../skills'
 import { installSkill, resolveSkillTargets, skillSyncState, uninstallSkill } from '../skill-targets'
-import { parseContent, parseId } from '../ipc-validation'
+import { assertKeys, optionalRawString, parseContent, parseId, record } from '../ipc-validation'
 import type { IpcContext } from './context'
-
-function record(value: unknown, label: string): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} 必须是对象`)
-  return value as Record<string, unknown>
-}
-
-function assertKeys(input: Record<string, unknown>, allowed: readonly string[], label: string) {
-  const keys = new Set(allowed)
-  for (const key of Object.keys(input)) if (!keys.has(key)) throw new Error(`${label}包含未知字段: ${key}`)
-}
-
-function optionalString(value: unknown, label: string): string | undefined {
-  if (value === undefined) return undefined
-  if (typeof value !== 'string') throw new Error(`${label} 必须是字符串`)
-  return value
-}
 
 export function registerSkillsIpc(ctx: IpcContext) {
   ipcMain.handle('skills:list', () => {
@@ -34,13 +18,13 @@ export function registerSkillsIpc(ctx: IpcContext) {
   ipcMain.handle('skills:save', (_e, name: unknown, input: unknown) => {
     const body = record(input, '技能参数')
     assertKeys(body, ['description', 'body', 'originName'], '技能参数')
-    const description = optionalString(body.description, 'description')
-    const content = optionalString(body.body, 'body')
+    const description = optionalRawString(body.description, 'description')
+    const content = optionalRawString(body.body, 'body')
     if (description === undefined || content === undefined) throw new Error('description/body 不能缺省')
     return saveSkill(ctx.sharedDir, parseId(name, 'name'), {
       description,
       body: content,
-      ...(body.originName !== undefined ? { originName: optionalString(body.originName, 'originName') } : {})
+      ...(body.originName !== undefined ? { originName: optionalRawString(body.originName, 'originName') } : {})
     })
   })
   ipcMain.handle('skills:delete', (_e, name: unknown) => {

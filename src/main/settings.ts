@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { app } from 'electron'
 import { DEFAULT_SETTINGS, type AppSettings } from '../shared/types'
+import { atomicWriteJson } from './persistence'
 
 const file = () => path.join(app.getPath('userData'), 'settings.json')
 
@@ -25,7 +26,7 @@ export function loadSettings(): AppSettings {
 }
 
 export function saveSettings(s: AppSettings): AppSettings {
-  fs.mkdirSync(path.dirname(file()), { recursive: true })
-  fs.writeFileSync(file(), JSON.stringify(s, null, 2))
+  // 原子写（唯一 tmp + fsync + rename）：写失败不再留下被截断的 settings.json
+  atomicWriteJson(file(), s)
   return s
 }

@@ -6,7 +6,7 @@ import { isTaskEventDurable, isTaskStatus, type Task, type TaskEvent, type Integ
 import { executionRecordFromTask } from '../shared/taskflow'
 import { worktreePathKey } from './git'
 import { EventLog } from './event-log'
-import { atomicWriteJson, readJsonFile, withStorageTransaction, assertSynchronousAction, assertTransactionToken, processOwnerState, createExecutionOwner, type SynchronousAction, type TransactionToken } from './persistence'
+import { atomicWriteJson, readJsonFile, withStorageTransaction, assertSynchronousAction, assertTransactionToken, processOwnerState, createExecutionOwner, isJsonObject, type SynchronousAction, type TransactionToken } from './persistence'
 
 /** Version of the task index envelope, independent from per-task snapshots. */
 export const TASK_INDEX_SCHEMA_VERSION = 1 as const
@@ -36,10 +36,6 @@ const TASK_INDEX_FIELDS = [
   'delegateSourceRunId', 'delegateDeliveredAt', 'delegateRejections', 'officeAgentId', 'meetingId', 'meetingTaskRole', 'terminatedRunId'
 ] as const
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value)
-}
-
 /**
  * 就地最小读取 userDataDir/agents.json，得到「注册名册里登记过哪些 agent id」。
  * 不能 import ./agents（它直接 import electron），这里只按形状宽容解析（数组元素为
@@ -52,7 +48,7 @@ function readTrustedOfficeAgentIds(userDataDir: string): ReadonlySet<string> {
     const ids = new Set<string>()
     if (Array.isArray(raw)) {
       for (const entry of raw) {
-        if (isRecord(entry) && typeof entry.id === 'string' && entry.id.trim()) ids.add(entry.id.trim())
+        if (isJsonObject(entry) && typeof entry.id === 'string' && entry.id.trim()) ids.add(entry.id.trim())
       }
     }
     return ids
@@ -67,7 +63,7 @@ function readTrustedOfficeAgentIds(userDataDir: string): ReadonlySet<string> {
  * implicit compatibility branch.
  */
 export function migrateTaskRecord(raw: unknown, sourceVersion = 0, now = Date.now(), options: { recoverRunning?: boolean; trustedOfficeAgentIds?: ReadonlySet<string> } = {}): Task | null {
-  if (!isRecord(raw)) return null
+  if (!isJsonObject(raw)) return null
   const old = raw as LegacyTask
   const out: Record<string, unknown> = {}
   for (const field of TASK_INDEX_FIELDS) {
@@ -78,7 +74,7 @@ export function migrateTaskRecord(raw: unknown, sourceVersion = 0, now = Date.no
   // Fields introduced before the first explicit schema version.
   if (sourceVersion < TASK_INDEX_SCHEMA_VERSION) {
     delete out.mode
-    const squad = isRecord(old.squad) ? old.squad : undefined
+    const squad = isJsonObject(old.squad) ? old.squad : undefined
     if (squad) {
       const integration: IntegrationInfo = {}
       if (typeof squad.integrationBranch === 'string' && squad.integrationBranch) integration.branch = squad.integrationBranch
@@ -106,7 +102,7 @@ export function migrateTaskRecord(raw: unknown, sourceVersion = 0, now = Date.no
   if (typeof out.delegateDeliveredAt !== 'number' || !Number.isFinite(out.delegateDeliveredAt) || out.delegateDeliveredAt <= 0) delete out.delegateDeliveredAt
   if (Array.isArray(out.delegateRejections)) {
     out.delegateRejections = out.delegateRejections.filter((entry): entry is { runId: string; reason: string; key?: string; deliveredAt?: number } =>
-      isRecord(entry) && typeof entry.runId === 'string' && !!entry.runId && typeof entry.reason === 'string' && !!entry.reason)
+      isJsonObject(entry) && typeof entry.runId === 'string' && !!entry.runId && typeof entry.reason === 'string' && !!entry.reason)
       .map((entry) => ({ runId: entry.runId, reason: entry.reason,
         ...(typeof entry.key === 'string' && entry.key ? { key: entry.key } : {}),
         ...(typeof entry.deliveredAt === 'number' && Number.isFinite(entry.deliveredAt) && entry.deliveredAt > 0 ? { deliveredAt: entry.deliveredAt } : {}) }))
@@ -143,7 +139,7 @@ export function migrateTaskRecord(raw: unknown, sourceVersion = 0, now = Date.no
   // A running task cannot survive an application restart. This recovery is
   // deliberately idempotent: the persisted result is terminal on next load.
   if (out.status === 'running' && options.recoverRunning !== false) {
-    const hadLegacySquad = sourceVersion < TASK_INDEX_SCHEMA_VERSION && isRecord(old.squad)
+    const hadLegacySquad = sourceVersion < TASK_INDEX_SCHEMA_VERSION && isJsonObject(old.squad)
     out.status = 'failed'
     if (typeof out.error !== 'string' || !out.error) {
       out.error = hadLegacySquad ? '旧版协同任务在升级后中断，请重新运行' : '应用重启导致任务中断，请重新运行'
@@ -170,7 +166,7 @@ export function migrateTaskIndex(raw: unknown, now = Date.now(), options: { reco
   let entries: unknown[] = []
   if (Array.isArray(raw)) {
     entries = raw
-  } else if (isRecord(raw)) {
+  } else if (isJsonObject(raw)) {
     if (!Array.isArray(raw.tasks)) throw new Error('Invalid task index: expected tasks array')
     if (!Object.prototype.hasOwnProperty.call(raw, 'schemaVersion')) {
       throw new Error('Invalid task index: missing schema version')
@@ -189,10 +185,10 @@ export function migrateTaskIndex(raw: unknown, now = Date.now(), options: { reco
   }
   return {
     schemaVersion: TASK_INDEX_SCHEMA_VERSION,
-    ...(isRecord(raw) && Array.isArray(raw.deletedDedupeKeys) ? { deletedDedupeKeys: raw.deletedDedupeKeys.filter((key): key is string => typeof key === 'string') } : {}),
-    ...(isRecord(raw) && Array.isArray(raw.pendingIssueProjections) ? { pendingIssueProjections: raw.pendingIssueProjections.map((entry) => migrateTaskRecord(entry, sourceVersion, now, { recoverRunning: false, trustedOfficeAgentIds: options.trustedOfficeAgentIds })).filter((task): task is Task => task !== null) } : {}),
-    ...(isRecord(raw) && Array.isArray(raw.pendingTaskSnapshots) ? { pendingTaskSnapshots: raw.pendingTaskSnapshots.filter((id): id is string => typeof id === 'string' && /^[A-Za-z0-9_-]{1,160}$/.test(id)) } : {}),
-    ...(isRecord(raw) && Array.isArray(raw.pendingTaskDeletes) ? { pendingTaskDeletes: raw.pendingTaskDeletes.filter((id): id is string => typeof id === 'string' && /^[A-Za-z0-9_-]{1,160}$/.test(id)) } : {}),
+    ...(isJsonObject(raw) && Array.isArray(raw.deletedDedupeKeys) ? { deletedDedupeKeys: raw.deletedDedupeKeys.filter((key): key is string => typeof key === 'string') } : {}),
+    ...(isJsonObject(raw) && Array.isArray(raw.pendingIssueProjections) ? { pendingIssueProjections: raw.pendingIssueProjections.map((entry) => migrateTaskRecord(entry, sourceVersion, now, { recoverRunning: false, trustedOfficeAgentIds: options.trustedOfficeAgentIds })).filter((task): task is Task => task !== null) } : {}),
+    ...(isJsonObject(raw) && Array.isArray(raw.pendingTaskSnapshots) ? { pendingTaskSnapshots: raw.pendingTaskSnapshots.filter((id): id is string => typeof id === 'string' && /^[A-Za-z0-9_-]{1,160}$/.test(id)) } : {}),
+    ...(isJsonObject(raw) && Array.isArray(raw.pendingTaskDeletes) ? { pendingTaskDeletes: raw.pendingTaskDeletes.filter((id): id is string => typeof id === 'string' && /^[A-Za-z0-9_-]{1,160}$/.test(id)) } : {}),
     tasks: entries
       .map((entry) => migrateTaskRecord(entry, sourceVersion, now, options))
       .filter((task): task is Task => task !== null)
@@ -223,7 +219,7 @@ export interface GitOperationClaim extends TaskGitOperation { taskIds: string[] 
 
 export function sameExecutionOwner(a: ExecutionOwner | undefined, b: ExecutionOwner | undefined): boolean {
   if (a === undefined || b === undefined) return a === b
-  if (!isRecord(a) || !isRecord(b) || typeof a.pid !== 'number' || a.pid <= 0 || typeof a.instance !== 'string' || !a.instance || typeof a.token !== 'string' || !a.token) return false
+  if (!isJsonObject(a) || !isJsonObject(b) || typeof a.pid !== 'number' || a.pid <= 0 || typeof a.instance !== 'string' || !a.instance || typeof a.token !== 'string' || !a.token) return false
   return a.pid === b.pid && a.instance === b.instance && a.token === b.token
 }
 
@@ -332,11 +328,11 @@ export class TaskStore {
       for (const file of files) {
         try {
           const pending: unknown = readJsonFile(path.join(directory, file), undefined)
-          if (!isRecord(pending) || pending.version !== 1 || pending.taskId !== task.id || typeof pending.runId !== 'string'
+          if (!isJsonObject(pending) || pending.version !== 1 || pending.taskId !== task.id || typeof pending.runId !== 'string'
             || !pending.runId || typeof pending.turnId !== 'string' || !pending.turnId
             || createHash('sha256').update(pending.turnId).digest('hex') + '.json' !== file
             || (pending.openedAt !== undefined && (!Number.isFinite(pending.openedAt) || Number(pending.openedAt) < 0))
-            || !Array.isArray(pending.events) || !pending.events.length || !pending.events.every((event) => isRecord(event)
+            || !Array.isArray(pending.events) || !pending.events.length || !pending.events.every((event) => isJsonObject(event)
               && !('seq' in event) && ((typeof event.id === 'string' && !!event.id) || (typeof event.eventId === 'string' && !!event.eventId))
               && Number.isFinite(event.ts) && typeof event.kind === 'string' && !!event.kind
               && isTaskEventDurable(event as Omit<TaskEvent, 'seq'>))) throw new Error('Invalid pending event batch')

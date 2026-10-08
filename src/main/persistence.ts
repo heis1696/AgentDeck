@@ -42,7 +42,8 @@ const context = globals[contextKey] ??= { stack: [] }
 const pause = new Int32Array(new SharedArrayBuffer(4))
 
 function errorCode(error: unknown): string | undefined { return (error as NodeJS.ErrnoException)?.code }
-function record(value: unknown): value is Record<string, unknown> { return !!value && typeof value === 'object' && !Array.isArray(value) }
+/** 存储族共享的对象谓词（不含数组）。注意与 backends/cli-common 的 isJsonObject（JsonObject 窄化）同名不同型：此处按 Record 窄化，宽容度更高。 */
+export function isJsonObject(value: unknown): value is Record<string, unknown> { return !!value && typeof value === 'object' && !Array.isArray(value) }
 
 export function probeProcess(pid: number): ProcessObservation {
   if (!Number.isSafeInteger(pid) || pid <= 0) return { state: 'unknown' }
@@ -86,7 +87,7 @@ export function createExecutionOwner(): ExecutionOwner {
 }
 
 export function processOwnerState(owner: unknown, probe: ProcessProbe = probeProcess): OwnerState {
-  if (!record(owner) || !Number.isSafeInteger(owner.pid) || Number(owner.pid) <= 0 || typeof owner.instance !== 'string' || !owner.instance) return 'unknown'
+  if (!isJsonObject(owner) || !Number.isSafeInteger(owner.pid) || Number(owner.pid) <= 0 || typeof owner.instance !== 'string' || !owner.instance) return 'unknown'
   const validIdentity = (instance: string) => process.platform === 'win32'
     ? /^[1-9]\d{16,18}$/.test(instance)
     : process.platform === 'linux' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:\d+$/i.test(instance)
@@ -182,7 +183,7 @@ export function withFileLock<T>(lockPath: string, action: SynchronousAction<T>, 
             const ownerPath = path.join(absolute, names[0])
             let owner: unknown
             try { owner = JSON.parse(fs.readFileSync(ownerPath, 'utf8')) } catch {}
-            if (record(owner) && owner.nonce === names[0].slice(6, -5)) {
+            if (isJsonObject(owner) && owner.nonce === names[0].slice(6, -5)) {
               // Avoid an OS subprocess during ordinary short fsync contention.
               if (owner.pid === process.pid || performance.now() - started >= 50 || options.probe) {
                 lastOwnerState = processOwnerState(owner, options.probe)
@@ -225,15 +226,22 @@ export function readJsonFile<T>(file: string, fallback: T): T {
   return JSON.parse(text) as T
 }
 
-/** The destination remains valid when write, fsync or rename fails. */
-export function atomicWriteJson(file: string, value: unknown): void {
+/** The destination remains valid when write, fsync or rename fails.
+ *  - `mode`：tmp 写入与改盘后的权限位；给了就 rename 后再 chmod 兜底（对抗 umask 抠位），不给则保持既有的 0600 默认、不做 chmod。
+ *  - `backup`：rename 前把现存旧文件复制一份（true = `<file>.bak`，字符串 = 自定路径）；源不存在（首次写）则跳过，其余复制失败照抛——备份不净写不落。 */
+export function atomicWriteJson(file: string, value: unknown, options: { backup?: boolean | string; mode?: number } = {}): void {
   fs.mkdirSync(path.dirname(file), { recursive: true })
+  if (options.backup) {
+    const backupFile = typeof options.backup === 'string' ? options.backup : `${file}.bak`
+    try { fs.copyFileSync(file, backupFile) } catch (error) { if (errorCode(error) !== 'ENOENT') throw error }
+  }
   const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`
   try {
-    fs.writeFileSync(temporary, JSON.stringify(value, null, 2), { encoding: 'utf8', flag: 'wx', mode: 0o600 })
+    fs.writeFileSync(temporary, JSON.stringify(value, null, 2), { encoding: 'utf8', flag: 'wx', mode: options.mode ?? 0o600 })
     const fd = fs.openSync(temporary, 'r+')
     try { fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
     fs.renameSync(temporary, file)
+    if (options.mode !== undefined) fs.chmodSync(file, options.mode)
   } finally {
     try { fs.unlinkSync(temporary) } catch (error) { if (errorCode(error) !== 'ENOENT') throw error }
   }
