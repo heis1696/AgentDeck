@@ -188,6 +188,47 @@ try {
   assert.equal(await activeRunner.releaseWorktreeSessions(failureDirectory), true)
   console.log('PASS running task sessions cannot be released by cleanup')
 
+  // F1 回归（docs/plan/runner-decomposition.md §8）：releaseWorktreeSessions 摘 runner
+  // 侧登记时必须对 TurnLifecycle 对称 detachSession（对齐 closeSession 既有语义）。
+  // 缺口后果：已 detach 保留的 provider 会话仍挂在 lifecycle.sessionValue 上，替换 Run
+  // 的 followUp 走 resume 重建、attachSession 时会把旧会话当 previous 清扫（stop+close），
+  // detach 保留语义被抵消——本轮断言：旧会话零 stop、零 close。
+  const f1Directory = repository('f1-replace')
+  const f1Store = new TaskStore(path.join(temporary, 'f1-store'))
+  const f1Touched = { first: { stop: 0, close: 0 }, second: { stop: 0, close: 0 } }
+  const f1Backend = {
+    id: 'f1', label: 'fixture', supportsResume: true,
+    async probe() { return { ok: true, detail: 'fixture' } },
+    async start({ resumeSessionId, events, turn }) {
+      const fresh = !resumeSessionId
+      setTimeout(() => events.onTurnEnd({ ok: true, response: fresh ? 'done' : 'replacement complete' }, turn), 10)
+      const which = fresh ? 'first' : 'second'
+      return {
+        sessionId: fresh ? 'f1-one' : 'f1-two',
+        turnScoped: true,
+        async send() {},
+        async stop() { f1Touched[which].stop++ },
+        async close() { f1Touched[which].close++ },
+        async detach() {}
+      }
+    }
+  }
+  const f1Runner = runnerFor(f1Store, [f1Backend])
+  const f1 = await isolatedTask(f1Store, f1Directory, f1Backend.id)
+  f1Runner.enqueue(f1.task)
+  await until(() => f1Store.get(f1.task.id)?.status === 'done')
+  assert.equal(f1Store.get(f1.task.id).sessionId, 'f1-one')
+  assert.equal(await f1Runner.releaseWorktreeSessions(f1.worktree.path), true)
+  assert.equal(f1Runner.sessionCount(), 0, 'release removes the runner-side registration')
+  assert.equal((await f1Runner.followUp(f1.task.id, 'replacement')).ok, true)
+  await until(() => f1Store.get(f1.task.id)?.status === 'done')
+  // attachSession 的 previous 清扫是 void 异步：给「误扫」留出确定性发生的时间窗
+  await wait(150)
+  assert.equal(f1Touched.first.stop, 0, 'detached-preserved session must not be stopped by the replacement attach')
+  assert.equal(f1Touched.first.close, 0, 'detached-preserved session must not be closed by the replacement attach')
+  assert.equal(f1Store.get(f1.task.id).sessionId, 'f1-two')
+  console.log('PASS replacement run session survives the previous release (F1 symmetric detach)')
+
   clearWorktreePool()
   const delegateDirectory = repository('delegation')
   const delegateStore = new TaskStore(path.join(temporary, 'delegate-store'))
