@@ -12,6 +12,10 @@
 //   - session/send {sessionId, content} 派发提示词
 //   - 事件流：session/event（含 model.streaming 文本增量、回合终态）、
 //             state.updated（会话状态机）、v4/telemetry/event（turn.terminal 等）
+//   - 内置 provider 目录（3.19.1 复核，2026-11）：裸启动的 CLI 自行推导目录路径会卡在旧版本
+//     （新模型不存在，setModel 报 "Provider Registry 中不存在 Model"），必须像桌面端一样经
+//     环境变量显式传入（zcodeProviderRuntimeEnv）；模型档位词表无法查询，setModel 被注册表以
+//     档位理由拒绝时按回退序列重试（setModelWithLevelFallback）
 import fs from 'node:fs'
 import os from 'node:os'
 import type { TaskEvent, ThinkingLevel } from '../../shared/types'
@@ -26,10 +30,18 @@ import {
   ensureZcodeCliConfig as ensureCliConfig,
   ensureZcodeCliProviderConfig as ensureProviderConfig,
   findZcodeBundle as findBundle,
+  isReasoningLevelRejection,
   listZcodeModels as listModels,
+  modelLevelAdjustment,
+  modelLevelFallbacks,
   resolveNodeRuntime as resolveNode,
-  zcodeDefaultPaths as defaultPaths
+  zcodeDefaultPaths as defaultPaths,
+  zcodeProviderRuntimeEnv,
+  type ZcodeModelSelection
 } from './zcode-config'
+
+/** 模型档位回退与 provider 运行时 env 的纯函数面（smoke 直连固化）：尝试序列 / 拒绝识别 / 生效档位说明 / env */
+export { isReasoningLevelRejection, modelLevelAdjustment, modelLevelFallbacks, zcodeProviderRuntimeEnv }
 
 
 const asString = zcodeString
@@ -77,13 +89,37 @@ function compactArgs(args?: string): string {
  * 归一大小写；reasoning 模型自动带 reasoningLevel（defaultVariant 或 thinking 就近档）。
  * 连接（API 预设）替代旧 runtimeModel 内联凭据：upsert 成 v2 注册表的个人
  * provider 规则后按派生 id 引用（写入发生在 app-server 拉起前，回合内即生效）。
+ * bundle 提供时模型目录并入最新内置目录的模型（新上模型否则不在目录里）。
  */
 export function buildModelSelectionFromCliConfig(
   modelRef?: string,
   connection?: { name: string; baseURL: string; apiKey: string },
-  thinking?: ThinkingLevel
-): { providerId: string; modelId: string; options?: { reasoningLevel: string } } | null {
-  return buildModelSelection(modelRef, connection, thinking)
+  thinking?: ThinkingLevel,
+  bundle?: string | null
+): ZcodeModelSelection | null {
+  return buildModelSelection(modelRef, connection, thinking, bundle)
+}
+
+/**
+ * 注册表是档位权威：本地目录给的首选被拒（缺档位 / 档位不支持）时按回退序列就近重试；
+ * 全部被拒抛首个错误，非档位错误（ModelNotFound 等）原样上抛——那是真实的模型/配置问题。
+ * 返回实际生效的 reasoningLevel（不带档位为 undefined）。
+ */
+async function setModelWithLevelFallback(conn: ZcodeConnection, sessionId: string, selection: ZcodeModelSelection, thinking?: ThinkingLevel): Promise<string | undefined> {
+  let firstRejection: unknown
+  for (const level of modelLevelFallbacks(selection, thinking)) {
+    const model: ZcodeModelSelection = level === undefined
+      ? { providerId: selection.providerId, modelId: selection.modelId }
+      : { providerId: selection.providerId, modelId: selection.modelId, options: { reasoningLevel: level } }
+    try {
+      await conn.request('session/setModel', { sessionId, model })
+      return level
+    } catch (error) {
+      if (!(error instanceof Error) || !isReasoningLevelRejection(error.message)) throw error
+      firstRejection ??= error
+    }
+  }
+  throw firstRejection
 }
 
 /**
@@ -137,8 +173,9 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
       const node = resolveNode(nodePath || undefined)
       // 模型解析（预设连接此时 upsert 进 v2 注册表）必须先于 spawn：app-server 启动时
       // 加载注册表快照，拉起后再写文件它看不到（setModel 报 provider-not-found）
-      const modelSelection = model?.trim() ? buildModelSelection(model, connection, thinking) : null
-      const conn = new ZcodeConnection(node.path, bundle, cwd)
+      const modelSelection = model?.trim() ? buildModelSelection(model, connection, thinking, bundle) : null
+      // 内置 provider 目录显式指向本地最新一份：裸启动的 CLI 自行推导会卡在旧版本，新模型在注册表里不存在
+      const conn = new ZcodeConnection(node.path, bundle, cwd, zcodeProviderRuntimeEnv(bundle))
       // 启动即注册硬停句柄：session/create 等握手请求挂死时（进程半死/连接无响应），
       // 调用方在 start 返回前也有手段杀掉进程，不会永久占住任务与并发槽
       rawEvents.onLaunch?.({ stop: () => conn.kill() })
@@ -453,10 +490,12 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
       // 后会话无可用模型，回合在 model_creation 阶段报 CONFIGURATION_ERROR
       // "Select a model before continuing"——等价于旧 runtimeModel 每次 resume 重传。
       // create 不带模型时服务端自选默认（实测可用），仅钉选时设置
-      const selection = resumeSessionId ? (modelSelection ?? buildModelSelection()) : modelSelection
+      const selection = resumeSessionId ? (modelSelection ?? buildModelSelection(undefined, undefined, undefined, bundle)) : modelSelection
       if (selection) {
-        await conn.request('session/setModel', { sessionId, model: selection })
+        const level = await setModelWithLevelFallback(conn, sessionId, selection, thinking)
         emit({ kind: 'status', text: `模型已设置: ${selection.providerId}/${selection.modelId}` })
+        const adjustment = modelLevelAdjustment(selection, thinking, level)
+        if (adjustment) emit({ kind: 'status', text: adjustment })
       }
       if (!sessionId) throw new Error('会话创建/resume 未返回 sessionId')
       sessionIdHolder.value = sessionId

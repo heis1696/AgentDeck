@@ -28,7 +28,7 @@ export function registerCatalogIpc(ctx: IpcContext) {
   ipcMain.handle('agents:models', (_e, backendId: unknown) => {
     const id = parseBackendId(backendId)
     if (id === 'zcode') {
-      const catalog = listZcodeModels()
+      const catalog = listZcodeModels(ctx.settings.zcodePath || undefined)
       if (catalog.models.length) return { backend: id, source: 'catalog', default: catalog.defaultModel, models: catalog.models }
     }
     const common: Record<string, string[]> = { claude: ['sonnet', 'opus', 'haiku'], codex: ['gpt-5.5', 'gpt-5.2-codex'], opencode: [], dsh: [] }

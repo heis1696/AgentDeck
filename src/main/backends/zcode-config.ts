@@ -65,26 +65,32 @@ export function ensureZcodeCliConfig(): { ok: boolean; detail: string } {
   }
 }
 
+/** 协议 model 字段：注册表引用（providerId/modelId 大小写敏感；reasoning 模型必须带 level） */
+export type ZcodeModelSelection = { providerId: string; modelId: string; options?: { reasoningLevel: string } }
+
 /**
  * 解析模型引用为协议 model 字段（{providerId, modelId, options?} 引用）。
  * 新协议（CLI 3.12.3+）只收注册表引用：providerId 必须是 ~/.zcode/v2/provider_config.json
  * providerRules 里的 id（如 bigmodel-api），模型 id 大小写敏感（目录里是 GLM-5.3），
  * reasoning 模型必须带 options.reasoningLevel（取桌面端目录里的 defaultVariant；
  * thinking 档位提供时按目录 variants 就近选档，非 reasoning 模型忽略）。
+ * 桌面端目录里没有的新模型不带 options——档位交由 setModel 按注册表校验回退（modelLevelFallbacks）。
  * 连接（API 预设）替代旧 runtimeModel 内联凭据：作为个人 provider 规则 upsert 进
  * v2 provider_config.json（id 由 baseURL 派生，不同预设互不冲突），app-server 由
  * agentdeck 每回合重新拉起、启动前写入即生效。
+ * bundle（zcode.cjs 路径）提供时模型目录并入最新内置目录的模型；不提供只读 ~/.zcode 下的运行时槽位。
  */
 export function buildModelSelectionFromCliConfig(
   modelRef?: string,
   connection?: { name: string; baseURL: string; apiKey: string; protocol?: 'anthropic' | 'openai' },
-  thinking?: ThinkingLevel
-): { providerId: string; modelId: string; options?: { reasoningLevel: string } } | null {
+  thinking?: ThinkingLevel,
+  bundle?: string | null
+): ZcodeModelSelection | null {
   const ref = modelRef?.trim()
   if (connection && ref) {
     const slash = ref.indexOf('/')
     const requested = slash > 0 && slash < ref.length - 1 ? ref.slice(slash + 1) : ref
-    const catalog = readV2ModelCatalog()
+    const catalog = readV2ModelCatalog(bundle)
     const entry = catalog?.models.find((m) => m.modelId === requested) ?? catalog?.models.find((m) => m.modelId.toLowerCase() === requested.toLowerCase())
     // 注册与引用必须同 id：优先目录归一后的，目录外按原引用
     const modelId = entry?.modelId ?? requested
@@ -96,7 +102,7 @@ export function buildModelSelectionFromCliConfig(
     }
     return { providerId: presetProviderId(connection), modelId, options: { reasoningLevel: reasoning.level } }
   }
-  const catalog = readV2ModelCatalog()
+  const catalog = readV2ModelCatalog(bundle)
   if (!catalog) return null
   const slash = ref ? ref.indexOf('/') : -1
   if (slash > 0 && ref) {
@@ -130,6 +136,33 @@ function pickThinkingVariant(thinking: ThinkingLevel, reasoning: { defaultVarian
   const chain = THINKING_VARIANT_CHAINS[thinking]
   const hit = chain.find((variant) => reasoning.variants?.includes(variant))
   return hit ?? reasoning.defaultVariant ?? reasoning.variants?.[0] ?? 'high'
+}
+
+/** 档位强度降序。注册表的默认档是词表末位即最强档（zcode listRegistryBackedModels 同口径），未设 thinking 时按此序取注册表接受的第一个 */
+const LEVELS_BY_STRENGTH_DESC = ['max', 'high', 'medium', 'enabled', 'low', 'disabled']
+
+/**
+ * setModel 的档位尝试序列（undefined = 不带档位）：本地目录给的首选 → thinking 就近档 → 强度降序 → 不带档位。
+ * 本地目录（桌面端 v2/config.json）不是权威——桌面端停更后新模型没有条目、档位词表也可能变——
+ * 注册表才是；协议没有列模型的 RPC，只能首选被注册表以档位理由拒绝时按序降级重试。
+ */
+export function modelLevelFallbacks(selection: ZcodeModelSelection, thinking?: ThinkingLevel): (string | undefined)[] {
+  const candidates: (string | undefined)[] = [selection.options?.reasoningLevel, ...(thinking ? THINKING_VARIANT_CHAINS[thinking] : []), ...LEVELS_BY_STRENGTH_DESC, undefined]
+  return candidates.filter((level, index) => candidates.indexOf(level) === index)
+}
+
+/** setModel 被注册表以档位理由拒绝（缺档位 / 档位不支持）；ModelNotFound 等其余错误不在其列 */
+export function isReasoningLevelRejection(message: string): boolean {
+  return /^Reasoning level is required for /.test(message) || /^Reasoning effort ".*" is not supported by /.test(message)
+}
+
+/** 实际生效档位与请求不一致时的状态说明；与请求一致（首选被接受，或命中 thinking 就近档）返回 null */
+export function modelLevelAdjustment(selection: ZcodeModelSelection, thinking: ThinkingLevel | undefined, accepted: string | undefined): string | null {
+  const primary = selection.options?.reasoningLevel
+  if (accepted === primary) return null
+  if (accepted === undefined) return primary ? `思考档位已忽略: ${primary}（注册表不支持任何档位）` : null
+  if (thinking && THINKING_VARIANT_CHAINS[thinking].includes(accepted)) return null
+  return `思考档位就近调整: ${primary ?? thinking ?? '默认'} → ${accepted}`
 }
 
 /**
@@ -242,20 +275,31 @@ function withReasoning(providerId: string, entry: { modelId: string; reasoning?:
   return { providerId, modelId: entry.modelId, ...(options ? { options } : {}) }
 }
 
-/** 桌面端 v2 目录：provider id 来自 provider_config.json 的 providerRules，模型表来自 v2/config.json 各 provider 的 models */
-function readV2ModelCatalog(): { providerIds: string[]; models: { modelId: string; reasoning?: { enabled?: boolean; defaultVariant?: string; variants?: string[] } }[] } | null {
+/** 模型目录条目：reasoning 元数据只有桌面端 v2/config.json 的条目才有，内置目录补进来的新模型没有 */
+type CatalogModel = { modelId: string; reasoning?: { enabled?: boolean; defaultVariant?: string; variants?: string[] } }
+
+/**
+ * 桌面端 v2 目录：provider id 来自 provider_config.json 的 providerRules，模型表来自 v2/config.json 各 provider 的 models，
+ * 并入最新内置目录里个人 provider 所引用模板的模型。bundle（zcode.cjs 路径）提供时内置目录一并看 bundle 侧的新旧两处布局。
+ */
+function readV2ModelCatalog(bundle?: string | null): { providerIds: string[]; models: CatalogModel[] } | null {
   const v2Dir = path.join(os.homedir(), '.zcode', 'v2')
   try {
     const providerIds: string[] = []
+    /** 个人 provider 引用的内置模板：模板的 builtinModelIds 即注册表真实可用的模型 */
+    const templateIds = new Set<string>()
     try {
       const rules = JSON.parse(fs.readFileSync(path.join(v2Dir, 'provider_config.json'), 'utf8')) as unknown
       if (isJsonObject(rules) && isJsonObject(rules.config) && isJsonObject(rules.config.providerConfigRules) && Array.isArray(rules.config.providerConfigRules.providerRules)) {
         for (const rule of rules.config.providerConfigRules.providerRules) {
-          if (isJsonObject(rule) && typeof rule.providerId === 'string') providerIds.push(rule.providerId)
+          if (isJsonObject(rule) && typeof rule.providerId === 'string') {
+            providerIds.push(rule.providerId)
+            if (typeof rule.templateId === 'string') templateIds.add(rule.templateId)
+          }
         }
       }
     } catch {}
-    const models: { modelId: string; reasoning?: { enabled?: boolean; defaultVariant?: string; variants?: string[] } }[] = []
+    const models: CatalogModel[] = []
     const seen = new Set<string>()
     const v2Config = JSON.parse(fs.readFileSync(path.join(v2Dir, 'config.json'), 'utf8')) as unknown
     if (isJsonObject(v2Config) && isJsonObject(v2Config.provider)) {
@@ -272,21 +316,21 @@ function readV2ModelCatalog(): { providerIds: string[]; models: { modelId: strin
         }
       }
     }
+    // 桌面端 v2/config.json 停更后新上的模型（如 GLM-5.4）只在最新内置目录的模板里：补在既有条目之后
+    // （默认模型仍取目录首项，行为不变），不带 reasoning 元数据——档位交由 setModel 按注册表校验回退
+    for (const modelId of builtinTemplateModelIds([...templateIds], bundle)) {
+      if (!models.some((m) => m.modelId.toLowerCase() === modelId.toLowerCase())) models.push({ modelId })
+    }
     if (!providerIds.length && !models.length) return null
     return { providerIds, models }
   } catch { return null }
 }
 
-export function listZcodeModels(): { models: string[]; defaultModel?: string } {
-  // 优先桌面端 v2 目录（注册表真实可用的模型 id，大小写如 GLM-5.3）；
+export function listZcodeModels(bundle?: string | null): { models: string[]; defaultModel?: string } {
+  // 优先桌面端 v2 目录（注册表真实可用的模型 id，大小写如 GLM-5.3）+ 最新内置目录补进的新模型；
   // 读不到时退回旧 cli config（历史行为）
-  try {
-    const v2Config = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.zcode', 'v2', 'config.json'), 'utf8')) as unknown
-    if (isJsonObject(v2Config) && isJsonObject(v2Config.provider)) {
-      const models = [...new Set(Object.values(v2Config.provider).flatMap((provider) => isJsonObject(provider) && isJsonObject(provider.models) ? Object.keys(provider.models) : []))]
-      if (models.length) return { models }
-    }
-  } catch {}
+  const catalog = readV2ModelCatalog(bundle)
+  if (catalog?.models.length) return { models: [...new Set(catalog.models.map((m) => m.modelId))] }
   try {
     const root = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.zcode', 'cli', 'config.json'), 'utf8')) as unknown
     if (!isJsonObject(root)) return { models: [] }
@@ -304,6 +348,8 @@ export function listZcodeModels(): { models: string[]; defaultModel?: string } {
  * （resources/glm/ 里的旧位置随更新被清掉），导致 app-server 拉起即退出
  * （code 1，"无法定位 CLI ZCode Built-in Provider Config"）。
  * 启动前检测：两处都不在时，从桌面端新版布局或 v2 运行时缓存复制补齐。
+ * 只保证 CLI 找得到文件——旧位置那份的内容会随桌面端更新停更，目录新鲜度由
+ * zcodeProviderRuntimeEnv 显式传路径解决（不覆盖任何文件）。
  */
 export function ensureZcodeCliProviderConfig(bundle: string): { ok: boolean; detail: string } {
   const bundleDir = path.dirname(path.resolve(bundle))
@@ -340,4 +386,77 @@ function runtimeProviderConfigSources(): string[] {
     }
     return found.sort((a, b) => b.mtime - a.mtime).map((entry) => entry.file)
   } catch { return [] }
+}
+
+/** 内置目录的 revision（越高越新）；读不到或解析失败返回 null */
+function builtinRevision(file: string): number | null {
+  try {
+    const root = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown
+    return isJsonObject(root) && typeof root.revision === 'number' && Number.isFinite(root.revision) ? root.revision : null
+  } catch { return null }
+}
+
+/**
+ * 本地最新的内置 provider 目录（provider 模板 + 模型规则，桌面端从 CDN 按版本下载维护）：
+ * 桌面端各版本的运行时槽位、新版布局 resources/config/provider/、CLI 自带旧位置 <bundle>/provider/，
+ * 按 revision 取最大（zcode selectReleaseCandidate 同口径：高者胜），同 revision 取 mtime 新的。
+ * bundleDir 为 null 时只看 ~/.zcode 下的运行时槽位。
+ */
+function newestBuiltinProviderConfig(bundleDir: string | null): { file: string; revision: number } | null {
+  const bundled = bundleDir ? [path.join(bundleDir, 'provider', 'zcode-builtin.json'), path.join(bundleDir, '..', 'config', 'provider', 'zcode-builtin.json')] : []
+  let newest: { file: string; revision: number; mtime: number } | null = null
+  for (const file of [...bundled, ...runtimeProviderConfigSources()]) {
+    const revision = builtinRevision(file)
+    if (revision === null) continue
+    let mtime = 0
+    try { mtime = fs.statSync(file).mtimeMs } catch {}
+    if (!newest || revision > newest.revision || (revision === newest.revision && mtime > newest.mtime)) newest = { file, revision, mtime }
+  }
+  return newest ? { file: newest.file, revision: newest.revision } : null
+}
+
+/** 最新内置目录里这些模板的模型 id（模板 builtinModelIds 顺序，剔除模板模型规则显式停用的） */
+function builtinTemplateModelIds(templateIds: string[], bundle?: string | null): string[] {
+  const newest = templateIds.length ? newestBuiltinProviderConfig(bundle ? path.dirname(path.resolve(bundle)) : null) : null
+  if (!newest) return []
+  try {
+    const root = JSON.parse(fs.readFileSync(newest.file, 'utf8')) as unknown
+    if (!isJsonObject(root) || !isJsonObject(root.config)) return []
+    const providerRules = isJsonObject(root.config.providerConfigRules) ? root.config.providerConfigRules : {}
+    const modelRules = isJsonObject(root.config.modelConfigRules) ? root.config.modelConfigRules : {}
+    const disabled = new Set<string>()
+    for (const rule of Array.isArray(modelRules.templateModelRules) ? modelRules.templateModelRules : []) {
+      if (isJsonObject(rule) && isJsonObject(rule.config) && rule.config.enabled === false) disabled.add(`${String(rule.templateId)}\u0000${String(rule.modelId)}`)
+    }
+    const out: string[] = []
+    for (const rule of Array.isArray(providerRules.templateRules) ? providerRules.templateRules : []) {
+      if (!isJsonObject(rule) || typeof rule.templateId !== 'string' || !templateIds.includes(rule.templateId)) continue
+      const config = isJsonObject(rule.config) ? rule.config : {}
+      for (const id of Array.isArray(config.builtinModelIds) ? config.builtinModelIds : []) {
+        if (typeof id === 'string' && !disabled.has(`${rule.templateId}\u0000${id}`) && !out.includes(id)) out.push(id)
+      }
+    }
+    return out
+  } catch { return [] }
+}
+
+/**
+ * 拉起 app-server 时显式传入 provider 配置路径（桌面端主进程 createNodeProviderRuntimePathEnv 的同一契约）。
+ * 不传时 CLI 自行推导，实测会卡在旧目录：版本常量落到 0.0.0-dev，运行时槽位
+ * ~/.zcode/v2/runtime/provider/<平台>/0.0.0-dev/ 建后不再更新；bundled 候选又优先取
+ * <bundle>/provider/ 的旧位置那份（随桌面端更新停更）——两处都停在 revision 28，而 GLM-5.4
+ * 从 47 才有，setModel 报 "Provider Registry 中不存在 Model"。三个变量齐备时 CLI 不再自行推导。
+ * 个人配置必须一并传：缺了它 CLI 会把自己的槽位路径写回 ZCODE_BUILTIN_PROVIDER_CONFIG_FILE。
+ */
+export function zcodeProviderRuntimeEnv(bundle: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {}
+  try {
+    const newest = newestBuiltinProviderConfig(path.dirname(path.resolve(bundle)))
+    const personal = path.join(os.homedir(), '.zcode', 'v2', 'provider_config.json')
+    if (!newest || !fs.existsSync(personal)) return env
+    env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE = newest.file
+    env.ZCODE_BUILTIN_PROVIDER_BUNDLED_CONFIG_FILE = newest.file
+    env.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE = personal
+  } catch {}
+  return env
 }

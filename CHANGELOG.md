@@ -25,6 +25,7 @@
 
 ### 修复
 
+- **zcode 新模型解析失败（内置 provider 目录停更 + 档位缺失）**：agentdeck 裸启动 zcode.cjs 时不传 provider 配置路径，CLI 自行推导后卡在 9 月的内置目录 revision 28（新模型如 GLM-5.4 从 47 才有；桌面端自己显式传路径所以不受影响），setModel 报 "Provider Registry 中不存在 Model"。现在按桌面端的同一契约经环境变量显式传入本地 revision 最大的内置目录与个人配置（不覆盖任何文件）；模型目录并入最新内置目录里个人 provider 所引用模板的模型（下拉自动出现新模型，既有条目与默认模型不变）；setModel 被注册表以档位理由拒绝（缺档位 / 档位不支持）时按 thinking 就近档 → 强度降序 → 不带档位回退，ModelNotFound 等原样上抛，生效档位与请求不一致时给状态说明。假 app-server 夹具新增 reasoning-level 场景，smoke:model 补目录 / env / 回退序列 / 端到端断言
 - **办公室会话键碰撞致闸门失效（P1）**：`AgentSessionRegistry` 的 `get()`/`ensure()` 只按 `dedupeKey` 复用任务、不核验身份——用户先以 `requestId=office_<队长ID>` 建一张普通任务，办公室会话就会复用这张用户单，办公室闸门（不派单/不咨询/不接力）随之整条失效。现在四层收口：① 运行期键换入注册表私有的版本化**候选序列**（`office:v2:<id>`、`office:v2:<id>#2`…）；② **查询与建单同源核验 `officeAgentId`**（键形不是安全边界——`requestId`/`idempotencyKey` 是用户可构造的自由串，核验才是主闸）；③ 键被占用时**换用备用键位另建**并在时间线具名留痕——注意 `createTask` 是「键命中即复用」，建单路径若沿用被占用的键会直接返回那张用户单、使核验形同虚设（第一轮复审查出），建单结果再核验一次身份防并发抢键；④ 旧键形的历史办公室单在 `ensure()` 里被收养并改写键，线上已存在的会话不被抛弃、续聊历史不丢
 - **外部建单入口可伪造办公室身份（P1）**：`officeAgentId` 是「这是办公室会话」的唯一运行期判据，而 sidecar 的 `tasks.create`/`issues.create` 透传任意字段、无白名单——外部建单方可给普通任务带上它，使其跳过派发/咨询/接力协议。入口补 `assertNoInternalIdentity` 统一拒绝（桌面 IPC 侧由 `parseTaskCreate` 的键白名单兜住）
 - **强制综合回合仍可发起调查（P2）**：强制综合提示词写明「不要发起调查」，但该回合经 `speak()` 一律标为 `meetingTurn`、运行时照常放行 `<investigate>`。`speak()` 增 `opts.investigate`（默认放行常规发言轮，强制综合显式传 `false`），提示词与运行时同口径

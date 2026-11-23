@@ -28,10 +28,12 @@ export class ZcodeConnection {
   private handlers = new Set<(message: ZcodeWireMessage) => void>()
   exited = false
 
-  constructor(nodePath: string, zcodePath: string, cwd: string) {
+  constructor(nodePath: string, zcodePath: string, cwd: string, extraEnv?: NodeJS.ProcessEnv) {
     const env: NodeJS.ProcessEnv = { ...process.env }
     if (sameExecutablePath(nodePath, process.execPath)) env.ELECTRON_RUN_AS_NODE = '1'
     else delete env.ELECTRON_RUN_AS_NODE
+    // provider 配置路径等按次覆盖（zcodeProviderRuntimeEnv）：必须在 ELECTRON_RUN_AS_NODE 处理之后并入
+    Object.assign(env, extraEnv)
     this.child = spawn(nodePath, [zcodePath, 'app-server', '--stdio'], { cwd, env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
     this.child.stdout!.setEncoding('utf8')
     this.child.stdout!.on('data', (chunk: string) => {

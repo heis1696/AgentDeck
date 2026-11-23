@@ -4,6 +4,12 @@
 //                        payload 无 response/usage 字段）；后续 send 同样收尾
 //   send-ack-hang      : 首回合正常收尾；第二个 session/send 既不 ack 也不发任何事件
 //                        （复现响应帧丢失——旧实现会永久悬挂）
+//   reasoning-level    : 仿 3.19 注册表对 session/setModel 的档位校验（拒绝文案照抄 zcode.cjs）——
+//                        GLM-5.4 必须带档位（词表 low/high/max）、GLM-5.1 只认 disabled/high、
+//                        GLM-9.9 不存在；每次 setModel 的 model 追加写入 $FAKE_SETMODEL_LOG（设了才写）
+// 本文件会被别的 smoke 整段拼接（smoke-worktree-sessions 在源码前加 import fs from 'node:fs'）：
+// 顶层只用带别名的具名导入，不占 fs 等通用绑定名
+import { appendFileSync as appendSetModelLog } from 'node:fs'
 import readline from 'node:readline'
 
 const scenario = process.env.FAKE_SCENARIO ?? 'terminal-new-shape'
@@ -54,6 +60,32 @@ rl.on('line', (line) => {
         break
       }
       setTimeout(() => emitTerminal(), 20)
+      break
+    }
+    case 'session/setModel': {
+      const model = msg.params?.model ?? {}
+      if (process.env.FAKE_SETMODEL_LOG) appendSetModelLog(process.env.FAKE_SETMODEL_LOG, `${JSON.stringify(model)}\n`)
+      const reject = (message) => write({ id: msg.id, error: { code: -32603, message, data: { name: 'ModelProtocolError' } } })
+      if (scenario === 'reasoning-level') {
+        const name = `${model.providerId}/${model.modelId}`
+        const level = model.options?.reasoningLevel
+        if (model.modelId === 'GLM-9.9') {
+          reject(`Provider Registry 中不存在 Model: ${name}`)
+          break
+        }
+        const levels = { 'GLM-5.4': ['low', 'high', 'max'], 'GLM-5.1': ['disabled', 'high'] }[model.modelId]
+        if (levels) {
+          if (level === undefined) {
+            reject(`Reasoning level is required for ${name}`)
+            break
+          }
+          if (!levels.includes(level)) {
+            reject(`Reasoning effort "${level}" is not supported by ${name}`)
+            break
+          }
+        }
+      }
+      write({ id: msg.id, result: {} })
       break
     }
     case 'session/stop':

@@ -5,6 +5,8 @@
 //   并集 + parseDelegatesMerged 多源去重。
 // - Phase 1：buildModelSelectionFromCliConfig(modelRef) 解析覆盖（隔离 HOME，不碰真实
 //   zcode 配置）；claude --model 实测（探测不到则跳过）。
+// - Phase 1b：内置 provider 目录新鲜度 + 模型档位回退（2026-11 真实事故：新模型 GLM-5.4 在
+//   app-server 注册表里不存在）——隔离 HOME + 假 bundle + 假运行时槽位，端到端走假 app-server。
 import { build } from 'esbuild'
 import { pathToFileURL } from 'node:url'
 import path from 'node:path'
@@ -162,6 +164,126 @@ assert(lv.ref === 'high' && lv.values?.[0] === 'high' && lv.map === undefined, '
 
 const catalog = listZcodeModels()
 assert(catalog.models.length === 3 && catalog.models.includes('GLM-5.3') && catalog.defaultModel === undefined, `模型目录来自 v2 桌面端目录（${catalog.models.join(',')}）`)
+
+// ============ Phase 1b：内置 provider 目录新鲜度（2026-11 真实事故：GLM-5.4） ============
+// 桌面端更新后新模型只存在于新版内置目录（revision 47）；裸启动的 CLI 自行推导目录路径会卡在
+// revision 28 → setModel 报 "Provider Registry 中不存在 Model"。修好目录后还有第二层：桌面端
+// v2/config.json 已停更、没有该模型 → 不带档位 → "Reasoning level is required"。
+const { createZcodeBackend, zcodeProviderRuntimeEnv, modelLevelFallbacks, isReasoningLevelRejection, modelLevelAdjustment } = await import(pathToFileURL(path.join(root, 'out/sm-zcode.cjs')).href)
+
+// 假 bundle：可执行的假 app-server + 自带旧目录（revision 28，没有 GLM-5.4）
+const fakeBundleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sm-model-bundle-'))
+const fixture = path.join(fakeBundleDir, 'zcode-fake.mjs')
+fs.copyFileSync(path.join(root, 'scripts', 'fixtures', 'fake-zcode-app-server.mjs'), fixture)
+// 内置目录最小形状：个人 provider（夹具注册表里的 bigmodel-api）引用的模板 + 模板模型规则
+const builtinCatalog = (revision, modelIds) => JSON.stringify({
+  schemaVersion: 1,
+  revision,
+  config: {
+    providerConfigRules: {
+      templateRules: [
+        { templateId: 'bigmodel-api', config: { builtinModelIds: modelIds } },
+        { templateId: 'other-api', config: { builtinModelIds: ['OTHER-1'] } }
+      ],
+      providerRules: []
+    },
+    modelConfigRules: { templateModelRules: [{ templateId: 'bigmodel-api', modelId: 'GLM-5-Turbo', config: { enabled: false } }] }
+  }
+})
+fs.mkdirSync(path.join(fakeBundleDir, 'provider'))
+const bundled = path.join(fakeBundleDir, 'provider', 'zcode-builtin.json')
+fs.writeFileSync(bundled, builtinCatalog(28, ['GLM-5.3', 'GLM-5.3-Flash', 'GLM-5-Turbo']))
+
+const withoutNew = listZcodeModels(fixture).models
+assert(withoutNew.join(',') === 'GLM-5.3,GLM-5.1,GLM-5.3-Flash', `bundle 侧旧目录没有新模型：目录不变，模板停用的与其它模板的模型都不进（${withoutNew.join(',')}）`)
+const rmNewRaw = buildModelSelectionFromCliConfig('glm-5.4', undefined, 'max', fixture)
+assert(rmNewRaw?.providerId === 'bigmodel-api' && rmNewRaw.modelId === 'glm-5.4' && rmNewRaw.options === undefined, '目录外新模型：按原引用透传、不带档位（现状）')
+const personal = path.join(fakeHome, '.zcode', 'v2', 'provider_config.json')
+const envBundled = zcodeProviderRuntimeEnv(fixture)
+assert(envBundled.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE === bundled && envBundled.ZCODE_BUILTIN_PROVIDER_BUNDLED_CONFIG_FILE === bundled, 'provider env：内置目录指向 bundle 自带那份（本地没有更新的）')
+assert(envBundled.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE === personal, 'provider env：个人配置一并显式传入（缺了 CLI 会改回自己的槽位）')
+
+// 桌面端为各版本 CLI 下载的运行时槽位：revision 更大的一份胜出，哪怕另一份 mtime 更新
+const slot = (version, content, mtime) => {
+  const dir = path.join(fakeHome, '.zcode', 'v2', 'runtime', 'provider', 'test-platform', version, 'endpoint-test')
+  fs.mkdirSync(dir, { recursive: true })
+  const file = path.join(dir, 'zcode-builtin.json')
+  fs.writeFileSync(file, content)
+  fs.utimesSync(file, mtime, mtime)
+  return file
+}
+const day = 86400e3
+slot('9.9.8', builtinCatalog(30, ['GLM-5.3']), new Date(Date.now() + day))
+const fresh = slot('9.9.9', builtinCatalog(47, ['GLM-5.4', 'GLM-5.3', 'GLM-5.3-Flash']), new Date(Date.now() - day))
+const envFresh = zcodeProviderRuntimeEnv(fixture)
+assert(envFresh.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE === fresh && envFresh.ZCODE_BUILTIN_PROVIDER_BUNDLED_CONFIG_FILE === fresh, 'provider env：内置目录取本地 revision 最大的一份（不以 mtime 论新旧）')
+const withNew = listZcodeModels(fixture).models
+assert(withNew.join(',') === 'GLM-5.3,GLM-5.1,GLM-5.3-Flash,GLM-5.4', `新上模型补进目录、排在既有条目之后（${withNew.join(',')}）`)
+assert(buildModelSelectionFromCliConfig(undefined, undefined, undefined, fixture)?.modelId === 'GLM-5.3', '默认模型仍是目录首项（新模型不改变既有默认）')
+const rmNew = buildModelSelectionFromCliConfig('glm-5.4', undefined, 'max', fixture)
+assert(rmNew?.providerId === 'bigmodel-api' && rmNew.modelId === 'GLM-5.4' && rmNew.options === undefined, '新上模型：id 归一到内置目录大小写，档位留给 setModel 按注册表回退')
+
+// 档位回退序列：本地目录的首选 → thinking 就近档 → 强度降序 → 不带档位（去重保序）
+const sequence = (model, thinking) => modelLevelFallbacks(buildModelSelectionFromCliConfig(model, undefined, thinking, fixture), thinking)
+const show = (levels) => levels.map((level) => level ?? '∅').join(' → ')
+const expectSeq = (model, thinking, expected, label) => {
+  const got = sequence(model, thinking)
+  assert(got.length === expected.length && got.every((level, i) => level === expected[i]), `${label}（${show(got)}）`)
+}
+expectSeq('GLM-5.4', 'max', [undefined, 'max', 'high', 'enabled', 'medium', 'low', 'disabled'], '目录外模型 + thinking=max：不带档位 → max → high → enabled → 强度降序')
+expectSeq('GLM-5.3', 'low', ['low', 'enabled', 'max', 'high', 'medium', 'disabled', undefined], '本地首选 low → 就近档 enabled → 强度降序 → 不带档位')
+expectSeq('GLM-5.3-Flash', 'max', [undefined, 'max', 'high', 'enabled', 'medium', 'low', 'disabled'], '本地非 reasoning 模型：先不带档位，被拒才降级重试')
+assert(isReasoningLevelRejection('Reasoning level is required for zai-api/GLM-5.4') && isReasoningLevelRejection('Reasoning effort "medium" is not supported by zai-api/GLM-5.4'), '档位拒绝识别：缺档位 / 档位不支持')
+assert(!isReasoningLevelRejection('Provider Registry 中不存在 Model: zai-api/GLM-5.4'), '模型不存在不是档位拒绝（不得触发回退重试）')
+const selNew = buildModelSelectionFromCliConfig('GLM-5.4', undefined, undefined, fixture)
+const selLegacy = buildModelSelectionFromCliConfig('GLM-5.1', undefined, undefined, fixture)
+assert(selLegacy?.options?.reasoningLevel === 'enabled', '前置：GLM-5.1 本地默认档位是 enabled')
+assert(modelLevelAdjustment(selNew, 'max', 'max') === null, '命中 thinking 档位：不提示')
+assert(modelLevelAdjustment(selNew, undefined, 'max') === '思考档位就近调整: 默认 → max', '未设 thinking 的新模型：说明实际采用的档位')
+assert(modelLevelAdjustment(selLegacy, undefined, 'high') === '思考档位就近调整: enabled → high', '本地默认被拒后换档：说明前后档位')
+assert(modelLevelAdjustment(selLegacy, undefined, undefined) === '思考档位已忽略: enabled（注册表不支持任何档位）', '注册表不认任何档位：说明档位被忽略')
+assert(modelLevelAdjustment(selLegacy, 'low', 'enabled') === null, '本地首选被接受：不提示')
+
+// 端到端（假 app-server 的 reasoning-level 场景）：走真实 backend.start → spawn → setModel 路径
+fs.mkdirSync(path.join(fakeHome, '.zcode', 'cli'), { recursive: true })
+fs.writeFileSync(path.join(fakeHome, '.zcode', 'cli', 'config.json'), JSON.stringify({ provider: {}, model: { main: 'bigmodel-api/GLM-5.3' } }))
+const setModelLog = path.join(fakeBundleDir, 'setmodel.log')
+const ORIG_SCENARIO = process.env.FAKE_SCENARIO
+process.env.FAKE_SCENARIO = 'reasoning-level'
+process.env.FAKE_SETMODEL_LOG = setModelLog
+const readAttempts = () => (fs.existsSync(setModelLog) ? fs.readFileSync(setModelLog, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line)) : [])
+const levelsOf = (attempts) => attempts.map((m) => m.options?.reasoningLevel)
+const backend = createZcodeBackend(() => ({ nodePath: process.execPath, zcodePath: fixture }))
+const runTurn = async (model, thinking) => {
+  fs.rmSync(setModelLog, { force: true })
+  const events = []
+  let resolveEnd = () => {}
+  const ended = new Promise((resolve) => { resolveEnd = resolve })
+  let session = null
+  let outcome
+  try {
+    session = await backend.start({ prompt: 'hi', workdir: fakeBundleDir, mode: 'yolo', model, thinking, events: { onEvent: (e) => events.push(e), onTurnEnd: resolveEnd } })
+    outcome = await Promise.race([ended, new Promise((resolve) => setTimeout(() => resolve({ ok: false, error: 'turn timeout' }), 10000))])
+  } catch (e) {
+    outcome = { ok: false, error: String(e?.message ?? e) }
+  }
+  await session?.close().catch(() => {})
+  return { ...outcome, attempts: readAttempts(), statuses: events.filter((e) => e.kind === 'status').map((e) => e.text) }
+}
+const t1 = await runTurn('glm-5.4', 'max')
+assert(t1.ok && show(levelsOf(t1.attempts)) === '∅ → max' && t1.attempts.at(-1).modelId === 'GLM-5.4', `新模型 + thinking=max：不带档位被拒后回退到 max，模型引用不变（尝试 ${show(levelsOf(t1.attempts))}）`)
+assert(t1.statuses.includes('模型已设置: bigmodel-api/GLM-5.4') && !t1.statuses.some((s) => s.includes('思考档位')), '命中 thinking 档位：只报模型已设置')
+const t2 = await runTurn('GLM-5.1', undefined)
+assert(t2.ok && show(levelsOf(t2.attempts)) === 'enabled → max → high', `本地默认档位被拒：按强度降序回退（尝试 ${show(levelsOf(t2.attempts))}）`)
+assert(t2.statuses.includes('思考档位就近调整: enabled → high'), '实际档位与本地默认不一致：给出状态说明')
+const t3 = await runTurn('GLM-9.9', 'max')
+assert(!t3.ok && /Provider Registry 中不存在 Model: bigmodel-api\/GLM-9\.9/.test(t3.error ?? '') && t3.attempts.length === 1, `模型不存在：原样上抛、不触发档位回退（${String(t3.error).slice(0, 60)}）`)
+const t4 = await runTurn('GLM-5.3-Flash', 'max')
+assert(t4.ok && t4.attempts.length === 1 && levelsOf(t4.attempts)[0] === undefined, '注册表不要求档位的模型：首次不带档位即被接受，无多余请求')
+if (ORIG_SCENARIO === undefined) delete process.env.FAKE_SCENARIO
+else process.env.FAKE_SCENARIO = ORIG_SCENARIO
+delete process.env.FAKE_SETMODEL_LOG
+try { fs.rmSync(fakeBundleDir, { recursive: true, force: true }) } catch {}
 
 process.env.USERPROFILE = ORIG_HOME // 还原，避免影响后续 claude 实测读真实配置
 
