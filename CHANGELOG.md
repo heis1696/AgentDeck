@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-11-23
+
 ### 新增
 
 - **代码图管线换代：dependency-cruiser → CodeGraph**：内置代码图从 dependency-cruiser 静态依赖图整体替换为 [CodeGraph](https://github.com/codegraph-ai/CodeGraph) tree-sitter 语义索引（函数/类/导入/调用链）。`npm i -D @astudioplus/codegraph-mcp`（postinstall 从 GitHub release 下载本平台引擎，失败可用 `npx codegraph-mcp-fetch-engine` 重试）；`npm run graph:index` 重建 `src/` 语义索引（默认 `--embedding-model static` 免 ONNX，失败自动降级 `--graph-only` 纯结构模式；内置护栏：src 文件数 <150 或符号数为 0 即非零退出，杜绝空图静默通过）；索引库 `.codegraph/` 为本地产物不入库。旧产物 `deps.mmd`/`deps.json`/`deps.md` 与 `graph:view` 3D 星图退役删除，查询改走 MCP（Claude Code / DSH / VS Code / JetBrains 插件）或 one-shot `npx codegraph-mcp --run-tool <tool>`（symbol_search、get_callers、find_circular_deps、analyze_impact 等）；旧→新能力映射与人读主图（`ARCHITECTURE-GRAPH.md`，人工维护）见重写后的 `docs/graph/README.md`。
