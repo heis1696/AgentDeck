@@ -4,6 +4,7 @@
 // ACP 组件缺失或握手失败时回退 headless 一次性纯文本模式：
 // dsh --profile headless "<task>" → 打印最终回复并退出（无 JSON 流、无 resume）
 // 源码安装常见于任意目录（本机 D:\Program files\deepseek-harness），自动扫描 + 设置页可指定
+// ~/.dsh 与桌面版共用：凭证文档被 0.2.x 迁成新结构时，两条路都经 dsh-credentials.ts 桥接
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
@@ -12,6 +13,7 @@ import { bindTurn } from './types'
 import { runCliJsonl, type CliJsonlRunner } from './cli-common'
 import { resolveCli, findOnPath, findSystemNode } from './cli-locator'
 import { findDshAcpBin, startDshAcpSession, AcpBootError } from './dsh-acp'
+import { readDshCredentialsDocument, resolveDshCredentialsBridge, type DshCredentialsBridge } from './dsh-credentials'
 
 const DSH_BIN = path.join('apps', 'cli', 'lib', 'bin.js')
 
@@ -63,13 +65,18 @@ export function findDshBin(custom?: string): { node: string; bin: string } | nul
   return null
 }
 
-export function createDshBackend(getPaths: () => { dshPath: string }): AgentBackend {
+export function createDshBackend(
+  getPaths: () => { dshPath: string },
+  resolveCredentials: () => DshCredentialsBridge | null = resolveDshCredentialsBridge
+): AgentBackend {
   const runOnce = (
     prompt: string,
     workdir: string,
     events: BackendSessionEvents,
     /** 本会话当前进程句柄落点：stop/close 只杀自己会话的进程，多任务并发不再串杀/漏杀 */
-    onSpawn?: (runner: Pick<CliJsonlRunner, 'kill'>) => void
+    onSpawn?: (runner: Pick<CliJsonlRunner, 'kill'>) => void,
+    /** 凭证桥接：headless 走用户自己的 profile，凭证行只能经 --patch 覆盖层改指 */
+    credentials: DshCredentialsBridge | null = null
   ): Promise<{ response: string; ok: boolean; error?: string }> => {
     // 每次调用现取设置，设置页改路径后无需重启即可生效
     const dsh = findDshBin(getPaths().dshPath || undefined)
@@ -94,14 +101,17 @@ export function createDshBackend(getPaths: () => { dshPath: string }): AgentBack
     const runner = runCliJsonl({
       command: dsh.node,
       prefixArgs: [dsh.bin],
-      args: ['--profile', 'headless', prompt],
+      args: ['--profile', 'headless', ...(credentials ? ['--patch', credentials.patchPath] : []), prompt],
       cwd: workdir || process.cwd(),
       // node 可能是 electron 充当（findSystemNode 找不到时的回退）：
       // 不加此标记会按 GUI 应用启动、不退出，子任务只能等看门狗超时
       env: { ELECTRON_RUN_AS_NODE: '1' },
       // 运行期零输出，默认 10 分钟空闲看门狗会把还在干活的 dsh 杀掉：改用固定回合预算
       idleTimeoutMs: DSH_TURN_BUDGET_MS,
-      onLine: () => {}, // 输出是纯文本非 JSON
+      // 输出是纯文本：能解析成 JSON 的行（回复恰是 JSON 时）不能被 JSONL 解析吞掉，两条回调都累积
+      onLine: (_obj, raw) => {
+        out += raw + '\n'
+      },
       onRaw: (line) => {
         out += line + '\n'
       }
@@ -147,20 +157,36 @@ export function createDshBackend(getPaths: () => { dshPath: string }): AgentBack
           { timeout: 15000, windowsHide: true, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } },
           (err, stdout) => {
             if (err) resolve({ ok: false, detail: 'dsh 执行失败: ' + String(err.message).slice(0, 80) })
-            else resolve({ ok: true, detail: `dsh ${stdout.trim().slice(0, 40)}${acpNote}` })
+            // 只读探测凭证文档结构：桥接生效与否、有没有可转交的 key，设置页一眼可见
+            else {
+              const credentials = readDshCredentialsDocument()
+              const bridgeNote = !credentials?.versioned
+                ? ''
+                : credentials.refs.DEEPSEEK_API_KEY
+                  ? ' · 凭证桥接（~/.dsh 凭证文档是本 dsh 读不了的结构，经老格式投影转交）'
+                  : ' · 凭证桥接（~/.dsh 凭证文档是本 dsh 读不了的结构，且其中没有 DEEPSEEK_API_KEY）'
+              resolve({ ok: true, detail: `dsh ${stdout.trim().slice(0, 40)}${acpNote}${bridgeNote}` })
+            }
           }
         )
       })
     },
     async start(args) {
       const { prompt, workdir, events: rawEvents, mode, model, thinking, turn } = args
+      // 每次启动现判现同步（与 findDshBin 同理）：桌面版何时迁移凭证文档不可预知
+      let credentials: DshCredentialsBridge | null
+      try {
+        credentials = resolveCredentials()
+      } catch (e) {
+        throw new Error(`dsh 凭证桥接失败：无法同步 ~/.dsh 凭证的老格式投影（${e instanceof Error ? e.message : String(e)}）`)
+      }
       // ACP 组件在才尝试：缺失时直接 headless，不产生额外延迟
       const acp = findDshAcpBin(getPaths().dshPath || undefined)
       if (acp) {
         try {
           // ACP owns its per-turn binding. Passing an already-bound channel
           // would force every later turn back onto the first turn's stamp.
-          return await startDshAcpSession({ prompt, workdir, mode, model, thinking, events: rawEvents, acp, turn })
+          return await startDshAcpSession({ prompt, workdir, mode, model, thinking, events: rawEvents, acp, turn, credentials })
         } catch (e) {
           if (!(e instanceof AcpBootError)) throw e
           const events = bindTurn(rawEvents, turn)
@@ -171,7 +197,7 @@ export function createDshBackend(getPaths: () => { dshPath: string }): AgentBack
       // Headless is one process per turn, so one fixed channel is sufficient.
       const events = bindTurn(rawEvents, turn)
       let own: Pick<CliJsonlRunner, 'kill'> | null = null
-      const r = await runOnce(prompt, workdir, events, (runner) => { own = runner })
+      const r = await runOnce(prompt, workdir, events, (runner) => { own = runner }, credentials)
       if (!r.ok) throw new Error(r.error || 'dsh 回合失败')
       return {
         sessionId: `dsh_${Date.now().toString(36)}`,

@@ -197,6 +197,7 @@ src/
 │       ├── opencode.ts       run --format json
 │       ├── dsh.ts            优先 ACP 常驻服务；缺组件/握手失败回退 --profile headless
 │       ├── dsh-acp.ts        ACP 客户端（NDJSON JSON-RPC：流式 text/续聊/权限桥）+ 内嵌组合配置
+│       ├── dsh-credentials.ts 凭证代差桥接：~/.dsh 凭证被 0.2.x（桌面版）迁成 version-1 时同步老格式投影
 │       ├── cli-common.ts     JSONL 行解析 + 空闲超时 + 输出上限
 │       └── cli-locator.ts    Windows npm .cmd 垫片解析（防 EINVAL）
 ├── preload/index.ts          contextBridge 桥（window.agentdeck，契约 = shared/contracts.ts）

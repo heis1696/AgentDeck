@@ -24,6 +24,7 @@ import { createClaudeBackend } from './backends/claude'
 import { createCodexBackend } from './backends/codex'
 import { createOpencodeBackend } from './backends/opencode'
 import { createDshBackend } from './backends/dsh'
+import { resolveDshCredentialsBridge } from './backends/dsh-credentials'
 import type { AgentBackend } from './backends/types'
 import type { AppSettings, Task, RunTrigger } from '../shared/types'
 import { ensureSharedDir } from './skills'
@@ -352,7 +353,11 @@ const initMain = async (): Promise<void> => {
     backends.set('claude', createClaudeBackend())
     backends.set('codex', createCodexBackend())
     backends.set('opencode', createOpencodeBackend())
-    backends.set('dsh', createDshBackend(() => ({ dshPath: settings.dshPath })))
+    // 凭证桥接的老格式投影含密钥，落应用数据目录（不进可入库同步的共享目录）
+    backends.set('dsh', createDshBackend(
+      () => ({ dshPath: settings.dshPath }),
+      () => resolveDshCredentialsBridge({ dir: app.getPath('userData') })
+    ))
     agents = loadAgents()
 
     taskService = new TaskService({

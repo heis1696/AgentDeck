@@ -14,6 +14,7 @@ import { relayIssueCommentOrEvent, type IssueRelayChannels } from './issue-relay
 import { createClaudeBackend } from './backends/claude'
 import { createCodexBackend } from './backends/codex'
 import { createDshBackend } from './backends/dsh'
+import { resolveDshCredentialsBridge } from './backends/dsh-credentials'
 import { createOpencodeBackend } from './backends/opencode'
 import { createZcodeBackend } from './backends/zcode'
 
@@ -71,7 +72,11 @@ export class SidecarRuntime {
     const backends = new Map<string, AgentBackend>([
       ['claude', createClaudeBackend()],
       ['codex', createCodexBackend()],
-      ['dsh', createDshBackend(() => ({ dshPath: this.settings.dshPath }))],
+      ['dsh', createDshBackend(
+        () => ({ dshPath: this.settings.dshPath }),
+        // 凭证桥接的老格式投影含密钥，落应用数据目录（不进可入库同步的共享目录）
+        () => resolveDshCredentialsBridge({ dir: this.userDataDir })
+      )],
       ['opencode', createOpencodeBackend()],
       ['zcode', createZcodeBackend(() => ({ nodePath: this.settings.nodePath, zcodePath: this.settings.zcodePath }))]
     ])

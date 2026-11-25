@@ -1,7 +1,9 @@
 // dsh ACP 适配器冒烟：fake ACP server（NDJSON JSON-RPC）驱动，不依赖真实 dsh/API key。
 // 覆盖：握手/建会话、agent_message_chunk→text 事件流、多回合续聊、
 // request_permission→onPermission 桥接、session/cancel 取消、close 杀进程、
-// 启动期失败抛 AcpBootError（供 headless 回退）、思考强度→AGENTDECK_DSH_* env 参数化。
+// 启动期失败抛 AcpBootError（供 headless 回退）、思考强度→AGENTDECK_DSH_* env 参数化；
+// 凭证代差桥接（~/.dsh 凭证被 0.2.x 迁成 version-1 结构时同步老格式投影）：文档判定、
+// 投影同步幂等、ACP 组合与 headless --patch 改指、key 不进子进程环境。
 import { build } from 'esbuild'
 import path from 'node:path'
 import fs from 'node:fs'
@@ -11,6 +13,10 @@ import { spawn } from 'node:child_process'
 
 const root = path.resolve(import.meta.dirname, '..')
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-dsh-acp-'))
+// 凭证桥接的缺省判定读 $DSH_HOME/.credentials.yaml：指到空目录，开发机的真实凭证不进冒烟；
+// 「key 不进子进程环境」的断言也不得被开发机自己导出的 key 误伤
+process.env.DSH_HOME = path.join(tmp, 'dsh-home-empty')
+delete process.env.DEEPSEEK_API_KEY
 const outfile = path.join(root, 'out', 'smoke-dsh-acp.cjs')
 await build({ entryPoints: [path.join(root, 'src/main/backends/dsh-acp.ts')], outfile, bundle: true, platform: 'node', format: 'cjs', target: 'node18' })
 const { startDshAcpSession, AcpBootError } = await import(pathToFileURL(outfile).href)
@@ -47,7 +53,7 @@ process.stdin.on('data', (c) => {
     const msg = JSON.parse(line)
     if (msg.method === 'initialize') {
       // 思考强度 env 探针：落盘 initialize 时所见（agentdeck 传入的组合 env）
-      try { fs.writeFileSync(process.argv[3] + '.envlog', JSON.stringify({ thinking: process.env.AGENTDECK_DSH_THINKING ?? null, effort: process.env.AGENTDECK_DSH_EFFORT ?? null })) } catch {}
+      try { fs.writeFileSync(process.argv[3] + '.envlog', JSON.stringify({ thinking: process.env.AGENTDECK_DSH_THINKING ?? null, effort: process.env.AGENTDECK_DSH_EFFORT ?? null, apiKey: process.env.DEEPSEEK_API_KEY ?? null })) } catch {}
       send({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: 1, agentInfo: { name: 'fake-acp' }, agentCapabilities: {} } })
     }
     else if (msg.method === 'session/new') { sessionCount++; send({ jsonrpc: '2.0', id: msg.id, result: { sessionId: 'fake-sess-' + sessionCount } }) }
@@ -176,9 +182,10 @@ const bootWithThinking = async (thinking) => {
   await s.close()
   return seen
 }
-assert(JSON.stringify(await bootWithThinking(undefined)) === JSON.stringify({ thinking: null, effort: null }), 'thinking 未设：不注入 env（模板默认 enabled/max）')
-assert(JSON.stringify(await bootWithThinking('off')) === JSON.stringify({ thinking: 'disabled', effort: null }), 'thinking=off：AGENTDECK_DSH_THINKING=disabled（不注 effort）')
-assert(JSON.stringify(await bootWithThinking('low')) === JSON.stringify({ thinking: 'enabled', effort: 'low' }), 'thinking=low：enabled + AGENTDECK_DSH_EFFORT=low')
+const seenDefault = JSON.stringify({ thinking: null, effort: null, apiKey: null })
+assert(JSON.stringify(await bootWithThinking(undefined)) === seenDefault, 'thinking 未设：不注入 env（模板默认 enabled/max）')
+assert(JSON.stringify(await bootWithThinking('off')) === JSON.stringify({ thinking: 'disabled', effort: null, apiKey: null }), 'thinking=off：AGENTDECK_DSH_THINKING=disabled（不注 effort）')
+assert(JSON.stringify(await bootWithThinking('low')) === JSON.stringify({ thinking: 'enabled', effort: 'low', apiKey: null }), 'thinking=low：enabled + AGENTDECK_DSH_EFFORT=low')
 
 // ---- 8) Production composition: dsh.ts must not bind ACP twice to turn #1 ----
 const fakeRepo = path.join(tmp, 'deepseek-harness')
@@ -203,5 +210,108 @@ assert(productionSession.turnScoped === true, 'production DSH ACP declares its p
 assert(productionTurns[0]?.turn?.id === turn1.id && productionTurns[1]?.turn?.id === turn2.id, 'production DSH ACP reports each terminal with its own stamp')
 assert(productionEvents.some((item) => item.event.kind === 'final' && item.turn?.id === turn2.id), 'production second-turn events do not fall back to the first stamp')
 await productionSession.close()
+
+// ---- 9) 凭证代差桥接：文档判定 ----
+const credentialsOutfile = path.join(root, 'out', 'smoke-dsh-credentials.cjs')
+await build({ entryPoints: [path.join(root, 'src/main/backends/dsh-credentials.ts')], outfile: credentialsOutfile, bundle: true, platform: 'node', format: 'cjs', target: 'node18' })
+const { parseDshCredentialsDocument, syncDshCredentialsBridge, resolveDshCredentialsBridge, dshCredentialsRedirectYaml } = await import(pathToFileURL(credentialsOutfile).href)
+
+const flat = parseDshCredentialsDocument('# 托管文档\nDEEPSEEK_API_KEY: sk-flat  # 行尾注释\nOPENAI_API_KEY: \'it\'\'s\'\n')
+assert(!flat.versioned && flat.refs.DEEPSEEK_API_KEY === 'sk-flat' && flat.refs.OPENAI_API_KEY === "it's", '扁平文档（0.1.x 布局）：不桥接，顶层条目即凭证引用（行尾注释与单引号转义）')
+const versioned = parseDshCredentialsDocument([
+  'version: 1',
+  'refs:',
+  '  DEEPSEEK_API_KEY: "sk-new"',
+  'records:',
+  '  client-connection/browser-session:',
+  '    kind: grant',
+  '    payload:',
+  '      version: 1',
+  '      DEEPSEEK_API_KEY: nested-not-a-ref',
+  ''
+].join('\n'))
+assert(versioned.versioned && JSON.stringify(versioned.refs) === JSON.stringify({ DEEPSEEK_API_KEY: 'sk-new' }), 'version-1 文档（桌面版迁移后的结构）：必须桥接，只取 refs 直属条目')
+const odd = parseDshCredentialsDocument('timeout: 30\nDEEPSEEK_API_KEY: sk-odd\n')
+assert(odd.versioned && odd.refs.DEEPSEEK_API_KEY === 'sk-odd' && !('timeout' in odd.refs), '扁平文档混入数字条目（老插件同样读不了）：桥接，非字符串条目不进投影')
+
+// ---- 9.1) 投影同步：扁平布局 / 幂等 / 被迁移后仍判已同步 / 轮换 / 清空 ----
+const bridgeDir = path.join(tmp, 'bridge')
+const bridge = syncDshCredentialsBridge(versioned.refs, bridgeDir)
+const readProjection = () => parseDshCredentialsDocument(fs.readFileSync(bridge.documentPath, 'utf8'))
+const projectionText = fs.readFileSync(bridge.documentPath, 'utf8')
+assert(!/^refs:|^records:/m.test(projectionText) && readProjection().refs.DEEPSEEK_API_KEY === 'sk-new', '投影是 0.1.x 可读的扁平布局，值原样还原')
+const patchText = fs.readFileSync(bridge.patchPath, 'utf8')
+assert(patchText.includes("- id: credentials\n  name: '@deepseek-ai/dsh-credentials-local'\n  config:\n    path: \"" + bridge.documentPath.replace(/\\/g, '/') + "\"\n    watch: false"), 'headless 覆盖层：credentials 行改指投影')
+const mtime = () => fs.statSync(bridge.documentPath).mtimeMs
+const writtenAt = mtime()
+await wait(30)
+syncDshCredentialsBridge(versioned.refs, bridgeDir)
+assert(mtime() === writtenAt, '同步幂等：引用没变不重写投影')
+// 0.2.x 的 dsh 若读到这份扁平投影会把它原地迁成 version-1：值没变，照样算已同步
+fs.writeFileSync(bridge.documentPath, 'version: 1\nrefs:\n  DEEPSEEK_API_KEY: "sk-new"\n')
+const migratedAt = mtime()
+await wait(30)
+syncDshCredentialsBridge(versioned.refs, bridgeDir)
+assert(mtime() === migratedAt, '投影被迁成 version-1 后值不变：不反复重写')
+syncDshCredentialsBridge({ DEEPSEEK_API_KEY: 'sk-rotated' }, bridgeDir)
+assert(readProjection().refs.DEEPSEEK_API_KEY === 'sk-rotated', 'key 轮换：投影跟着重写')
+const emptied = syncDshCredentialsBridge({}, bridgeDir)
+assert(!fs.existsSync(emptied.documentPath) && fs.existsSync(emptied.patchPath), '引用清空：投影删除（不残留已移除的 key），覆盖层保留')
+assert(dshCredentialsRedirectYaml('  ', "C:\\o'dd\\p.yaml") === '  config:\n    path: "C:/o\'dd/p.yaml"\n    watch: false\n', 'config 行：path 归一为正斜杠，缩进随调用方（ACP 组合与覆盖层共用）')
+
+// ---- 9.2) 判定：缺失 / 老格式不干预，新格式桥接到注入目录 ----
+const dshHome = path.join(tmp, 'dsh-home')
+const resolveAt = () => resolveDshCredentialsBridge({ dshHome, dir: path.join(tmp, 'bridge-resolve') })
+assert(resolveAt() === null, '凭证文档不存在：不干预')
+fs.mkdirSync(dshHome, { recursive: true })
+fs.writeFileSync(path.join(dshHome, '.credentials.yaml'), 'DEEPSEEK_API_KEY: sk-flat\n')
+assert(resolveAt() === null, '老格式凭证文档：不干预（dsh 自己读 ~/.dsh）')
+fs.writeFileSync(path.join(dshHome, '.credentials.yaml'), 'version: 1\nrefs:\n  DEEPSEEK_API_KEY: "sk-new"\n')
+const resolved = resolveAt()
+assert(resolved?.documentPath === path.join(tmp, 'bridge-resolve', 'dsh-credentials.yaml'), '新格式凭证文档：桥接，投影落在注入的目录')
+
+// ---- 9.3) ACP 组合：桥接 → credentials 行指向投影；不桥接 → 无重定向；两种情况 key 都不进子进程环境 ----
+const compositionFor = async (credentials) => {
+  const s = await startDshAcpSession({
+    prompt: 'credentials probe', workdir: tmp, mode: 'yolo', credentials,
+    events: { onEvent: () => {}, onHeartbeat: () => {}, onTurnEnd: () => {} },
+    acp: { node: process.execPath, bin: fakeServer, repoRoot: tmp }
+  })
+  const text = fs.readFileSync(compositionPath, 'utf8')
+  const env = JSON.parse(fs.readFileSync(envLogPath, 'utf8'))
+  await s.close()
+  return { text, env }
+}
+const bridged = await compositionFor(resolved)
+const redirect = '  config:\n    path: "' + resolved.documentPath.replace(/\\/g, '/') + "\"\n    watch: false\n"
+assert(bridged.text.includes("name: '@deepseek-ai/dsh-credentials-local'\n" + redirect + '\n- id: sandbox'), '桥接：ACP 组合的 credentials 行 config 指向投影（列表项内缩进，条目间空行保留）')
+assert(bridged.env.apiKey === null, '桥接只改 path：key 不进子进程环境（dsh 的托管文档不落 process.env）')
+const legacy = await compositionFor(null)
+assert(legacy.text === bridged.text.replace(redirect, ''), '不桥接：ACP 组合与桥接版只差插入的 config 块（默认路径文本不变）')
+assert(!bridged.text.includes('__AGENTDECK_DSH_CREDENTIALS_CONFIG__') && !legacy.text.includes('__AGENTDECK_DSH_CREDENTIALS_CONFIG__'), '占位标记两种情况下都被替换干净')
+const auto = await compositionFor(undefined)
+assert(!auto.text.includes('dsh-credentials.yaml'), '缺省判定：$DSH_HOME 下没有凭证文档 → 不桥接')
+
+// ---- 9.4) headless 回退：桥接 → --patch 覆盖层进 argv；不桥接 → argv 与桥接前逐项一致 ----
+// 假仓库只带一个启动即退的 ACP 组件：dshPath 派生根最先匹配，任何机器上都确定走 headless 回退。
+// 假 CLI 把 argv 打成一行合法 JSON——顺带钉住「回复恰是合法 JSON 行不得被 JSONL 解析吞掉」
+const headlessRepo = path.join(tmp, 'deepseek-harness')
+fs.mkdirSync(path.join(headlessRepo, 'packages', 'examples', 'acp-demo', 'lib'), { recursive: true })
+fs.copyFileSync(crashServer, path.join(headlessRepo, 'packages', 'examples', 'acp-demo', 'lib', 'bin.js'))
+const fakeCli = path.join(headlessRepo, 'apps', 'cli', 'lib', 'bin.js')
+fs.mkdirSync(path.dirname(fakeCli), { recursive: true })
+fs.writeFileSync(fakeCli, 'console.log(JSON.stringify(process.argv.slice(2)))\n')
+const headlessArgv = async (resolveCredentials) => {
+  const ends = []
+  const s = await createDshBackend(() => ({ dshPath: fakeCli }), resolveCredentials).start({
+    prompt: 'PROMPT', workdir: tmp, mode: 'yolo',
+    events: { onEvent: () => {}, onHeartbeat: () => {}, onTurnEnd: (r) => ends.push(r) }
+  })
+  await s.close()
+  assert(ends.at(-1)?.ok, 'headless 回退回合正常收场')
+  return JSON.parse(ends.at(-1).response)
+}
+assert(JSON.stringify(await headlessArgv(() => resolved)) === JSON.stringify(['--profile', 'headless', '--patch', resolved.patchPath, 'PROMPT']), 'headless 桥接：--patch 覆盖层插在 profile 与任务文本之间')
+assert(JSON.stringify(await headlessArgv(() => null)) === JSON.stringify(['--profile', 'headless', 'PROMPT']), 'headless 不桥接：argv 与桥接前逐项一致')
 
 console.log('\n✅ DSH ACP SMOKE PASSED')

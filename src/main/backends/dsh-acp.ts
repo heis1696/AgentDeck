@@ -18,6 +18,10 @@ import type { BackendSession, BackendSessionEvents, BackendTurnStamp } from './t
 import { bindTurn } from './types'
 import { killProcessTree } from './cli-common'
 import { findSystemNode } from './cli-locator'
+import { dshCredentialsRedirectYaml, resolveDshCredentialsBridge, type DshCredentialsBridge } from './dsh-credentials'
+
+/** 凭证代差桥接的落点：~/.dsh 凭证是 0.1.x 读不了的结构时，替换成把 path 指向老格式投影的 config */
+const CREDENTIALS_CONFIG_MARKER = '__AGENTDECK_DSH_CREDENTIALS_CONFIG__'
 
 /** ACP 组合 yml（运行期写入临时文件交给 dsh-acp-demo bin --config 加载）。
  *  `!!js` 表达式由 dsh 配置加载器在服务进程内求值，这里只保留字面文本。 */
@@ -36,7 +40,7 @@ const ACP_COMPOSITION = `# AgentDeck 的 dsh ACP 组合：基于 deepseek-harnes
 # （否则每次启动都要外部注入 DEEPSEEK_API_KEY）。
 - id: credentials
   name: '@deepseek-ai/dsh-credentials-local'
-
+${CREDENTIALS_CONFIG_MARKER}
 - id: sandbox
   name: '@deepseek-ai/dsh-sandbox-local'
 
@@ -308,6 +312,8 @@ export interface DshAcpSessionOptions {
   acp: DshAcpBin
   /** 首回合身份：本连接会把消息归属到它，并原样回传 */
   turn?: BackendTurnStamp
+  /** 凭证桥接（dsh-credentials.ts）：null = 不桥接；缺省 = 按 ~/.dsh 凭证文档现判现同步 */
+  credentials?: DshCredentialsBridge | null
 }
 
 /**
@@ -317,6 +323,7 @@ export interface DshAcpSessionOptions {
  */
 export async function startDshAcpSession(opts: DshAcpSessionOptions): Promise<BackendSession> {
   const { prompt, workdir, mode, model, thinking, events, acp, turn: firstTurn } = opts
+  const credentials = opts.credentials === undefined ? resolveDshCredentialsBridge() : opts.credentials
   /**
    * 本连接"在飞回合"的发射通道：**每个回合一个不可变通道**（bindTurn 固定住身份），
    * 换回合只换指针、绝不改写既有通道。没有回合身份时退回会话级通道（老调用方零变化），
@@ -336,7 +343,11 @@ export async function startDshAcpSession(opts: DshAcpSessionOptions): Promise<Ba
   const configPath = path.join(configDir, 'agentdeck.cordis.yml')
   try {
     fs.mkdirSync(configDir, { recursive: true })
-    fs.writeFileSync(configPath, ACP_COMPOSITION, 'utf8')
+    fs.writeFileSync(
+      configPath,
+      ACP_COMPOSITION.replace(CREDENTIALS_CONFIG_MARKER, credentials ? dshCredentialsRedirectYaml('  ', credentials.documentPath) : ''),
+      'utf8'
+    )
     ensureWin32PwshLink(acp.repoRoot)
   } catch (e) {
     throw new AcpBootError(`无法在 dsh 仓库内准备 ACP 组合配置（${configPath}）：${e instanceof Error ? e.message : String(e)}`)

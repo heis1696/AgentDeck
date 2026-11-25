@@ -35,7 +35,7 @@ flowchart TB
     BYP["旁路编排（3 + 2）<br/>goal-controller · meeting-controller · agent-forge<br/>+ agent-sessions · acceptance-verifier"]
     ST["存储与状态（10）<br/>store · event-log · issue/goal/meeting-store<br/>settings · agents · presets …"]
     IPCG["IPC（12）<br/>ipc/register 总装 + 11 域模块"]
-    BE["后端适配 backends/（14）<br/>zcode · claude · codex · opencode · dsh"]
+    BE["后端适配 backends/（15）<br/>zcode · claude · codex · opencode · dsh"]
     GIT["git.ts<br/>worktree 全生命周期"]
     ECO["扩展生态（10）<br/>skills · mcp · hooks · plugins · sources"]
     SC["sidecar（4）"]
