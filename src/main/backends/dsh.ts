@@ -138,6 +138,7 @@ export function createDshBackend(
   return {
     id: 'dsh',
     label: 'DeepSeek Harness',
+    thinkingSwitchMode: 'startup-only',
     // 无跨进程恢复通路：ACP 模式的 startDshAcpSession 参数表没有 resume 通道
     // （dsh-acp 启动握手固定 session/new），headless 模式每回合一次性进程、sessionId
     // 是合成的 dsh_* 且 send 直接抛错——提供 resumeSessionId 只会静默开新会话

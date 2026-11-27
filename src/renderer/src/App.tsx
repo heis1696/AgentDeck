@@ -15,6 +15,7 @@ import { WorkspaceSwitcher } from './components/WorkspaceSwitcher'
 import { ListTodo, Kanban, Gauge, Settings, Search, Plus, Command, AlarmClock, Layers, Users } from 'lucide-react'
 import { ToastHost } from './ui/Toasts'
 import { ConfirmHost } from './ui/Confirm'
+import { TriageBar } from './ui/TriageBar'
 import { Palette, type PaletteCommand } from './ui/Palette'
 import { PageHeader } from './ui/PageHeader'
 import { ui, rootTabsOf, type UiView } from './ui/interaction-center'
@@ -223,7 +224,7 @@ export function App() {
       : selected ? <TaskDetail task={selected} tasks={tasks} onSelect={openTask} /> : null
 
   return <div className="app" data-view={view}>
-    <ToastHost /><ConfirmHost /><Palette open={paletteOpen} onClose={() => ui.palette.close()} commands={commands} />
+    <ToastHost /><ConfirmHost /><TriageBar /><Palette open={paletteOpen} onClose={() => ui.palette.close()} commands={commands} />
     <aside className="sidebar">
       <div className="brand" aria-label="AgentDeck"><span className="brand-mark">A</span><span className="brand-name">AgentDeck</span><span className="brand-status" aria-hidden="true" title="本地工作区已连接" /></div>
       <WorkspaceSwitcher dir={workspaceDir} recent={recentWorkspaces} onChoose={chooseWorkspace} onPick={pickWorkspace} />

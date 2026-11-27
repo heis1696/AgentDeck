@@ -245,7 +245,7 @@ export interface OpencodeServerBackendOptions extends OpencodeServerClientOption
 
 export function createOpencodeServerBackend(options: OpencodeServerBackendOptions): AgentBackend {
   return {
-    id: 'opencode', label: 'OpenCode',
+    id: 'opencode', label: 'OpenCode', thinkingSwitchMode: 'none',
     // resumeSessionId 直接复用 server 侧既有会话（resumeSessionId || createSession），
     // 后续 prompt 全部投给该会话 id：不悄悄新建
     supportsResume: true,

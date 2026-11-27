@@ -52,8 +52,8 @@ const automation = validation.parseAutomationCreate({ name: 'daily', prompt: 'ch
 if (automation.scheduleMinutes !== 15 || automation.output !== 'issue') throw new Error('valid automation was rejected')
 expectReject(() => validation.parseAutomationCreate({ name: 'x', prompt: 'p', workdir: '', scheduleMinutes: 0, output: 'issue' }), 'invalid automation schedule')
 expectReject(() => validation.parseAutomationUpdate({ createdAt: 1 }), 'immutable automation field')
-const agents = validation.parseAgents([{ id: 'ag_1', name: 'One', backend: 'codex', color: '#fff' }])
-if (agents.length !== 1 || agents[0].backend !== 'codex') throw new Error('valid agents were rejected')
+const agents = validation.parseAgents([{ id: 'ag_1', name: 'One', backend: 'codex', color: '#fff' }, { id: 'ag_agy', name: 'Antigravity', backend: 'agy', color: '#34a853' }])
+if (agents.length !== 2 || agents[0].backend !== 'codex' || agents[1].backend !== 'agy') throw new Error('valid agents were rejected')
 expectReject(() => validation.parseAgents([{ id: 'ag_1', name: 'One', backend: 'unknown', color: '#fff' }]), 'invalid agent backend')
 expectReject(() => validation.parseAgents([{ id: 'same', name: 'One', backend: 'codex', color: '#fff' }, { id: 'same', name: 'Two', backend: 'claude', color: '#000' }]), 'duplicate agent id')
 // 思考强度档位：白名单内原样回传，非法档拒收

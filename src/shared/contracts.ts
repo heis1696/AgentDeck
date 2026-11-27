@@ -1,6 +1,7 @@
-import type { AcceptanceCriterion, Automation, AppSettings, AnalyticsSummary, Comment, Goal, GoalApprovalSnapshot, GoalCheckpoint, GoalEvolutionPatch, GoalSpecDecision, GoalSpecSnapshot, GoalRun, Issue, IssuePriority, IssueStatus, Run, RunTrigger, RuntimeSnapshot, Task, TaskEvent, ThinkingLevel } from './types'
+import type { AcceptanceCriterion, AgentThinking, Automation, AppSettings, AnalyticsSummary, Comment, Goal, GoalApprovalSnapshot, GoalCheckpoint, GoalEvolutionPatch, GoalSpecDecision, GoalSpecSnapshot, GoalRun, Issue, IssuePriority, IssueStatus, Run, RunTrigger, RuntimeSnapshot, Task, TaskEvent, ThinkingLevel, ThinkingSource } from './types'
 import type { SkillDetail, SkillMeta, SkillTarget, SyncState } from './skills'
 import type { AgentDraft, DraftResult, ExportResult, ImproveResult, ImportResult, EvaluateResult } from './forge'
+import type { TriageAssessInput, TriageAssessResult } from './triage'
 import type { Meeting, MeetingCreateInput, MeetingTurnDetail, MeetingTurnReadQuery, MeetingTurnPage, MeetingMemberExecutions } from './meeting'
 import type { PackAssets, PetGenDone, PetGenProgress, PetGenStartInput } from './pet'
 import type { PetDragPosition, PetSayPayload, PetStateSnapshot, PetThrowVelocity, PetWindowEvent } from './pet'
@@ -58,7 +59,8 @@ export interface AgentInfo {
   backend: string
   model?: string
   presetId?: string
-  thinking?: ThinkingLevel
+  thinking?: AgentThinking
+  sharedWorkspace?: boolean
   note?: string
   color: string
   role?: string
@@ -91,6 +93,10 @@ export interface TaskCreateInput {
   workdir: string
   backend?: string
   agentId?: string
+  thinking?: ThinkingLevel
+  thinkingSource?: ThinkingSource
+  thinkingReason?: string
+  skipTriage?: boolean
   handoff?: string
   startNow?: boolean
   trigger?: RunTrigger
@@ -106,6 +112,10 @@ export interface IssueCreateInput {
   workdir: string
   agentId?: string
   backend?: string
+  thinking?: ThinkingLevel
+  thinkingSource?: ThinkingSource
+  thinkingReason?: string
+  skipTriage?: boolean
   handoff?: string
   startNow?: boolean
   trigger?: RunTrigger
@@ -258,7 +268,7 @@ export interface AgentDeckApi {
     /** 取消任务；reason 契约：undefined = 系统取消不打标，string（含空串）= 用户主动打断
      *  ——回执文案（「用户打断：<原因>」/「用户打断（未填写原因）」）落任务时间线与 error 字段，随委派报告回灌领队 */
     cancel: (id: string, reason?: string) => Promise<IpcResult>
-    followUp: (id: string, content: string, opts?: { relay?: boolean; collectFinal?: boolean; wait?: boolean }) => Promise<IpcResult>
+    followUp: (id: string, content: string, opts?: { relay?: boolean; collectFinal?: boolean; wait?: boolean; thinking?: ThinkingLevel; thinkingSource?: ThinkingSource; thinkingReason?: string; skipTriage?: boolean }) => Promise<IpcResult>
     delete: (id: string) => Promise<IpcResult>
     retry: (id: string) => Promise<IpcResult>
     move: (id: string, status: Task['status']) => Promise<IpcResult>
@@ -369,6 +379,10 @@ export interface AgentDeckApi {
     importMd: () => Promise<ImportResult>
     /** 导出 agent 为 .md（Claude subagent 格式，另存对话框） */
     exportMd: (agentId: string) => Promise<ExportResult>
+  }
+  triage?: {
+    assess: (input: TriageAssessInput) => Promise<TriageAssessResult>
+    cancel: (requestId: string) => Promise<{ ok: boolean }>
   }
   presets: {
     list: () => Promise<PresetInfo[]>

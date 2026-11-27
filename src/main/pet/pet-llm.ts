@@ -24,7 +24,7 @@ export function inferPresetProtocol(preset: Pick<ApiPreset, 'protocol' | 'baseUR
 }
 
 /** 请求构造纯函数：smoke 直连断言形状，不发真网络 */
-export function buildChatRequest(preset: ApiPreset, messages: PetChatMessage[], model?: string): PetChatRequestDraft {
+export function buildChatRequest(preset: ApiPreset, messages: PetChatMessage[], model?: string, maxTokens = 200): PetChatRequestDraft {
   const protocol = inferPresetProtocol(preset)
   const trimmed = preset.baseURL.replace(/\/+$/, '')
   // 双鉴权头照 fetchPresetModels 惯例：网关对多余头不敏感，省一次协议猜错
@@ -55,21 +55,45 @@ export function buildChatRequest(preset: ApiPreset, messages: PetChatMessage[], 
     protocol,
     urls: [`${trimmed.replace(/\/v1\/messages$/, '')}/v1/messages`],
     headers: { 'content-type': 'application/json', ...authHeaders, 'anthropic-version': '2023-06-01' },
-    body: JSON.stringify({ ...(model ? { model } : {}), max_tokens: 200, ...(system ? { system } : {}), messages: rest })
+    body: JSON.stringify({ ...(model ? { model } : {}), max_tokens: maxTokens, ...(system ? { system } : {}), messages: rest })
+  }
+}
+
+/** 合并超时与外部取消信号：任一触发即中止底层 fetch，结束后自动卸载监听 */
+function combineAbortSignals(timeoutMs: number, external?: AbortSignal): { signal: AbortSignal; dispose: () => void } {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(new Error(`请求超时（${Math.round(timeoutMs / 1000)}s）`)), timeoutMs)
+  const onExternal = () => controller.abort(external?.reason ?? new Error('请求已取消'))
+  if (external) {
+    if (external.aborted) onExternal()
+    else external.addEventListener('abort', onExternal, { once: true })
+  }
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      clearTimeout(timer)
+      if (external) external.removeEventListener('abort', onExternal)
+    }
   }
 }
 
 /** 单轮对话：候选端点按序尝试；非 2xx / 超时 / 无文本都抛错（错误信息不含 key） */
-export async function chatCompletion(preset: ApiPreset, messages: PetChatMessage[], opts: { timeoutMs?: number; model?: string } = {}): Promise<string> {
-  const draft = buildChatRequest(preset, messages, opts.model)
+export async function chatCompletion(
+  preset: ApiPreset,
+  messages: PetChatMessage[],
+  opts: { timeoutMs?: number; model?: string; maxTokens?: number; signal?: AbortSignal } = {}
+): Promise<string> {
+  const draft = buildChatRequest(preset, messages, opts.model, opts.maxTokens ?? 200)
   const errors: string[] = []
   for (const url of draft.urls) {
+    if (opts.signal?.aborted) throw new Error('请求已取消')
+    const combined = combineAbortSignals(opts.timeoutMs ?? 12_000, opts.signal)
     try {
       const res = await fetch(url, {
         method: 'POST',
         headers: draft.headers,
         body: draft.body,
-        signal: AbortSignal.timeout(opts.timeoutMs ?? 12_000)
+        signal: combined.signal
       })
       if (!res.ok) {
         errors.push(`HTTP ${res.status} @ ${url.replace(/^https?:\/\//, '')}`)
@@ -88,7 +112,10 @@ export async function chatCompletion(preset: ApiPreset, messages: PetChatMessage
       }
       errors.push('响应没有文本内容')
     } catch (err) {
+      if (opts.signal?.aborted) throw new Error('请求已取消')
       errors.push(err instanceof Error ? err.message : String(err))
+    } finally {
+      combined.dispose()
     }
   }
   throw new Error(`模型请求失败：${errors.join('；')}`)

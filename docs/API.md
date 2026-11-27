@@ -81,9 +81,11 @@ preload 以 `contextBridge` 暴露，全部经 `ipcRenderer.invoke/on` 与主进
 
 `AgentInfo`：`{ id, name, backend, model?, presetId?, thinking?, note?, color, role?, systemPrompt?, subordinates?: string[] }`
 
-- `backend ∈ { zcode, claude, codex, opencode, dsh }`
+- `backend ∈ { zcode, claude, codex, opencode, dsh, agy }`
 - `subordinates` 非空 → 领队（获得委派能力）；`model` 钉死模型覆盖；`presetId` 绑定 API 预设连接
-- `thinking` 思考强度档位（`off | low | medium | high | max`，空 = 平台默认）；opencode 不支持（走其配置文件 variants）
+- `thinking` 思考强度档位（`auto | off | low | medium | high | max`，空 = 平台默认）；`auto` 由系统内置分诊师（`ag_triage`）按任务难度动态定档（`opencode` 暂不支持，走其配置文件 variants）
+- `bridge.triage`：动态思考强度评估域，含 `triage.assess(input: TriageAssessInput) => Promise<TriageAssessResult>` 与 `triage.cancel(requestId: string) => Promise<{ ok: boolean }>`（前端两道 2s 悬浮确认条在阶段 1 到期或点击「立即评估」后显式调用，阶段 1 严禁偷跑）
+- `TaskCreateInput` / `IssueCreateInput` / `tasks.followUp(id, content, opts)` 支持透传 `thinking?: ThinkingLevel`、`thinkingSource?: ThinkingSource`、`thinkingReason?: string`、`skipTriage?: boolean`；`Task` 同步持久化这四个字段用于时间线留痕、徽章提示与重试/停滞升档安全网
 
 ### 1.3 Issue / Run `bridge.issues`
 

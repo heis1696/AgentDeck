@@ -1,8 +1,9 @@
 // preload：向渲染层暴露类型安全的 IPC 桥
 import { contextBridge, ipcRenderer } from 'electron'
-import type { Task, TaskEvent, AppSettings, Issue, Run, Comment, Automation, RuntimeSnapshot, AnalyticsSummary, IssuePriority, IssueStatus, RunTrigger } from '../shared/types'
+import type { Task, TaskEvent, AppSettings, Issue, Run, Comment, Automation, RuntimeSnapshot, AnalyticsSummary, IssuePriority, IssueStatus, RunTrigger, ThinkingLevel, ThinkingSource } from '../shared/types'
 import type { SkillDetail, SkillMeta, SkillTarget, SyncState } from '../shared/skills'
 import type { AgentDraft, DraftResult, ExportResult, ImproveResult, ImportResult, EvaluateResult } from '../shared/forge'
+import type { TriageAssessInput, TriageAssessResult } from '../shared/triage'
 import type {
   CatalogEntry,
   DiscoveredAsset,
@@ -55,7 +56,7 @@ const api: AgentDeckApi = {
     create: (input: TaskCreateInput) =>
       invoke('tasks:create', input) as Promise<Task>,
     cancel: (id: string, reason?: string) => invoke('tasks:cancel', id, reason) as Promise<{ ok: boolean; error?: string; warning?: string }>,
-    followUp: (id: string, content: string, opts?: { relay?: boolean; collectFinal?: boolean; wait?: boolean }) =>
+    followUp: (id: string, content: string, opts?: { relay?: boolean; collectFinal?: boolean; wait?: boolean; thinking?: ThinkingLevel; thinkingSource?: ThinkingSource; thinkingReason?: string; skipTriage?: boolean }) =>
       invoke('tasks:followup', id, content, opts) as Promise<{ ok: boolean; error?: string }>,
     delete: (id: string) => invoke('tasks:delete', id) as Promise<{ ok: boolean; error?: string }>,
     retry: (id: string) => invoke('tasks:retry', id) as Promise<{ ok: boolean; error?: string }>,
@@ -105,7 +106,7 @@ const api: AgentDeckApi = {
   issues: {
     list: (): Promise<Issue[]> => invoke('issues:list'),
     get: (id: string): Promise<Issue | null> => invoke('issues:get', id),
-    create: (input: { title: string; description: string; workdir: string; agentId?: string; backend?: string; handoff?: string; startNow?: boolean; trigger?: RunTrigger; titleAuto?: boolean }): Promise<Issue> => invoke('issues:create', input),
+    create: (input: { title: string; description: string; workdir: string; agentId?: string; backend?: string; thinking?: ThinkingLevel; thinkingSource?: ThinkingSource; thinkingReason?: string; skipTriage?: boolean; handoff?: string; startNow?: boolean; trigger?: RunTrigger; titleAuto?: boolean }): Promise<Issue> => invoke('issues:create', input),
     runs: (id: string): Promise<Run[]> => invoke('issues:runs', id),
     comments: (id: string): Promise<Comment[]> => invoke('issues:comments', id),
     update: (id: string, patch: { priority?: IssuePriority; labels?: string[]; dueDate?: number; status?: IssueStatus }): Promise<Issue | null> => invoke('issues:update', id, patch),
@@ -209,6 +210,10 @@ const api: AgentDeckApi = {
     evaluate: (draft: AgentDraft): Promise<EvaluateResult> => invoke('agents:evaluate', draft),
     importMd: (): Promise<ImportResult> => invoke('agents:import-md'),
     exportMd: (agentId: string): Promise<ExportResult> => invoke('agents:export-md', agentId)
+  },
+  triage: {
+    assess: (input: TriageAssessInput): Promise<TriageAssessResult> => invoke('triage:assess', input),
+    cancel: (requestId: string): Promise<{ ok: boolean }> => invoke('triage:cancel', requestId)
   },
   presets: {
     list: (): Promise<Array<PresetInfo>> => invoke('presets:list'),

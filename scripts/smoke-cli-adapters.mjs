@@ -1,4 +1,4 @@
-// 三个 CLI 适配器真实冒烟：各跑一轮最小任务
+// 四个 CLI 适配器真实冒烟：各跑一轮最小任务
 import { build } from 'esbuild'
 import { pathToFileURL } from 'node:url'
 import path from 'node:path'
@@ -9,7 +9,8 @@ const root = path.resolve(import.meta.dirname, '..')
 for (const [src, out] of [
   ['src/main/backends/claude.ts', 'out/smoke-claude.cjs'],
   ['src/main/backends/codex.ts', 'out/smoke-codex.cjs'],
-  ['src/main/backends/opencode.ts', 'out/smoke-opencode.cjs']
+  ['src/main/backends/opencode.ts', 'out/smoke-opencode.cjs'],
+  ['src/main/backends/agy.ts', 'out/smoke-agy-real.cjs']
 ]) {
   await build({ entryPoints: [path.join(root, src)], outfile: path.join(root, out), bundle: true, platform: 'node', format: 'cjs', target: 'node18' })
 }
@@ -21,7 +22,8 @@ const results = {}
 for (const [name, out, factory, prompt] of [
   ['claude', 'smoke-claude.cjs', 'createClaudeBackend', '读取 note.txt，只回复那个秘密单词本身，不要其他内容。'],
   ['codex', 'smoke-codex.cjs', 'createCodexBackend', '读取 note.txt 文件，只回复那个秘密单词本身，不要其他内容。'],
-  ['opencode', 'smoke-opencode.cjs', 'createOpencodeBackend', '读取当前目录下 note.txt 文件，只回复那个秘密单词本身。']
+  ['opencode', 'smoke-opencode.cjs', 'createOpencodeBackend', '读取当前目录下 note.txt 文件，只回复那个秘密单词本身。'],
+  ['agy', 'smoke-agy-real.cjs', 'createAgyBackend', '读取 note.txt 文件，只回复那个秘密单词本身，不要其他内容。']
 ]) {
   console.log(`\n===== ${name} =====`)
   const mod = await import(pathToFileURL(path.join(root, 'out', out)).href)

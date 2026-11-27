@@ -41,7 +41,7 @@ const RULES: Rule[] = [
   },
   {
     code: 'provider_model_missing',
-    re: /\b400\s*[-:]\s*1211\b|\bmodel(?:[_\s-]?name)?[_\s-]*(?:does[_\s-]+not[_\s-]+exist|not[_\s-]+found)\b|模型(?:不存在|未找到)/i,
+    re: /\b400\s*[-:]\s*1211\b|\bmodel(?:[_\s-]?name)?[_\s-]*(?:does[_\s-]+not[_\s-]+exist|not[_\s-]+found)\b|invalid model selection|not recognized as a known model|模型(?:不存在|未找到)/i,
     title: '模型不存在或不可用',
     hint: '检查模型名称/ID 是否填写正确，以及当前渠道是否支持该模型；修正模型配置后再运行。',
     retryable: false

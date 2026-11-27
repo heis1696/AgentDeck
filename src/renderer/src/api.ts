@@ -13,6 +13,9 @@ export type { AgentInfo, AgentModelCatalog }
 /** 锻造师（agent 生成器）草稿契约——与 src/shared/forge.ts 对齐 */
 export type { AgentDraft, DraftResult, ImproveOutcome, ImproveResult, ImportResult, ExportResult, EvaluateVerdict, EvaluateOutcome, EvaluateResult } from '../../shared/forge'
 
+/** 分诊师（动态思考强度评估）契约——与 src/shared/triage.ts 对齐 */
+export type { TriageAssessInput, TriageAssessKind, TriageAssessResult, TriageDecision } from '../../shared/triage'
+
 /** API 预设（连接档案）——与主进程 presets.ts 的 ApiPreset 对齐 */
 export type ApiPresetInfo = PresetInfo
 

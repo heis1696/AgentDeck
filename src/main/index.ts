@@ -25,6 +25,7 @@ import { createCodexBackend } from './backends/codex'
 import { createOpencodeBackend } from './backends/opencode'
 import { createDshBackend } from './backends/dsh'
 import { resolveDshCredentialsBridge } from './backends/dsh-credentials'
+import { createAgyBackend } from './backends/agy'
 import type { AgentBackend } from './backends/types'
 import type { AppSettings, Task, RunTrigger } from '../shared/types'
 import { ensureSharedDir } from './skills'
@@ -40,6 +41,7 @@ import { resolveHotState } from './hot/resolve'
 import { clearPointer, readPointer } from './hot/pointer'
 import { HotUpdater } from './hot/updater'
 import { sweepOldShellDirs } from './hot/shell'
+import { assessTaskThinking, TriageBroker } from './thinking-triage'
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
@@ -58,6 +60,7 @@ let agentSessions!: AgentSessionRegistry
 let meetingController!: MeetingController
 let sidecarManager: SidecarManager
 let petController: PetController | null = null
+let triageBroker: TriageBroker | null = null
 let automationTimer: NodeJS.Timeout | undefined
 let hotUpdater: HotUpdater
 /** 当前窗口加载的热更渲染层版本目录（null = 内置）；did-fail-load 溯源用（§4.3） */
@@ -358,6 +361,7 @@ const initMain = async (): Promise<void> => {
       () => ({ dshPath: settings.dshPath }),
       () => resolveDshCredentialsBridge({ dir: app.getPath('userData') })
     ))
+    backends.set('agy', createAgyBackend())
     agents = loadAgents()
 
     taskService = new TaskService({
@@ -533,6 +537,15 @@ const initMain = async (): Promise<void> => {
     }
     presets = loadPresets()
     runner.attachPresets(() => presets)
+    triageBroker = new TriageBroker()
+    runner.attachTriage((input) => assessTaskThinking({
+      agents,
+      presets,
+      backends,
+      mode: settings.mode,
+      sharedDir: resolveSharedDir(),
+      homedir: app.getPath('home')
+    }, input))
     runner.attachIssueOps({
       reviewStatus: (childId, verdict, note) => {
         const child = store.get(childId)
@@ -569,6 +582,9 @@ const initMain = async (): Promise<void> => {
         workdir: input.workdir,
         backend: input.backend,
         agentId: input.agentId,
+        ...(input.thinking ? { thinking: input.thinking } : {}),
+        ...(input.thinkingSource ? { thinkingSource: input.thinkingSource } : {}),
+        ...(input.thinkingReason ? { thinkingReason: input.thinkingReason } : {}),
         issueId: input.issueId,
         goalId: input.goalId,
         phaseIndex: input.phaseIndex,
@@ -584,7 +600,8 @@ const initMain = async (): Promise<void> => {
       },
       cancelTask: (taskId) => runner.cancel(taskId),
       listTasks: () => store.list(),
-      continueTask: (taskId, content) => runner.followUp(taskId, content),
+      continueTask: (taskId, content, opts) => runner.followUp(taskId, content, opts),
+      isAutoThinking: (agentId) => !!agentId && agents.find((agent) => agent.id === agentId)?.thinking === 'auto',
       onGuard: (goal, reason, detail) => {
         const task = store.list().find((candidate) => candidate.goalId === goal.id)
         if (!task) return
@@ -610,10 +627,10 @@ const initMain = async (): Promise<void> => {
     goalController.recover(store.list())
 
     // 阶段接力（<continue>）：同一 Issue 上创建后继执行——新会话硬切，简报为唯一携带物
-    runner.attachContinue(({ sourceTaskId, issueId, brief, start }) => {
+    runner.attachContinue(({ sourceTaskId, issueId, brief, start, thinking, thinkingSource, thinkingReason }) => {
       const source = store.get(sourceTaskId)
       if (!source) return null
-      const resolved = taskService.resolveHandoffTask({ sourceTaskId, issueId, brief, start })
+      const resolved = taskService.resolveHandoffTask({ sourceTaskId, issueId, brief, start, thinking, thinkingSource, thinkingReason })
       if (!resolved) return null
       const { task, created } = resolved
       if (!created) {
@@ -762,6 +779,7 @@ const initMain = async (): Promise<void> => {
       sidecar: sidecarManager,
       updates: hotUpdater,
       pet: petController ?? undefined,
+      triageBroker: triageBroker ?? undefined,
       get agents() { return agents },
       set agents(value) { agents = value },
       get presets() { return presets },
@@ -825,6 +843,8 @@ app.on('before-quit', (event) => {
     // 空闲门控挂起的载荷在退出时补应用（§5.1 autoInstallOnAppQuit 语义；翻转指针 + relaunch 已排程）
     if (hotUpdater?.hasStagedPayload()) await hotUpdater.applyStagedOnQuit()
     await runner?.shutdown()
+    triageBroker?.shutdown()
+    triageBroker = null
     await sidecarManager?.stop()
     petController?.dispose()
     petController = null

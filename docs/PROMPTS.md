@@ -13,6 +13,7 @@ AgentDeck 的提示词不只是文案：它们是运行时解析器（`<delegate
 | `handoff.ts` | 阶段接力协议 `CONTINUE_BLOCK`、接力按钮指令、接手/手动启动确认、标题重命名 | `runner.ts` |
 | `meeting.ts` | 会议优先规则、汇报/质疑/答辩/综合/强制综合五类发言、纪要 schema、主席插话、办公室会话引导、只读调查的派单与回灌 | `meeting-controller.ts`、`agent-sessions.ts`、`runner.ts` |
 | `forge.ts` | 锻造师技能正文（v5 现行 + V1–V4 升级比对基准）、SKILL.md、生成/改进/评测三模式 prompt | `agent-forge.ts` |
+| `triage.ts` | 分诊师技能正文（`thinking-triage`，v1 现行 + 升级比对基准）、SKILL.md、任务/追问分诊上下文与 HTTP/CLI 双通路 prompt | `thinking-triage.ts` |
 | `personas.ts` | 预置队伍的默认人设（只影响新装/迁移补缺） | `agents.ts` |
 
 本目录只放纯字符串与纯模板函数：不 import electron、不放解析器与业务逻辑。解析器在 `delegate.ts`（委派/咨询/调查/接力/评估/审核）、`meeting-controller.ts`（表态/反对/纪要）、`goal-controller.ts`（checkpoint）。
@@ -140,6 +141,8 @@ AgentDeck 的提示词不只是文案：它们是运行时解析器（`<delegate
 2. 把当前正文逐字追加进 `FORGE_SKILL_BODIES_PREVIOUS`。
 
 v3→v4 曾漏第 2 步，未编辑的 v3 副本被误判为用户编辑过、永不升级；v5 一并补回 V3/V4。`smoke:prompts` 逐代验证升级链。
+
+分诊师技能 `skills/thinking-triage/SKILL.md`（`ensureTriageSkill`，版本常量在 `src/shared/triage.ts` 的 `TRIAGE_SKILL_VERSION`，旧正文基准在 `src/main/prompts/triage.ts` 的 `TRIAGE_SKILL_BODIES_PREVIOUS`）遵循完全相同的两步升级规则，并保留 `<delegate>` / `<investigate>` / `<continue>` 可选 `thinking` 属性的纯文字说明红线（不新增完整示例尖括号标签）。
 
 ## 8. 已知遗留（不在本次范围）
 

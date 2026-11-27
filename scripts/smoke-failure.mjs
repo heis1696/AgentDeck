@@ -26,6 +26,7 @@ const cases = [
   ['402 Payment Required: insufficient balance', 'provider_quota'],
   ['HTTP 400-1211: model does not exist', 'provider_model_missing'],
   ['model_not_found: requested model is unavailable', 'provider_model_missing'],
+  ['invalid model selection (--model "foo"): model foo is not recognized as a known model', 'provider_model_missing'],
   ['模型不存在: bad-model', 'provider_model_missing'],
   ['No available channel for model gpt-example', 'provider_channel_unavailable'],
   ['Error: 429 Too Many Requests', 'rate_limit'],

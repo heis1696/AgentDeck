@@ -13,6 +13,7 @@ import type { AppSettings, RunTrigger, Task } from '../../shared/types'
 import type { SidecarManager } from '../sidecar'
 import type { HotUpdater } from '../hot/updater'
 import type { PetController } from '../pet'
+import type { TriageBroker } from '../thinking-triage'
 
 export type { CreateTaskInput } from '../task-service'
 
@@ -34,6 +35,8 @@ export interface IpcContext {
   readonly sidecar?: SidecarManager
   /** Optional desktop-pet controller. Legacy/test contexts may omit it. */
   readonly pet?: PetController
+  /** Optional triage broker for dynamic thinking assessment cancellation on shutdown. */
+  readonly triageBroker?: TriageBroker
   /** 免安装热更（updates:* IPC 背后的状态机） */
   readonly updates: HotUpdater
   get agents(): Agent[]

@@ -142,6 +142,7 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
   return {
     id: 'zcode',
     label: 'ZCode (GLM)',
+    thinkingSwitchMode: 'per-turn',
     // resumeSessionId 走 session/resume（startDshAcpSession 同名参数表之外唯一的服务器端
     // 恢复入口）：对全新 app-server 连接请求恢复既有会话，跨进程生效
     supportsResume: true,
@@ -491,6 +492,7 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
       // "Select a model before continuing"——等价于旧 runtimeModel 每次 resume 重传。
       // create 不带模型时服务端自选默认（实测可用），仅钉选时设置
       const selection = resumeSessionId ? (modelSelection ?? buildModelSelection(undefined, undefined, undefined, bundle)) : modelSelection
+      let appliedThinking: ThinkingLevel | undefined = thinking
       if (selection) {
         const level = await setModelWithLevelFallback(conn, sessionId, selection, thinking)
         emit({ kind: 'status', text: `模型已设置: ${selection.providerId}/${selection.modelId}` })
@@ -511,7 +513,7 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
 
       const session: BackendSession = {
         sessionId,
-        async send(content: string, turnStamp?: BackendTurnStamp) {
+        async send(content: string, turnStamp?: BackendTurnStamp, opts?: { thinking?: ThinkingLevel }) {
           // 新回合先立新通道：旧通道连同它的身份一起作废，旧回合的迟到消息带不回新回合
           setTurn(turnStamp)
           // 串行化：上一回合仍在跑（调用方已放弃等待/被中断）时，先停掉它并等终态，
@@ -533,6 +535,21 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
               turnActive = false
             } finally {
               swallowingStaleTurnEnd = false
+            }
+          }
+          // 同会话热切思考强度：仅档位真实变化时发 session/setModel；失败容错沿用原档，不炸回合
+          if (opts?.thinking && opts.thinking !== appliedThinking) {
+            try {
+              const baseSel = selection ?? buildModelSelection(model, connection, opts.thinking, bundle) ?? buildModelSelection(undefined, undefined, opts.thinking, bundle)
+              if (baseSel) {
+                const nextSel = buildModelSelection(model?.trim() ? model : `${baseSel.providerId}/${baseSel.modelId}`, connection, opts.thinking, bundle) ?? baseSel
+                const level = await setModelWithLevelFallback(conn, sessionId, nextSel, opts.thinking)
+                appliedThinking = opts.thinking
+                const adjustment = modelLevelAdjustment(nextSel, opts.thinking, level)
+                if (adjustment) emit({ kind: 'status', text: adjustment })
+              }
+            } catch (error) {
+              emit({ kind: 'status', text: `⚠ 思考档位热切失败（沿用原档）：${error instanceof Error ? error.message.slice(0, 120) : String(error)}` })
             }
           }
           currentText = ''

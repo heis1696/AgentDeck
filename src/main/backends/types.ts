@@ -63,9 +63,19 @@ export interface BackendTurnResult {
   delegationText?: string
 }
 
+/** 后端对动态思考强度的切换能力：per-turn=支持会话内逐回合热切；startup-only=仅启动期生效；none=暂不支持 */
+export type ThinkingSwitchMode = 'per-turn' | 'startup-only' | 'none'
+
+export interface BackendTurnOptions {
+  /** 本回合覆盖的思考强度（缺省沿用会话建立时的档位） */
+  thinking?: ThinkingLevel
+}
+
 export interface AgentBackend {
   id: string
   label: string
+  /** 动态思考强度切换能力（缺省按 'none' 保守处理，兼容旧测试桩） */
+  thinkingSwitchMode?: ThinkingSwitchMode
   /**
    * 声明 `start` 的 resumeSessionId 通路会真实恢复该 provider 会话（跨进程续聊）。
    *
@@ -109,8 +119,8 @@ export interface BackendSession {
    * 一个隔离回合；后续关掉本地传输并按 sessionId 重建——没有可靠标识就不复用。
    */
   turnScoped?: boolean
-  /** 发送后续消息（续聊）；回合结束经由 onTurnEnd 通知 */
-  send: (content: string, turn?: BackendTurnStamp) => Promise<void>
+  /** 发送后续消息（续聊）；回合结束经由 onTurnEnd 通知；opts.thinking 用于支持热切的后端逐回合覆写思考档位 */
+  send: (content: string, turn?: BackendTurnStamp, opts?: BackendTurnOptions) => Promise<void>
   /** 中止当前回合 */
   stop: () => Promise<void>
   /** Disconnect local transport while preserving a resumable provider session. */

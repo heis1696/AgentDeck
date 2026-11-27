@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
-import type { Goal, GoalApprovalSnapshot, GoalCheckpoint, GoalRun, GoalSpecDecision, GoalSpecSnapshot, GoalStatus, Task, TaskEvent } from '../shared/types'
+import type { Goal, GoalApprovalSnapshot, GoalCheckpoint, GoalRun, GoalSpecDecision, GoalSpecSnapshot, GoalStatus, Task, TaskEvent, ThinkingLevel, ThinkingSource } from '../shared/types'
+import { nextEscalatedThinkingLevel } from '../shared/triage'
 import type { GoalCheckpointInput, GoalCreateInput, GoalEvolveInput } from '../shared/contracts'
 import { isTerminalGoalStatus, validateGoalTransition } from '../shared/taskflow'
 import { GoalStore, type GoalCreateRecord } from './goal-store'
@@ -100,6 +101,9 @@ export interface GoalTaskInput {
   workdir: string
   backend?: string
   agentId?: string
+  thinking?: ThinkingLevel
+  thinkingSource?: ThinkingSource
+  thinkingReason?: string
   issueId: string
   goalId: string
   phaseIndex: number
@@ -142,7 +146,9 @@ export interface GoalControllerOptions {
   listTasks?: () => Task[]
   onUpdated?: (goal: Goal) => void
   /** 续轮首选：同会话续聊（v2） */
-  continueTask?: (taskId: string, content: string) => Promise<{ ok: boolean; error?: string }> | { ok: boolean; error?: string }
+  continueTask?: (taskId: string, content: string, opts?: { thinking?: ThinkingLevel; thinkingSource?: ThinkingSource; thinkingReason?: string }) => Promise<{ ok: boolean; error?: string }> | { ok: boolean; error?: string }
+  /** 判定目标 Agent 是否处于动态思考档（自动升档安全网仅对 auto 生效） */
+  isAutoThinking?: (agentId?: string) => boolean
   /** 完成时调用：Issue 归档 done（v2） */
   finalizeIssue?: (issueId: string) => void
   /** Optional sink for a human-visible Goal guard event. */
@@ -1015,7 +1021,7 @@ export class GoalController {
     return { status: 'active', complete: false, shouldContinue: true }
   }
 
-  private launchNext(goal: Goal, enqueue = true): { ok: boolean; error?: string; task?: Task } {
+  private launchNext(goal: Goal, enqueue = true, escalation?: { thinking: ThinkingLevel; thinkingSource: ThinkingSource; thinkingReason: string }): { ok: boolean; error?: string; task?: Task } {
     if (goal.runCount >= goal.maxRuns) return { ok: false, error: `Goal run budget exhausted (${goal.runCount}/${goal.maxRuns})` }
     if (goal.totalDurationMs >= goal.maxDurationMs) return { ok: false, error: `Goal duration budget exhausted (${goal.totalDurationMs}/${goal.maxDurationMs}ms)` }
     const phaseIndex = goal.runCount
@@ -1030,6 +1036,7 @@ export class GoalController {
         workdir: goal.workdir ?? '',
         backend: goal.backend,
         agentId: goal.agentId,
+        ...(escalation ?? {}),
         issueId: goal.issueId,
         goalId: goal.id,
         phaseIndex,
@@ -1071,15 +1078,25 @@ export class GoalController {
         failures,
         taskError: task.error
       })
+      // 停滞安全网：上一轮无可见进展且目标 Agent 处于动态思考档 → 下轮自动升一档
+      const autoEligible = this.options.isAutoThinking
+        ? this.options.isAutoThinking(task.agentId ?? goal.agentId)
+        : (task.thinking !== undefined && (task.thinkingSource === undefined || task.thinkingSource === 'triage' || task.thinkingSource === 'fallback' || task.thinkingSource === 'escalation'))
+      const escalated = (goal.noProgress ?? 0) >= 1 && autoEligible
+        ? nextEscalatedThinkingLevel(task.thinking)
+        : null
+      const escalation = escalated
+        ? { thinking: escalated, thinkingSource: 'escalation' as const, thinkingReason: '目标模式连续无进展，自动升档' }
+        : undefined
 
       // 首选 continueTask（同会话续聊）
       if (this.options.continueTask && task.sessionId) {
-        const result = await Promise.resolve(this.options.continueTask(taskId, content))
+        const result = await Promise.resolve(this.options.continueTask(taskId, content, escalation))
         if (result.ok) return
         // continueTask 失败时走 launchNext 兜底（会话可能已死）
       }
       // 兜底：launchNext 新任务
-      this.launchNext(goal, true)
+      this.launchNext(goal, true, escalation)
     } finally {
       this.inflightContinues.delete(key)
     }

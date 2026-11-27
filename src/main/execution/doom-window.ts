@@ -29,6 +29,8 @@ export interface DoomWindowPorts {
   isCurrentRun(claim: RunClaim | undefined): claim is RunClaim
   /** 拒绝后停当前回合（runner：kernel.sessionOf(taskId)?.stop()） */
   stopSession(taskId: string): void | Promise<unknown>
+  /** 人工审批放行 doom-loop 后回调（动态思考安全网：给自动档任务触发下轮升档） */
+  onDoomApproved?(taskId: string, claim: RunClaim): void
 }
 
 export class DoomWindow {
@@ -89,6 +91,7 @@ export class DoomWindow {
         this.windows.delete(taskId)
         const allowed = this.ports.appendEvent(taskId, { ts: Date.now(), kind: 'status', text: 'doom-loop: 人工审批通过，继续执行', data: { stopReason: 'doom_loop_approved' } }, runCondition(claim))
         if (allowed) this.ports.pushEvent(taskId, allowed)
+        this.ports.onDoomApproved?.(taskId, claim)
         return
       }
       const denied = this.ports.appendEvent(taskId, { ts: Date.now(), kind: 'status', text: 'doom-loop: 未获人工审批，停止当前回合', data: { stopReason: 'doom_loop_denied' } }, runCondition(claim))

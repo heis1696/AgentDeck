@@ -9,7 +9,7 @@
 //   I4.3 互斥键 = `delegate:sha256(taskId, expectedRunId, to, prompt)`，与落盘 dedupeKey 同格式；
 //   I4.4 dispatchHold 三步 = 登记 holding → setWorktreeOwner 磁盘绑定 → updateIf(出生身份+holding) 翻面 → 入队前复核；
 //   closeSpawnedChild 条件撤销/让位 = updateIf 落空给具名让位拒单并返回 claimed ?? null。
-import type { Task, WorktreeInfo } from '../../shared/types'
+import type { Task, ThinkingLevel, ThinkingSource, WorktreeInfo } from '../../shared/types'
 import type { TaskExpectation, TaskStore } from '../store'
 import { parseSparseAttr, sanitizeChildPrompt, MAX_DEPTH, MAX_TOTAL_ROUNDS, type AgentLike, type DelegateCall, type InvestigateCall } from '../delegate'
 import { buildChildPrompt, sharedWorkspaceInstruction, investigationTaskPrompt } from '../prompts'
@@ -30,6 +30,9 @@ export interface ChildTaskCreator {
     workdir: string
     backend: string
     agentId?: string
+    thinking?: ThinkingLevel
+    thinkingSource?: ThinkingSource
+    thinkingReason?: string
     parentTaskId: string
     dedupeKey?: string
     delegateSourceRunId?: string
@@ -391,12 +394,20 @@ export class ChildSpawner {
     const title = siblings.some((s) => s.title === baseTitle) ? `${baseTitle} #${workerIndex}` : baseTitle
     // 登记 key：循环侧新建的单同样进入会话级去重（否则后续回合复述同一派单会再建）
     this.ledger.rememberSeenKey(taskId, `${call.to}\n${call.prompt}`)
+    if (call.invalidThinking) {
+      guardedNote(`⚠ thinking 属性值无效（${call.invalidThinking}），仅接受 off/low/medium/high/max，已按队员默认处理`)
+    }
     const childInput = {
       title,
       prompt: childPrompt,
       workdir,
       backend: target.backend,
       ...(target.id ? { agentId: target.id } : {}),
+      ...(call.thinking ? {
+        thinking: call.thinking,
+        thinkingSource: 'leader' as const,
+        thinkingReason: (call.reason ? `领队指派：${call.reason}` : '领队按单定档').slice(0, 120)
+      } : {}),
       parentTaskId: taskId,
       workerIndex,
       ...(dedupeKey ? { dedupeKey, delegateSourceRunId: expectedRunId } : {}),
@@ -533,6 +544,9 @@ export class ChildSpawner {
     const budget = this.opts().delegateMaxTotalRounds ?? MAX_TOTAL_ROUNDS
     if (budget - inherited <= 0) { this.note(taskId, '⚠ 全链委派轮数预算已耗尽，拒绝调查', expected); return null }
     this.store.updateIf(taskId, expected, { roundsUsed: (task.roundsUsed ?? 0) + 1 })
+    if (call.invalidThinking) {
+      this.note(taskId, `⚠ investigate 的 thinking 属性值无效（${call.invalidThinking}），已按队员默认处理`, expected)
+    }
     const childInput = {
       title: `${target.name}: 调查 ${call.prompt.slice(0, 40).replace(/\n/g, ' ')}`,
       // 背景块：办公室会话的 task.prompt 只是会话引导（不是任务原文），附给调查员只是噪音
@@ -540,6 +554,11 @@ export class ChildSpawner {
       workdir: task.workdir,
       backend: target.backend,
       ...(target.id ? { agentId: target.id } : {}),
+      ...(call.thinking ? {
+        thinking: call.thinking,
+        thinkingSource: 'leader' as const,
+        thinkingReason: (call.reason ? `领队调查指派：${call.reason}` : '领队指定调查思考强度').slice(0, 120)
+      } : {}),
       parentTaskId: taskId,
       workerIndex: this.workerCount(taskId) + 1,
       suppressIssue: true,

@@ -129,6 +129,7 @@ export function createCodexBackend(): AgentBackend {
   return {
     id: 'codex',
     label: 'Codex',
+    thinkingSwitchMode: 'per-turn',
     // resumeSessionId 走 `codex exec resume <id>`：每回合独立进程恢复 provider 会话
     supportsResume: true,
     async probe() {
@@ -139,16 +140,16 @@ export function createCodexBackend(): AgentBackend {
       const dir = workdir || process.cwd()
       let own: Pick<CliJsonlRunner, 'kill'> | null = null
       // 一次性 CLI：每个回合一个进程。回合身份随进程绑定，被杀旧进程的迟到回调带旧身份。
-      const runTurn = (turnPrompt: string, resumeId?: string, turnStamp?: BackendTurnStamp) =>
-        runOnce(turnPrompt, dir, resumeId, bindTurn(rawEvents, turnStamp), model, thinking, (r) => { own = r })
+      const runTurn = (turnPrompt: string, resumeId?: string, turnStamp?: BackendTurnStamp, turnThinking?: ThinkingLevel) =>
+        runOnce(turnPrompt, dir, resumeId, bindTurn(rawEvents, turnStamp), model, turnThinking ?? thinking, (r) => { own = r })
       const r = await runTurn(prompt, resumeSessionId, turn)
       if (!r.ok && r.error) throw new Error(r.error)
       const sid = r.sessionId
       return {
         sessionId: sid,
         turnScoped: true,
-        async send(content, turnStamp) {
-          const res = await runTurn(content, sid, turnStamp)
+        async send(content, turnStamp, opts) {
+          const res = await runTurn(content, sid, turnStamp, opts?.thinking)
           if (!res.ok) throw new Error(res.error || '回合失败')
         },
         async stop() {

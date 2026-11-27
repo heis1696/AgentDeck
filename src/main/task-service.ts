@@ -1,4 +1,4 @@
-import type { Task, RunTrigger, WorktreeInfo } from '../shared/types'
+import type { Task, RunTrigger, WorktreeInfo, ThinkingLevel, ThinkingSource } from '../shared/types'
 import { sameExecutionOwner, type TaskStore } from './store'
 import type { IssueStore } from './issue-store'
 import { findHandoffSuccessor, repeatsHandoffPhase } from './handoff'
@@ -16,6 +16,10 @@ export interface TaskCreateInput {
   backend?: string
   agentId?: string
   trigger?: RunTrigger
+  thinking?: ThinkingLevel
+  thinkingSource?: ThinkingSource
+  thinkingReason?: string
+  skipTriage?: boolean
   handoff?: string
   startNow?: boolean
   parked?: boolean
@@ -51,6 +55,9 @@ export interface ChildTaskCreateInput {
   parentTaskId: string
   dedupeKey?: string
   delegateSourceRunId?: string
+  thinking?: ThinkingLevel
+  thinkingSource?: ThinkingSource
+  thinkingReason?: string
   title: string
   prompt: string
   workdir?: string
@@ -69,6 +76,9 @@ export interface HandoffTaskCreateInput {
   issueId: string
   brief: string
   start: 'auto' | 'parked'
+  thinking?: ThinkingLevel
+  thinkingSource?: ThinkingSource
+  thinkingReason?: string
 }
 
 export interface TaskServiceOptions {
@@ -195,6 +205,10 @@ export class TaskService {
       const created = existing ?? tx.create({
         title, prompt, workdir: input.workdir ?? '', backend, trigger,
         ...(agent ? { agentId: agent.id } : (!this.getAgent && input.agentId) ? { agentId: input.agentId } : {}),
+        ...(input.thinking ? { thinking: input.thinking } : {}),
+        ...(input.thinkingSource ? { thinkingSource: input.thinkingSource } : {}),
+        ...(input.thinkingReason?.trim() ? { thinkingReason: input.thinkingReason.trim().slice(0, 120) } : {}),
+        ...(input.skipTriage ? { skipTriage: true } : {}),
         ...(input.handoff?.trim() ? { handoff: input.handoff.trim() } : {}),
         ...(input.startNow === false || input.parked ? { parked: true } : {}),
         ...(input.backgroundRunning ? { backgroundRunning: true } : {}),
@@ -231,6 +245,9 @@ export class TaskService {
       workdir: input.workdir ?? '',
       backend: input.backend,
       ...(input.agentId ? { agentId: input.agentId } : {}),
+      ...(input.thinking ? { thinking: input.thinking } : {}),
+      ...(input.thinkingSource ? { thinkingSource: input.thinkingSource } : {}),
+      ...(input.thinkingReason ? { thinkingReason: input.thinkingReason } : {}),
       parentTaskId: input.parentTaskId,
       dedupeKey: input.dedupeKey,
       workerIndex: input.workerIndex,
@@ -273,6 +290,9 @@ export class TaskService {
         title: '▶ ' + (firstLine?.slice(0, 40) ?? source.title + ' (next phase)'),
         prompt: brief, workdir: source.workdir, agentId: source.agentId, backend: source.backend,
         issueId, continuesFrom: source.id, trigger: 'handoff',
+        ...(input.thinking ? { thinking: input.thinking } : {}),
+        ...(input.thinkingSource ? { thinkingSource: input.thinkingSource } : {}),
+        ...(input.thinkingReason?.trim() ? { thinkingReason: input.thinkingReason.trim().slice(0, 120) } : {}),
         ...(source.goalId ? { goalId: source.goalId } : {}),
         ...(phaseIndex !== undefined ? { phaseIndex } : {}),
         ...(input.start === 'parked' ? { parked: true } : {})

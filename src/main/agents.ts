@@ -3,14 +3,15 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { app } from 'electron'
-import { BACKEND_IDS, THINKING_LEVELS, type BackendId, type ThinkingLevel } from '../shared/types'
-import { FORGE_AGENT_ID, isForgeAgent } from '../shared/forge'
-import { LEAD_PERSONA, CLAUDE_PERSONA, CODEX_PERSONA, OPENCODE_PERSONA, DSH_PERSONA } from './prompts/personas'
+import { AGENT_THINKING_VALUES, BACKEND_IDS, type AgentThinking, type BackendId } from '../shared/types'
+import { FORGE_AGENT_ID } from '../shared/forge'
+import { isSystemAgent, TRIAGE_AGENT_ID } from '../shared/triage'
+import { LEAD_PERSONA, CLAUDE_PERSONA, CODEX_PERSONA, OPENCODE_PERSONA, DSH_PERSONA, AGY_PERSONA } from './prompts/personas'
 
 export interface Agent {
   id: string
   name: string
-  /** 后端 id: zcode | claude | codex | opencode | dsh */
+  /** 后端 id: zcode | claude | codex | opencode | dsh | agy */
   backend: string
   /** 定位/头衔，如 领队、前端工程师 */
   role?: string
@@ -22,8 +23,8 @@ export interface Agent {
   model?: string
   /** API 预设 id（连接覆盖：baseURL/apiKey 按会话内存注入；可空 = 平台默认连接） */
   presetId?: string
-  /** 思考强度档位（可空 = 平台默认）；opencode 不支持，走其配置文件 variants */
-  thinking?: ThinkingLevel
+  /** 思考强度档位（固定 5 档或 'auto' 动态分诊；可空 = 平台默认）；opencode 不支持，走其配置文件 variants */
+  thinking?: AgentThinking
   /** 只读协作标记：true 时被派单直接共享领队工作区、不建隔离 worktree（审码/咨询类零建树开销） */
   sharedWorkspace?: boolean
   note?: string
@@ -32,7 +33,7 @@ export interface Agent {
 }
 
 const BACKEND_SET = new Set<string>(BACKEND_IDS)
-const THINKING_SET = new Set<string>(THINKING_LEVELS)
+const THINKING_SET = new Set<string>(AGENT_THINKING_VALUES)
 
 /** Normalize persisted/user supplied agents before they cross the IPC boundary. */
 export function normalizeAgent(value: unknown, fallback?: Agent): Agent | null {
@@ -54,7 +55,7 @@ export function normalizeAgent(value: unknown, fallback?: Agent): Agent | null {
     ...(subordinates?.length ? { subordinates } : {}),
     ...(typeof raw.model === 'string' && raw.model.trim() ? { model: raw.model.trim() } : {}),
     ...(typeof raw.presetId === 'string' && raw.presetId.trim() ? { presetId: raw.presetId.trim() } : {}),
-    ...(typeof raw.thinking === 'string' && THINKING_SET.has(raw.thinking) ? { thinking: raw.thinking as ThinkingLevel } : {}),
+    ...(typeof raw.thinking === 'string' && THINKING_SET.has(raw.thinking) ? { thinking: raw.thinking as AgentThinking } : {}),
     ...(typeof raw.sharedWorkspace === 'boolean' ? { sharedWorkspace: raw.sharedWorkspace } : {}),
     ...(typeof raw.note === 'string' && raw.note.trim() ? { note: raw.note.trim() } : {}),
     color: typeof raw.color === 'string' && raw.color.trim() ? raw.color.trim() : (fallback?.color ?? '#64748b')
@@ -71,11 +72,12 @@ export function normalizeAgents(values: unknown): Agent[] {
     ids.add(agent.id)
     out.push(agent)
   }
-  // Remove subordinate references to deleted agents and self references.
+  // Remove subordinate references to deleted agents, system agents, and self references.
+  const systemIds = new Set(out.filter(isSystemAgent).map((agent) => agent.id))
   return out.map((agent) => ({
     ...agent,
     ...(agent.subordinates
-      ? { subordinates: agent.subordinates.filter((id) => id !== agent.id && ids.has(id)) }
+      ? { subordinates: agent.subordinates.filter((id) => id !== agent.id && ids.has(id) && !systemIds.has(id)) }
       : {})
   }))
 }
@@ -85,13 +87,16 @@ const file = () => path.join(app.getPath('userData'), 'agents.json')
 /** 预置队伍：每个可用后端一个默认队员 */
 export function defaultAgents(): Agent[] {
   return [
-    { id: 'ag_zcode', name: 'ZetCode', backend: 'zcode', color: '#4f8cff', role: '领队', systemPrompt: LEAD_PERSONA, subordinates: ['ag_claude', 'ag_codex', 'ag_opencode', 'ag_dsh'] },
+    { id: 'ag_zcode', name: 'ZetCode', backend: 'zcode', color: '#4f8cff', role: '领队', systemPrompt: LEAD_PERSONA, subordinates: ['ag_claude', 'ag_codex', 'ag_opencode', 'ag_dsh', 'ag_agy'] },
     { id: 'ag_claude', name: 'Claude', backend: 'claude', color: '#d97757', role: '工程师', systemPrompt: CLAUDE_PERSONA },
     { id: 'ag_codex', name: 'Codex', backend: 'codex', color: '#8b95a5', role: '工程师', systemPrompt: CODEX_PERSONA },
     { id: 'ag_opencode', name: 'OpenCode', backend: 'opencode', color: '#c084fc', role: '工程师', systemPrompt: OPENCODE_PERSONA },
     { id: 'ag_dsh', name: 'DeepSeek', backend: 'dsh', color: '#4d6bfe', role: '分析员', systemPrompt: DSH_PERSONA },
+    { id: 'ag_agy', name: 'Antigravity', backend: 'agy', color: '#34a853', role: '工程师', systemPrompt: AGY_PERSONA },
     // 锻造师：agents:draft 的生成引擎；系统提示词由 agent-crafter 技能提供（agent-forge.ts），故不设 systemPrompt
-    { id: FORGE_AGENT_ID, name: '锻造师', backend: 'zcode', color: '#f59e0b', role: '锻造', note: '专职生成其它 Agent——改我的平台/模型即换生成引擎；无需系统提示词（由 agent-crafter 技能提供）' }
+    { id: FORGE_AGENT_ID, name: '锻造师', backend: 'zcode', color: '#f59e0b', role: '锻造', note: '专职生成其它 Agent——改我的平台/模型即换生成引擎；无需系统提示词（由 agent-crafter 技能提供）' },
+    // 分诊师：动态思考强度（auto）的难度评估引擎；规则由 thinking-triage 技能提供（thinking-triage.ts）
+    { id: TRIAGE_AGENT_ID, name: '分诊师', backend: 'zcode', thinking: 'off', color: '#06b6d4', role: '分诊', note: '专职评估任务难度并分配思考强度——绑定 API 预设与快模型可走直连（~1 秒），未绑预设自动回退 CLI；无需系统提示词（由 thinking-triage 技能提供）' }
   ]
 }
 
@@ -103,13 +108,14 @@ export function loadAgents(): Agent[] {
     if (list.length) saved = list
   } catch {}
   if (!saved) return defaultAgents()
-  // 迁移：补上保存文件里缺失的平台预置队员（如新增的 dsh）
+  // 迁移：补上保存文件里缺失的平台预置队员（如新增的 dsh/agy）
   const have = new Set(saved.map((a) => a.backend))
-  // 锻造师按 id 补缺：平台与领队同为 zcode，按 backend 补缺盖不住它
-  const missing = defaultAgents().filter((d) => !have.has(d.backend) && !isForgeAgent(d))
+  // 系统 Agent（锻造师/分诊师）按 id 补缺：平台与领队同为 zcode，按 backend 补缺盖不住它们
+  const missing = defaultAgents().filter((d) => !have.has(d.backend) && !isSystemAgent(d))
   const haveIds = new Set(saved.map((a) => a.id))
-  const forge = defaultAgents().find(isForgeAgent)
-  if (forge && !haveIds.has(forge.id)) missing.push(forge)
+  for (const sys of defaultAgents().filter(isSystemAgent)) {
+    if (!haveIds.has(sys.id)) missing.push(sys)
+  }
   const merged = missing.length ? dedupeAgentNames([...saved, ...missing]) : dedupeAgentNames(saved)
   return merged
 }

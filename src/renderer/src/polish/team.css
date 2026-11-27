@@ -80,6 +80,7 @@
 }
 .tm-badge-mono { font-family: var(--font-mono); color: var(--text-faint); }
 .tm-badge-forge { background: var(--violet-soft); color: var(--violet); }
+.tm-badge-triage { background: var(--status-running-bg); color: var(--status-running-fg); }
 .tm-badge-lead { background: var(--accent-soft); color: var(--accent); }
 .tm-badge-preset { color: var(--text-faint); }
 

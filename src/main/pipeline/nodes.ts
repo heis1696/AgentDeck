@@ -6,12 +6,23 @@
 import type { FlowContext, FlowNode, FlowState } from './flow'
 
 export interface ExecutionPorts<S extends FlowState = FlowState> {
+  /** 动态思考强度路由：仅对 thinking='auto' 且未预分诊/未跳过任务触发（RouteThinkingNode） */
+  routeThinking?(ctx: FlowContext<S>): Promise<void>
   /** 启动竞态：后端 start + 身份栅栏绑定 + 会话安装（StartNode） */
   start?(ctx: FlowContext<S>): Promise<void>
   /** 回合执行：await 到回合终态（含看门狗竞速，RunningNode） */
   runTurn?(ctx: FlowContext<S>): Promise<void>
   /** 终态收尾：结果落库/委派循环/通知（FinalizeNode） */
   finalize?(ctx: FlowContext<S>): Promise<void>
+}
+
+/** 动态思考强度路由节点：在会话启动前静默定档并落盘 */
+export class RouteThinkingNode<S extends FlowState = FlowState> implements FlowNode<S> {
+  readonly id = 'route-thinking'
+  constructor(private readonly ports: ExecutionPorts<S>) {}
+  enter(ctx: FlowContext<S>): Promise<void> | void {
+    return this.ports.routeThinking?.(ctx)
+  }
 }
 
 /** 启动节点：后端会话建立与安装 */

@@ -6,6 +6,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { app } from 'electron'
 import { FORGE_SKILL_NAME, FORGE_SKILL_VERSION, isForgeAgent, type AgentDraft, type DraftResult, type EvaluateResult, type ImproveResult } from '../shared/forge'
+import { isSystemAgent } from '../shared/triage'
 // 技能正文与三模式 prompt 组装集中在 src/main/prompts/forge.ts
 import { FORGE_SKILL_MD, FORGE_SKILL_BODIES_PREVIOUS, FORGE_SKILL_BODY, buildDraftPrompt, buildImprovePrompt, buildEvaluatePrompt } from './prompts/forge'
 import { parseFrontmatter, skillsDir } from './skills'
@@ -234,7 +235,7 @@ export async function draftAgent(ctx: IpcContext, description: string, answers?:
 export async function improveAgent(ctx: IpcContext, agentId: string, feedback: string): Promise<ImproveResult> {
   const target = ctx.agents.find((a) => a.id === agentId)
   if (!target) return { ok: false, error: '目标 Agent 不存在' }
-  if (isForgeAgent(target)) return { ok: false, error: '锻造师自身无需系统提示词，不支持改进' }
+  if (isSystemAgent(target)) return { ok: false, error: '系统内置 Agent（锻造师/分诊师）由技能驱动，不支持改进' }
   const turn = await runForgeTurn(ctx, buildImprovePrompt(resolveForgeSkillBody(ctx.sharedDir), target, feedback))
   if (!turn.ok) return turn
   return parseImproveResponse(turn.response)

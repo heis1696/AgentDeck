@@ -4,7 +4,7 @@ import { bridge, type AgentInfo } from '../../api'
 import { ui } from '../../ui/interaction-center'
 import { FloatWindow } from '../../ui/FloatWindow'
 import { captains } from './captains'
-import { isForgeAgent } from '../../../../shared/forge'
+import { isSystemAgent } from '../../../../shared/triage'
 import { MeetingCard, MEETING_STATUS_LABEL } from './MeetingCard'
 import type { Meeting } from '../../../../shared/meeting'
 
@@ -54,7 +54,7 @@ export function MeetingPanel({ issueId, open, onToggle, onMeeting }: {
   const refreshAgents = useCallback(async () => {
     try {
       const items = await bridge.agents.list()
-      const eligible = captains(items)
+      const eligible = captains(items.filter((agent) => !isSystemAgent(agent)))
       setAgents(eligible)
       setAgentError(null)
       setReporter((current) => current || eligible[0]?.id || '')
@@ -88,7 +88,7 @@ export function MeetingPanel({ issueId, open, onToggle, onMeeting }: {
   const current = meetings.find((meeting) => meeting.status === 'active' || meeting.status === 'waiting_user')
   useEffect(() => { onMeeting(current ?? null) }, [current, onMeeting])
 
-  const eligible = useMemo(() => agents.filter((agent) => agent.backend !== 'dsh' && !isForgeAgent(agent)), [agents])
+  const eligible = useMemo(() => agents.filter((agent) => agent.backend !== 'dsh' && !isSystemAgent(agent)), [agents])
   const run = async (action: () => Promise<{ ok: boolean; error?: string }>) => {
     setBusy(true)
     try {

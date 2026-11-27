@@ -9,7 +9,8 @@ import { WorkspaceGitCard } from './WorkspaceGitCard'
 import { WorkspaceFileMenu, FILE_MENU_LISTBOX_ID, fileMenuOptionId } from './WorkspaceFileMenu'
 import { useFileReferenceMenu } from '../hooks/useFileReferenceMenu'
 import type { Task } from '../../../shared/types'
-import { isForgeAgent } from '../../../shared/forge'
+import { isSystemAgent } from '../../../shared/triage'
+import { shouldPromptTriage } from '../ui/triage-flow'
 
 /** 新建 Issue 的三种类型：普通任务 / 目标模式（自动推进）/ 团队会议（三队长研讨） */
 type IssueKind = 'task' | 'goal' | 'meeting'
@@ -104,8 +105,8 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
       const list = await bridge.agents.list()
       if (request !== agentRequestRef.current) return
       setAgents(list)
-      // 锻造师只负责生成 Agent，不进入任务执行者或会议队长选择。
-      const available = list.filter((agent) => !isForgeAgent(agent))
+      // 系统内置 Agent（锻造师/分诊师）不进入任务执行者或会议队长选择。
+      const available = list.filter((agent) => !isSystemAgent(agent))
       const first = available.find((agent) => agent.id === draft.agentId) ?? available[0]
       draft.agentId = first?.id ?? ''
       setAgentId(first?.id ?? '')
@@ -122,7 +123,7 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
   }, [loadAgents])
 
   // 会议型三队长预填：取前三位合格队长（不足三位留空，由校验提示兜底）
-  const availableAgents = useMemo(() => agents.filter((agent) => !isForgeAgent(agent)), [agents])
+  const availableAgents = useMemo(() => agents.filter((agent) => !isSystemAgent(agent)), [agents])
   const eligibleCaptains = useMemo(() => captains(availableAgents), [availableAgents])
   useEffect(() => {
     if (eligibleCaptains.length < 3) return
@@ -190,8 +191,31 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
 
   const submit = async (startNow = true) => {
     if (!prompt.trim() || !kindValid || busy) return
+    const selectedAgent = availableAgents.find((a) => a.id === agentId)
     setBusy(true)
     try {
+      let triageFields: { thinking?: import('../../../shared/types').ThinkingLevel; thinkingSource?: import('../../../shared/types').ThinkingSource; thinkingReason?: string; skipTriage?: boolean } = {}
+      const triageBridge = bridge.triage
+      if (kind === 'task' && startNow && triageBridge && shouldPromptTriage({ agent: selectedAgent, kind: 'task' })) {
+        const triage = await ui.triage.start({
+          kind: 'task',
+          prompt: prompt.trim(),
+          handoff: handoff.trim() || undefined,
+          agentId: selectedAgent?.id,
+          agentName: selectedAgent?.name,
+          workdir,
+          assess: (input) => triageBridge.assess(input),
+          cancel: (requestId) => triageBridge.cancel(requestId),
+          onFallbackToast: (msg) => ui.toast.info(msg)
+        })
+        if (triage.action === 'cancelled') return
+        triageFields = {
+          ...(triage.thinking ? { thinking: triage.thinking } : {}),
+          ...(triage.thinkingSource ? { thinkingSource: triage.thinkingSource } : {}),
+          ...(triage.thinkingReason ? { thinkingReason: triage.thinkingReason } : {}),
+          ...(triage.skipTriage ? { skipTriage: true } : {})
+        }
+      }
       // goal/meeting 的容器 Issue 一律不自动启动：执行由 goal 循环 / 会议调度接管，避免双跑
       const issue = await bridge.issues.create({
         title: deriveTitle(prompt),
@@ -199,11 +223,11 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
         description: prompt.trim(),
         workdir,
         agentId,
+        ...triageFields,
         handoff: handoff.trim() || undefined,
         startNow: kind === 'task' ? startNow : false,
         trigger: 'assignment'
       })
-      const selectedAgent = availableAgents.find((a) => a.id === agentId)
       if (kind === 'goal') {
         await bridge.goals.create({
           text: prompt.trim(),
@@ -439,6 +463,7 @@ export function WorkspaceView({ onCreated, workspaceDir, onPickWorkspace }: { on
           <p className="trigger-preview" title="触发预览">
              <Zap size={13} aria-hidden="true" /> 将唤醒：<b>{selectedAgent.name}</b>（{selectedAgent.role || selectedAgent.backend}
             {isLeader ? ` · 领队，可自行派工给 ${selectedAgent.subordinates?.length} 名队员` : ''}
+            {selectedAgent.thinking === 'auto' && selectedAgent.backend !== 'opencode' ? ' · 动态思考' : ''}
             {handoff.trim() ? ' · 含交接备注' : ''}）
           </p>
         )}

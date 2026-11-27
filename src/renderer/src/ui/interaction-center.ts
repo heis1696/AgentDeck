@@ -12,6 +12,8 @@
  * 4. 任务执行不走这里：start/cancel/retry/delete/…仍由 task-service 负责，中心只做界面交互。
  */
 import { interactionLayers, type LayerStack } from './interaction-layer'
+import type { ThinkingLevel } from '../../../shared/types'
+import { createTriageFlow, IDLE_TRIAGE_STATE, type TriageFlowOutcome, type TriageFlowStartInput, type TriageFlowState } from './triage-flow'
 
 export type UiView = 'issues' | 'detail' | 'usage' | 'settings' | 'automation' | 'skills' | 'board' | 'agents'
 export const UI_VIEWS: readonly UiView[] = ['issues', 'detail', 'usage', 'settings', 'automation', 'skills', 'board', 'agents']
@@ -161,6 +163,8 @@ export interface InteractionSnapshot {
   confirm: ConfirmRequest | null
   /** 排队等待的确认框数量（不含当前） */
   confirmPending: number
+  /** 动态思考强度两道 2s 确认条状态（跨挂载保留） */
+  triage: TriageFlowState
 }
 
 export const EMPTY_SNAPSHOT: InteractionSnapshot = Object.freeze({
@@ -173,7 +177,8 @@ export const EMPTY_SNAPSHOT: InteractionSnapshot = Object.freeze({
   docks: Object.freeze({}) as Readonly<Record<string, DockBucket>>,
   toasts: Object.freeze([]) as readonly ToastRecord[],
   confirm: null,
-  confirmPending: 0
+  confirmPending: 0,
+  triage: IDLE_TRIAGE_STATE
 })
 
 export interface CenterTimers {
@@ -284,6 +289,14 @@ export interface InteractionCenter {
   toast: { info(text: string): number; success(text: string): number; error(text: string): number; dismiss(id: number): void; attach(): void; detach(): void; clear(): void }
   confirm(options: ConfirmOptions): Promise<boolean>
   confirmHost: { respond(value: boolean): boolean; cancelAll(): void }
+  triage: {
+    start(input: TriageFlowStartInput): Promise<TriageFlowOutcome>
+    skip(): void
+    pickLevel(level: ThinkingLevel): void
+    confirmNow(): void
+    cancel(): void
+    setHovered(hovered: boolean): void
+  }
   dock: {
     open(item: DockItem, opts?: { rootId?: string }): DockHandle
     /** 仅切换激活项（不改打开请求标识：进行中的异步回写仍然有效） */
@@ -369,6 +382,14 @@ export function createInteractionCenter(options: InteractionCenterOptions = {}):
     confirmResolvers.delete(request.id)
     resolve?.(value)
   }
+
+  /* ------------------------------------------------------------- triage */
+  const triageFlow = createTriageFlow({
+    timers,
+    now: options.now,
+    onChange: (triage) => emit({ triage }),
+    onBusy: () => pushToast('info', '请先完成当前思考强度确认')
+  })
 
   /* --------------------------------------------------------------- dock */
   let nextDockToken = 1
@@ -628,6 +649,14 @@ export function createInteractionCenter(options: InteractionCenterOptions = {}):
         if (state.confirm || state.confirmPending) emit({ confirm: null, confirmPending: 0 })
       }
     },
+    triage: {
+      start: (input) => triageFlow.start(input),
+      skip: () => triageFlow.skip(),
+      pickLevel: (level) => triageFlow.pickLevel(level),
+      confirmNow: () => triageFlow.confirmNow(),
+      cancel: () => triageFlow.cancel(),
+      setHovered: (hovered) => triageFlow.setHovered(hovered)
+    },
     dock: {
       open: (item, opts) => {
         const rootId = opts?.rootId ?? resolveRoot(item.payload.taskId).rootId
@@ -746,6 +775,7 @@ export function createInteractionCenter(options: InteractionCenterOptions = {}):
       catalogReady = false
       catalogSource = 0
       catalogVersion = 0
+      triageFlow.reset()
       pendingOpens.clear()
       state = EMPTY_SNAPSHOT
       for (const listener of listeners) listener()

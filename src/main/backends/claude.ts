@@ -144,6 +144,7 @@ export function createClaudeBackend(): AgentBackend {
   return {
     id: 'claude',
     label: 'Claude Code',
+    thinkingSwitchMode: 'per-turn',
     // resumeSessionId 走 `claude --resume <id>`：每回合独立进程按 provider 落盘的会话恢复
     supportsResume: true,
     async probe() {
@@ -155,8 +156,8 @@ export function createClaudeBackend(): AgentBackend {
       let own: Pick<CliJsonlRunner, 'kill'> | null = null
       // 每个回合都是独立进程：把它自己的回合身份绑到该进程的所有回调上，
       // 被杀掉的旧进程再吐终态也只会带着旧身份，被运行器丢弃。
-      const runTurn = (turnPrompt: string, resumeId?: string, turnStamp?: BackendTurnStamp) =>
-        runOnce(turnPrompt, dir, resumeId, bindTurn(rawEvents, turnStamp), model, connection, thinking, (r) => { own = r })
+      const runTurn = (turnPrompt: string, resumeId?: string, turnStamp?: BackendTurnStamp, turnThinking?: ThinkingLevel) =>
+        runOnce(turnPrompt, dir, resumeId, bindTurn(rawEvents, turnStamp), model, connection, turnThinking ?? thinking, (r) => { own = r })
       const first = runTurn(prompt, resumeSessionId, turn)
       const sidPromise = first.then((r) => r.sessionId).catch(() => '')
       // start() 在回合结束后才 resolve 与 zcode 语义不同——但接口允许：
@@ -167,8 +168,8 @@ export function createClaudeBackend(): AgentBackend {
       const session: BackendSession = {
         sessionId: sid,
         turnScoped: true,
-        async send(content, turnStamp) {
-          const res = await runTurn(content, sid, turnStamp)
+        async send(content, turnStamp, opts) {
+          const res = await runTurn(content, sid, turnStamp, opts?.thinking)
           if (!res.ok) throw new Error(res.error || '回合失败')
         },
         async stop() {

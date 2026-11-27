@@ -151,6 +151,7 @@ export function createOpencodeBackend(config: OpencodeBackendOptions = {}): Agen
   const cliBackend: AgentBackend = {
     id: 'opencode',
     label: 'OpenCode',
+    thinkingSwitchMode: 'none',
     // resumeSessionId 走 `opencode run -s <id>`：每回合独立进程续接 provider 落盘的会话
     supportsResume: true,
     async probe() {

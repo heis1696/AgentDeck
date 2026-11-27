@@ -1,0 +1,225 @@
+/* ============================================================
+   动态思考强度两道 2s 底部悬浮确认条（TriageBar）
+   全部颜色与字阶取自 tokens.css，零硬编码色值与裸 px 字号。
+   ============================================================ */
+
+.triage-bar {
+  position: fixed;
+  left: 50%;
+  bottom: var(--space-5);
+  transform: translateX(-50%);
+  z-index: 60;
+  width: min(760px, calc(100vw - var(--space-8)));
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-overlay);
+  box-shadow: var(--shadow-panel);
+  color: var(--text);
+  overflow: hidden;
+  animation: triage-bar-in var(--duration-base) var(--ease-out);
+}
+
+.triage-bar-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  flex-wrap: wrap;
+}
+
+.triage-bar-main {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  flex: 1 1 240px;
+}
+
+.triage-bar-icon {
+  color: var(--accent);
+  flex: none;
+}
+
+.triage-bar-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.triage-bar-title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-label);
+  font-weight: var(--weight-semibold);
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.triage-bar-agent {
+  color: var(--text-dim);
+  font-weight: var(--weight-regular);
+}
+
+.triage-bar-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: var(--text-micro);
+  font-weight: var(--weight-semibold);
+}
+
+.triage-bar-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px var(--space-1);
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  font-size: var(--text-micro);
+  font-weight: var(--weight-medium);
+}
+
+.triage-bar-countdown,
+.triage-bar-reason {
+  font-size: var(--text-caption);
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.triage-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+  flex-wrap: wrap;
+}
+
+.triage-level-pills {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+}
+
+.triage-pill {
+  min-width: 24px;
+  height: 24px;
+  padding: 0 var(--space-1);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--text-micro);
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+  transition: background var(--duration-quick) var(--ease-in-out), color var(--duration-quick) var(--ease-in-out);
+}
+
+.triage-pill:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.triage-pill.active {
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: var(--weight-semibold);
+}
+
+.triage-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: 28px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--text);
+  font-size: var(--text-caption);
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--duration-quick) var(--ease-in-out), border-color var(--duration-quick) var(--ease-in-out);
+}
+
+.triage-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.triage-btn.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: var(--weight-semibold);
+}
+
+.triage-btn.primary:hover {
+  background: var(--accent-hover);
+}
+
+.triage-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background var(--duration-quick) var(--ease-in-out), color var(--duration-quick) var(--ease-in-out);
+}
+
+.triage-close:hover {
+  background: var(--status-failed-bg);
+  color: var(--status-failed);
+}
+
+.triage-bar-progress {
+  height: 2px;
+  width: 100%;
+  background: var(--border-subtle);
+}
+
+.triage-bar-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 50ms linear;
+}
+
+@keyframes triage-bar-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 8px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .triage-bar {
+    animation: none;
+  }
+  .triage-bar-progress-fill {
+    transition: none;
+  }
+}

@@ -1,6 +1,7 @@
 // 任务运行器：队列 + 生命周期 + 事件管道
 // 状态机：queued → running → done | failed | cancelled
-import type { ExecutionOwner, Task, TaskEvent } from '../shared/types'
+import { isThinkingLevel, type ExecutionOwner, type Task, type TaskEvent, type ThinkingLevel, type ThinkingSource } from '../shared/types'
+import { nextEscalatedThinkingLevel, type TriageAssessInput, type TriageAssessResult } from '../shared/triage'
 import { createHash } from 'node:crypto'
 import { type TaskExpectation, type TaskStore } from './store'
 import { createExecutionOwner } from './persistence'
@@ -40,7 +41,20 @@ interface PresetLike {
 }
 
 /** 阶段接力处理器：主进程接 createTask（同 issue 新 run、新会话硬切） */
-export type ContinueHandler = (input: { sourceTaskId: string; issueId: string; brief: string; start: 'auto' | 'parked' }) => unknown
+export type ContinueHandler = (input: { sourceTaskId: string; issueId: string; brief: string; start: 'auto' | 'parked'; thinking?: ThinkingLevel; thinkingSource?: ThinkingSource; thinkingReason?: string }) => unknown
+
+/** 思考档位标签（任务时间线状态事件用） */
+const THINKING_LABEL: Record<ThinkingLevel, string> = { off: '关', low: '低', medium: '中', high: '高', max: '极致' }
+
+/** 后台静默分诊器（RouteThinkingNode 与自动追问复用） */
+export type TriageAssessor = (input: TriageAssessInput) => Promise<TriageAssessResult>
+
+/** 静态思考档位解析（DT-1 铁律：绝不把 'auto' 传入后端）：优先任务显式档位，其次 Agent 固定 5 档 */
+export function resolveStaticThinking(task: Pick<Task, 'thinking'>, agent?: Pick<AgentLike, 'thinking'>): ThinkingLevel | undefined {
+  if (task.thinking && isThinkingLevel(task.thinking)) return task.thinking
+  if (agent?.thinking && isThinkingLevel(agent.thinking)) return agent.thinking
+  return undefined
+}
 
 /** Cross-leader consultation hook. The runner owns source-session turn order;
  * the host resolves the target office session and returns its final answer. */
@@ -62,7 +76,7 @@ import { TaskFinalizer } from './task-finalizer'
 import { Executor } from './executor'
 import { IssuePipeline } from './pipeline/issue-pipeline'
 import { FlowEngine, type FlowState } from './pipeline/flow'
-import { StartNode, RunningNode, FinalizeNode, type ExecutionPorts } from './pipeline/nodes'
+import { RouteThinkingNode, StartNode, RunningNode, FinalizeNode, type ExecutionPorts } from './pipeline/nodes'
 import { decideRetry } from './retry-policy'
 import { DSH_TURN_BUDGET_MS } from './backends/dsh'
 import { createTurnEvents, type RunnerEvent } from './execution/turn-events'
@@ -151,6 +165,9 @@ export class TaskRunner {
    *  与 permissionBroker.cancelTask 成对（四个清扫位同经 purgeTaskWorkflowState 单点）。 */
   private readonly doomWindows: DoomWindow
   private shuttingDown = false
+  private triageAssessor: TriageAssessor | null = null
+  /** doom-loop 人工放行触发的待消费升档任务集合：下一回合自动升档且不被静默分诊降回 */
+  private readonly doomEscalatedTasks = new Set<string>()
   private cancellationDrains = new Map<string, number>()
   private meetingGuard: ((task: Task) => boolean) | null = null
   private activeRunsMap = new Map<string, Promise<unknown>>()
@@ -192,7 +209,25 @@ export class TaskRunner {
       pushEvent: (taskId, event) => this.pushEvent(taskId, event),
       askPermission: (taskId, request) => this.askPermission(taskId, request),
       isCurrentRun: (claim) => this.kernel.isCurrentRun(claim),
-      stopSession: (taskId) => this.kernel.sessionOf(taskId)?.stop()
+      stopSession: (taskId) => this.kernel.sessionOf(taskId)?.stop(),
+      onDoomApproved: (taskId, claim) => {
+        const current = this.store.get(taskId)
+        if (!current) return
+        const me = (this.getTeam?.() ?? []).find((a) => a.id === current.agentId)
+        const backend = this.backends.get(current.backend)
+        if (me?.thinking !== 'auto' || backend?.thinkingSwitchMode !== 'per-turn') return
+        const next = nextEscalatedThinkingLevel(current.thinking)
+        if (!next) return
+        const reason = 'doom-loop 人工放行后自动升档'
+        if (!this.store.updateIf(taskId, runCondition(claim), {
+          thinking: next,
+          thinkingSource: 'escalation',
+          thinkingReason: reason
+        })) return
+        this.doomEscalatedTasks.add(taskId)
+        this.note(taskId, `思考强度自动升档：${THINKING_LABEL[next]}（${reason}，下回合生效）`, runCondition(claim))
+        this.pushTask(taskId)
+      }
     })
     // 回合事件工厂（批次 3b）先于内核装配：端口回调引用 runner 编排面（惰性调用，
     // 构造期不触发）；store/kernel/pump 的访问全部经窄端口注入（§6.3 3b 端口清单）
@@ -535,6 +570,7 @@ export class TaskRunner {
     // 台账只服务 terminateTask 的平台会话收尾；任务移除后无人能再触发终止，随行清除防累积
     // （台账已迁 execution/termination.ts，批次 5）
     this.termination.forgetTask(taskId)
+    this.doomEscalatedTasks.delete(taskId)
     if (session) {
       await awaitCleanup(() => this.kernel.trackSessionRelease(session, workdir, async () => {
         await awaitCleanup(() => session.stop())
@@ -623,6 +659,11 @@ export class TaskRunner {
   /** API 预设提供者（agent 引用的连接覆盖） */
   attachPresets(getPresets: () => PresetLike[]) {
     this.getPresets = getPresets
+  }
+
+  /** 后台静默分诊器（RouteThinkingNode 与自动追问复用） */
+  attachTriage(assessor: TriageAssessor) {
+    this.triageAssessor = assessor
   }
 
   private onContinue: ContinueHandler | null = null
@@ -1008,6 +1049,7 @@ export class TaskRunner {
       if (full) this.pushEvent(taskId, full)
     }
     if (cont.loose) note('阶段接力标记不在回复末尾（其后仍有内容），已按显式 start="auto" 兜底解析')
+    if (cont.invalidThinking) note(`⚠ 阶段接力 thinking 属性无效（${cont.invalidThinking}），仅接受 off/low/medium/high/max，已忽略`)
     const existing = findHandoffSuccessor(this.store.list(), task)
     if (!existing && repeatsHandoffPhase(task, cont.brief)) {
       note('阶段接力已阻止：简报仍指向当前阶段，请在当前会话继续处理或等待用户回复')
@@ -1026,7 +1068,13 @@ export class TaskRunner {
     }
     let ok = false
     try {
-      ok = !!this.onContinue?.({ sourceTaskId: taskId, issueId, brief: cont.brief, start: cont.start })
+      ok = !!this.onContinue?.({
+        sourceTaskId: taskId,
+        issueId,
+        brief: cont.brief,
+        start: cont.start,
+        ...(cont.thinking ? { thinking: cont.thinking, thinkingSource: 'leader' as const, thinkingReason: '阶段接力指定思考强度' } : {})
+      })
     } catch (e) {
       note(`⚠ 阶段接力创建失败：${e instanceof Error ? e.message : String(e)}`)
       return stripped
@@ -1055,7 +1103,8 @@ export class TaskRunner {
     let budgetTimer: NodeJS.Timeout | undefined
     try {
       const r = await Promise.race([
-        this.sendTurn(taskId, session, RETITLE_PROMPT, claim),
+        // 隐藏重命名回合强制最低思考档，避免结果已产出却白烧高思考起标题
+        this.sendTurn(taskId, session, RETITLE_PROMPT, claim, { thinking: 'off' }),
         new Promise<BackendTurnResult>((resolve) => {
           budgetTimer = setTimeout(() => resolve({ ok: false, response: '', error: RETITLE_BUDGET_EXCEEDED }), RETITLE_TURN_BUDGET_MS)
         })
@@ -1099,7 +1148,7 @@ export class TaskRunner {
    * 每个回合在这里拿到**自己的**不可变身份（新 generation + 新 stamp）；不会去改写
    * 任何既有回合的身份对象，旧回调因此不可能被"续命"成新回合的回调。
    */
-  private async startIsolatedTurn(taskId: string, content: string, claim: RunClaim): Promise<BackendTurnResult> {
+  private async startIsolatedTurn(taskId: string, content: string, claim: RunClaim, turnOpts?: { thinking?: ThinkingLevel }): Promise<BackendTurnResult> {
     const task = this.store.get(taskId)
     const backend = task && this.backends.get(task.backend)
     if (!task || !backend || !this.isCurrentRun(claim)) return { ok: false, response: '', error: 'Task execution is no longer active' }
@@ -1128,6 +1177,7 @@ export class TaskRunner {
     })
     const sentinel = this.idleSentinel(taskId)
     const me = (this.getTeam?.() ?? []).find((agent) => agent.id === task.agentId)
+    const effectiveThinking = turnOpts?.thinking ?? resolveStaticThinking(task, me)
     // 实际运行走执行流节点（Start→Running）：启动竞态与回合执行各自成节点，节点在途账
     // 接管线账本（`${taskId}:node:*`），流级收尾端口承接原 finally 的全部语义。
     type IsolatedState = FlowState & { turnResult?: BackendTurnResult }
@@ -1140,7 +1190,7 @@ export class TaskRunner {
             workdir: task.workdir,
             mode: this.opts().mode,
             model: me?.model,
-            thinking: me?.thinking,
+            thinking: effectiveThinking,
             connection: this.resolveConnection(task.agentId),
             resumeSessionId,
             turn: turn.stamp,
@@ -1180,7 +1230,7 @@ export class TaskRunner {
     return { ok: false, response: '', error: flow.error ?? 'Task execution is no longer active' }
   }
 
-  async sendTurn(taskId: string, session: BackendSession, content: string, expected?: string | RunClaim): Promise<BackendTurnResult> {
+  async sendTurn(taskId: string, session: BackendSession, content: string, expected?: string | RunClaim, turnOpts?: { thinking?: ThinkingLevel }): Promise<BackendTurnResult> {
     const claim = typeof expected === 'object' && expected !== null ? expected : this.claimForRun(taskId, expected)
     const installed = this.kernel.sessionOf(taskId)
     if (!claim || !this.store.matches(taskId, runCondition(claim)) || !installed) {
@@ -1195,8 +1245,13 @@ export class TaskRunner {
     if (life.pendingResume) {
       return { ok: false, response: '', error: 'Task already has an active turn' }
     }
+    let effectiveTurnOpts = turnOpts
+    if (!effectiveTurnOpts?.thinking && this.doomEscalatedTasks.delete(taskId)) {
+      const escalated = this.store.get(taskId)?.thinking
+      if (escalated && isThinkingLevel(escalated)) effectiveTurnOpts = { ...effectiveTurnOpts, thinking: escalated }
+    }
     if (!this.sessionMayOpenNewTurn(session)) {
-      return this.startIsolatedTurn(taskId, content, claim)
+      return this.startIsolatedTurn(taskId, content, claim, effectiveTurnOpts)
     }
     // 换代先作废在飞回合（含"没有终态就被放弃"的判定），再开启已证明可复用的连接。
     const gen = this.bumpTurnGen(taskId)
@@ -1212,7 +1267,7 @@ export class TaskRunner {
     try {
       // send 不阻塞裁决：立即失败（连接已死等）要马上浮出，不能干等空转上限；
       // 看门狗触发的 stop 会让 send 以 reject 收尾，统一按超时语义上报
-      void session.send(content, turn.stamp).catch((e) => {
+      void session.send(content, turn.stamp, effectiveTurnOpts).catch((e) => {
         // 只有这一回合自己的失败才作废它；迟到的 reject 不得连累后继回合
         router.abandonTurn(turn.stamp.id)
         settleTurn(idleFired ? turnTimeoutError(this.turnBudgetMs(taskId)) : { ok: false, response: '', error: e instanceof Error ? e.message : String(e) })
@@ -1277,7 +1332,8 @@ export class TaskRunner {
     try {
       // send 不阻塞裁决：立即失败先 settle（失败原因直达调用方）再撤销本回合记录；
       // 悬挂/慢速 resolve 不得拖住预算竞速，迟到的 reject 只作废仍在表中的自己
-      void session.send(content, stamp).catch((e) => {
+      // 总结轮属于压缩辅助回合，强制 low 档提速省费
+      void session.send(content, stamp, { thinking: 'low' }).catch((e) => {
         settle({ ok: false, response: '', error: e instanceof Error ? e.message : String(e) })
         router.abandonTurn(stamp.id)
       })
@@ -1382,17 +1438,81 @@ export class TaskRunner {
     // 节点在途账接管线账本（`${taskId}:node:*`）；原 try/catch/finally 语义逐条映射——
     // 良性早退（绑定换手/回合失效）用协作中断表达，真错误走流错误路径（关会话+落败
     // +自动重试），外层 finally 映射到流级 onFlowEnd 端口。
-    type RunState = FlowState & { session?: BackendSession; result?: BackendTurnResult; benign?: boolean }
+    type RunState = FlowState & { session?: BackendSession; result?: BackendTurnResult; benign?: boolean; resolvedThinking?: ThinkingLevel }
     const state: RunState = {}
+    const needsTriage = !(task.thinking && isThinkingLevel(task.thinking))
+      && !task.skipTriage
+      && !office
+      && me?.thinking === 'auto'
+      && !!backend.thinkingSwitchMode
+      && backend.thinkingSwitchMode !== 'none'
+      && !!this.triageAssessor
+    if (!needsTriage) {
+      state.resolvedThinking = resolveStaticThinking(task, me)
+      if (task.thinking && isThinkingLevel(task.thinking) && task.thinkingSource && task.thinkingSource !== 'agent') {
+        this.note(taskId, `思考强度：${THINKING_LABEL[task.thinking]}${task.thinkingReason ? `（${task.thinkingReason}）` : ''}`, runCondition(claim))
+      }
+    }
     const ports: ExecutionPorts<RunState> = {
+      routeThinking: async (ctx) => {
+        const latest = this.store.get(taskId) ?? task
+        const kind: TriageAssessInput['kind'] = latest.parentTaskId
+          ? 'delegate'
+          : latest.goalId
+            ? 'goal'
+            : latest.continuesFrom
+              ? 'handoff'
+              : 'task'
+        let res: TriageAssessResult
+        try {
+          res = await this.triageAssessor!({
+            prompt: latest.prompt,
+            handoff: latest.handoff,
+            agentId: latest.agentId,
+            workdir: latest.workdir,
+            kind
+          })
+        } catch (err) {
+          res = { ok: false, error: err instanceof Error ? err.message : String(err), fallback: 'medium' }
+        }
+        this.touchWatchdog(taskId)
+        if (!this.isCurrentRun(claim)) {
+          state.benign = true
+          ctx.interrupted = { reason: '分诊返回时执行已换手' }
+          return
+        }
+        if (res.ok) {
+          const { level, reason } = res.decision
+          state.resolvedThinking = level
+          this.store.updateIf(taskId, runCondition(claim), {
+            thinking: level,
+            thinkingSource: 'triage',
+            thinkingReason: reason
+          })
+          this.note(taskId, `思考强度：${THINKING_LABEL[level]}（分诊师：${reason}）`, runCondition(claim))
+          this.pushTask(taskId)
+        } else {
+          const level = res.fallback
+          const reason = res.error.slice(0, 120)
+          state.resolvedThinking = level
+          this.store.updateIf(taskId, runCondition(claim), {
+            thinking: level,
+            thinkingSource: 'fallback',
+            thinkingReason: reason
+          })
+          this.note(taskId, `思考强度：${THINKING_LABEL[level]}（分诊降级：${reason}）`, runCondition(claim))
+          this.pushTask(taskId)
+        }
+      },
       start: async (ctx) => {
+        const effectiveThinking = state.resolvedThinking ?? resolveStaticThinking(this.store.get(taskId) ?? task, me)
         const session = await this.executor.start(
           () => backend.start({
             prompt,
             workdir: task.workdir,
             mode: this.opts().mode,
             model: me?.model,
-            thinking: me?.thinking,
+            thinking: effectiveThinking,
             connection: this.resolveConnection(task.agentId),
             // 自动重试第 1 次带会话续跑（maybeAutoRetry 故意保留 sessionId）：从失败处接着干，
             // 不再整任务从头重来；手动"重新运行"会清 sessionId，恒新会话不受影响
@@ -1469,7 +1589,10 @@ export class TaskRunner {
         }
       }
     }
-    const flow = await this.flowEngine.run<RunState>(taskId, [new StartNode(ports), new RunningNode(ports), new FinalizeNode(ports)], state, {
+    const flowNodes = needsTriage
+      ? [new RouteThinkingNode(ports), new StartNode(ports), new RunningNode(ports), new FinalizeNode(ports)]
+      : [new StartNode(ports), new RunningNode(ports), new FinalizeNode(ports)]
+    const flow = await this.flowEngine.run<RunState>(taskId, flowNodes, state, {
       onFlowEnd: () => {
         sentinel.cancel()
         this.store.flushEvents(taskId)
@@ -1520,13 +1643,24 @@ export class TaskRunner {
       this.kernel.clearRetry(taskId)
       const current = this.store.get(taskId)
       if (!current || !this.meetingGuardAllows(current)) return
+      const retryAgent = (this.getTeam?.() ?? []).find((a) => a.id === current.agentId)
+      const retryBackend = this.backends.get(current.backend)
+      const escalated = fresh && retryAgent?.thinking === 'auto' && retryBackend?.thinkingSwitchMode && retryBackend.thinkingSwitchMode !== 'none'
+        ? nextEscalatedThinkingLevel(current.thinking)
+        : null
       const requeued = this.store.updateIf(taskId, failedRun, {
         status: 'queued',
         endedAt: undefined,
         runId: undefined,
         executionOwner: undefined,
         attempt: next,
-        ...(fresh ? { sessionId: undefined } : {})
+        ...(fresh ? { sessionId: undefined } : {}),
+        ...(escalated ? {
+          thinking: escalated,
+          thinkingSource: 'escalation' as const,
+          thinkingReason: '瞬态失败二次重试自动升档',
+          skipTriage: undefined
+        } : {})
       })
       // 退避等待期间用户可能已取消/手动处理：不再是原失败运行就放弃重试
       if (!requeued) return
@@ -1534,7 +1668,7 @@ export class TaskRunner {
       const full = this.store.appendEvent(taskId, {
         ts: Date.now(),
         kind: 'status',
-        text: `⟳ 自动重试 ${next}/2（${failure.title}）${fresh ? '· 新会话' : '· 续会话'}${goalBudget}`
+        text: `⟳ 自动重试 ${next}/2（${failure.title}）${fresh ? '· 新会话' : '· 续会话'}${escalated ? ` · 思考升档→${THINKING_LABEL[escalated]}` : ''}${goalBudget}`
       }, { status: 'queued', runId: undefined, executionOwner: undefined })
       if (full) this.pushEvent(taskId, full)
       this.pushTask(taskId)
@@ -1571,7 +1705,7 @@ export class TaskRunner {
 
   /** 续聊：在已完成任务的会话上追加消息，任务回到 running。
    *  opts.relay 仅由「⇥ 接力下一阶段」按钮传入（显式人工入口）；自由追问不再按关键词猜测接力意图。 */
-  async followUp(taskId: string, content: string, opts?: { relay?: boolean; collectFinal?: boolean; consultDepth?: number; wait?: boolean; meetingTurn?: boolean; onExecution?: (identity: { taskId: string; runId: string; turnId: string }) => void }): Promise<{ ok: boolean; error?: string; finalText?: string }> {
+  async followUp(taskId: string, content: string, opts?: { relay?: boolean; collectFinal?: boolean; consultDepth?: number; wait?: boolean; meetingTurn?: boolean; thinking?: ThinkingLevel; thinkingSource?: ThinkingSource; thinkingReason?: string; skipTriage?: boolean; onExecution?: (identity: { taskId: string; runId: string; turnId: string }) => void }): Promise<{ ok: boolean; error?: string; finalText?: string }> {
     const task = this.store.get(taskId)
     if (!task) return { ok: false, error: '任务不存在' }
     const message = content.trim()
@@ -1634,6 +1768,12 @@ export class TaskRunner {
         // phase. Advance the phase index so maxRuns/runCount account for
         // continuation turns instead of remaining pinned at phase zero.
         ...(task.goalId ? { phaseIndex: (task.phaseIndex ?? 0) + 1 } : {}),
+        ...(opts?.thinking ? {
+          thinking: opts.thinking,
+          thinkingSource: opts.thinkingSource ?? 'user',
+          thinkingReason: opts.thinkingReason?.trim().slice(0, 120) || undefined,
+          skipTriage: undefined
+        } : {}),
         endedAt: undefined,
         error: undefined,
         failure: undefined
@@ -1682,6 +1822,51 @@ export class TaskRunner {
     // 调用方）仍等整轮结束以拿 finalText。
     const runTurn = async (): Promise<{ ok: boolean; error?: string; finalText?: string }> => {
       if (!this.isCurrentRun(claim) || !this.meetingGuardAllows(task)) return { ok: false, error: '会议执行已终止' }
+      // 追问思考强度解析：显式传入 > doom-loop 待消费升档 > 后台静默分诊（auto + per-turn） > 沿用原档
+      let resolvedFollowUpThinking: ThinkingLevel | undefined = opts?.thinking
+      if (resolvedFollowUpThinking) {
+        this.doomEscalatedTasks.delete(taskId)
+        this.note(taskId, `思考强度：${THINKING_LABEL[resolvedFollowUpThinking]}${opts?.thinkingReason ? `（${opts.thinkingReason}）` : ''}`, runCondition(claim))
+      } else if (this.doomEscalatedTasks.delete(taskId)) {
+        resolvedFollowUpThinking = resolveStaticThinking(this.store.get(taskId) ?? task, me)
+      } else if (!opts?.skipTriage && !opts?.meetingTurn && !isOfficeTask(task) && me?.thinking === 'auto' && backend.thinkingSwitchMode === 'per-turn' && this.triageAssessor) {
+        const latest = this.store.get(taskId) ?? task
+        let res: TriageAssessResult
+        try {
+          res = await this.triageAssessor({
+            prompt: message,
+            agentId: latest.agentId,
+            workdir: latest.workdir,
+            kind: 'followup',
+            currentThinking: latest.thinking
+          })
+        } catch (err) {
+          res = { ok: false, error: err instanceof Error ? err.message : String(err), fallback: 'medium' }
+        }
+        if (!this.isCurrentRun(claim)) return { ok: false, error: '回合已失效' }
+        if (res.ok) {
+          resolvedFollowUpThinking = res.decision.level
+          this.store.updateIf(taskId, runCondition(claim), {
+            thinking: resolvedFollowUpThinking,
+            thinkingSource: 'triage',
+            thinkingReason: res.decision.reason
+          })
+          this.note(taskId, `思考强度：${THINKING_LABEL[resolvedFollowUpThinking]}（分诊师：${res.decision.reason}）`, runCondition(claim))
+          this.pushTask(taskId)
+        } else {
+          resolvedFollowUpThinking = res.fallback
+          const reason = res.error.slice(0, 120)
+          this.store.updateIf(taskId, runCondition(claim), {
+            thinking: resolvedFollowUpThinking,
+            thinkingSource: 'fallback',
+            thinkingReason: reason
+          })
+          this.note(taskId, `思考强度：${THINKING_LABEL[resolvedFollowUpThinking]}（分诊降级：${reason}）`, runCondition(claim))
+          this.pushTask(taskId)
+        }
+      } else {
+        resolvedFollowUpThinking = resolveStaticThinking(this.store.get(taskId) ?? task, me)
+      }
       // 1) 内存会话健在：直接续聊
       let liveSession = this.kernel.sessionOf(taskId)
       // M2 会话绑定工作目录：内存会话跑在安装时的 cwd 上。集成后续链换基线
@@ -1704,7 +1889,7 @@ export class TaskRunner {
       if (liveSession) {
         try {
           if (!this.isCurrentRun(claim) || !this.meetingGuardAllows(task)) return { ok: false, error: '会议执行已终止' }
-          const r = await this.sendTurn(taskId, liveSession, turnContent, claim)
+          const r = await this.sendTurn(taskId, liveSession, turnContent, claim, resolvedFollowUpThinking ? { thinking: resolvedFollowUpThinking } : undefined)
           if (!this.isCurrentRun(claim)) return { ok: false, error: '回合已失效' }
           if (!r.ok) throw new Error(r.error || '续聊回合失败')
           acknowledgeRecovery()
@@ -1780,7 +1965,7 @@ export class TaskRunner {
               workdir: task.workdir,
               mode: this.opts().mode,
               model: me?.model,
-              thinking: me?.thinking,
+              thinking: resolvedFollowUpThinking,
               connection: this.resolveConnection(task.agentId),
               resumeSessionId: task.sessionId,
               turn: turnRecord.stamp,
@@ -1985,6 +2170,7 @@ export class TaskRunner {
     this.delegateLedger.clearSessionState()
     this.permissionBroker.shutdown()
     this.doomWindows.clear()
+    this.doomEscalatedTasks.clear()
     await this.executor.shutdown()
   }
 

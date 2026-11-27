@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { DEFAULT_SETTINGS, type AppSettings, type Issue, type RunTrigger, type Task } from '../shared/types'
+import { DEFAULT_SETTINGS, type AgentThinking, type AppSettings, type Issue, type RunTrigger, type Task } from '../shared/types'
 import { TaskStore } from './store'
 import { IssueStore } from './issue-store'
 import { GoalStore } from './goal-store'
@@ -11,6 +11,7 @@ import { TaskRunner } from './runner'
 import type { AgentBackend } from './backends/types'
 import { prepareManualTaskStart } from './handoff'
 import { relayIssueCommentOrEvent, type IssueRelayChannels } from './issue-relay'
+import { createAgyBackend } from './backends/agy'
 import { createClaudeBackend } from './backends/claude'
 import { createCodexBackend } from './backends/codex'
 import { createDshBackend } from './backends/dsh'
@@ -18,7 +19,7 @@ import { resolveDshCredentialsBridge } from './backends/dsh-credentials'
 import { createOpencodeBackend } from './backends/opencode'
 import { createZcodeBackend } from './backends/zcode'
 
-type SidecarAgent = { id: string; name: string; backend: string; role?: string; systemPrompt?: string; subordinates?: string[]; model?: string; presetId?: string; color?: string }
+type SidecarAgent = { id: string; name: string; backend: string; role?: string; systemPrompt?: string; subordinates?: string[]; model?: string; presetId?: string; thinking?: AgentThinking; color?: string }
 
 function readJson(file: string): unknown {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')) } catch { return null }
@@ -70,6 +71,7 @@ export class SidecarRuntime {
     // write/fsync/rename failure in the projection file.
     this.issueStore.syncEventually(this.store.list())
     const backends = new Map<string, AgentBackend>([
+      ['agy', createAgyBackend()],
       ['claude', createClaudeBackend()],
       ['codex', createCodexBackend()],
       ['dsh', createDshBackend(
@@ -103,17 +105,18 @@ export class SidecarRuntime {
     this.runner.attachTeam(() => this.agents)
     this.runner.attachTaskService(this.taskService)
     this.goalController = new GoalController(this.goalStore = new GoalStore(userDataDir), {
-      createTask: (input) => this.taskService.createTask({ title: input.title, prompt: input.prompt, workdir: input.workdir, backend: input.backend, agentId: input.agentId, issueId: input.issueId, goalId: input.goalId, phaseIndex: input.phaseIndex, dedupeKey: input.dedupeKey, startNow: input.startNow }, input.trigger),
+      createTask: (input) => this.taskService.createTask({ title: input.title, prompt: input.prompt, workdir: input.workdir, backend: input.backend, agentId: input.agentId, ...(input.thinking ? { thinking: input.thinking } : {}), ...(input.thinkingSource ? { thinkingSource: input.thinkingSource } : {}), ...(input.thinkingReason ? { thinkingReason: input.thinkingReason } : {}), issueId: input.issueId, goalId: input.goalId, phaseIndex: input.phaseIndex, dedupeKey: input.dedupeKey, startNow: input.startNow }, input.trigger),
       enqueueTask: (task) => this.runner.enqueue(task),
       startTask: (task) => prepareManualTaskStart(this.store, task.id) ?? this.store.get(task.id) ?? task,
       cancelTask: (taskId) => this.runner.cancel(taskId),
       listTasks: () => this.store.list(),
-      continueTask: (taskId, content) => this.runner.followUp(taskId, content),
+      continueTask: (taskId, content, opts) => this.runner.followUp(taskId, content, opts),
+      isAutoThinking: (agentId) => !!agentId && this.agents.find((agent) => agent.id === agentId)?.thinking === 'auto',
       maxRetryAttempts: () => this.settings.maxRetryAttempts
     })
-    this.runner.attachContinue(({ sourceTaskId, issueId, brief, start }) => {
+    this.runner.attachContinue(({ sourceTaskId, issueId, brief, start, thinking, thinkingSource, thinkingReason }) => {
       const source = this.store.get(sourceTaskId)
-      const resolved = this.taskService.resolveHandoffTask({ sourceTaskId, issueId, brief, start })
+      const resolved = this.taskService.resolveHandoffTask({ sourceTaskId, issueId, brief, start, thinking, thinkingSource, thinkingReason })
       if (!resolved) return null
       const { task, created } = resolved
       if (!created) {

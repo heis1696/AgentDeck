@@ -2,7 +2,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
-import { isTaskEventDurable, isTaskStatus, type Task, type TaskEvent, type IntegrationInfo, type ExecutionOwner, type TaskStatus, type TaskGitOperation } from '../shared/types'
+import { isTaskEventDurable, isTaskStatus, isThinkingLevel, isThinkingSource, type Task, type TaskEvent, type IntegrationInfo, type ExecutionOwner, type TaskStatus, type TaskGitOperation } from '../shared/types'
 import { executionRecordFromTask } from '../shared/taskflow'
 import { worktreePathKey } from './git'
 import { EventLog } from './event-log'
@@ -28,7 +28,7 @@ type LegacyTask = Partial<Task> & {
 
 /** Current on-disk Task shape. Unknown keys must not become implicit schema. */
 const TASK_INDEX_FIELDS = [
-  'id', 'title', 'prompt', 'workdir', 'backend', 'agentId', 'trigger', 'issueId',
+  'id', 'title', 'prompt', 'workdir', 'backend', 'agentId', 'thinking', 'thinkingSource', 'thinkingReason', 'skipTriage', 'trigger', 'issueId',
   'suppressIssue', 'runId', 'executionOwner', 'gitOperation', 'goalId', 'phaseIndex', 'parentTaskId', 'workerIndex', 'integration', 'status',
   'createdAt', 'startedAt', 'endedAt', 'result', 'error', 'failure', 'attempt',
   'roundsUsed', 'handoff', 'continuesFrom', 'parked', 'dispatchHold', 'manualStartConfirmedAt', 'backgroundRunning', 'titleAuto', 'sessionId',
@@ -96,6 +96,11 @@ export function migrateTaskRecord(raw: unknown, sourceVersion = 0, now = Date.no
   if (typeof out.eventCount !== 'number' || !Number.isFinite(out.eventCount) || out.eventCount < 0) out.eventCount = 0
   if (typeof out.workdir !== 'string') out.workdir = ''
   if (typeof out.backend !== 'string' || !out.backend) out.backend = 'zcode'
+  if (!isThinkingLevel(out.thinking)) delete out.thinking
+  if (!isThinkingSource(out.thinkingSource)) delete out.thinkingSource
+  if (typeof out.thinkingReason === 'string' && out.thinkingReason.trim()) out.thinkingReason = out.thinkingReason.trim().slice(0, 120)
+  else delete out.thinkingReason
+  if (out.skipTriage !== true) delete out.skipTriage
   if (!isTaskStatus(out.status)) out.status = 'queued'
   if (typeof out.manualStartConfirmedAt !== 'number' || !Number.isFinite(out.manualStartConfirmedAt) || out.manualStartConfirmedAt <= 0) delete out.manualStartConfirmedAt
   if (typeof out.delegateSourceRunId !== 'string' || !out.delegateSourceRunId) delete out.delegateSourceRunId
@@ -196,7 +201,7 @@ export function migrateTaskIndex(raw: unknown, now = Date.now(), options: { reco
 }
 
 export type TaskCreateRecord = Pick<Task, 'title' | 'prompt' | 'workdir' | 'backend'> & Partial<Pick<Task,
-  'parentTaskId' | 'workerIndex' | 'integration' | 'agentId' | 'handoff' | 'continuesFrom' | 'parked' |
+  'parentTaskId' | 'workerIndex' | 'integration' | 'agentId' | 'thinking' | 'thinkingSource' | 'thinkingReason' | 'skipTriage' | 'handoff' | 'continuesFrom' | 'parked' |
   'backgroundRunning' | 'suppressIssue' | 'trigger' | 'issueId' | 'goalId' | 'phaseIndex' | 'titleAuto' |
   'unavailableReason' | 'worktree' | 'workVersion' | 'dedupeKey' | 'delegateSourceRunId' | 'dispatchHold' | 'officeAgentId' |
   'meetingId' | 'meetingTaskRole'>>
@@ -512,7 +517,7 @@ export class TaskStore {
             title: input.title, prompt: input.prompt, workdir: input.workdir, backend: input.backend,
             status: 'queued', createdAt: Date.now(), eventCount: 0
           }
-          const fields = ['parentTaskId', 'workerIndex', 'integration', 'agentId', 'handoff', 'continuesFrom', 'parked',
+          const fields = ['parentTaskId', 'workerIndex', 'integration', 'agentId', 'thinking', 'thinkingSource', 'thinkingReason', 'skipTriage', 'handoff', 'continuesFrom', 'parked',
             'backgroundRunning', 'suppressIssue', 'trigger', 'issueId', 'goalId', 'phaseIndex', 'titleAuto',
             'unavailableReason', 'worktree', 'workVersion', 'dedupeKey', 'delegateSourceRunId', 'dispatchHold',
             'officeAgentId', 'meetingId', 'meetingTaskRole'] as const

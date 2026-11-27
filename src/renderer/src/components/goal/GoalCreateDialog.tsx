@@ -4,6 +4,7 @@ import { ui } from '../../ui/interaction-center'
 import { useInteractionLayer } from '../../hooks/useInteractionLayer'
 import { Menu } from '../../ui/Menu'
 import type { AgentInfo } from '../../../../shared/contracts'
+import { isSystemAgent } from '../../../../shared/triage'
 
 /** 创建对话框的预填信息：来自 Issue 绑定任务的 title/workdir/agentId/backend */
 export interface GoalPrefill {
@@ -75,7 +76,7 @@ export function GoalCreateDialog({ issueId, prefill, onClose }: { issueId: strin
       <label className="field">
         <span>执行 Agent</span>
         <Menu
-          items={[{ value: prefill.agentId ?? '', label: prefill.agentId ? '沿用当前 Issue 的 Agent' : '不指定（按平台默认执行）' }, ...agents.filter((a) => a.id !== prefill.agentId).map((a) => ({ value: a.id, label: a.name }))]}
+          items={[{ value: prefill.agentId ?? '', label: prefill.agentId ? '沿用当前 Issue 的 Agent' : '不指定（按平台默认执行）' }, ...agents.filter((a) => !isSystemAgent(a) && a.id !== prefill.agentId).map((a) => ({ value: a.id, label: a.name }))]}
           value={draft.agentId}
           onChange={(v) => setDraft({ ...draft, agentId: v })}
           trigger={(cur, open) => <button className="btn menu-trigger" type="button">{cur?.label ?? '不指定'} <span className="menu-caret">{open ? '▴' : '▾'}</span></button>}

@@ -1,12 +1,15 @@
-import { ipcMain, dialog } from 'electron'
+import { ipcMain, dialog, app } from 'electron'
 import fs from 'node:fs'
 import { listZcodeModels } from '../backends/zcode-config'
+import { listAgyModels } from '../backends/agy'
 import { newAgentId, saveAgents } from '../agents'
 import { draftAgent, improveAgent, evaluateDraft } from '../agent-forge'
 import { parseAgentMarkdown, serializeAgentMarkdown } from '../agent-exchange'
-import { isForgeAgent, type AgentDraft } from '../../shared/forge'
+import type { AgentDraft } from '../../shared/forge'
+import { isSystemAgent } from '../../shared/triage'
+import { TriageBroker } from '../thinking-triage'
 import { fetchPresetModels, newPresetId, savePresets } from '../presets'
-import { parseAgents, parseAutomationCreate, parseAutomationUpdate, parseBackendId, parseId, parsePresets } from '../ipc-validation'
+import { parseAgents, parseAutomationCreate, parseAutomationUpdate, parseBackendId, parseId, parsePresets, parseTriageAssess } from '../ipc-validation'
 import type { IpcContext } from './context'
 
 export function registerCatalogIpc(ctx: IpcContext) {
@@ -25,13 +28,17 @@ export function registerCatalogIpc(ctx: IpcContext) {
     return ctx.agents
   })
   ipcMain.handle('agents:new-id', () => newAgentId())
-  ipcMain.handle('agents:models', (_e, backendId: unknown) => {
+  ipcMain.handle('agents:models', async (_e, backendId: unknown) => {
     const id = parseBackendId(backendId)
     if (id === 'zcode') {
       const catalog = listZcodeModels(ctx.settings.zcodePath || undefined)
       if (catalog.models.length) return { backend: id, source: 'catalog', default: catalog.defaultModel, models: catalog.models }
     }
-    const common: Record<string, string[]> = { claude: ['sonnet', 'opus', 'haiku'], codex: ['gpt-5.5', 'gpt-5.2-codex'], opencode: [], dsh: [] }
+    if (id === 'agy') {
+      const catalog = await listAgyModels()
+      if (catalog.models.length) return { backend: id, source: 'catalog', models: catalog.models }
+    }
+    const common: Record<string, string[]> = { claude: ['sonnet', 'opus', 'haiku'], codex: ['gpt-5.5', 'gpt-5.2-codex'], opencode: [], dsh: [], agy: [] }
     return { backend: id, source: 'freeform', models: common[id] ?? [] }
   })
   // 锻造师·生成：一句描述 → 草稿或澄清问题（answers 提供即强制出稿；失败走 {ok:false,error}，不抛异常）
@@ -84,12 +91,12 @@ export function registerCatalogIpc(ctx: IpcContext) {
       return { ok: false, error: `读取失败：${err instanceof Error ? err.message : String(err)}` }
     }
   })
-  // subagent Markdown 导出：另存对话框 → 写盘（锻造师无人设，不参与导出）
+  // subagent Markdown 导出：另存对话框 → 写盘（系统内置 Agent 无人设，不参与导出）
   ipcMain.handle('agents:export-md', async (_e, agentId: unknown) => {
     const id = typeof agentId === 'string' ? agentId.trim() : ''
     const agent = ctx.agents.find((a) => a.id === id)
     if (!agent) return { ok: false, error: '目标 Agent 不存在' }
-    if (isForgeAgent(agent)) return { ok: false, error: '锻造师无人设，无可导出' }
+    if (isSystemAgent(agent)) return { ok: false, error: '系统内置 Agent（锻造师/分诊师）无人设，无可导出' }
     const safeName = agent.name.replace(/[\\/:*?"<>|]/g, '_')
     const picked = await dialog.showSaveDialog({ defaultPath: `${safeName}.md`, filters: [{ name: 'Markdown', extensions: ['md'] }] })
     if (picked.canceled || !picked.filePath) return { ok: false, error: '已取消导出' }
@@ -100,6 +107,18 @@ export function registerCatalogIpc(ctx: IpcContext) {
       return { ok: false, error: `写入失败：${err instanceof Error ? err.message : String(err)}` }
     }
   })
+
+  // 动态思考强度分诊：前端两道 2s 确认条在第 1 道到期/点击「立即评估」后显式触发，绝不在确认窗内偷跑
+  const triageBroker = ctx.triageBroker ?? new TriageBroker()
+  ipcMain.handle('triage:assess', (_e, input: unknown) => triageBroker.assess({
+    agents: ctx.agents,
+    presets: ctx.presets,
+    backends: ctx.backends,
+    mode: ctx.settings.mode,
+    sharedDir: ctx.sharedDir,
+    homedir: app.getPath('home')
+  }, parseTriageAssess(input)))
+  ipcMain.handle('triage:cancel', (_e, requestId: unknown) => ({ ok: triageBroker.cancel(parseId(requestId, 'requestId')) }))
 
   ipcMain.handle('presets:list', () => ctx.presets)
   ipcMain.handle('presets:save', (_e, list: unknown) => { ctx.presets = savePresets(parsePresets(list)); return ctx.presets })

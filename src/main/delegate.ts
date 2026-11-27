@@ -4,7 +4,7 @@
 // 提示词文案集中在 src/main/prompts/delegation.ts（本文件只保留解析器与循环逻辑）。
 import path from 'node:path'
 import fs from 'node:fs'
-import type { Task, TaskEvent, ThinkingLevel } from '../shared/types'
+import { isThinkingLevel, type AgentThinking, type Task, type TaskEvent, type ThinkingLevel } from '../shared/types'
 import type { TaskExpectation, TaskStore } from './store'
 import type { TaskRunner } from './runner'
 import type { BackendSession, BackendTurnResult } from './backends/types'
@@ -80,7 +80,21 @@ export interface DelegateCall {
    *  缺省 = 全量检出，行为与无此属性时完全一致；值合法性（通配符/空值）由 parseSparseAttr
    *  统一判定，建树侧据此生效或回落全量（docs/WORKTREE-BIG-REPO-PERF.md §6.1/§7.3） */
   sparse?: string
+  /** thinking 属性（可选）：领队为本子单显式指派的思考强度，无条件覆写队员自身配置 */
+  thinking?: ThinkingLevel
+  /** 非法 thinking 属性原文（仅留痕注记，绝不拒单） */
+  invalidThinking?: string
 }
+
+/** thinking 属性解析：大小写不敏感匹配 5 档；空/缺省视为未声明；非法值返回 invalid 原文（容错降级不拒单） */
+export function parseThinkingAttr(value: string | undefined): { level?: ThinkingLevel; invalid?: string } {
+  if (value === undefined) return {}
+  const trimmed = value.trim().toLowerCase()
+  if (!trimmed) return {}
+  if (isThinkingLevel(trimmed)) return { level: trimmed }
+  return { invalid: value.trim().slice(0, 40) }
+}
+
 
 /** sparse 属性解析结果（§7.3）：
  *  - undeclared：缺省 / 空值 / 全空白 → 视为未声明，全量检出，行为与今天完全一致
@@ -167,7 +181,10 @@ function matchDelegates(text: string): DelegateMatch[] {
     const to = tagAttr(m[1], 'to')
     const reason = tagAttr(m[1], 'reason')
     const sparse = tagAttr(m[1], 'sparse')
-    if (prompt && to) entry.call = { to, prompt, ...(reason ? { reason } : {}), ...(summaryAttr(m[1]) ? { summary: true } : {}), ...(sparse !== undefined ? { sparse } : {}) }
+    if (prompt && to) {
+      const thinking = parseThinkingAttr(tagAttr(m[1], 'thinking'))
+      entry.call = { to, prompt, ...(reason ? { reason } : {}), ...(summaryAttr(m[1]) ? { summary: true } : {}), ...(sparse !== undefined ? { sparse } : {}), ...(thinking.level ? { thinking: thinking.level } : {}), ...(thinking.invalid ? { invalidThinking: thinking.invalid } : {}) }
+    }
     out.push(entry)
   }
   return out
@@ -269,6 +286,8 @@ export interface InvestigateCall {
   to: string
   prompt: string
   reason?: string
+  thinking?: ThinkingLevel
+  invalidThinking?: string
 }
 
 const INVESTIGATE_RE = /<investigate\b(?=[^>]*\bto\s*=)([^>]*)>((?:(?!<investigate\b)[\s\S])*?)<\/investigate>/
@@ -281,7 +300,8 @@ export function parseInvestigates(text: string): InvestigateCall[] {
     const prompt = m[2].trim()
     const to = tagAttr(m[1], 'to')
     const reason = tagAttr(m[1], 'reason')
-    if (prompt && to) out.push({ to, prompt, ...(reason ? { reason } : {}) })
+    const thinking = parseThinkingAttr(tagAttr(m[1], 'thinking'))
+    if (prompt && to) out.push({ to, prompt, ...(reason ? { reason } : {}), ...(thinking.level ? { thinking: thinking.level } : {}), ...(thinking.invalid ? { invalidThinking: thinking.invalid } : {}) })
   }
   return out
 }
@@ -357,6 +377,10 @@ export interface ContinueCall {
   brief: string
   /** auto = 用户已明确要求继续，立即执行；parked = agent 备好等用户启动 */
   start: 'auto' | 'parked'
+  /** 可选：为下一阶段显式指定的思考强度 */
+  thinking?: ThinkingLevel
+  /** 非法 thinking 属性原文（仅留痕，绝不阻断接力） */
+  invalidThinking?: string
   /**
    * 兜底通道命中：标记不在回复末尾（其后仍有正文/围栏），但显式写了 start="auto"。
    * 调用方据此在时间线留痕，让"为什么没走末尾锚定"可观测。
@@ -398,8 +422,9 @@ export function parseContinue(text: string): ContinueCall[] {
   const tail = text.match(CONTINUE_TAIL_RE)
   if (tail) {
     const brief = tail[2].trim()
+    const thinking = parseThinkingAttr(tagAttr(tail[1], 'thinking'))
     // 防复述：与协议示例同指纹的简报不构成接力意图（agent 逐字引用协议块收尾时）
-    if (brief && !brief.startsWith(CONTINUE_EXAMPLE_FINGERPRINT)) out.push({ brief, start: continueStart(tail[1]).start })
+    if (brief && !brief.startsWith(CONTINUE_EXAMPLE_FINGERPRINT)) out.push({ brief, start: continueStart(tail[1]).start, ...(thinking.level ? { thinking: thinking.level } : {}), ...(thinking.invalid ? { invalidThinking: thinking.invalid } : {}) })
     return out
   }
   let last: RegExpMatchArray | null = null
@@ -411,7 +436,8 @@ export function parseContinue(text: string): ContinueCall[] {
   // 也不接受分量不足的简报——真简报按协议必须自包含（目标/成果/约束），讨论里的演示标记通常只有片语
   if (brief.startsWith(CONTINUE_EXAMPLE_FINGERPRINT) || brief.length < 20) return out
   const { start, explicitAuto } = continueStart(last[1])
-  if (explicitAuto) out.push({ brief, start: 'auto', loose: true })
+  const thinking = parseThinkingAttr(tagAttr(last[1], 'thinking'))
+  if (explicitAuto) out.push({ brief, start: 'auto', loose: true, ...(thinking.level ? { thinking: thinking.level } : {}), ...(thinking.invalid ? { invalidThinking: thinking.invalid } : {}) })
   return out
 }
 
@@ -458,7 +484,7 @@ export interface AgentLike {
   /** API 预设 id（连接覆盖，runner 解析为 connection 传入 backend.start） */
   presetId?: string
   /** 思考强度档位（Agent.thinking 透传给 backend.start） */
-  thinking?: ThinkingLevel
+  thinking?: AgentThinking
   /** 只读协作标记：true 时派单直接共享领队工作区、不建隔离 worktree（审码/咨询类零建树开销） */
   sharedWorkspace?: boolean
   note?: string
@@ -718,6 +744,8 @@ export interface ChildReportBodyInput {
    *  必须随报告可见——领队不能把该单当成「改动已在分支上」。模板是系统文案，但内嵌
    *  失败原因含队员可控的 Git stderr，回灌入口统一过转义后才进正文 */
   commitLossNote?: string
+  /** 本单生效的思考强度（failed 单附注给领队，辅助改派时自然加码） */
+  thinking?: ThinkingLevel
 }
 
 /** 终态落盘失败（commitAllDetailed failed）的报告标记文案：时间线注记之外的第二个可见面
@@ -747,6 +775,10 @@ export function buildChildReportBody(input: ChildReportBodyInput): string {
   } else {
     // failed/error 路径与 result/总结同源转义：队员可控的 error 文本不得携带可解析的活标记
     parts.push(`状态 ${input.status}${input.error ? ': ' + escapeProtocolLiterals(input.error) : ''}`)
+    if (input.status === 'failed' && input.thinking) {
+      const labels: Record<ThinkingLevel, string> = { off: '关', low: '低', medium: '中', high: '高', max: '极致' }
+      parts.push(`本单思考强度：${labels[input.thinking]}（若因推理深度不足导致失败，改派时可显式提高 thinking 属性）`)
+    }
     // 稀疏单失败附扩圈提示（§7.2）：仅 failed——cancelled/error 不是「缺文件」可自愈的失败形态
     if (input.status === 'failed' && input.sparseDirs?.length) parts.push(sparseScopeFailureNote(input.sparseDirs))
   }
@@ -1052,7 +1084,8 @@ export async function runDelegationLoop(
         gitSection,
         pointers: fullTextPointerLines(copyRel, issueOk, seq),
         sparseDirs: c.worktree?.sparseDirs,
-        commitLossNote: tailCommitLosses.has(id) ? commitLossReportNote(tailCommitLosses.get(id)!) : undefined
+        commitLossNote: tailCommitLosses.has(id) ? commitLossReportNote(tailCommitLosses.get(id)!) : undefined,
+        thinking: c.thinking
       })
       tailEntries.push(childReportEntry(call?.to ?? c.agentId ?? c.backend, c.status, seq, body))
       allChildren.push(id)
@@ -1329,7 +1362,8 @@ export async function runDelegationLoop(
         summary: summaryBodies.get(id),
         summaryFallbackNote: summaryFallbackNotes.get(id),
         sparseDirs: c.worktree?.sparseDirs,
-        commitLossNote: commitLosses.has(id) ? commitLossReportNote(commitLosses.get(id)!) : undefined
+        commitLossNote: commitLosses.has(id) ? commitLossReportNote(commitLosses.get(id)!) : undefined,
+        thinking: c.thinking
       })
       reportEntries.push(childReportEntry(call?.to ?? c.agentId ?? c.backend, c.status, seq, body))
     }

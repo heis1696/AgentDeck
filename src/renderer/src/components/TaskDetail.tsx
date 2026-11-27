@@ -3,7 +3,8 @@ import {
   ChevronDown, Copy, FileText, FolderOpen, FolderTree, History, Info, ListChecks,
   Pencil, Play, RefreshCw, Square, Trash2, Users, Waypoints
 } from 'lucide-react'
-import { bridge, fmtDuration, fmtTime, fmtTokens } from '../api'
+import { bridge, fmtDuration, fmtTime, fmtTokens, type AgentInfo } from '../api'
+import { shouldPromptTriage } from '../ui/triage-flow'
 import { taskService } from '../task-service'
 import { GOAL_STATUS_LABELS, PARKED_QUEUED_LABEL, TASK_STATUS_LABELS, isParkedQueued } from '../labels'
 import { Markdown } from './Markdown'
@@ -32,7 +33,7 @@ import { FloatWindow } from '../ui/FloatWindow'
 import { GoalPanel } from './goal/GoalPanel'
 import { MeetingPanel } from './meeting/MeetingPanel'
 import { MEETING_STATUS_LABEL } from './meeting/MeetingCard'
-import type { Goal, IssuePriority, IssueStatus, Task } from '../../../shared/types'
+import type { Goal, IssuePriority, IssueStatus, Task, ThinkingLevel, ThinkingSource } from '../../../shared/types'
 import { issueTransitionTargets } from '../../../shared/taskflow'
 import type { Meeting } from '../../../shared/meeting'
 import type { SkillMeta } from '../../../shared/skills'
@@ -59,6 +60,15 @@ const FLOW_STATIONS: ReadonlyArray<IssueStatus> = ['backlog', 'todo', 'in_progre
 const PRIORITY_OPTIONS: Array<{ value: IssuePriority; label: string }> = [
   { value: 'none', label: '优先级' }, { value: 'urgent', label: '紧急' }, { value: 'high', label: '高' }, { value: 'medium', label: '中' }, { value: 'low', label: '低' }
 ]
+const THINKING_LEVEL_LABELS: Record<ThinkingLevel, string> = { off: '关', low: '低', medium: '中', high: '高', max: '极致' }
+const THINKING_SOURCE_LABELS: Record<ThinkingSource, string> = { agent: 'Agent 固定', triage: '分诊师', user: '用户指定', leader: '领队指派', escalation: '自动升档', fallback: '降级兜底', system: '系统辅助' }
+function formatThinkingTooltip(task: Pick<Task, 'thinking' | 'thinkingSource' | 'thinkingReason'>): string {
+  if (!task.thinking) return ''
+  const parts = [`思考强度：${THINKING_LEVEL_LABELS[task.thinking]}`]
+  if (task.thinkingSource) parts.push(`来源：${THINKING_SOURCE_LABELS[task.thinkingSource]}`)
+  if (task.thinkingReason) parts.push(`理由：${task.thinkingReason}`)
+  return parts.join(' · ')
+}
 
 /** 管线轨道灯（吸收 ZCode 站点灯视觉）：主线五站——已过站实心、当前站高亮、未到站空心；
  *  blocked/cancelled 旁路态以徽标附在轨道尾部，一眼读出「走到哪、卡在哪」。 */
@@ -119,6 +129,9 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
   const fileMenuExpanded = fileRef.open && fileRef.items.length > 0
   // 追问框：↑↓ 历史重写 + / 命令菜单（本地命令 + 技能；技能列表首按 / 时懒加载一次）
   const history = usePromptHistory(task.id)
+  const [agents, setAgents] = useState<AgentInfo[]>([])
+  useEffect(() => { void bridge.agents.list().then(setAgents).catch(() => {}) }, [])
+  const taskAgent = task.agentId ? agents.find((a) => a.id === task.agentId) : undefined
   const [skills, setSkills] = useState<SkillMeta[]>([])
   const skillsLoadedRef = useRef(false)
   const [skillMenuOpen, setSkillMenuOpen] = useTaskScopedState(task.id, false)
@@ -409,8 +422,30 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
     const submittedRevision = taskDraftSlot(task.id).promptRevision
     setBusy(true)
     try {
+      let triageOpts: { thinking?: ThinkingLevel; thinkingSource?: ThinkingSource; thinkingReason?: string; skipTriage?: boolean } = {}
+      const triageBridge = bridge.triage
+      if (!opts?.relay && triageBridge && shouldPromptTriage({ agent: taskAgent, kind: 'followup' })) {
+        const triage = await ui.triage.start({
+          kind: 'followup',
+          prompt: content,
+          agentId: taskAgent?.id,
+          agentName: taskAgent?.name,
+          workdir: task.workdir,
+          currentThinking: task.thinking,
+          assess: (input) => triageBridge.assess(input),
+          cancel: (requestId) => triageBridge.cancel(requestId),
+          onFallbackToast: (msg) => ui.toast.info(msg)
+        })
+        if (triage.action === 'cancelled') return
+        triageOpts = {
+          ...(triage.thinking ? { thinking: triage.thinking } : {}),
+          ...(triage.thinkingSource ? { thinkingSource: triage.thinkingSource } : {}),
+          ...(triage.thinkingReason ? { thinkingReason: triage.thinkingReason } : {}),
+          ...(triage.skipTriage ? { skipTriage: true } : {})
+        }
+      }
       // wait:false：IPC 在回合开跑即返回，busy 不锁整轮追问——否则「停止」会禁用到回合结束
-      const result = await taskService.followUp(task.id, content, { ...opts, wait: false })
+      const result = await taskService.followUp(task.id, content, { ...opts, ...triageOpts, wait: false })
       if (!result.ok) ui.toast.error(result.error ?? '续聊失败')
       else {
         history.push(raw)
@@ -499,7 +534,7 @@ export function TaskDetail({ task, tasks, onSelect }: { task: Task; tasks: Task[
           </select>}
           <span className="meta-group meta-status"><span className={`status-chip status-${task.status}`}>{stateLabel}</span>{turnActive && <span className="active-duration" aria-hidden="true">工作中 · {fmtDuration(elapsed)}</span>}</span>
           <span className="meta-divider" aria-hidden="true" />
-          <span className="meta-group meta-source"><span className="meta-chip mono" title={`执行后端 ${task.backend}`}>{task.backend}</span>{workdir && <button className="meta-chip meta-chip-action workspace-chip" type="button" title={workdir} onClick={() => void bridge.openPath(workdir)}><FolderOpen size={12} aria-hidden="true" /><span>{workdir.split(/[\\/]/).filter(Boolean).pop()}</span></button>}<span className="meta-chip" title={`${task.startedAt ? fmtTime(task.startedAt) : '未开始'} → ${task.endedAt ? fmtTime(task.endedAt) : turnActive ? '进行中' : '—'}`}>⏱ {elapsed > 0 ? fmtDuration(elapsed) : '—'}</span>{task.usage && <span className="meta-chip" title={`输入 ${task.usage.inputTokens.toLocaleString()} · 输出 ${task.usage.outputTokens.toLocaleString()} · 回合 ${task.usage.turns}${task.usage.costUsd > 0 ? ` · 成本 $${task.usage.costUsd.toFixed(4)}` : ''}`}>{fmtTokens(task.usage.inputTokens + task.usage.outputTokens)} tokens{task.usage.costUsd > 0 ? ` · $${task.usage.costUsd.toFixed(4)}` : ''}</span>}{integration?.branch && <span className="meta-chip mono" title={`集成分支 ${integration.branch}`}>⎇ {integration.branch.replace('agentdeck/task-', '#')}</span>}{!!task.attempt && <span className="meta-chip is-warn" title={`自动重试 ${task.attempt}/2`}>⟳ 重试 {task.attempt}/2</span>}</span>
+          <span className="meta-group meta-source"><span className="meta-chip mono" title={`执行后端 ${task.backend}`}>{task.backend}</span>{task.thinking && <span className="meta-chip" title={formatThinkingTooltip(task)}>思考·{THINKING_LEVEL_LABELS[task.thinking]}</span>}{workdir && <button className="meta-chip meta-chip-action workspace-chip" type="button" title={workdir} onClick={() => void bridge.openPath(workdir)}><FolderOpen size={12} aria-hidden="true" /><span>{workdir.split(/[\\/]/).filter(Boolean).pop()}</span></button>}<span className="meta-chip" title={`${task.startedAt ? fmtTime(task.startedAt) : '未开始'} → ${task.endedAt ? fmtTime(task.endedAt) : turnActive ? '进行中' : '—'}`}>⏱ {elapsed > 0 ? fmtDuration(elapsed) : '—'}</span>{task.usage && <span className="meta-chip" title={`输入 ${task.usage.inputTokens.toLocaleString()} · 输出 ${task.usage.outputTokens.toLocaleString()} · 回合 ${task.usage.turns}${task.usage.costUsd > 0 ? ` · 成本 $${task.usage.costUsd.toFixed(4)}` : ''}`}>{fmtTokens(task.usage.inputTokens + task.usage.outputTokens)} tokens{task.usage.costUsd > 0 ? ` · $${task.usage.costUsd.toFixed(4)}` : ''}</span>}{integration?.branch && <span className="meta-chip mono" title={`集成分支 ${integration.branch}`}>⎇ {integration.branch.replace('agentdeck/task-', '#')}</span>}{!!task.attempt && <span className="meta-chip is-warn" title={`自动重试 ${task.attempt}/2`}>⟳ 重试 {task.attempt}/2</span>}</span>
           <div className="meta-info-wrap" ref={infoRef}>
             <button type="button" className={`meta-chip meta-chip-action meta-info-btn ${infoOpen ? 'open' : ''}`} title="原始指令、交接备注与详细信息" aria-expanded={infoOpen} onClick={() => setInfoOpen((value) => !value)}><Info size={12} aria-hidden="true" /></button>
           {infoOpen && <div className="meta-info-pop" ref={infoPopRef}>

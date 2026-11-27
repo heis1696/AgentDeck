@@ -1,4 +1,4 @@
-import { BACKEND_IDS, THINKING_LEVELS, type AppSettings, type Automation, type GoalAcceptancePatch, type GoalEvolutionPatch, type GoalPatchProvenance, type IssuePriority, type IssueStatus, type RunTrigger, type TaskStatus } from '../shared/types'
+import { AGENT_THINKING_VALUES, BACKEND_IDS, THINKING_LEVELS, THINKING_SOURCES, type AgentThinking, type AppSettings, type Automation, type GoalAcceptancePatch, type GoalEvolutionPatch, type GoalPatchProvenance, type IssuePriority, type IssueStatus, type RunTrigger, type TaskStatus, type ThinkingLevel, type ThinkingSource } from '../shared/types'
 import type { GoalCheckpointInput, GoalCreateInput, GoalEvolveInput, IssueCreateInput, IssueUpdatePatch, TaskCreateInput } from '../shared/contracts'
 import type { Agent } from './agents'
 import type { ApiPreset } from './presets'
@@ -9,6 +9,8 @@ const taskStatuses = new Set<TaskStatus>(['queued', 'running', 'done', 'failed',
 const triggers = new Set<RunTrigger>(['assignment', 'mention', 'autopilot', 'manual', 'handoff', 'meeting'])
 const backendIds = new Set<string>(BACKEND_IDS)
 const thinkingLevels = new Set<string>(THINKING_LEVELS)
+const agentThinkingValues = new Set<string>(AGENT_THINKING_VALUES)
+const thinkingSources = new Set<string>(THINKING_SOURCES)
 const settingsKeys = new Set<keyof AppSettings>(['theme', 'uiFontSize', 'zcodePath', 'dshPath', 'nodePath', 'concurrency', 'notifyOnDone', 'mode', 'workerConcurrency', 'sharedDir', 'turnIdleTimeoutMs', 'permissionTimeoutMs', 'maxRetryAttempts', 'retryBackoffMs', 'maxHandoffChain', 'delegateMaxRounds', 'delegateMaxTotalRounds', 'delegateMaxDepth', 'doomLoopThreshold', 'worktreeMaxAgeDays', 'updateFeedUrl'])
 
 /** 调优参数的合法区间：越界直接拒绝，防止手滑值把看门狗/预算打穿 */
@@ -39,11 +41,25 @@ export function assertKeys(input: Record<string, unknown>, allowed: readonly str
   for (const key of Object.keys(input)) if (!keys.has(key)) throw new Error(`${label}包含未知字段: ${key}`)
 }
 
-/** 思考强度档位白名单（空 = 平台默认，故 undefined 合法） */
-function optionalThinking(value: unknown, label: string): Agent['thinking'] | undefined {
+/** 执行期思考强度白名单（仅 5 档，不含 'auto'；空 = 缺省） */
+function optionalThinking(value: unknown, label: string): ThinkingLevel | undefined {
   if (value === undefined) return undefined
   if (typeof value !== 'string' || !thinkingLevels.has(value)) throw new Error(`${label} 无效: ${String(value)}`)
-  return value as Agent['thinking']
+  return value as ThinkingLevel
+}
+
+/** Agent 配置面思考强度白名单（5 档 + 'auto' 动态分诊；空 = 平台默认） */
+function optionalAgentThinking(value: unknown, label: string): AgentThinking | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' || !agentThinkingValues.has(value)) throw new Error(`${label} 无效: ${String(value)}`)
+  return value as AgentThinking
+}
+
+/** 思考强度决策来源白名单 */
+function optionalThinkingSource(value: unknown, label: string): ThinkingSource | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' || !thinkingSources.has(value)) throw new Error(`${label} 无效: ${String(value)}`)
+  return value as ThinkingSource
 }
 
 function stringValue(value: unknown, label: string, required = true): string | undefined {
@@ -113,16 +129,24 @@ export function parseRepoRelativePath(value: unknown, label = 'file'): string {
 
 export function parseTaskCreate(value: unknown): TaskCreateInput {
   const input = record(value, '任务参数')
-  assertKeys(input, ['title', 'prompt', 'workdir', 'backend', 'agentId', 'handoff', 'startNow', 'trigger', 'requestId', 'idempotencyKey'], '任务参数')
+  assertKeys(input, ['title', 'prompt', 'workdir', 'backend', 'agentId', 'thinking', 'thinkingSource', 'thinkingReason', 'skipTriage', 'handoff', 'startNow', 'trigger', 'requestId', 'idempotencyKey'], '任务参数')
   const trigger = input.trigger
   if (trigger !== undefined && (typeof trigger !== 'string' || !triggers.has(trigger as RunTrigger))) throw new Error('trigger 无效')
   if (input.startNow !== undefined && typeof input.startNow !== 'boolean') throw new Error('startNow 必须是布尔值')
+  if (input.skipTriage !== undefined && typeof input.skipTriage !== 'boolean') throw new Error('skipTriage 必须是布尔值')
+  const thinking = optionalThinking(input.thinking, 'thinking')
+  const thinkingSource = optionalThinkingSource(input.thinkingSource, 'thinkingSource')
+  const thinkingReason = optionalString(input.thinkingReason, 'thinkingReason')?.slice(0, 120)
   return {
     title: stringValue(input.title, 'title')!,
     prompt: stringValue(input.prompt, 'prompt')!,
     workdir: stringValue(input.workdir, 'workdir', false) ?? '',
     backend: optionalString(input.backend, 'backend'),
     agentId: optionalString(input.agentId, 'agentId'),
+    ...(thinking ? { thinking } : {}),
+    ...(thinkingSource ? { thinkingSource } : {}),
+    ...(thinkingReason ? { thinkingReason } : {}),
+    ...(input.skipTriage === true ? { skipTriage: true } : {}),
     handoff: optionalString(input.handoff, 'handoff'),
     startNow: input.startNow as boolean | undefined,
     trigger: trigger as RunTrigger | undefined,
@@ -133,13 +157,17 @@ export function parseTaskCreate(value: unknown): TaskCreateInput {
 
 export function parseIssueCreate(value: unknown): IssueCreateInput {
   const input = record(value, 'Issue 参数')
-  assertKeys(input, ['title', 'description', 'workdir', 'backend', 'agentId', 'handoff', 'startNow', 'trigger', 'titleAuto', 'requestId', 'idempotencyKey'], 'Issue 参数')
+  assertKeys(input, ['title', 'description', 'workdir', 'backend', 'agentId', 'thinking', 'thinkingSource', 'thinkingReason', 'skipTriage', 'handoff', 'startNow', 'trigger', 'titleAuto', 'requestId', 'idempotencyKey'], 'Issue 参数')
   const task = parseTaskCreate({
     title: input.title,
     prompt: input.description,
     workdir: input.workdir,
     backend: input.backend,
     agentId: input.agentId,
+    thinking: input.thinking,
+    thinkingSource: input.thinkingSource,
+    thinkingReason: input.thinkingReason,
+    skipTriage: input.skipTriage,
     handoff: input.handoff,
     startNow: input.startNow,
     trigger: input.trigger,
@@ -153,6 +181,10 @@ export function parseIssueCreate(value: unknown): IssueCreateInput {
     workdir: task.workdir,
     backend: task.backend,
     agentId: task.agentId,
+    ...(task.thinking ? { thinking: task.thinking } : {}),
+    ...(task.thinkingSource ? { thinkingSource: task.thinkingSource } : {}),
+    ...(task.thinkingReason ? { thinkingReason: task.thinkingReason } : {}),
+    ...(task.skipTriage ? { skipTriage: true } : {}),
     handoff: task.handoff,
     startNow: task.startNow,
     trigger: task.trigger,
@@ -395,7 +427,7 @@ export function parseAgents(value: unknown): Agent[] {
       ...(subordinates ? { subordinates } : {}),
       ...(optionalString(input.model, `agent[${index}].model`) ? { model: optionalString(input.model, `agent[${index}].model`) } : {}),
       ...(optionalString(input.presetId, `agent[${index}].presetId`) ? { presetId: optionalString(input.presetId, `agent[${index}].presetId`) } : {}),
-      ...(optionalThinking(input.thinking, `agent[${index}].thinking`) ? { thinking: optionalThinking(input.thinking, `agent[${index}].thinking`) } : {}),
+      ...(optionalAgentThinking(input.thinking, `agent[${index}].thinking`) ? { thinking: optionalAgentThinking(input.thinking, `agent[${index}].thinking`) } : {}),
       ...(input.sharedWorkspace === true ? { sharedWorkspace: true } : {}),
       ...(optionalString(input.note, `agent[${index}].note`) ? { note: optionalString(input.note, `agent[${index}].note`) } : {})
     }
@@ -429,14 +461,40 @@ export function parsePresets(value: unknown): ApiPreset[] {
   })
 }
 
-export function parseFollowUpOptions(value: unknown): { relay?: boolean; collectFinal?: boolean; wait?: boolean } {
+export function parseFollowUpOptions(value: unknown): { relay?: boolean; collectFinal?: boolean; wait?: boolean; thinking?: ThinkingLevel; thinkingSource?: ThinkingSource; thinkingReason?: string; skipTriage?: boolean } {
   if (value === undefined) return {}
   const input = record(value, '追问选项')
-  assertKeys(input, ['relay', 'collectFinal', 'wait'], '追问选项')
+  assertKeys(input, ['relay', 'collectFinal', 'wait', 'thinking', 'thinkingSource', 'thinkingReason', 'skipTriage'], '追问选项')
+  const thinking = optionalThinking(input.thinking, 'thinking')
+  const thinkingSource = optionalThinkingSource(input.thinkingSource, 'thinkingSource')
+  const thinkingReason = optionalString(input.thinkingReason, 'thinkingReason')?.slice(0, 120)
   return {
     ...(input.relay === undefined ? {} : { relay: booleanValue(input.relay, 'relay') }),
     ...(input.collectFinal === undefined ? {} : { collectFinal: booleanValue(input.collectFinal, 'collectFinal') }),
-    ...(input.wait === undefined ? {} : { wait: booleanValue(input.wait, 'wait') })
+    ...(input.wait === undefined ? {} : { wait: booleanValue(input.wait, 'wait') }),
+    ...(thinking ? { thinking } : {}),
+    ...(thinkingSource ? { thinkingSource } : {}),
+    ...(thinkingReason ? { thinkingReason } : {}),
+    ...(input.skipTriage === undefined ? {} : { skipTriage: booleanValue(input.skipTriage, 'skipTriage') })
+  }
+}
+
+const triageKinds = new Set(['task', 'followup', 'delegate', 'goal', 'handoff'] as const)
+
+export function parseTriageAssess(value: unknown): import('../shared/triage').TriageAssessInput {
+  const input = record(value, '分诊参数')
+  assertKeys(input, ['requestId', 'prompt', 'handoff', 'agentId', 'workdir', 'currentThinking', 'kind'], '分诊参数')
+  const kind = stringValue(input.kind, 'kind')!
+  if (!triageKinds.has(kind as 'task')) throw new Error(`kind 无效: ${kind}`)
+  const currentThinking = optionalThinking(input.currentThinking, 'currentThinking')
+  return {
+    ...(optionalString(input.requestId, 'requestId') ? { requestId: optionalString(input.requestId, 'requestId') } : {}),
+    prompt: stringValue(input.prompt, 'prompt')!.slice(0, 20_000),
+    ...(optionalString(input.handoff, 'handoff') ? { handoff: optionalString(input.handoff, 'handoff')!.slice(0, 4_000) } : {}),
+    ...(optionalString(input.agentId, 'agentId') ? { agentId: optionalString(input.agentId, 'agentId') } : {}),
+    ...(optionalString(input.workdir, 'workdir') ? { workdir: optionalString(input.workdir, 'workdir') } : {}),
+    ...(currentThinking ? { currentThinking } : {}),
+    kind: kind as import('../shared/triage').TriageAssessKind
   }
 }
 

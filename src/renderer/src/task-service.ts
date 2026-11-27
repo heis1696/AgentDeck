@@ -1,4 +1,4 @@
-import type { Task } from '../../shared/types'
+import type { Task, ThinkingLevel, ThinkingSource } from '../../shared/types'
 import { bridge } from './api'
 
 /** Renderer task commands. Components pass domain values, not IPC payloads. */
@@ -9,7 +9,7 @@ export const taskService = {
   cancel: (taskId: string, reason?: string) => bridge.tasks.cancel(taskId, reason),
   retry: (taskId: string) => bridge.tasks.retry(taskId),
   delete: (taskId: string) => bridge.tasks.delete(taskId),
-  followUp: (taskId: string, content: string, opts?: { relay?: boolean; wait?: boolean }) => bridge.tasks.followUp(taskId, content, opts),
+  followUp: (taskId: string, content: string, opts?: { relay?: boolean; wait?: boolean; thinking?: ThinkingLevel; thinkingSource?: ThinkingSource; thinkingReason?: string; skipTriage?: boolean }) => bridge.tasks.followUp(taskId, content, opts),
   rewind: (taskId: string, toSeq: number) => bridge.tasks.rewind(taskId, toSeq),
   rename: (taskId: string, title: string) => bridge.tasks.rename(taskId, title),
   duplicate: (task: Task) => bridge.tasks.create({

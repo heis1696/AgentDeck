@@ -3,12 +3,32 @@
 export type TaskStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
 
 /** Backends shipped by the main process. Keep string compatibility at IPC boundaries. */
-export type BackendId = 'zcode' | 'claude' | 'codex' | 'opencode' | 'dsh'
-export const BACKEND_IDS: readonly BackendId[] = ['zcode', 'claude', 'codex', 'opencode', 'dsh']
+export type BackendId = 'zcode' | 'claude' | 'codex' | 'opencode' | 'dsh' | 'agy'
+export const BACKEND_IDS: readonly BackendId[] = ['zcode', 'claude', 'codex', 'opencode', 'dsh', 'agy']
 
-/** Agent 思考强度档位（zcode/claude/codex/dsh 支持；opencode 不支持，走其配置文件 variants） */
+/** Agent 执行期思考强度档位（真实下发给后端；zcode/claude/codex/dsh/agy 支持；opencode 走其配置 variants） */
 export type ThinkingLevel = 'off' | 'low' | 'medium' | 'high' | 'max'
 export const THINKING_LEVELS: readonly ThinkingLevel[] = ['off', 'low', 'medium', 'high', 'max']
+
+/** Agent 配置面思考强度：固定 5 档 | 动态分诊（auto）；undefined = 跟随平台默认 */
+export type AgentThinking = ThinkingLevel | 'auto'
+export const AGENT_THINKING_VALUES: readonly AgentThinking[] = ['off', 'low', 'medium', 'high', 'max', 'auto']
+
+/** 本次任务/回合生效档位的决策来源（审计、迟滞防抖与 UI 展示用） */
+export type ThinkingSource = 'user' | 'leader' | 'triage' | 'escalation' | 'system' | 'agent' | 'fallback'
+export const THINKING_SOURCES: readonly ThinkingSource[] = ['user', 'leader', 'triage', 'escalation', 'system', 'agent', 'fallback']
+
+export function isThinkingLevel(value: unknown): value is ThinkingLevel {
+  return typeof value === 'string' && (THINKING_LEVELS as readonly string[]).includes(value)
+}
+
+export function isAgentThinking(value: unknown): value is AgentThinking {
+  return typeof value === 'string' && (AGENT_THINKING_VALUES as readonly string[]).includes(value)
+}
+
+export function isThinkingSource(value: unknown): value is ThinkingSource {
+  return typeof value === 'string' && (THINKING_SOURCES as readonly string[]).includes(value)
+}
 
 export function isTaskStatus(value: unknown): value is TaskStatus {
   return value === 'queued' || value === 'running' || value === 'done' || value === 'failed' || value === 'cancelled'
@@ -399,6 +419,14 @@ export interface Task {
   backend: string
   /** 执行队员（agent 身份）；空 = 默认 zcode 队员 */
   agentId?: string
+  /** 本任务当前生效（或预设覆写）的执行思考档位；缺省按 Agent.thinking 决定 */
+  thinking?: ThinkingLevel
+  /** 当前生效思考档位的决策来源 */
+  thinkingSource?: ThinkingSource
+  /** 定档/升降档的一句话理由（≤120 字，时间线与徽章提示用） */
+  thinkingReason?: string
+  /** 用户在分诊前主动跳过动态评估：后端 RouteThinkingNode 见此标记直接短路，绝不二次触发分诊师 */
+  skipTriage?: boolean
   /** 触发这次执行的产品动作，映射到 Issue 的 Run。 */
   trigger?: RunTrigger
   /** Durable issue that owns this execution. Added in the issue/run migration. */

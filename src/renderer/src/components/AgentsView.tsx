@@ -8,20 +8,22 @@ import { PageHeader } from '../ui/PageHeader'
 import { EmptyState } from '../ui/EmptyState'
 import { BACKEND_IDS } from '../../../shared/types'
 import { isForgeAgent } from '../../../shared/forge'
+import { isSystemAgent, isTriageAgent } from '../../../shared/triage'
 
 /** v1 支持预设注入执行的后端面（Agent 表单的预设提示文案据此区分，非预设归属）：zcode（runtimeModel）/ claude（spawn env） */
 const CONNECTION_BACKENDS = ['zcode', 'claude']
 
-/** 思考强度档位（空 = 跟随平台默认）；badge 用同一文案映射 */
-const THINKING_OPTIONS: Array<{ value: '' | 'off' | 'low' | 'medium' | 'high' | 'max'; label: string }> = [
+/** 思考强度档位（空 = 跟随平台默认；auto = 动态分诊师定档）；badge 用同一文案映射 */
+const THINKING_OPTIONS: Array<{ value: '' | 'auto' | 'off' | 'low' | 'medium' | 'high' | 'max'; label: string }> = [
   { value: '', label: '跟随默认' },
+  { value: 'auto', label: '动态（分诊师）' },
   { value: 'off', label: '关' },
   { value: 'low', label: '低' },
   { value: 'medium', label: '中' },
   { value: 'high', label: '高' },
   { value: 'max', label: '极致' }
 ]
-const THINKING_LABELS: Record<string, string> = { off: '关', low: '低', medium: '中', high: '高', max: '极致' }
+const THINKING_LABELS: Record<string, string> = { auto: '动态', off: '关', low: '低', medium: '中', high: '高', max: '极致' }
 
 export type ListLoadState = 'loading' | 'ready' | 'error'
 
@@ -548,11 +550,11 @@ export function AgentsView() {
                   <div className="agent-avatar" style={{ background: a.color }}>{a.name.slice(0, 1)}</div>
                   <div className="tm-id">
                     <span className="tm-name">{a.name}</span>
-                    <span className="tm-role">{a.role || (isForgeAgent(a) ? '锻造师' : '') || '\u00A0'}</span>
+                    <span className="tm-role">{a.role || (isForgeAgent(a) ? '锻造师' : isTriageAgent(a) ? '分诊师' : '') || '\u00A0'}</span>
                   </div>
                   <div className="tm-acts">
-                    {!isForgeAgent(a) && <button className="tm-act" title="导出为 .md（Claude subagent 格式）" onClick={(e) => { e.stopPropagation(); void exportMd(a) }}><Download size={13} /></button>}
-                    {!isForgeAgent(a) && <button className="tm-act" title="用锻造师改进提示词" disabled={!canWriteAgents} onClick={(e) => { e.stopPropagation(); openImprove(a) }}><Sparkles size={13} /></button>}
+                    {!isSystemAgent(a) && <button className="tm-act" title="导出为 .md（Claude subagent 格式）" onClick={(e) => { e.stopPropagation(); void exportMd(a) }}><Download size={13} /></button>}
+                    {!isSystemAgent(a) && <button className="tm-act" title="用锻造师改进提示词" disabled={!canWriteAgents} onClick={(e) => { e.stopPropagation(); openImprove(a) }}><Sparkles size={13} /></button>}
                     <button className="tm-act tm-act-danger" title="删除" disabled={!canWriteAgents || deletingAgentRef.current.has(a.id)} onClick={(e) => { e.stopPropagation(); void remove(a.id) }}><X size={13} /></button>
                   </div>
                 </div>
@@ -561,6 +563,7 @@ export function AgentsView() {
                   {a.model ? <span className="tm-badge tm-badge-mono">{a.model}</span> : null}
                   {a.thinking ? <span className="tm-badge" title="思考强度">思考·{THINKING_LABELS[a.thinking] ?? a.thinking}</span> : null}
                   {isForgeAgent(a) ? <span className="tm-badge tm-badge-forge">✦ 锻造师</span> : null}
+                  {isTriageAgent(a) ? <span className="tm-badge tm-badge-triage">✦ 分诊师</span> : null}
                   {a.subordinates?.length ? <span className="tm-badge tm-badge-lead">⚡ 领队 · 可驱使 {a.subordinates.length}</span> : null}
                   {preset ? <span className="tm-badge tm-badge-preset" title={`连接：${preset.name} · ${preset.baseURL}`}>预设：{preset.name}</span> : null}
                 </div>
@@ -814,7 +817,7 @@ export function AgentsView() {
                   {fetching ? '拉取中…' : '↻ 获取模型'}
                 </button>
               </div>
-              {editing.backend !== 'zcode' && !editing.presetId && <span className="hint">该平台无本地模型目录，可自由填写，或选 API 预设后在线获取</span>}
+              {catalog?.source !== 'catalog' && editing.backend !== 'zcode' && !editing.presetId && <span className="hint">该平台无本地模型目录，可自由填写，或选 API 预设后在线获取</span>}
               {catalog && catalog.models.length > 0 && (
                 <div className="agent-picker">
                   {catalog.models.map((m) => (
@@ -837,20 +840,30 @@ export function AgentsView() {
                 disabled={editing.backend === 'opencode'}
                 onChange={(e) => update(editing, { thinking: (e.target.value || undefined) as Agent['thinking'] })}
               >
-                {THINKING_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                {THINKING_OPTIONS.filter((o) => !(isTriageAgent(editing) && o.value === 'auto')).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
               </select>
               {editing.backend === 'opencode'
-                ? <span className="hint">OpenCode 暂不支持，请用其配置文件 variants</span>
-                : editing.backend === 'zcode'
-                  ? <span className="hint">非推理模型自动忽略，协议无中间档时自动就近上调</span>
-                  : null}
+                ? <span className="hint">OpenCode 暂不支持思考强度与动态分诊，请用其配置文件 variants</span>
+                : isTriageAgent(editing)
+                  ? <span className="hint">分诊师自身建议用「关」或「低」档搭配快模型，降低分诊耗时</span>
+                  : editing.thinking === 'auto' && editing.backend === 'dsh'
+                    ? <span className="hint">dsh 仅支持任务启动前分诊（不支持中途热切），追问沿用首轮档位</span>
+                    : editing.thinking === 'auto'
+                      ? <span className="hint">动态档：发送前弹出两道 2s 悬浮确认条，由「分诊师」按任务难度自动定档；领队派单 thinking 属性可直接覆写</span>
+                      : editing.backend === 'zcode'
+                        ? <span className="hint">非推理模型自动忽略，协议无中间档时自动就近上调</span>
+                        : editing.backend === 'agy'
+                          ? <span className="hint">模型名自带档位后缀（如 -high）时以模型为准；留空或填基名时生效</span>
+                          : null}
             </label>
             <label className="field">
               <span>定位（头衔：领队 / 工程师 / 审查员…）</span>
               <input value={editing.role ?? ''} onChange={(e) => update(editing, { role: e.target.value })} placeholder="领队" />
             </label>
-            {isForgeAgent(editing) ? (
-              <span className="hint">锻造师专职生成 Agent，无需系统提示词——元提示词由 agent-crafter 技能提供（共享目录 skills/agent-crafter/SKILL.md，可在「技能」页编辑）。平台 / 模型 / 预设即生成引擎配置。</span>
+            {isSystemAgent(editing) ? (
+              isForgeAgent(editing)
+                ? <span className="hint">锻造师专职生成 Agent，无需系统提示词——元提示词由 agent-crafter 技能提供（共享目录 skills/agent-crafter/SKILL.md，可在「扩展」页编辑）。平台 / 模型 / 预设即生成引擎配置。</span>
+                : <span className="hint">分诊师专职评估任务难度并分配思考强度，无需系统提示词——评估标尺由 thinking-triage 技能提供（共享目录 skills/thinking-triage/SKILL.md，可在「扩展」页编辑）。绑定 API 预设与快模型可走 HTTP 直连（约 1 秒），未绑预设自动回退 CLI。</span>
             ) : (
               <>
             <label className="field">
@@ -865,9 +878,9 @@ export function AgentsView() {
             <label className="field">
               <span>可驱使的 Agent（勾选后它成为领队/子领队：对话中可自行把子任务派给他们；领队→子领队→队员最多 3 层）</span>
               <div className="agent-picker">
-                {agents.filter((o) => o.id !== editing.id && !isForgeAgent(o)).length === 0 && <span className="hint">（还没有其他 Agent）</span>}
+                {agents.filter((o) => o.id !== editing.id && !isSystemAgent(o)).length === 0 && <span className="hint">（还没有其他 Agent）</span>}
                 {agents
-                  .filter((o) => o.id !== editing.id && !isForgeAgent(o))
+                  .filter((o) => o.id !== editing.id && !isSystemAgent(o))
                   .map((o) => (
                     <button
                       key={o.id}

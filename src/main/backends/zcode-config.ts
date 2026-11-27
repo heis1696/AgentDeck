@@ -165,17 +165,25 @@ export function modelLevelAdjustment(selection: ZcodeModelSelection, thinking: T
   return `思考档位就近调整: ${primary ?? thinking ?? '默认'} → ${accepted}`
 }
 
+/** 预设连接按协议允许切换的全量 reasoningLevel 档位表（同会话 session/setModel 热切用） */
+function presetReasoningValues(connection: { baseURL: string; protocol?: 'anthropic' | 'openai' }): string[] {
+  return resolvePresetProtocol(connection) === 'anthropic-messages'
+    ? ['disabled', 'low', 'high', 'max']
+    : ['disabled', 'low', 'medium', 'high', 'max']
+}
+
 /**
  * 预设线的 reasoningLevel 声明与引用档位。未设保持 'high'（历史行为，回归兼容）；
- * off 用 'disabled' 且不发任何 thinking 参数；low/medium/high/max 声明单值档、
+ * off 用 'disabled' 且不发任何 thinking 参数；low/medium/high/max 声明可热切全档、
  * 不写 map——与 builtin 目录一致，交给 zcode 内置默认映射翻译成 thinking /
  * reasoning_effort 参数（anthropic 协议无 medium 档，上调 'high'）。
  */
-function presetReasoningSpec(connection: { baseURL: string; protocol?: 'anthropic' | 'openai' }, thinking?: ThinkingLevel): { level: string; silent: boolean } {
-  if (!thinking) return { level: 'high', silent: true }
-  if (thinking === 'off') return { level: 'disabled', silent: true }
-  if (thinking === 'medium' && resolvePresetProtocol(connection) === 'anthropic-messages') return { level: 'high', silent: false }
-  return { level: thinking, silent: false }
+function presetReasoningSpec(connection: { baseURL: string; protocol?: 'anthropic' | 'openai' }, thinking?: ThinkingLevel): { level: string; silent: boolean; values: string[] } {
+  const all = presetReasoningValues(connection)
+  if (!thinking) return { level: 'high', silent: true, values: ['high'] }
+  if (thinking === 'off') return { level: 'disabled', silent: true, values: all }
+  if (thinking === 'medium' && resolvePresetProtocol(connection) === 'anthropic-messages') return { level: 'high', silent: false, values: all }
+  return { level: thinking, silent: false, values: all }
 }
 
 /** 预设注册到 v2 注册表的 providerId：baseURL 派生（fnv1a-32），同预设幂等、异预设不冲突 */
@@ -207,7 +215,7 @@ function resolvePresetProtocol(connection: { baseURL: string; protocol?: 'anthro
 function upsertPresetProvider(
   connection: { name: string; baseURL: string; apiKey: string; protocol?: 'anthropic' | 'openai' },
   modelId: string,
-  reasoning: { level: string; silent: boolean }
+  reasoning: { level: string; silent: boolean; values: string[] }
 ): boolean {
   const id = presetProviderId(connection)
   try {
@@ -252,9 +260,8 @@ function upsertPresetProvider(
           supportsMidConversationSystem: false
         },
         optionSpecs: {
-          // silent 档（未设/关）写空 map：不生成任何 thinking 请求参数；
-          // 其余档不写 map，由 zcode 内置默认映射发 thinking/reasoning_effort
-          reasoningLevel: { values: [reasoning.level], ...(reasoning.silent ? { map: '{}' } : {}) },
+          // 历史未设档（values 仅单值 'high'）写空 map 保静默兼容；其余带显式档位声明全量可切档位供同会话热切
+          reasoningLevel: { values: reasoning.values, ...(reasoning.silent && reasoning.values.length === 1 ? { map: '{}' } : {}) },
           maxOutputTokens: { max: 32000, map: "{'max_tokens': maxOutputTokens}" }
         }
       }

@@ -1,4 +1,5 @@
 import { ipcMain } from 'electron'
+import { isSystemAgent } from '../../shared/triage'
 import type { Task } from '../../shared/types'
 import { parseContent, parseId, parseIssueCreate, parseIssuePatch } from '../ipc-validation'
 import type { IpcContext } from './context'
@@ -10,7 +11,7 @@ export function registerIssueIpc(ctx: IpcContext) {
   ipcMain.handle('issues:get', (_e, id: unknown) => ctx.issueStore.get(parseId(id, 'issueId')) ?? null)
   ipcMain.handle('issues:create', (_e, input: unknown) => {
     const parsed = parseIssueCreate(input)
-    const task = ctx.createTask({ title: parsed.title, prompt: parsed.description, workdir: parsed.workdir, agentId: parsed.agentId, backend: parsed.backend, handoff: parsed.handoff, startNow: parsed.startNow, titleAuto: parsed.titleAuto, requestId: parsed.requestId, idempotencyKey: parsed.idempotencyKey }, parsed.trigger ?? 'assignment')
+    const task = ctx.createTask({ title: parsed.title, prompt: parsed.description, workdir: parsed.workdir, agentId: parsed.agentId, backend: parsed.backend, ...(parsed.thinking ? { thinking: parsed.thinking } : {}), ...(parsed.thinkingSource ? { thinkingSource: parsed.thinkingSource } : {}), ...(parsed.thinkingReason ? { thinkingReason: parsed.thinkingReason } : {}), ...(parsed.skipTriage ? { skipTriage: true } : {}), handoff: parsed.handoff, startNow: parsed.startNow, titleAuto: parsed.titleAuto, requestId: parsed.requestId, idempotencyKey: parsed.idempotencyKey }, parsed.trigger ?? 'assignment')
     // The Task commit above is authoritative. Publish/project on every path so
     // a parked Issue is visible immediately and a failed projection enters the
     // IssueStore retry loop instead of failing this successful creation.
@@ -41,7 +42,7 @@ export function registerIssueIpc(ctx: IpcContext) {
       if (meeting.status === 'active') ctx.meetingController.interject(meeting.id, text)
     } else if (issue && comment) {
       const mention = text.match(/@([^\s@]+)/)?.[1]?.replace(/[),.;:!?]+$/, '').toLowerCase()
-      const agent = mention ? ctx.agents.find((item) => item.name.toLowerCase() === mention || item.id.toLowerCase() === mention) : undefined
+      const agent = mention ? ctx.agents.find((item) => !isSystemAgent(item) && (item.name.toLowerCase() === mention || item.id.toLowerCase() === mention)) : undefined
       if (agent) {
         executionTask = ctx.createTask({ title: issue.title, prompt: text, workdir: ctx.store.get(issue.taskId)?.workdir ?? '', agentId: agent.id, backend: agent.backend, startNow: true, issueId: issue.id }, 'mention')
         ctx.publishIssueUpdate(executionTask)
