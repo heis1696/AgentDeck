@@ -569,6 +569,125 @@ export interface ToolEditMeta {
   truncated?: boolean
 }
 
+/** AgentDeck MCP 协议动作事件的 `TaskEvent.type` 标识（附在 `kind: 'status'` 持久化事件上，供渲染层卡片化） */
+export const PROTOCOL_ACTION_EVENT_TYPE = 'agentdeck.action' as const
+
+/** MCP 结构化协作动作快照：主进程落盘于 `event.data.action`，渲染层按与 XML 相同的特殊卡片/芯片渲染 */
+export type ProtocolActionData =
+  | {
+      kind: 'delegate'
+      to: string
+      reason?: string
+      prompt: string
+      childId?: string
+      thinking?: ThinkingLevel
+      isolatedWorktree?: boolean
+    }
+  | {
+      kind: 'continue'
+      start: 'auto' | 'parked'
+      brief: string
+      thinking?: ThinkingLevel
+    }
+  | {
+      kind: 'round'
+      outcome: 'action' | 'no_action' | 'failed'
+      reason?: string
+    }
+  | {
+      kind: 'review'
+      of: string
+      verdict: 'pass' | 'fail'
+      note?: string
+      childId?: string
+    }
+  | {
+      kind: 'consult'
+      to: string
+      reason?: string
+      prompt: string
+    }
+  | {
+      kind: 'investigate'
+      to: string
+      reason?: string
+      prompt: string
+      thinking?: ThinkingLevel
+    }
+
+/** 从任务事件中安全提取结构化 MCP 协议动作；普通状态事件返回 null */
+export function extractProtocolAction(event: Pick<TaskEvent, 'type' | 'data'>): ProtocolActionData | null {
+  if (event.type !== PROTOCOL_ACTION_EVENT_TYPE) return null
+  const rec = taskEventDataRecord(event)
+  const raw = rec?.action
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const a = raw as Record<string, unknown>
+  const optStr = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined)
+  const optThinking = (v: unknown): ThinkingLevel | undefined => (isThinkingLevel(v) ? v : undefined)
+  switch (a.kind) {
+    case 'delegate': {
+      if (typeof a.to !== 'string' || !a.to || typeof a.prompt !== 'string') return null
+      return {
+        kind: 'delegate',
+        to: a.to,
+        prompt: a.prompt,
+        ...(optStr(a.reason) ? { reason: optStr(a.reason) } : {}),
+        ...(optStr(a.childId) ? { childId: optStr(a.childId) } : {}),
+        ...(optThinking(a.thinking) ? { thinking: optThinking(a.thinking) } : {}),
+        ...(a.isolatedWorktree === true ? { isolatedWorktree: true } : {})
+      }
+    }
+    case 'continue': {
+      if ((a.start !== 'auto' && a.start !== 'parked') || typeof a.brief !== 'string') return null
+      return {
+        kind: 'continue',
+        start: a.start,
+        brief: a.brief,
+        ...(optThinking(a.thinking) ? { thinking: optThinking(a.thinking) } : {})
+      }
+    }
+    case 'round': {
+      if (a.outcome !== 'action' && a.outcome !== 'no_action' && a.outcome !== 'failed') return null
+      return {
+        kind: 'round',
+        outcome: a.outcome,
+        ...(optStr(a.reason) ? { reason: optStr(a.reason) } : {})
+      }
+    }
+    case 'review': {
+      if (typeof a.of !== 'string' || !a.of || (a.verdict !== 'pass' && a.verdict !== 'fail')) return null
+      return {
+        kind: 'review',
+        of: a.of,
+        verdict: a.verdict,
+        ...(optStr(a.note) ? { note: optStr(a.note) } : {}),
+        ...(optStr(a.childId) ? { childId: optStr(a.childId) } : {})
+      }
+    }
+    case 'consult': {
+      if (typeof a.to !== 'string' || !a.to || typeof a.prompt !== 'string') return null
+      return {
+        kind: 'consult',
+        to: a.to,
+        prompt: a.prompt,
+        ...(optStr(a.reason) ? { reason: optStr(a.reason) } : {})
+      }
+    }
+    case 'investigate': {
+      if (typeof a.to !== 'string' || !a.to || typeof a.prompt !== 'string') return null
+      return {
+        kind: 'investigate',
+        to: a.to,
+        prompt: a.prompt,
+        ...(optStr(a.reason) ? { reason: optStr(a.reason) } : {}),
+        ...(optThinking(a.thinking) ? { thinking: optThinking(a.thinking) } : {})
+      }
+    }
+    default:
+      return null
+  }
+}
+
 export type TaskEventDurability = 'durable' | 'live'
 
 /** Durable metadata follows the OpenCode event contract while remaining optional. */

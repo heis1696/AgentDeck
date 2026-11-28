@@ -126,6 +126,7 @@ html.light .code-token { color: var(--shiki-light); font-style: var(--shiki-ligh
 .worker-pane .bubble { max-width: 100%; font-size: var(--text-caption); overflow-wrap: anywhere; }
 .worker-pane .bubble pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .worker-pane .worklog { max-width: 100%; }
+.worker-pane .turn-action { max-width: 100%; }
 .worker-pane .worklog-body { overflow-wrap: anywhere; }
 .worker-pane .log-line { font-size: var(--text-micro); }
 .worker-pane-error { flex-shrink: 0; max-height: 90px; overflow: auto; padding: 8px 12px; background: var(--status-failed-bg); color: var(--err); font-size: var(--text-caption); overflow-wrap: anywhere; }

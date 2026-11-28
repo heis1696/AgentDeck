@@ -173,4 +173,26 @@ const countMarker = (marker) => restated.flatMap((turn) => turn.items).filter((i
 ok(countMarker('<delegate to="zcode"') === 1, 'restated delegate marker is stripped (first occurrence kept)')
 ok(countMarker('<delegate to="dsh"') === 1, 'fresh delegate marker in a later turn is preserved')
 ok(restated[1].items.some((item) => item.type === 'final' && item.text.includes('评估：单已交付')), 'surrounding prose of a restated marker survives')
+
+// MCP 协议动作事件（type='agentdeck.action'）：独立渲染为 action 项、不把同一工具调用的 started/result 撕裂成两段 worklog、且终态收敛后不丢失
+const actionEvent = (seq, action, text = '') => ({ seq, ts: seq, kind: 'status', type: 'agentdeck.action', text, data: { action } })
+const mcpTurns = buildTurns([
+  event(1, 'user', '拆任务并行做'),
+  event(2, 'text', '我把任务派给两位队员。'),
+  event(3, 'tool', 'mcp__agentdeck__agentdeck_dispatch_worker', { phase: 'started' }),
+  actionEvent(4, { kind: 'delegate', to: 'Claude', reason: '核心实现', prompt: '完成模块 A 实现并补齐单测' }, '⚡ 委派 → Claude'),
+  event(5, 'status', '⚡ 已接单：Claude ← 完成模块 A'),
+  event(6, 'tool', 'mcp__agentdeck__agentdeck_dispatch_worker', { phase: 'result', ok: true, durationMs: 18 }),
+  event(7, 'tool', 'mcp__agentdeck__agentdeck_record_round', { phase: 'started' }),
+  actionEvent(8, { kind: 'round', outcome: 'action', reason: '已派单' }, '领队评估：action'),
+  event(9, 'tool', 'mcp__agentdeck__agentdeck_record_round', { phase: 'result', ok: true, durationMs: 4 }),
+  event(10, 'text', '已派发并记录本轮状态。'),
+  event(11, 'final', '我把任务派给两位队员。\n已派发并记录本轮状态。')
+], 'x')
+ok(mcpTurns.length === 1, 'mcp action turn stays in one turn')
+ok(mcpTurns[0].items.filter((item) => item.type === 'work').length === 1, 'mcp protocol action between tool started and result does not fragment worklog')
+ok(mcpTurns[0].items.filter((item) => item.type === 'action').length === 2, 'mcp protocol action cards survive final convergence')
+ok(mcpTurns[0].items.some((item) => item.type === 'action' && item.action.kind === 'delegate' && item.action.to === 'Claude' && item.action.prompt === '完成模块 A 实现并补齐单测'), 'delegate action retains full untruncated prompt')
+ok(mcpTurns[0].items.some((item) => item.type === 'action' && item.action.kind === 'round' && item.action.outcome === 'action'), 'round action is extracted cleanly')
+
 if (!process.exitCode) console.log('\n✅ TURN MODEL SMOKE PASSED')

@@ -1,6 +1,6 @@
 // 任务运行器：队列 + 生命周期 + 事件管道
 // 状态机：queued → running → done | failed | cancelled
-import { isThinkingLevel, type ExecutionOwner, type Task, type TaskEvent, type ThinkingLevel, type ThinkingSource } from '../shared/types'
+import { isThinkingLevel, PROTOCOL_ACTION_EVENT_TYPE, type ExecutionOwner, type ProtocolActionData, type Task, type TaskEvent, type ThinkingLevel, type ThinkingSource } from '../shared/types'
 import { nextEscalatedThinkingLevel, type TriageAssessInput, type TriageAssessResult } from '../shared/triage'
 import { createHash } from 'node:crypto'
 import { type TaskExpectation, type TaskStore } from './store'
@@ -757,6 +757,16 @@ export class TaskRunner {
     if (full) this.pushEvent(taskId, full)
   }
 
+  /** MCP 结构化协作动作留痕（持久化 status 事件 + type='agentdeck.action'，供渲染层输出特殊卡片/芯片） */
+  private emitProtocolAction(taskId: string, action: ProtocolActionData, text: string, expected: TaskExpectation = {}) {
+    const full = this.store.appendEvent(
+      taskId,
+      { ts: Date.now(), kind: 'status' as const, type: PROTOCOL_ACTION_EVENT_TYPE, text, data: { action } },
+      expected
+    )
+    if (full) this.pushEvent(taskId, full)
+  }
+
   /** facade：武装流式派单嗅探已迁 ledger（批次 4a）；MCP 模式只初始化台账、不扫正文 XML */
   private armDelegateSniffer(taskId: string, opts?: { sniffText?: boolean }) {
     this.delegateLedger.armDelegateSniffer(taskId, opts)
@@ -997,6 +1007,22 @@ export class TaskRunner {
           const deduplicated = this.delegateLedger.recordExternalSpawn(taskId, call, child.id)
           const team = this.getTeam?.() ?? []
           const worker = team.find((a) => a.id === child.agentId)?.name ?? call.to
+          if (!deduplicated) {
+            this.emitProtocolAction(
+              taskId,
+              {
+                kind: 'delegate',
+                to: worker,
+                ...(call.reason ? { reason: call.reason } : {}),
+                prompt: call.prompt,
+                childId: child.id,
+                ...(call.thinking ? { thinking: call.thinking } : {}),
+                ...(child.worktree ? { isolatedWorktree: true } : {})
+              },
+              `⚡ 委派 → ${worker}${call.reason ? `（${call.reason}）` : ''}：${call.prompt.slice(0, 80).replace(/\n/g, ' ')}`,
+              expected
+            )
+          }
           return {
             ok: true,
             childId: child.id,
@@ -1015,12 +1041,36 @@ export class TaskRunner {
         const child = this.store.get(childId)
         if (!child || child.status !== 'done') return { ok: false, error: `子单 #${seq} 当前状态不可审核` }
         this.applyChildReview(childId, verdict, note)
-        this.note(taskId, `单 #${seq} 审核${verdict === 'pass' ? '通过' : '退回'}${note ? `：${note}` : ''}`, expected)
+        this.emitProtocolAction(
+          taskId,
+          {
+            kind: 'review',
+            of: `#${seq}`,
+            verdict,
+            ...(note ? { note } : {}),
+            childId
+          },
+          `单 #${seq} 审核${verdict === 'pass' ? '通过' : '退回'}${note ? `：${note}` : ''}`,
+          expected
+        )
         return { ok: true }
       },
       recordRound: (roundNote) => {
         if (!this.isCurrentRun(claim)) return
-        this.note(taskId, `领队评估：${roundNote.outcome}${roundNote.reason ? ' — ' + roundNote.reason : ''}`, expected)
+        const outcome: 'action' | 'no_action' | 'failed' =
+          roundNote.outcome === 'action' || roundNote.outcome === 'no_action' || roundNote.outcome === 'failed'
+            ? roundNote.outcome
+            : 'action'
+        this.emitProtocolAction(
+          taskId,
+          {
+            kind: 'round',
+            outcome,
+            ...(roundNote.reason ? { reason: roundNote.reason } : {})
+          },
+          `领队评估：${roundNote.outcome}${roundNote.reason ? ' — ' + roundNote.reason : ''}`,
+          expected
+        )
       },
       validateHandoff: (call) => {
         const current = this.store.get(taskId)
@@ -1039,6 +1089,49 @@ export class TaskRunner {
           return { ok: false, error: `阶段接力已达上限（${chainLimit} 次），不能继续接力；请人工推进后续阶段。` }
         }
         return { ok: true }
+      },
+      onHandoff: (call) => {
+        if (!this.isCurrentRun(claim)) return
+        this.emitProtocolAction(
+          taskId,
+          {
+            kind: 'continue',
+            start: call.start,
+            brief: call.brief,
+            ...(call.thinking ? { thinking: call.thinking } : {})
+          },
+          `阶段接力（${call.start === 'parked' ? '等你启动' : '自动开始'}）`,
+          expected
+        )
+      },
+      onConsult: (call) => {
+        if (!this.isCurrentRun(claim)) return
+        this.emitProtocolAction(
+          taskId,
+          {
+            kind: 'consult',
+            to: call.to,
+            ...(call.reason ? { reason: call.reason } : {}),
+            prompt: call.prompt
+          },
+          `咨询队长 → ${call.to}${call.reason ? `（${call.reason}）` : ''}：${call.prompt.slice(0, 80).replace(/\n/g, ' ')}`,
+          expected
+        )
+      },
+      onInvestigate: (call) => {
+        if (!this.isCurrentRun(claim)) return
+        this.emitProtocolAction(
+          taskId,
+          {
+            kind: 'investigate',
+            to: call.to,
+            ...(call.reason ? { reason: call.reason } : {}),
+            prompt: call.prompt,
+            ...(call.thinking ? { thinking: call.thinking } : {})
+          },
+          `只读调查 → ${call.to}${call.reason ? `（${call.reason}）` : ''}：${call.prompt.slice(0, 80).replace(/\n/g, ' ')}`,
+          expected
+        )
       }
     }
   }

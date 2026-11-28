@@ -1,10 +1,11 @@
 import { useMemo } from 'react'
-import type { Task, TaskEvent } from '../../../shared/types'
+import { extractProtocolAction, type ProtocolActionData, type Task, type TaskEvent } from '../../../shared/types'
 
 export type TurnItem =
   | { type: 'text'; text: string; closed: boolean }
   | { type: 'final'; text: string }
   | { type: 'work'; work: TaskEvent[] }
+  | { type: 'action'; action: ProtocolActionData; seq: number; ts: number }
 
 export interface Turn {
   userText: string | null
@@ -64,7 +65,7 @@ function dedupeDelegateCards(turns: Turn[]) {
   const seen = new Set<string>()
   for (const turn of turns) {
     for (const item of turn.items) {
-      if (item.type === 'work' || !item.text.includes('<delegate')) continue
+      if ((item.type !== 'text' && item.type !== 'final') || !item.text.includes('<delegate')) continue
       item.text = item.text.replace(DELEGATE_BLOCK_RE, (whole: string, attrs: string, prompt: string) => {
         const key = `${attrs.match(DELEGATE_TO_ATTR_RE)?.[1] ?? ''}\n${prompt.trim()}`
         if (seen.has(key)) return ''
@@ -89,8 +90,12 @@ export function buildTurns(events: TaskEvent[], prompt = ''): Turn[] {
   }
   const pushWork = (turn: Turn, event: TaskEvent) => {
     closeText(turn)
-    const last = turn.items[turn.items.length - 1]
-    if (last?.type === 'work') last.work.push(event)
+    // MCP 协议动作卡片会在 tool(started) 与 tool(result) 之间到达：回溯跳过末尾连续的
+    // action 项，把同批 tool/status 收进同一个 work 块，避免单个工具调用被拆成两段 worklog。
+    let workIdx = turn.items.length - 1
+    while (workIdx >= 0 && turn.items[workIdx].type === 'action') workIdx--
+    const target = workIdx >= 0 ? turn.items[workIdx] : undefined
+    if (target?.type === 'work') target.work.push(event)
     else turn.items.push({ type: 'work', work: [event] })
   }
   for (const event of events) {
@@ -100,6 +105,12 @@ export function buildTurns(events: TaskEvent[], prompt = ''): Turn[] {
     }
     let turn = current ?? open(null, event.seq)
     if ((event.kind === 'text' || event.kind === 'final') && turn.done) turn = open(null, event.seq)
+    const protocolAction = extractProtocolAction(event)
+    if (protocolAction) {
+      closeText(turn)
+      turn.items.push({ type: 'action', action: protocolAction, seq: event.seq, ts: event.ts })
+      continue
+    }
     if (event.kind === 'text') {
       const last = turn.items[turn.items.length - 1]
       turn.streamed += event.text ?? ''
@@ -117,8 +128,8 @@ export function buildTurns(events: TaskEvent[], prompt = ''): Turn[] {
       const fullFinal = compact(event.text ?? '')
       const fullStreamed = compact(turn.streamed)
       if (fullFinal !== '' && fullStreamed !== '' && fullFinal.includes(fullStreamed)) {
-        const firstBubble = turn.items.findIndex((item) => item.type !== 'work')
-        const items: TurnItem[] = turn.items.filter((item) => item.type === 'work')
+        const firstBubble = turn.items.findIndex((item) => item.type === 'text' || item.type === 'final')
+        const items: TurnItem[] = turn.items.filter((item) => item.type === 'work' || item.type === 'action')
         items.splice(firstBubble >= 0 ? firstBubble : items.length, 0, { type: 'final', text: event.text ?? '' })
         turn.items = items
       } else if (absorbFinalFragments(turn, event.text ?? '', compact)) {

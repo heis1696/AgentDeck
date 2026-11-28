@@ -2146,6 +2146,31 @@ body { background: var(--app-shell); color: var(--text); }
 .delegate-card-excerpt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .delegate-card-body pre { margin: 0; padding: 10px 12px; max-height: 240px; overflow: auto; border-top: 1px solid var(--teal-line); background: var(--surface-inset); font: 12px/1.55 var(--mono); white-space: pre-wrap; word-break: break-word; }
 
+/* MCP 结构化协作动作项（在时间线内独立成块，宽度与 worklog/气泡对齐） */
+.turn-action { align-self: flex-start; width: 100%; max-width: 86%; }
+.turn-action > .delegate-card,
+.turn-action > .continue-card,
+.turn-action > .round-chip,
+.turn-action > .review-chip { margin: 0; }
+.delegate-card-consult {
+  border-color: color-mix(in srgb, var(--type-meeting) 40%, transparent);
+  border-left-color: var(--type-meeting);
+  background: color-mix(in srgb, var(--type-meeting) 12%, transparent);
+}
+.delegate-card-consult .delegate-card-icon { color: var(--type-meeting); }
+.delegate-card-consult .delegate-card-tag { background: var(--type-meeting); color: var(--accent-ink); }
+.delegate-card-consult .delegate-card-body summary,
+.delegate-card-consult .delegate-card-body pre { border-top-color: color-mix(in srgb, var(--type-meeting) 35%, transparent); }
+.delegate-card-investigate {
+  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+  border-left-color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+}
+.delegate-card-investigate .delegate-card-icon { color: var(--warn); }
+.delegate-card-investigate .delegate-card-tag { background: var(--warn); color: var(--accent-ink); }
+.delegate-card-investigate .delegate-card-body summary,
+.delegate-card-investigate .delegate-card-body pre { border-top-color: color-mix(in srgb, var(--warn) 35%, transparent); }
+
 /* —— 委派来源徽章：agent 创建的 Issue/看板卡片上，与用户创建的一眼区分 —— */
 .badge-delegate {
   display: inline-flex; align-items: center; gap: 3px;

@@ -1,9 +1,9 @@
 import { ArrowDown, ChevronDown, Copy, Search, Undo2, X, ChevronUp } from 'lucide-react'
 import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from 'react'
-import { Markdown, renderStreamingMarkers } from '../Markdown'
+import { ConsultCard, ContinueCard, DelegateCard, InvestigateCard, Markdown, ReviewChip, RoundChip, renderStreamingMarkers } from '../Markdown'
 import { bridge, fmtDuration, fmtTime } from '../../api'
 import { PARKED_QUEUED_LABEL } from '../../labels'
-import type { Task, TaskEvent } from '../../../../shared/types'
+import type { ProtocolActionData, Task, TaskEvent } from '../../../../shared/types'
 import type { Turn } from '../../hooks/turnModel'
 import { classifyTool, navSummary } from '../../hooks/turnModel'
 import { isComposingKey, ui, type DockEditMetadata } from '../../ui/interaction-center'
@@ -83,12 +83,31 @@ function firstLine(value: string) {
   return line.length > 100 ? line.slice(0, 100) + '…' : line
 }
 
-/** 回合起始时间：取该回合第一个带时间戳的工作事件（用户气泡本身不带 ts） */
+/** 回合起始时间：取该回合第一个带时间戳的工作或协作动作事件（用户气泡本身不带 ts） */
 function turnTime(turn: Turn): number {
   for (const item of turn.items) {
     if (item.type === 'work' && item.work.length) return item.work[0].ts
+    if (item.type === 'action' && item.ts) return item.ts
   }
   return 0
+}
+
+/** MCP 结构化协作动作渲染（与 Markdown XML 通道共用同一套特殊卡片/芯片视觉） */
+function ProtocolActionCard({ action }: { action: ProtocolActionData }) {
+  switch (action.kind) {
+    case 'delegate':
+      return <DelegateCard to={action.to} reason={action.reason} prompt={action.prompt} />
+    case 'continue':
+      return <ContinueCard start={action.start} brief={action.brief} />
+    case 'round':
+      return <RoundChip outcome={action.outcome} reason={action.reason} />
+    case 'review':
+      return <ReviewChip of={action.of} verdict={action.verdict} note={action.note} />
+    case 'consult':
+      return <ConsultCard to={action.to} reason={action.reason} prompt={action.prompt} />
+    case 'investigate':
+      return <InvestigateCard to={action.to} reason={action.reason} prompt={action.prompt} />
+  }
 }
 
 /** 一个气泡右上角的悬浮动作（复制原文）：只在 hover / 键盘聚焦时出现，不占版面 */
@@ -266,13 +285,24 @@ function WorkLog({ work, autoOpen }: { work: TaskEvent[]; autoOpen: boolean }) {
  *  「历史/实时分离」：运行中回合永远在窗口内（窗口从末尾数起），流式追加不触碰未渲染的旧回合。 */
 const WINDOW_STEP = 30
 
-/** 回合可检索文本：用户输入 + 回复正文 + 工具名（长会话里「刚才哪轮说了 XX」的查找面） */
+/** 回合可检索文本：用户输入 + 回复正文 + 协作卡片 + 工具名（长会话里「刚才哪轮说了 XX」的查找面） */
 function turnSearchText(turn: Turn): string {
   const parts: string[] = []
   if (turn.userText != null) parts.push(turn.userText)
   for (const item of turn.items) {
     if (item.type === 'final' || item.type === 'text') parts.push(item.text)
-    else for (const event of item.work) if (event.text) parts.push(event.text)
+    else if (item.type === 'action') {
+      const a = item.action
+      if (a.kind === 'delegate' || a.kind === 'consult' || a.kind === 'investigate') {
+        parts.push(a.to, a.reason ?? '', a.prompt)
+      } else if (a.kind === 'continue') {
+        parts.push(a.start, a.brief)
+      } else if (a.kind === 'round') {
+        parts.push(a.outcome, a.reason ?? '')
+      } else if (a.kind === 'review') {
+        parts.push(a.of, a.verdict, a.note ?? '')
+      }
+    } else for (const event of item.work) if (event.text) parts.push(event.text)
   }
   return parts.join('\n')
 }
@@ -407,7 +437,10 @@ export function TurnTimeline({ task, turns, activeNav, following, onFollowLatest
           const startedAt = turnTime(turn)
           let lastBubbleIndex = -1
           let lastWorkIndex = -1
-          turn.items.forEach((item, itemIndex) => { if (item.type === 'work') lastWorkIndex = itemIndex; else lastBubbleIndex = itemIndex })
+          turn.items.forEach((item, itemIndex) => {
+            if (item.type === 'work') lastWorkIndex = itemIndex
+            else if (item.type === 'text' || item.type === 'final') lastBubbleIndex = itemIndex
+          })
           // key 带任务身份：切任务时回合子树整体重挂，worklog「显示全部」等本地状态
           // 不跨任务继承（否则 A 展开的第 70 回合会把 B 的第 70 回合也顶成全量渲染）
           return <div className="turn" id={`turn-${index}`} data-turn-idx={index} key={`${task.id}:${index}`}>
@@ -423,9 +456,11 @@ export function TurnTimeline({ task, turns, activeNav, following, onFollowLatest
             {turn.sysNotes.length > 0 && <div className="sys-strip">{turn.sysNotes.map((note, noteIndex) => <div key={noteIndex} className="sys-note">⚡ {note}</div>)}</div>}
             {turn.items.map((item, itemIndex) => {
               if (item.type === 'work') return <WorkLog key={itemIndex} work={item.work} autoOpen={streaming && itemIndex === lastWorkIndex} />
+              if (item.type === 'action') return <div className="turn-action" key={`act-${item.seq}-${itemIndex}`}><ProtocolActionCard action={item.action} /></div>
               if (item.type === 'final') return <div className="bubble agent is-final" key={itemIndex}><BubbleTools text={item.text} label="回复" /><Markdown text={item.text} />{turn.usage && <UsageBadge usage={turn.usage} />}</div>
               return <div className="bubble agent" key={itemIndex}>{item.closed && <BubbleTools text={item.text} label="回复" />}{item.closed ? <Markdown text={item.text} /> : <pre className="streaming">{renderStreamingMarkers(item.text)}</pre>}{streaming && !item.closed && <div className="log-running"><span className="dots"><i /><i /><i /></span>回复中…</div>}{turn.usage && finalIndex < 0 && itemIndex === lastBubbleIndex && <UsageBadge usage={turn.usage} />}</div>
             })}
+            {turn.usage && finalIndex < 0 && lastBubbleIndex < 0 && <UsageBadge usage={turn.usage} />}
             {streaming && !endsWithOpenText && finalIndex < 0 && <div className="bubble agent"><div className="log-running"><span className="dots"><i /><i /><i /></span>回复中…</div></div>}
             {pending && <div className="bubble agent"><div className="log-running">{task.parked ? PARKED_QUEUED_LABEL : <><span className="dots"><i /><i /><i /></span>排队等待执行…</>}</div></div>}
           </div>

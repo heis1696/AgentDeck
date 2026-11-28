@@ -20,7 +20,7 @@ await build({
   jsx: 'automatic',
   external: ['react', 'react-dom']
 })
-const { Markdown } = await import(pathToFileURL(outfile).href)
+const { Markdown, DelegateCard, ContinueCard, RoundChip, ReviewChip, ConsultCard, InvestigateCard } = await import(pathToFileURL(outfile).href)
 const render = (text) => renderToStaticMarkup(React.createElement(Markdown, { text }))
 const ok = (condition, label) => {
   console.log(`  ${condition ? '✓' : '✗'} ${label}`)
@@ -58,5 +58,26 @@ ok(has(fenced.replace(/&lt;/g, '<').replace(/&gt;/g, '>'), '<div>hello</div>'), 
 
 // 空文本不崩
 ok(render('') === '<div class="md"></div>', 'empty text renders empty container')
+
+// MCP 通道直接复用的独立协议卡片/芯片导出渲染正确
+const mcpCardHtml = renderToStaticMarkup(React.createElement(React.Fragment, null,
+  React.createElement(DelegateCard, { to: 'Claude', reason: '实现', prompt: '完整派单正文' }),
+  React.createElement(ContinueCard, { start: 'auto', brief: '阶段交接简报' }),
+  React.createElement(RoundChip, { outcome: 'action', reason: '已派单' }),
+  React.createElement(ReviewChip, { of: '#1', verdict: 'pass', note: '验证通过' }),
+  React.createElement(ConsultCard, { to: 'Codex', reason: '架构对齐', prompt: '确认接口边界' }),
+  React.createElement(InvestigateCard, { to: 'ZCode', reason: '只读排查', prompt: '检查日志路径' })
+))
+ok(
+  has(mcpCardHtml, 'delegate-card')
+  && has(mcpCardHtml, 'continue-card')
+  && has(mcpCardHtml, 'round-chip')
+  && has(mcpCardHtml, 'review-chip')
+  && has(mcpCardHtml, 'delegate-card-consult')
+  && has(mcpCardHtml, 'delegate-card-investigate')
+  && has(mcpCardHtml, '完整派单正文')
+  && has(mcpCardHtml, '阶段交接简报'),
+  'standalone protocol cards/chips render for MCP action timeline'
+)
 
 if (!process.exitCode) console.log('\n✅ MARKDOWN SMOKE PASSED')

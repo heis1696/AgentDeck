@@ -201,8 +201,8 @@ console.log('3. 端到端 MCP 委派闭环：')
         reason: '后端专长',
         thinking: 'high'
       }, 4)
-      check(!okDispatch.isError && okDispatch.payload.accepted === true && !!okDispatch.payload.childTaskId,
-        '当场改派合法队员：同步返回 accepted=true 与 childTaskId')
+      check(!okDispatch.isError && okDispatch.payload.accepted === true && !okDispatch.payload.deduplicated && !!okDispatch.payload.childTaskId,
+        '当场改派合法队员：同步返回 accepted=true（非 deduplicated）与 childTaskId')
 
       // 重复派完全相同单子：幂等去重
       const dupDispatch = await mcpCall(mcpEndpoint, 'agentdeck_dispatch_worker', {
@@ -335,6 +335,18 @@ console.log('3. 端到端 MCP 委派闭环：')
   check(handoffsCreated.length === 1 && handoffsCreated[0].start === 'parked' && handoffsCreated[0].brief.includes('阶段2'),
     'MCP 阶段接力生效且未受正文伪造 <continue> 干扰')
   check(captured.turnCount === 2, `仅跑 2 个回合（无冗余拒单回灌回合，实跑 ${captured.turnCount} 轮）`)
+
+  // 验证结构化协议动作事件（供渲染层恢复特殊委派/审核/自评/接力卡片 UI，且去重派单不双发）
+  const leaderEvents = store.readEvents(leaderTask.id)
+  const actionEvents = leaderEvents.filter((e) => e.type === 'agentdeck.action').map((e) => e.data?.action)
+  check(actionEvents.filter((a) => a?.kind === 'delegate').length === 1 && actionEvents.find((a) => a?.kind === 'delegate')?.to === 'Worker1' && actionEvents.find((a) => a?.kind === 'delegate')?.prompt === '实现核心模块并写长报告',
+    'MCP 派单落盘唯一 delegate 动作事件且保留完整指令（去重调用不重复发卡）')
+  check(actionEvents.some((a) => a?.kind === 'review' && a?.of === '#1' && a?.verdict === 'pass'),
+    'MCP 审核落盘 review 动作事件供时间线渲染 ReviewChip')
+  check(actionEvents.some((a) => a?.kind === 'round' && a?.outcome === 'no_action'),
+    'MCP 回合自评落盘 round 动作事件供时间线渲染 RoundChip')
+  check(actionEvents.some((a) => a?.kind === 'continue' && a?.start === 'parked' && a?.brief?.includes('阶段2')),
+    'MCP 阶段接力落盘 continue 动作事件供时间线渲染 ContinueCard')
 
   // 闲置期调用原 Token 必须被拒绝
   const idleCall = await mcpCall(captured.firstEndpoint, 'agentdeck_context', {}, 29)

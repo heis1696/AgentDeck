@@ -93,7 +93,7 @@ function DelegateFallbackCard({ prompt, truncated }: { prompt: string; truncated
 
 // 硬切接力卡片：领队输出 <continue start> 时，本回合在此硬切新会话，简报是唯一携带物。
 // 紫色系对齐看板上已有的「阶段接力」徽章（.badge-handoff）。
-function ContinueCard({ start, brief, truncated }: { start?: string; brief: string; truncated?: boolean }) {
+export function ContinueCard({ start, brief, truncated }: { start?: string; brief: string; truncated?: boolean }) {
   const body = brief.trim()
   const excerpt = excerptOf(body)
   return (
@@ -118,7 +118,7 @@ function ContinueCard({ start, brief, truncated }: { start?: string; brief: stri
 
 // 回合自评：领队每轮回灌后输出的 <round outcome reason/>
 const ROUND_LABEL: Record<string, string> = { action: '已行动', no_action: '无动作', failed: '受挫' }
-function RoundChip({ outcome, reason, inline }: { outcome?: string; reason?: string; inline?: boolean }) {
+export function RoundChip({ outcome, reason, inline }: { outcome?: string; reason?: string; inline?: boolean }) {
   const known = outcome ? ROUND_LABEL[outcome] : undefined
   return (
     <div className={`round-chip${inline ? ' inline' : ''}${outcome ? ` rc-${outcome}` : ''}`}>
@@ -131,7 +131,7 @@ function RoundChip({ outcome, reason, inline }: { outcome?: string; reason?: str
 }
 
 // 委派单审核结论：领队对 done 子任务输出的 <review of verdict note/>
-function ReviewChip({ of, verdict, note, inline }: { of?: string; verdict?: string; note?: string; inline?: boolean }) {
+export function ReviewChip({ of, verdict, note, inline }: { of?: string; verdict?: string; note?: string; inline?: boolean }) {
   const pass = verdict === 'pass'
   const label = pass ? '通过' : verdict === 'fail' ? '退回' : verdict || '—'
   return (
@@ -141,6 +141,54 @@ function ReviewChip({ of, verdict, note, inline }: { of?: string; verdict?: stri
       <b className="review-chip-of">{of || '—'}</b>
       <span className="review-chip-verdict">{label}</span>
       {note ? <span className="review-chip-note">· {note}</span> : null}
+    </div>
+  )
+}
+
+// 跨队长咨询卡片：MCP agentdeck_consult_captain 登记时展示
+export function ConsultCard({ to, reason, prompt }: { to: string; reason?: string; prompt: string }) {
+  const body = prompt.trim()
+  const excerpt = excerptOf(body)
+  return (
+    <div className="delegate-card delegate-card-consult">
+      <div className="delegate-card-head">
+        <span className="delegate-card-icon">💬</span>
+        <span className="delegate-card-tag">咨询</span>
+        <span className="delegate-card-to">{to}</span>
+        <span className="delegate-card-arrow">→</span>
+        {reason ? <span className="delegate-card-reason">· {reason}</span> : null}
+      </div>
+      <details className="delegate-card-body">
+        <summary>
+          <span className="delegate-card-summary-label">咨询问题</span>
+          {excerpt ? <span className="delegate-card-excerpt">{excerpt}</span> : null}
+        </summary>
+        <pre>{body || '（无内容）'}</pre>
+      </details>
+    </div>
+  )
+}
+
+// 只读调查卡片：MCP agentdeck_investigate 登记时展示
+export function InvestigateCard({ to, reason, prompt }: { to: string; reason?: string; prompt: string }) {
+  const body = prompt.trim()
+  const excerpt = excerptOf(body)
+  return (
+    <div className="delegate-card delegate-card-investigate">
+      <div className="delegate-card-head">
+        <span className="delegate-card-icon">🔍</span>
+        <span className="delegate-card-tag">调查</span>
+        <span className="delegate-card-to">{to}</span>
+        <span className="delegate-card-arrow">→</span>
+        {reason ? <span className="delegate-card-reason">· {reason}</span> : null}
+      </div>
+      <details className="delegate-card-body">
+        <summary>
+          <span className="delegate-card-summary-label">调查指令</span>
+          {excerpt ? <span className="delegate-card-excerpt">{excerpt}</span> : null}
+        </summary>
+        <pre>{body || '（无内容）'}</pre>
+      </details>
     </div>
   )
 }

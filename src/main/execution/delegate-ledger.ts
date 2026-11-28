@@ -42,7 +42,7 @@ export class DelegateLedger {
   /** 流式派单嗅探：领队会话期间逐条 text 事件累计扫描，闭合一个 <delegate> 即提前建单入队。
    *  回灌仍只在回合末（委派循环）发生，不会打断领队正在进行的主运行。
    *  sniffText=false 用于 MCP 通道：不扫正文 XML，但复用同一份 spawned/seenKeys/suspended 台账。 */
-  private earlySpawns = new Map<string, { buffer: string; scanOffset: number; closeScanOffset: number; spawned: Map<string, { call: DelegateCall; childId: string }>; seenKeys: Set<string>; pending: Promise<unknown>[]; suspended: boolean; sniffText: boolean }>()
+  private earlySpawns = new Map<string, { buffer: string; scanOffset: number; closeScanOffset: number; spawned: Map<string, { call: DelegateCall; childId: string }>; seenKeys: Set<string>; externalChildIds: Set<string>; pending: Promise<unknown>[]; suspended: boolean; sniffText: boolean }>()
   /** 被拒派单的原因（按任务累积）：委派循环每轮取走并回灌给领队，让它当场改派而不是干等不存在的回灌 */
   private delegateRejections = new Map<string, Array<{ runId?: string; reason: string; key?: string }>>()
   private workerIndexReservations = new Map<string, number>()
@@ -78,22 +78,25 @@ export class DelegateLedger {
       existing.sniffText = sniffText
       return
     }
-    this.earlySpawns.set(taskId, { buffer: '', scanOffset: 0, closeScanOffset: 0, spawned: new Map(), seenKeys: new Set(), pending: [], suspended: false, sniffText })
+    this.earlySpawns.set(taskId, { buffer: '', scanOffset: 0, closeScanOffset: 0, spawned: new Map(), seenKeys: new Set(), externalChildIds: new Set(), pending: [], suspended: false, sniffText })
   }
 
   /** 登记外部结构化通道（如 MCP agentdeck_dispatch_worker）建出的子单，直接汇入同一份
    *  earlySpawns / seenKeys 台账，复用既有等待终态、回灌、集成与回合失败撤销语义。
-   *  返回 true 表示同一派单已登记（去重命中），false 表示本回合新登记。 */
+   *  返回 true 表示同一子单已登记（去重命中），false 表示本会话首次登记。 */
   recordExternalSpawn(taskId: string, call: DelegateCall, childId: string): boolean {
     let state = this.earlySpawns.get(taskId)
     if (!state) {
-      state = { buffer: '', scanOffset: 0, closeScanOffset: 0, spawned: new Map(), seenKeys: new Set(), pending: [], suspended: false, sniffText: false }
+      state = { buffer: '', scanOffset: 0, closeScanOffset: 0, spawned: new Map(), seenKeys: new Set(), externalChildIds: new Set(), pending: [], suspended: false, sniffText: false }
       this.earlySpawns.set(taskId, state)
     }
     const key = `${call.to}\n${call.prompt}`
-    const already = state.spawned.get(key)?.childId === childId || state.seenKeys.has(key)
+    // 注意：ChildSpawner.spawnDelegateChildExclusive 在返回 child 前已调用 rememberSeenKey，
+    // 因此不能用 seenKeys.has(key) 判首次重复，必须以 externalChildIds / spawned.childId 判定。
+    const already = state.externalChildIds.has(childId) || state.spawned.get(key)?.childId === childId
     state.seenKeys.add(key)
-    if (!state.spawned.has(key)) {
+    state.externalChildIds.add(childId)
+    if (!already && !state.spawned.has(key)) {
       state.spawned.set(key, { call, childId })
     }
     return already

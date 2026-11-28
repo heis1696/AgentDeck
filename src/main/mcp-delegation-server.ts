@@ -115,6 +115,12 @@ export interface McpRunBinding {
   recordRound(note: RoundNote): void
   /** 校验阶段接力是否允许（防重复阶段或超接力链上限） */
   validateHandoff(call: ContinueCall): { ok: true } | { ok: false; error: string }
+  /** 阶段接力通过校验后的即时留痕钩子（供渲染层输出特殊接力卡片） */
+  onHandoff?(call: ContinueCall): void
+  /** 跨队长咨询登记后的即时留痕钩子（供渲染层输出咨询卡片） */
+  onConsult?(call: ConsultCall): void
+  /** 只读调查登记后的即时留痕钩子（供渲染层输出调查卡片） */
+  onInvestigate?(call: InvestigateCall): void
 }
 
 interface ActiveRunEntry {
@@ -536,7 +542,9 @@ async function executeToolCall(entry: ActiveRunEntry, name: string, rawArgs: unk
       const key = `${peer.name}\n${prompt}`
       const duplicate = entry.turnConsults.some((c) => `${c.to}\n${c.prompt}` === key)
       if (!duplicate) {
-        entry.turnConsults.push({ to: peer.name, prompt, ...(reason ? { reason } : {}) })
+        const call: ConsultCall = { to: peer.name, prompt, ...(reason ? { reason } : {}) }
+        entry.turnConsults.push(call)
+        entry.binding.onConsult?.(call)
       }
       return {
         isError: false,
@@ -574,13 +582,15 @@ async function executeToolCall(entry: ActiveRunEntry, name: string, rawArgs: unk
       const key = `${worker.name}\n${prompt}`
       const duplicate = entry.turnInvestigates.some((c) => `${c.to}\n${c.prompt}` === key)
       if (!duplicate) {
-        entry.turnInvestigates.push({
+        const call: InvestigateCall = {
           to: worker.name,
           prompt,
           ...(reason ? { reason } : {}),
           ...(thinking ? { thinking } : {}),
           ...(invalidThinking ? { invalidThinking } : {})
-        })
+        }
+        entry.turnInvestigates.push(call)
+        entry.binding.onInvestigate?.(call)
       }
       return {
         isError: false,
@@ -614,6 +624,7 @@ async function executeToolCall(entry: ActiveRunEntry, name: string, rawArgs: unk
         return { isError: true, payload: { accepted: false, error: check.error } }
       }
       entry.turnHandoff = call
+      entry.binding.onHandoff?.(call)
       return {
         isError: false,
         payload: {
