@@ -78,7 +78,15 @@ process.stdin.on('end', () => {
   const content = msg && msg.message && typeof msg.message.content === 'string' ? msg.message.content : ''
   const logFile = process.env.FAKE_AGY_LOG
   if (logFile) {
-    fs.appendFileSync(logFile, JSON.stringify({ args, event: msg && msg.event, contentLen: content.length, contentHead: content.slice(0, 24) }) + '\\n')
+    const addDirIdx = args.indexOf('--add-dir')
+    const addDir = addDirIdx >= 0 ? args[addDirIdx + 1] : null
+    let mcpConfig = null
+    let hostRule = null
+    if (addDir) {
+      try { mcpConfig = JSON.parse(fs.readFileSync(addDir + '/.agents/mcp_config.json', 'utf8')) } catch {}
+      try { hostRule = fs.readFileSync(addDir + '/.agents/rules/agentdeck-host.md', 'utf8') } catch {}
+    }
+    fs.appendFileSync(logFile, JSON.stringify({ args, event: msg && msg.event, contentLen: content.length, contentHead: content.slice(0, 24), addDir, mcpConfig, hostRule }) + '\\n')
   }
   const resumeIdx = args.indexOf('--resume')
   const resumed = resumeIdx >= 0 ? args[resumeIdx + 1] : ''
@@ -220,7 +228,48 @@ try {
   const logs = readLogs()
   ok(logs[0].event === 'user' && logs[0].contentLen === hugePrompt.length, '46K 超长 prompt 通过 stdin NDJSON 完整送达')
   ok(logs[0].args.includes('--model') && logs[0].args.includes('gemini-4-neon') && logs[0].args.includes('--effort') && logs[0].args.includes('xhigh'), '基名模型 + max 思考映射到 --effort xhigh')
+  ok(!logs[0].args.includes('--add-dir'), '未传 systemPrompt/mcpEndpoint 时不挂载多余 --add-dir')
   ok(logs[1].args.includes('--resume') && logs[1].args.includes('conv-smoke-001'), '续聊透传 --resume <conversation_id>')
+
+  console.log('MCP + 原生系统规则（--add-dir overlay）注入与清理：')
+  ok(backend.systemPromptMode === 'native' && backend.delegationTransport === 'mcp', 'agy 声明 systemPromptMode=native + delegationTransport=mcp')
+  const mcpSession = await backend.start({
+    prompt: 'mcp turn 1',
+    workdir: tmpRoot,
+    mode: 'yolo',
+    systemPrompt: '你是运行在 AgentDeck 平台中的领队。',
+    mcpEndpoint: { serverName: 'agentdeck', url: 'http://127.0.0.1:43210/mcp', token: 'tok_agy_secret' },
+    events: { onEvent: () => {}, onTurnEnd: () => {} }
+  })
+  await mcpSession.send('mcp turn 2')
+  await mcpSession.close()
+  const allLogsAfterMcp = readLogs()
+  const mcpLog1 = allLogsAfterMcp[allLogsAfterMcp.length - 2]
+  const mcpLog2 = allLogsAfterMcp[allLogsAfterMcp.length - 1]
+  const srv1 = mcpLog1?.mcpConfig?.mcpServers?.agentdeck
+  const srv2 = mcpLog2?.mcpConfig?.mcpServers?.agentdeck
+  ok(
+    !!mcpLog1?.addDir
+    && srv1?.serverUrl === 'http://127.0.0.1:43210/mcp'
+    && srv1?.headers?.Authorization === 'Bearer tok_agy_secret'
+    && srv1?.tools?.agentdeck_context?.eager === true
+    && srv1?.tools?.agentdeck_dispatch_worker?.eager === true,
+    '首轮通过 --add-dir 注入 .agents/mcp_config.json（serverUrl + Bearer + eager 工具）'
+  )
+  ok(
+    typeof mcpLog1?.hostRule === 'string'
+    && mcpLog1.hostRule.includes('trigger: always_on')
+    && mcpLog1.hostRule.includes('AgentDeck 平台中的领队'),
+    '首轮注入 .agents/rules/agentdeck-host.md（always_on 原生规则）'
+  )
+  ok(
+    !!mcpLog2?.addDir
+    && mcpLog2.addDir !== mcpLog1.addDir
+    && srv2?.serverUrl === 'http://127.0.0.1:43210/mcp'
+    && typeof mcpLog2?.hostRule === 'string' && mcpLog2.hostRule.includes('trigger: always_on'),
+    '续聊 --resume 回合同样注入独立 overlay（MCP 配置 + always_on 规则）'
+  )
+  ok(!fs.existsSync(mcpLog1.addDir) && !fs.existsSync(mcpLog2.addDir), '回合退出后自动清理临时 overlay 目录，零残留')
 
   console.log('自带档位后缀模型冲突规避 + 错误与中止：')
   const conflictSession = await backend.start({
@@ -232,7 +281,7 @@ try {
     events: { onEvent: () => {}, onTurnEnd: () => {} }
   })
   await conflictSession.close()
-  const conflictLog = readLogs()[2]
+  const conflictLog = readLogs().at(-1)
   ok(conflictLog.args.includes('gemini-3.8-flash-low') && !conflictLog.args.includes('--effort'), '模型名已含 -low 时省略 --effort 避免冲突报错')
 
   let errMsg = ''

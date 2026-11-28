@@ -33,13 +33,19 @@ export const AGENTDECK_MCP_TOOLS = {
 
 const INTERNAL_TOOL_NAMES = new Set<string>(Object.values(AGENTDECK_MCP_TOOLS))
 
-/** 识别 AgentDeck 内部协作 MCP 工具名（各 CLI 命名前缀差异：mcp__agentdeck__* / agentdeck:* / 裸名），
+/** 识别 AgentDeck 内部协作 MCP 工具名（各 CLI 命名前缀差异：mcp__agentdeck__* / mcp_agentdeck_* / agentdeck:* / 裸名），
  *  供非 yolo 模式的权限桥自动放行，避免领队派单/审核弹人工权限确认。 */
 export function isAgentDeckMcpToolName(toolName: string): boolean {
   const normalized = toolName.trim().toLowerCase()
   if (!normalized) return false
   if (INTERNAL_TOOL_NAMES.has(normalized)) return true
-  if (normalized.startsWith('mcp__agentdeck__') || normalized.startsWith('agentdeck__') || normalized.startsWith('agentdeck:') || normalized.startsWith('agentdeck/')) {
+  if (
+    normalized.startsWith('mcp__agentdeck__')
+    || normalized.startsWith('mcp_agentdeck_')
+    || normalized.startsWith('agentdeck__')
+    || normalized.startsWith('agentdeck:')
+    || normalized.startsWith('agentdeck/')
+  ) {
     return true
   }
   return false

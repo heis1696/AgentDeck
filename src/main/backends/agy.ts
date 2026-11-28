@@ -10,12 +10,81 @@ import { execFile } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnResult, BackendTurnStamp } from './types'
+import type { AgentBackend, BackendMcpEndpoint, BackendSession, BackendSessionEvents, BackendTurnResult, BackendTurnStamp } from './types'
 import { bindTurn } from './types'
 import type { TaskEvent, ThinkingLevel, ToolEditMeta } from '../../shared/types'
 import { isJsonObject, jsonNumber, jsonObject, jsonString, runCliJsonl, toolEvent, type CliJsonlRunner } from './cli-common'
 import { parseEditMeta, stringifyToolArgs } from './edit-meta'
 import { resolveCli, type ResolvedCli } from './cli-locator'
+import { AGENTDECK_MCP_TOOLS } from '../mcp-delegation-server'
+
+/** Antigravity 单条 rule 文件上限 24,000 字节；留出 frontmatter 余量确保不被静默截断 */
+const AGY_RULE_BODY_MAX_BYTES = 20_000
+
+function trimUtf8Bytes(text: string, maxBytes: number): string {
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text
+  const suffix = '\n…（宿主指令已按 agy 单条规则字节上限截断，请调用 agentdeck_context 获取完整实时状态）'
+  const budget = Math.max(0, maxBytes - Buffer.byteLength(suffix, 'utf8'))
+  let end = Math.min(text.length, budget)
+  while (end > 0 && Buffer.byteLength(text.slice(0, end), 'utf8') > budget) {
+    end -= Math.max(1, Math.ceil((Buffer.byteLength(text.slice(0, end), 'utf8') - budget) / 3))
+  }
+  return text.slice(0, end) + suffix
+}
+
+/**
+ * 为单回合 agy 进程构造独立临时 overlay 目录（经 `--add-dir` 挂载，零污染用户工作区）：
+ * - `.agents/mcp_config.json`：按会话注入 AgentDeck Streamable HTTP MCP 端点与 Bearer Token，
+ *   全部 AgentDeck 内部工具设 `eager: true`，免去懒加载额外读盘回合；
+ * - `.agents/rules/agentdeck-host.md`：`trigger: always_on` 规则，随每轮系统规则层注入，免疫自动压缩。
+ */
+function createAgyOverlayDir(systemPrompt?: string, mcpEndpoint?: BackendMcpEndpoint): string | undefined {
+  const hasPrompt = !!systemPrompt?.trim()
+  if (!hasPrompt && !mcpEndpoint) return undefined
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-agy-ctx-'))
+  try {
+    const agentsDir = path.join(dir, '.agents')
+    fs.mkdirSync(agentsDir, { recursive: true })
+    if (mcpEndpoint) {
+      const eagerTools: Record<string, { eager: true }> = {}
+      for (const toolName of Object.values(AGENTDECK_MCP_TOOLS)) {
+        eagerTools[toolName] = { eager: true }
+      }
+      fs.writeFileSync(
+        path.join(agentsDir, 'mcp_config.json'),
+        JSON.stringify({
+          mcpServers: {
+            [mcpEndpoint.serverName]: {
+              serverUrl: mcpEndpoint.url,
+              headers: { Authorization: `Bearer ${mcpEndpoint.token}` },
+              tools: eagerTools
+            }
+          }
+        }, null, 2),
+        'utf8'
+      )
+    }
+    if (hasPrompt) {
+      const rulesDir = path.join(agentsDir, 'rules')
+      fs.mkdirSync(rulesDir, { recursive: true })
+      const body = trimUtf8Bytes(systemPrompt!.trim(), AGY_RULE_BODY_MAX_BYTES)
+      const content = [
+        '---',
+        'trigger: always_on',
+        'description: "AgentDeck host platform framing, role boundaries, and collaboration contract"',
+        '---',
+        '',
+        body,
+        ''
+      ].join('\n')
+      fs.writeFileSync(path.join(rulesDir, 'agentdeck-host.md'), content, 'utf8')
+    }
+    return dir
+  } catch (err) {
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch {}
+    throw err
+  }
+}
 
 /** 思考档位 → agy --effort 原生档（实测默认旗舰系列无 max 档，最高为 xhigh；off 落最低档 low） */
 const EFFORT_LEVEL: Record<ThinkingLevel, string> = {
@@ -111,17 +180,33 @@ export function createAgyBackend(): AgentBackend {
     model?: string,
     thinking?: ThinkingLevel,
     /** 本会话当前进程句柄落点：stop/close 只杀自己会话的进程，多任务并发不再串杀/漏杀 */
-    onSpawn?: (runner: Pick<CliJsonlRunner, 'kill'>) => void
+    onSpawn?: (runner: Pick<CliJsonlRunner, 'kill'>) => void,
+    systemPrompt?: string,
+    mcpEndpoint?: BackendMcpEndpoint
   ): Promise<{ sessionId: string } & BackendTurnResult> => {
     const emit = (e: Omit<TaskEvent, 'seq' | 'ts'>) => events.onEvent({ ...e, ts: Date.now() })
     const resolved = resolveAgy()
     if (!resolved) return Promise.reject(new Error('PATH 或默认安装路径上找不到 agy'))
+    let overlayDir: string | undefined
+    const cleanupOverlay = () => {
+      if (!overlayDir) return
+      const target = overlayDir
+      overlayDir = undefined
+      try { fs.rmSync(target, { recursive: true, force: true }) } catch {}
+    }
+    try {
+      overlayDir = createAgyOverlayDir(systemPrompt, mcpEndpoint)
+    } catch (err) {
+      cleanupOverlay()
+      return Promise.reject(err instanceof Error ? err : new Error(String(err)))
+    }
     const trimmedModel = model?.trim() || ''
     const effort = thinking && (!trimmedModel || !hasExplicitEffort(trimmedModel)) ? EFFORT_LEVEL[thinking] : undefined
     const args = [
       '--input-format', 'stream-json',
       '--output-format', 'stream-json',
       '--dangerously-skip-permissions',
+      ...(overlayDir ? ['--add-dir', overlayDir] : []),
       ...(trimmedModel ? ['--model', trimmedModel] : []),
       ...(effort ? ['--effort', effort] : []),
       ...(resumeSessionId ? ['--resume', resumeSessionId] : [])
@@ -288,6 +373,7 @@ export function createAgyBackend(): AgentBackend {
     events.onLaunch?.({ stop: () => runner.kill() })
 
     void runner.exited.then((exitInfo) => {
+      cleanupOverlay()
       if (!settled) {
         const streamedSteps = [...agentStepTexts.values()].map((s) => s.trim()).filter(Boolean)
         const fallbackText = streamedSteps.length ? streamedSteps[streamedSteps.length - 1] : ''
@@ -312,6 +398,8 @@ export function createAgyBackend(): AgentBackend {
     id: 'agy',
     label: 'Antigravity',
     thinkingSwitchMode: 'per-turn',
+    systemPromptMode: 'native',
+    delegationTransport: 'mcp',
     // resumeSessionId 走 `agy --resume <conversationId>`：每回合独立进程按 provider 落盘会话恢复
     supportsResume: true,
     async probe() {
@@ -325,12 +413,12 @@ export function createAgyBackend(): AgentBackend {
         })
       })
     },
-    async start({ prompt, workdir, events: rawEvents, resumeSessionId, model, thinking, turn }) {
+    async start({ prompt, workdir, events: rawEvents, resumeSessionId, model, thinking, systemPrompt, mcpEndpoint, turn }) {
       const dir = workdir || process.cwd()
       let own: Pick<CliJsonlRunner, 'kill'> | null = null
       // 一次性 CLI：每个回合一个进程；回合身份随进程绑定，被杀旧进程的迟到回调带旧身份。
       const runTurn = (turnPrompt: string, resumeId?: string, turnStamp?: BackendTurnStamp, turnThinking?: ThinkingLevel) =>
-        runOnce(turnPrompt, dir, resumeId, bindTurn(rawEvents, turnStamp), model, turnThinking ?? thinking, (r) => { own = r })
+        runOnce(turnPrompt, dir, resumeId, bindTurn(rawEvents, turnStamp), model, turnThinking ?? thinking, (r) => { own = r }, systemPrompt, mcpEndpoint)
       const r = await runTurn(prompt, resumeSessionId, turn)
       if (!r.ok && r.error) throw new Error(r.error)
       const sid = r.sessionId

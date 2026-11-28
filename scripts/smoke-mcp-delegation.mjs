@@ -28,14 +28,15 @@ const bundle = async (source, name) => {
   return import(pathToFileURL(outfile).href)
 }
 
-const [{ TaskStore }, { TaskRunner }, mcpMod, promptsMod, { createClaudeBackend }, { createCodexBackend }, { createZcodeBackend }] = await Promise.all([
+const [{ TaskStore }, { TaskRunner }, mcpMod, promptsMod, { createClaudeBackend }, { createCodexBackend }, { createZcodeBackend }, { createAgyBackend }] = await Promise.all([
   bundle('src/main/store.ts', 'store.cjs'),
   bundle('src/main/runner.ts', 'runner.cjs'),
   bundle('src/main/mcp-delegation-server.ts', 'mcp-server.cjs'),
   bundle('src/main/prompts/index.ts', 'prompts.cjs'),
   bundle('src/main/backends/claude.ts', 'claude.cjs'),
   bundle('src/main/backends/codex.ts', 'codex.cjs'),
-  bundle('src/main/backends/zcode.ts', 'zcode.cjs')
+  bundle('src/main/backends/zcode.ts', 'zcode.cjs'),
+  bundle('src/main/backends/agy.ts', 'agy.cjs')
 ])
 
 let failures = 0
@@ -89,11 +90,14 @@ console.log('1. 后端能力声明与内部工具识别：')
   const claude = createClaudeBackend()
   const codex = createCodexBackend()
   const zcode = createZcodeBackend(() => ({ nodePath: '', zcodePath: '' }))
+  const agy = createAgyBackend()
   check(claude.systemPromptMode === 'native' && claude.delegationTransport === 'mcp', 'claude 声明 systemPromptMode=native + delegationTransport=mcp')
   check(codex.systemPromptMode === 'native' && codex.delegationTransport === 'mcp', 'codex 声明 systemPromptMode=native + delegationTransport=mcp')
   check(zcode.systemPromptMode === 'fallback' && zcode.delegationTransport === 'mcp', 'zcode 声明 systemPromptMode=fallback + delegationTransport=mcp')
+  check(agy.systemPromptMode === 'native' && agy.delegationTransport === 'mcp', 'agy 声明 systemPromptMode=native + delegationTransport=mcp')
   check(mcpMod.isAgentDeckMcpToolName('agentdeck_dispatch_worker'), '裸内部工具名识别')
   check(mcpMod.isAgentDeckMcpToolName('mcp__agentdeck__agentdeck_dispatch_worker'), 'Claude 前缀内部工具名识别')
+  check(mcpMod.isAgentDeckMcpToolName('mcp_agentdeck_agentdeck_context'), 'Antigravity (agy) 前缀内部工具名识别')
   check(mcpMod.isAgentDeckMcpToolName('agentdeck:agentdeck_context'), '冒号前缀内部工具名识别')
   check(!mcpMod.isAgentDeckMcpToolName('Bash') && !mcpMod.isAgentDeckMcpToolName('mcp__github__list_issues'), '普通外部工具不误判为内部工具')
 }
