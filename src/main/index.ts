@@ -544,7 +544,8 @@ const initMain = async (): Promise<void> => {
       backends,
       mode: settings.mode,
       sharedDir: resolveSharedDir(),
-      homedir: app.getPath('home')
+      homedir: app.getPath('home'),
+      timeoutMs: settings.triageTimeoutMs
     }, input))
     runner.attachIssueOps({
       reviewStatus: (childId, verdict, note) => {

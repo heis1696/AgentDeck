@@ -116,7 +116,8 @@ export function registerCatalogIpc(ctx: IpcContext) {
     backends: ctx.backends,
     mode: ctx.settings.mode,
     sharedDir: ctx.sharedDir,
-    homedir: app.getPath('home')
+    homedir: app.getPath('home'),
+    timeoutMs: ctx.settings.triageTimeoutMs
   }, parseTriageAssess(input)))
   ipcMain.handle('triage:cancel', (_e, requestId: unknown) => ({ ok: triageBroker.cancel(parseId(requestId, 'requestId')) }))
 

@@ -30,10 +30,9 @@ import { chatCompletion as defaultChatCompletion } from './pet/pet-llm'
 import type { ApiPreset } from './presets'
 import type { AgentBackend, BackendSession, BackendTurnResult } from './backends/types'
 
-/** 快通路（HTTP 直连）硬预算：12s */
-export const TRIAGE_HTTP_TIMEOUT_MS = 12_000
-/** 兜底通路（CLI 单回合）硬预算：15s */
-export const TRIAGE_CLI_TIMEOUT_MS = 15_000
+/** 分诊兜底超时默认上限：5 分钟（可经 settings.triageTimeoutMs 调节；前端随时可点跳过立即中止） */
+export const TRIAGE_HTTP_TIMEOUT_MS = 300_000
+export const TRIAGE_CLI_TIMEOUT_MS = 300_000
 /** Fail-open 默认兜底档位 */
 export const TRIAGE_FALLBACK_LEVEL: ThinkingLevel = 'medium'
 
@@ -61,6 +60,8 @@ export interface TriageDeps {
   homedir?: string
   /** 测试桩注入（生产默认 pet-llm.ts 的 chatCompletion） */
   chatCompletion?: typeof defaultChatCompletion
+  /** 统一分诊超时上限（来自 settings.triageTimeoutMs，默认 5 分钟） */
+  timeoutMs?: number
   httpTimeoutMs?: number
   cliTimeoutMs?: number
 }
@@ -200,7 +201,7 @@ export async function assessTaskThinking(
     try {
       const reply = await complete(preset, buildTriageMessages(skillBody, promptCtx), {
         model: triageAgent.model.trim(),
-        timeoutMs: deps.httpTimeoutMs ?? TRIAGE_HTTP_TIMEOUT_MS,
+        timeoutMs: deps.httpTimeoutMs ?? deps.timeoutMs ?? TRIAGE_HTTP_TIMEOUT_MS,
         maxTokens: 160,
         signal
       })
@@ -229,7 +230,7 @@ export async function assessTaskThinking(
   const ref: { session: BackendSession | null; stopLaunch: (() => void | Promise<unknown>) | null } = { session: null, stopLaunch: null }
   let turnDone: ((r: BackendTurnResult) => void) | null = null
   const firstTurn = new Promise<BackendTurnResult>((resolve) => { turnDone = resolve })
-  const timeoutMs = deps.cliTimeoutMs ?? TRIAGE_CLI_TIMEOUT_MS
+  const timeoutMs = deps.cliTimeoutMs ?? deps.timeoutMs ?? TRIAGE_CLI_TIMEOUT_MS
 
   const run = (async () => {
     ref.session = await backend.start({
@@ -280,7 +281,7 @@ export async function assessTaskThinking(
     return {
       ok: false,
       error: timedOut
-        ? `分诊超时（${Math.round(timeoutMs / 1000)} 秒），已降级默认档`
+        ? `分诊超时（${Math.round(timeoutMs / 1000)}s），已降级默认档——给「分诊师」绑 API 预设可提速至 ~1s`
         : `分诊启动失败：${err instanceof Error ? err.message : String(err)}`,
       fallback: TRIAGE_FALLBACK_LEVEL
     }

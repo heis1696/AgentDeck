@@ -642,6 +642,7 @@ export interface AppSettings {
   // —— 运行调优参数（设置界面「调优」分区；保持默认 = 出厂行为）——
   turnIdleTimeoutMs: number // 回合空转看门狗：等待终态期间无任何事件达此时长判超时（有事件续命）
   permissionTimeoutMs: number // 权限请求无响应自动拒绝时限
+  triageTimeoutMs: number // 分诊师评估超时兜底上限（默认 5 分钟；超时自动降级默认档）
   maxRetryAttempts: number // 瞬态失败（限流/超时/崩溃/沙箱）自动重试上限
   retryBackoffMs: number // 限流（429）退避时长
   maxHandoffChain: number // 阶段接力（<continue>）链上限，防无限自继
@@ -666,6 +667,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   sharedDir: '',
   turnIdleTimeoutMs: 600_000,
   permissionTimeoutMs: 300_000,
+  triageTimeoutMs: 300_000,
   maxRetryAttempts: 2,
   retryBackoffMs: 60_000,
   maxHandoffChain: 8,

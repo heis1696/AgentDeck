@@ -1,15 +1,15 @@
 /* ============================================================
-   动态思考强度两道 2s 底部悬浮确认条（TriageBar）
+   动态思考强度两道 2s 右上角悬浮确认条（TriageBar）
+   固定于视口右上角，避开底部输入区与右下角 Toast；
    全部颜色与字阶取自 tokens.css，零硬编码色值与裸 px 字号。
    ============================================================ */
 
 .triage-bar {
   position: fixed;
-  left: 50%;
-  bottom: var(--space-5);
-  transform: translateX(-50%);
-  z-index: 60;
-  width: min(760px, calc(100vw - var(--space-8)));
+  top: var(--space-3);
+  right: var(--space-4);
+  z-index: 70;
+  width: min(440px, calc(100vw - var(--space-8)));
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
   background: var(--bg-overlay);
@@ -19,13 +19,18 @@
   animation: triage-bar-in var(--duration-base) var(--ease-out);
 }
 
-.triage-bar-row {
+.triage-bar-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+}
+
+.triage-bar-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-3);
-  padding: var(--space-2) var(--space-3);
-  flex-wrap: wrap;
+  gap: var(--space-2);
 }
 
 .triage-bar-main {
@@ -33,19 +38,12 @@
   align-items: center;
   gap: var(--space-2);
   min-width: 0;
-  flex: 1 1 240px;
+  flex: 1;
 }
 
 .triage-bar-icon {
   color: var(--accent);
   flex: none;
-}
-
-.triage-bar-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
 }
 
 .triage-bar-title {
@@ -55,6 +53,7 @@
   font-size: var(--text-label);
   font-weight: var(--weight-semibold);
   color: var(--text);
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -88,21 +87,45 @@
   font-weight: var(--weight-medium);
 }
 
-.triage-bar-countdown,
-.triage-bar-reason {
-  font-size: var(--text-caption);
+.triage-bar-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: none;
+}
+
+.triage-bar-countdown {
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
   color: var(--text-dim);
-  white-space: nowrap;
+  min-width: 32px;
+  text-align: right;
+}
+
+.triage-bar-reason {
+  margin: 0;
+  font-size: var(--text-caption);
+  line-height: var(--leading-tight);
+  color: var(--text-dim);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .triage-bar-actions {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: var(--space-2);
-  flex: none;
   flex-wrap: wrap;
+}
+
+.triage-bar-btns {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
 }
 
 .triage-level-pills {
@@ -177,8 +200,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
+  width: 24px;
+  height: 24px;
   border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
@@ -207,11 +230,11 @@
 @keyframes triage-bar-in {
   from {
     opacity: 0;
-    transform: translate(-50%, 8px);
+    transform: translateY(-8px);
   }
   to {
     opacity: 1;
-    transform: translate(-50%, 0);
+    transform: translateY(0);
   }
 }
 

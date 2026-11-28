@@ -285,6 +285,12 @@ function AdvancedSection() {
           hint="权限确认弹窗无响应超时后自动拒绝"
           onCommit={(v) => save({ permissionTimeoutMs: v * 1000 })}
         />
+        <TuningNumber
+          label="分诊师评估超时上限（秒）" min={5} max={3600}
+          value={Math.round(num(settings.triageTimeoutMs, 300_000) / 1000)}
+          hint="分诊师评估任务难度的兜底上限（默认 300 秒）；超时自动降级中档继续执行，评估期间也可在右上角浮窗随时点跳过"
+          onCommit={(v) => save({ triageTimeoutMs: v * 1000 })}
+        />
       </section>
 
       <section className="settings-card">

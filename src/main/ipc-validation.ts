@@ -11,13 +11,14 @@ const backendIds = new Set<string>(BACKEND_IDS)
 const thinkingLevels = new Set<string>(THINKING_LEVELS)
 const agentThinkingValues = new Set<string>(AGENT_THINKING_VALUES)
 const thinkingSources = new Set<string>(THINKING_SOURCES)
-const settingsKeys = new Set<keyof AppSettings>(['theme', 'uiFontSize', 'zcodePath', 'dshPath', 'nodePath', 'concurrency', 'notifyOnDone', 'mode', 'workerConcurrency', 'sharedDir', 'turnIdleTimeoutMs', 'permissionTimeoutMs', 'maxRetryAttempts', 'retryBackoffMs', 'maxHandoffChain', 'delegateMaxRounds', 'delegateMaxTotalRounds', 'delegateMaxDepth', 'doomLoopThreshold', 'worktreeMaxAgeDays', 'updateFeedUrl'])
+const settingsKeys = new Set<keyof AppSettings>(['theme', 'uiFontSize', 'zcodePath', 'dshPath', 'nodePath', 'concurrency', 'notifyOnDone', 'mode', 'workerConcurrency', 'sharedDir', 'turnIdleTimeoutMs', 'permissionTimeoutMs', 'triageTimeoutMs', 'maxRetryAttempts', 'retryBackoffMs', 'maxHandoffChain', 'delegateMaxRounds', 'delegateMaxTotalRounds', 'delegateMaxDepth', 'doomLoopThreshold', 'worktreeMaxAgeDays', 'updateFeedUrl'])
 
 /** 调优参数的合法区间：越界直接拒绝，防止手滑值把看门狗/预算打穿 */
 const settingsIntRanges: Partial<Record<keyof AppSettings, [min: number, max: number]>> = {
   uiFontSize: [12, 16],
   turnIdleTimeoutMs: [1_000, 86_400_000],
   permissionTimeoutMs: [5_000, 3_600_000],
+  triageTimeoutMs: [5_000, 3_600_000],
   maxRetryAttempts: [0, 10],
   retryBackoffMs: [0, 3_600_000],
   maxHandoffChain: [1, 100],

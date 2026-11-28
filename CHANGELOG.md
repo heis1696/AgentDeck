@@ -4,7 +4,9 @@
 
 ## [Unreleased]
 
-### 新增
+### 变更
+
+- **分诊师超时可调 + TriageBar 改版**：快通路 12s / 兜底通路 15s 的硬预算改为 settings.triageTimeoutMs 统一可调（默认 5 分钟，前端随时可点跳过立即中止）——真实模型分诊常超 12s 被腰斩；TriageBar UI 同步改版（超时进度与跳过入口强化）；`triage:assess` IPC 透传 timeoutMs。
 
 - **动态思考强度（分诊师 Agent 全链路）**：同时防两头——简单任务不再顶着高思考又慢又贵，复杂任务不再忘了切高思考导致返工。内置分诊师 `ag_triage`（引擎 `thinking-triage.ts`，双通路：绑定 API 预设走零依赖 HTTP 快通路 ~0.5-1.5s，未绑预设回退 backend 单回合兜底；fail-open 契约超时/网络失败一律降级 medium 绝不阻断）；领队 `<delegate thinking>` 完全指派权；回合级热切（RouteThinkingNode）；安全网自动升档；UI 两道 2s 悬浮确认框（`ui/TriageBar.tsx` + `triage-bar.css`，不偷跑）。施工方案见 [docs/plan/dynamic-thinking.md](docs/plan/dynamic-thinking.md)。新增 `smoke:dynamic-thinking` / `smoke:ui-triage`。
 - **Antigravity CLI（agy）后端**：一次性进程模型适配器（`backends/agy.ts`）——`--input-format stream-json` stdin NDJSON 送达（规避 Windows 32767 字符上限），init/step_update/result 事件映射，`--resume` 续聊，本轮真实用量由 DONE step_update.usage 汇总（result.usage 是会话累计）。新增 `smoke:agy`。
