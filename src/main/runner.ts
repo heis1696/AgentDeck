@@ -5,9 +5,10 @@ import { nextEscalatedThinkingLevel, type TriageAssessInput, type TriageAssessRe
 import { createHash } from 'node:crypto'
 import { type TaskExpectation, type TaskStore } from './store'
 import { createExecutionOwner } from './persistence'
-import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnStamp, PermissionRequest, BackendTurnResult } from './backends/types'
-import { runDelegationLoop, parseContinueMerged, stripContinue, parseDelegates, stripDelegates, stripRoundNotes, stripReviews, parseConsultsMerged, stripConsults, parseInvestigatesMerged, stripInvestigates, ancestorBudget, escapeProtocolLiterals, findUnmatchedConsultOpens, findUnmatchedInvestigateOpens, unmatchedConsultOpenReason, unmatchedInvestigateOpenReason, type AgentLike, type DelegateCall, type ConsultCall, type InvestigateCall, type IssueCommentLike } from './delegate'
-import { buildAgentPrompt, buildDelegationBlock, handoffNoteBlock, delegateRecoveryNotice, consultReplyFeedback, investigationFeedback, CONTINUE_BLOCK, HANDOFF_CUE, HANDOFF_RECEIVE_CUE, HANDOFF_START_CONFIRMED_CUE, RETITLE_PROMPT } from './prompts'
+import type { AgentBackend, BackendMcpEndpoint, BackendSession, BackendSessionEvents, BackendTurnStamp, DelegationTransport, PermissionRequest, BackendTurnResult, SystemPromptMode } from './backends/types'
+import { runDelegationLoop, parseContinueMerged, stripContinue, parseDelegates, stripDelegates, stripRoundNotes, stripReviews, parseConsultsMerged, stripConsults, parseInvestigatesMerged, stripInvestigates, ancestorBudget, escapeProtocolLiterals, findUnmatchedConsultOpens, findUnmatchedInvestigateOpens, unmatchedConsultOpenReason, unmatchedInvestigateOpenReason, MAX_DEPTH, MAX_TOTAL_ROUNDS, type AgentLike, type DelegateCall, type ConsultCall, type InvestigateCall, type IssueCommentLike } from './delegate'
+import { buildAgentPrompt, buildDelegationBlock, buildHostFraming, buildMcpDelegationBlock, buildTurnAnchor, isCaptainLike, handoffNoteBlock, delegateRecoveryNotice, consultReplyFeedback, investigationFeedback, CONTINUE_BLOCK, MCP_CONTINUE_BLOCK, MCP_HANDOFF_CUE, HANDOFF_CUE, HANDOFF_RECEIVE_CUE, HANDOFF_START_CONFIRMED_CUE, RETITLE_PROMPT, type HostRoleKind, type HostWorkspaceKind } from './prompts'
+import { McpDelegationServer, isAgentDeckMcpToolName, type McpRunBinding } from './mcp-delegation-server'
 import { isOfficeTask } from './agent-sessions'
 import { findHandoffSuccessor, prepareManualTaskStart, repeatsHandoffPhase } from './handoff'
 import { sameWorktreePath, type GitRepositoryProbeResult } from './git'
@@ -172,6 +173,12 @@ export class TaskRunner {
   private meetingGuard: ((task: Task) => boolean) | null = null
   private activeRunsMap = new Map<string, Promise<unknown>>()
   private activeTurns = new Map<string, Promise<unknown>>()
+  /** 本地回环 Per-Run MCP Server（惰性拉起，服务支持 delegationTransport='mcp' 的后端） */
+  private readonly mcpServer = new McpDelegationServer()
+  /** 运行中领队任务的当前委派轮数（供 MCP 上下文实时反映剩余轮数预算） */
+  private readonly runRoundCounters = new Map<string, number>()
+  /** 当前活跃回合是否属于会议发言回合（办公室会话按回合放行 agentdeck_investigate） */
+  private readonly activeMeetingTurns = new Map<string, boolean>()
   private readonly onTaskChanged?: (task: Task) => void
   constructor(
     store: TaskStore,
@@ -476,8 +483,12 @@ export class TaskRunner {
     this.kernel.retireSession(session, reason)
   }
 
-  /** 权限确认：推给 UI，5 分钟无响应自动拒绝（领队/worker 共用） */
+  /** 权限确认：推给 UI，5 分钟无响应自动拒绝（领队/worker 共用）；AgentDeck 内部协作 MCP 工具自动放行 */
   askPermission(taskId: string, req: PermissionRequest): Promise<{ optionId?: string; decision: 'allow' | 'deny' }> {
+    if (isAgentDeckMcpToolName(req.toolName)) {
+      const allowOpt = req.options.find((o) => o.response.decision === 'allow')
+      return Promise.resolve({ ...(allowOpt ? { optionId: allowOpt.optionId } : {}), decision: 'allow' })
+    }
     const workVersion = this.workVersion(taskId)
     return this.permissionBroker.ask(taskId, { ...req, workVersion }, workVersion)
   }
@@ -595,6 +606,11 @@ export class TaskRunner {
     if (scope.permissions) {
       this.permissionBroker.cancelTask(taskId)
       this.doomWindows.forget(taskId)
+    }
+    if (scope.delegationLedger) {
+      this.mcpServer.unregisterTask(taskId)
+      this.runRoundCounters.delete(taskId)
+      this.activeMeetingTurns.delete(taskId)
     }
     this.delegateLedger.purge(taskId, scope)
   }
@@ -741,9 +757,9 @@ export class TaskRunner {
     if (full) this.pushEvent(taskId, full)
   }
 
-  /** facade：武装流式派单嗅探已迁 ledger（批次 4a） */
-  private armDelegateSniffer(taskId: string) {
-    this.delegateLedger.armDelegateSniffer(taskId)
+  /** facade：武装流式派单嗅探已迁 ledger（批次 4a）；MCP 模式只初始化台账、不扫正文 XML */
+  private armDelegateSniffer(taskId: string, opts?: { sniffText?: boolean }) {
+    this.delegateLedger.armDelegateSniffer(taskId, opts)
   }
 
   /** facade：收尾回合关闭流式建单通道已迁 ledger（批次 4a；smoke 直连，签名冻结） */
@@ -829,12 +845,220 @@ export class TaskRunner {
     return `run_${taskId}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`
   }
 
+  /** 解析当前后端生效的委派协议通道：AGENTDECK_DELEGATION_TRANSPORT=prompt 可一键回退 Prompt 协议 */
+  private resolveDelegationTransport(backend: AgentBackend): DelegationTransport {
+    const override = process.env.AGENTDECK_DELEGATION_TRANSPORT?.trim().toLowerCase()
+    if (override === 'prompt') return 'prompt'
+    if (override === 'mcp') return backend.delegationTransport === 'mcp' ? 'mcp' : 'prompt'
+    return backend.delegationTransport ?? 'prompt'
+  }
+
+  /** 解析当前后端生效的宿主系统提示通道 */
+  private resolveSystemPromptMode(backend: AgentBackend): SystemPromptMode {
+    return backend.systemPromptMode ?? 'fallback'
+  }
+
+  /** 计算任务的 AgentDeck 平台认知上下文（角色、工作区契约、可派名单、咨询对象与协议通道） */
+  private resolveHostContext(task: Task, backend: AgentBackend) {
+    const team = this.getTeam?.() ?? []
+    const me = team.find((a) => a.id === task.agentId)
+    const office = isOfficeTask(task)
+    const isWorker = !!task.parentTaskId
+    const isInvestigation = !!task.suppressIssue && !!task.parentTaskId
+    const subs = (me?.subordinates ?? [])
+      .map((id) => team.find((a) => a.id === id))
+      .filter((a): a is AgentLike => !!a)
+    const subIds = new Set(subs.map((s) => s.id))
+    const peers = me
+      ? team.filter((a) => a.id !== me.id && a.backend.toLowerCase() !== 'dsh' && !subIds.has(a.id) && isCaptainLike(a))
+      : []
+    const isLeader = !office && !isInvestigation && task.backend !== 'dsh'
+      && (subs.length > 0 || (!!task.agentId && (!me || (!!me.role && /队长|领队|captain|leader/i.test(me.role)))))
+    const roleKind: HostRoleKind = office
+      ? 'office'
+      : (subs.length > 0 && !isInvestigation && task.backend !== 'dsh')
+        ? 'leader'
+        : isWorker
+          ? 'worker'
+          : 'solo'
+    const workspaceKind: HostWorkspaceKind = (me?.sharedWorkspace || isInvestigation)
+      ? 'shared-readonly'
+      : task.worktree
+        ? 'isolated-worktree'
+        : task.unavailableReason?.includes('not a Git')
+          ? 'non-git'
+          : 'main-workspace'
+    const transport = this.resolveDelegationTransport(backend)
+    const sysMode = this.resolveSystemPromptMode(backend)
+    const canHandoff = !isWorker && !office && !!task.issueId
+    const maxRounds = this.opts().delegateMaxRounds ?? 6
+    const maxTotalRounds = this.opts().delegateMaxTotalRounds ?? MAX_TOTAL_ROUNDS
+    const maxDepth = this.opts().delegateMaxDepth ?? MAX_DEPTH
+    return { me, team, office, isWorker, isInvestigation, isLeader, roleKind, workspaceKind, transport, sysMode, subs, peers, canHandoff, maxRounds, maxTotalRounds, maxDepth }
+  }
+
+  private buildNativeSystemPrompt(task: Task, backend: AgentBackend): string | undefined {
+    const ctx = this.resolveHostContext(task, backend)
+    if (ctx.sysMode !== 'native') return undefined
+    return buildHostFraming({
+      agent: ctx.me,
+      team: ctx.team,
+      roleKind: ctx.roleKind,
+      workspaceKind: ctx.workspaceKind,
+      transport: ctx.transport,
+      canHandoff: ctx.canHandoff,
+      maxRounds: ctx.maxRounds,
+      includePersona: true
+    })
+  }
+
+  private buildMcpRunBinding(taskId: string, claim: RunClaim, backend: AgentBackend): McpRunBinding {
+    const expected = runCondition(claim)
+    const getLiveContext = () => {
+      const current = this.store.get(taskId)
+      if (!current) return null
+      return { task: current, host: this.resolveHostContext(current, backend) }
+    }
+    return {
+      taskId,
+      runId: claim.runId,
+      isActive: () => this.isCurrentRun(claim),
+      onActivity: () => this.touchWatchdog(taskId),
+      getInstructions: () => {
+        const live = getLiveContext()
+        if (!live) return ''
+        return buildHostFraming({
+          agent: live.host.me,
+          team: live.host.team,
+          roleKind: live.host.roleKind,
+          workspaceKind: live.host.workspaceKind,
+          transport: 'mcp',
+          canHandoff: live.host.canHandoff,
+          maxRounds: live.host.maxRounds,
+          includePersona: true
+        })
+      },
+      getContextSnapshot: () => {
+        const live = getLiveContext()
+        if (!live) {
+          return {
+            taskId,
+            title: '',
+            roleKind: 'solo',
+            workspaceKind: 'main-workspace',
+            workdir: '',
+            subordinates: [],
+            consultPeers: [],
+            remainingRounds: 0,
+            currentDepth: 0,
+            maxDepth: MAX_DEPTH,
+            spawnsSuspended: true,
+            canConsult: false,
+            canInvestigate: false,
+            canHandoff: false
+          }
+        }
+        const { task: current, host } = live
+        const { inherited, depth } = ancestorBudget(this.store, taskId)
+        const usedThisRun = this.runRoundCounters.get(taskId) ?? 0
+        const budget = Math.min(host.maxRounds, host.maxTotalRounds - inherited)
+        const remainingRounds = depth >= host.maxDepth ? 0 : Math.max(0, budget - usedThisRun)
+        const meetingTurn = this.activeMeetingTurns.get(taskId) === true
+        const investigateAllowed = !host.office || meetingTurn
+        return {
+          taskId,
+          title: current.title,
+          roleKind: host.roleKind,
+          ...(host.me ? {
+            agent: {
+              id: host.me.id,
+              name: host.me.name,
+              backend: host.me.backend,
+              ...(host.me.role ? { role: host.me.role } : {}),
+              ...(host.me.systemPrompt ? { systemPrompt: host.me.systemPrompt } : {})
+            }
+          } : {}),
+          workspaceKind: host.workspaceKind,
+          workdir: current.workdir,
+          subordinates: host.subs,
+          consultPeers: host.peers,
+          remainingRounds,
+          currentDepth: depth,
+          maxDepth: host.maxDepth,
+          spawnsSuspended: this.delegateLedger.isSpawnsSuspended(taskId),
+          canConsult: !!this.onConsult && !host.office && host.peers.length > 0,
+          canInvestigate: !!this.onInvestigate && investigateAllowed && host.subs.length > 0,
+          canHandoff: host.canHandoff
+        }
+      },
+      dispatchWorker: async (call) => {
+        const child = await this.spawnDelegateChild(taskId, call, claim.runId)
+        if (child) {
+          const deduplicated = this.delegateLedger.recordExternalSpawn(taskId, call, child.id)
+          const team = this.getTeam?.() ?? []
+          const worker = team.find((a) => a.id === child.agentId)?.name ?? call.to
+          return {
+            ok: true,
+            childId: child.id,
+            worker,
+            status: child.status,
+            isolatedWorktree: !!child.worktree,
+            ...(deduplicated ? { deduplicated: true } : {})
+          }
+        }
+        const key = `${call.to}\n${call.prompt}`
+        const consumed = this.delegateLedger.consumeDelegateRejectionByKey(taskId, claim.runId, key)
+        return { ok: false, error: consumed ?? '派单被护栏拒绝（未建单）' }
+      },
+      submitReview: ({ childId, seq, verdict, note }) => {
+        if (!this.isCurrentRun(claim)) return { ok: false, error: '当前运行已失效' }
+        const child = this.store.get(childId)
+        if (!child || child.status !== 'done') return { ok: false, error: `子单 #${seq} 当前状态不可审核` }
+        this.applyChildReview(childId, verdict, note)
+        this.note(taskId, `单 #${seq} 审核${verdict === 'pass' ? '通过' : '退回'}${note ? `：${note}` : ''}`, expected)
+        return { ok: true }
+      },
+      recordRound: (roundNote) => {
+        if (!this.isCurrentRun(claim)) return
+        this.note(taskId, `领队评估：${roundNote.outcome}${roundNote.reason ? ' — ' + roundNote.reason : ''}`, expected)
+      },
+      validateHandoff: (call) => {
+        const current = this.store.get(taskId)
+        if (!current || current.parentTaskId || !current.issueId) {
+          return { ok: false, error: '当前任务不支持阶段接力' }
+        }
+        const existing = findHandoffSuccessor(this.store.list(), current)
+        if (!existing && repeatsHandoffPhase(current, call.brief)) {
+          return { ok: false, error: '简报仍指向当前阶段，不能重复交接同一阶段；请在当前会话继续处理或等待用户回复。' }
+        }
+        const chainLimit = this.opts().maxHandoffChain ?? MAX_HANDOFF_CHAIN
+        const handoffCount = new Set(this.store.list().filter((t) =>
+          t.issueId === current.issueId && t.trigger === 'handoff' && t.status !== 'cancelled'
+        ).map((t) => t.continuesFrom ?? t.id)).size
+        if (!existing && handoffCount >= chainLimit) {
+          return { ok: false, error: `阶段接力已达上限（${chainLimit} 次），不能继续接力；请人工推进后续阶段。` }
+        }
+        return { ok: true }
+      }
+    }
+  }
+
+  private async prepareMcpEndpoint(taskId: string, claim: RunClaim, backend: AgentBackend, mode: 'new' | 'rebind'): Promise<BackendMcpEndpoint | undefined> {
+    if (this.resolveDelegationTransport(backend) !== 'mcp') return undefined
+    const binding = this.buildMcpRunBinding(taskId, claim, backend)
+    return mode === 'rebind'
+      ? this.mcpServer.rebindOrRegisterRun(binding)
+      : this.mcpServer.registerRun(binding)
+  }
+
   /** Finish one successful turn, including any delegation emitted before the final message. */
   private async completeTurn(taskId: string, session: BackendSession, r: BackendTurnResult, claim: RunClaim, consultDepth = 0, meetingTurn = false): Promise<string> {
     const task = this.store.get(taskId)!
       const isInvestigation = !!task.suppressIssue && !!task.parentTaskId
       const team = this.getTeam?.() ?? []
       const me = team.find((a) => a.id === task.agentId)
+      const isMcp = this.mcpServer.hasRun(taskId, claim.runId)
+      const subs = (me?.subordinates ?? []).map((id) => team.find((a) => a.id === id)).filter((a): a is AgentLike => !!a)
       let finalText = r.response
       /** <continue> 与 delegate 同源解析：领队用委派循环的全部回合文本，普通任务用首回合两源 */
       let scanTexts: string[] = [r.delegationText ?? '', r.response]
@@ -842,16 +1066,18 @@ export class TaskRunner {
         // 办公室会话不受理派单与咨询（会议优先规则已禁用这些日常协议标记，首条消息也不注入派发协议）：
         // 越界输出的派单/评估/审核/咨询/接力标记一律只剥离展示并留痕，绝不建单、绝不发起咨询或接力。
         // 会议允许的 investigate 不在此列，走下方 completeInvestigates。
-        const texts = [r.delegationText ?? '', r.response]
-        const ignoredDelegates = texts.reduce((max, text) => Math.max(max, parseDelegates(text).length), 0)
-        const ignoredConsults = texts.reduce((max, text) => Math.max(max, parseConsultsMerged(text).length), 0)
-        if (ignoredDelegates || ignoredConsults) {
-          const parts = [ignoredDelegates ? `派单 ${ignoredDelegates} 个` : '', ignoredConsults ? `咨询 ${ignoredConsults} 个` : ''].filter(Boolean)
-          this.note(taskId, `⚠ 办公室会话不受理${ignoredDelegates ? '派单' : ''}${ignoredDelegates && ignoredConsults ? '与' : ''}${ignoredConsults ? '咨询' : ''}标记（已忽略 ${parts.join('、')}）`, runCondition(claim))
+        if (!isMcp) {
+          const texts = [r.delegationText ?? '', r.response]
+          const ignoredDelegates = texts.reduce((max, text) => Math.max(max, parseDelegates(text).length), 0)
+          const ignoredConsults = texts.reduce((max, text) => Math.max(max, parseConsultsMerged(text).length), 0)
+          if (ignoredDelegates || ignoredConsults) {
+            const parts = [ignoredDelegates ? `派单 ${ignoredDelegates} 个` : '', ignoredConsults ? `咨询 ${ignoredConsults} 个` : ''].filter(Boolean)
+            this.note(taskId, `⚠ 办公室会话不受理${ignoredDelegates ? '派单' : ''}${ignoredDelegates && ignoredConsults ? '与' : ''}${ignoredConsults ? '咨询' : ''}标记（已忽略 ${parts.join('、')}）`, runCondition(claim))
+          }
+          // 接力标记一并剥掉（办公室任务没有 Issue，handleContinue 会原样返回标记、污染展示结果）
+          finalText = stripContinue(stripConsults(stripReviews(stripRoundNotes(stripDelegates(finalText)))))
         }
-        // 接力标记一并剥掉（办公室任务没有 Issue，handleContinue 会原样返回标记、污染展示结果）
-        finalText = stripContinue(stripConsults(stripReviews(stripRoundNotes(stripDelegates(finalText)))))
-      } else if ((me?.subordinates?.length || this.delegateLedger.seenKeyCount(taskId) || (task.agentId && (!me || (me.role && /队长|领队|captain|leader/i.test(me.role)))
+      } else if ((me?.subordinates?.length || this.delegateLedger.seenKeyCount(taskId) || (!isMcp && task.agentId && (!me || (me.role && /队长|领队|captain|leader/i.test(me.role)))
         && [r.delegationText, r.response].some((text) => text && parseDelegates(text).length)))
         && task.backend !== 'dsh' && !isInvestigation) {
         // The loop receives this Run's full execution expectation explicitly:
@@ -873,7 +1099,21 @@ export class TaskRunner {
           pushEvent: (id, e) => this.pushEvent(id, e),
           applyReview: (childId, verdict, note) => this.applyChildReview(childId, verdict, note),
           addIssueComment: (issueId, text) => this.addIssueComment(issueId, text),
-          sendChildSummaryTurn: (childId, content) => this.sendChildSummaryTurn(childId, content)
+          sendChildSummaryTurn: (childId, content) => this.sendChildSummaryTurn(childId, content),
+          transport: isMcp ? 'mcp' : 'prompt',
+          ...(isMcp ? {
+            setMcpActiveReports: (reports) => this.mcpServer.setActiveReports(taskId, claim.runId, reports),
+            drainMcpRoundActions: () => this.mcpServer.drainRoundFeedbackActions(taskId, claim.runId)
+          } : {}),
+          onRoundChange: (round) => { this.runRoundCounters.set(taskId, round) },
+          buildTurnAnchor: ({ remainingRounds, activeReportSeqs }) => buildTurnAnchor({
+            agentName: me?.name,
+            roleLabel: me?.role || '领队',
+            transport: isMcp ? 'mcp' : 'prompt',
+            remainingRounds,
+            subordinates: subs,
+            activeReportSeqs
+          })
         })
         finalText = outcome.finalText || r.response
         scanTexts = outcome.scanTexts
@@ -891,11 +1131,15 @@ export class TaskRunner {
       } else if (this.onInvestigate) {
         // 办公室会话的非会议回合（咨询应答/自由追问）：标记只剥离展示、不发起调查，
         // 并具名留痕——静默丢弃与「模型没输出」无从区分，正是这类边界失效的盲区。
-        const dropped = scanTexts.flatMap((text) => parseInvestigatesMerged(text)).length
-        if (dropped) {
-          this.note(taskId, `⚠ 办公室会话只在会议发言回合受理只读调查；本回合是咨询应答，已忽略 ${dropped} 个调查标记`, runCondition(claim))
-          finalText = stripInvestigates(finalText)
-          scanTexts = scanTexts.map((text) => stripInvestigates(text))
+        if (isMcp) {
+          this.mcpServer.drainInvestigates(taskId, claim.runId)
+        } else {
+          const dropped = scanTexts.flatMap((text) => parseInvestigatesMerged(text)).length
+          if (dropped) {
+            this.note(taskId, `⚠ 办公室会话只在会议发言回合受理只读调查；本回合是咨询应答，已忽略 ${dropped} 个调查标记`, runCondition(claim))
+            finalText = stripInvestigates(finalText)
+            scanTexts = scanTexts.map((text) => stripInvestigates(text))
+          }
         }
       }
       if (!this.isCurrentRun(claim)) return finalText
@@ -922,10 +1166,11 @@ export class TaskRunner {
     let finalText = initialText
     let scanTexts = initialScanTexts
     const expected = runCondition(claim)
-    // 残缺 investigate 开标记具名回执（与 delegate 同构）：解析不出调查≠可以无痕，
-    // 多源去重后逐条留痕（本单未应答 + 其后完整标记按字面独立受理，不断言内嵌已应答）
+    const isMcp = this.mcpServer.hasRun(taskId, claim.runId)
+    // 残缺 investigate 开标记具名回执（仅 Prompt 模式；MCP 模式走结构化工具入参）
     const notedBrokenInvestigates = new Set<string>()
     const drainBrokenInvestigates = () => {
+      if (isMcp) return
       for (const broken of scanTexts.flatMap((text) => findUnmatchedInvestigateOpens(text))) {
         const key = `${broken.to}\n${broken.excerpt}`
         if (notedBrokenInvestigates.has(key)) continue
@@ -935,13 +1180,14 @@ export class TaskRunner {
     }
     drainBrokenInvestigates()
     const seen = new Set<string>()
-    const calls = parseInvestigatesMerged(...scanTexts).filter((call) => {
+    const rawCalls = isMcp ? this.mcpServer.drainInvestigates(taskId, claim.runId) : parseInvestigatesMerged(...scanTexts)
+    const calls = rawCalls.filter((call) => {
       const key = `${call.to}\n${call.prompt}`
       if (seen.has(key)) return false
       seen.add(key)
       return true
     })
-    if (!calls.length) return { finalText: stripInvestigates(finalText), scanTexts }
+    if (!calls.length) return { finalText: isMcp ? finalText : stripInvestigates(finalText), scanTexts }
     const reports: Array<{ to: string; text: string }> = []
     for (const call of calls) {
       if (!this.isCurrentRun(claim)) return { finalText, scanTexts }
@@ -949,14 +1195,14 @@ export class TaskRunner {
       if (!this.isCurrentRun(claim)) return { finalText, scanTexts }
       if (report?.trim()) reports.push({ to: call.to, text: report.trim() })
     }
-    if (!reports.length) return { finalText: stripInvestigates(finalText), scanTexts }
+    if (!reports.length) return { finalText: isMcp ? finalText : stripInvestigates(finalText), scanTexts }
     const turn = await this.sendTurn(taskId, session, investigationFeedback(reports), claim)
     if (!this.isCurrentRun(claim)) return { finalText, scanTexts }
     if (!turn.ok) throw new Error(turn.error || '调查结果回灌回合失败')
     finalText = turn.response
     scanTexts = [turn.delegationText ?? '', turn.response]
     drainBrokenInvestigates()
-    return { finalText: stripInvestigates(finalText), scanTexts }
+    return { finalText: isMcp ? finalText : stripInvestigates(finalText), scanTexts }
   }
 
   /**
@@ -976,10 +1222,11 @@ export class TaskRunner {
     let finalText = initialText
     let scanTexts = initialScanTexts
     const expected = runCondition(claim)
-    // 残缺 consult 开标记具名回执（与 delegate 同构）：本单未应答也要具名留痕，
-    // 绝不允许领队按「已应答」契约等到永远；多源去重，回灌回合新见的一并补痕
+    const isMcp = this.mcpServer.hasRun(taskId, claim.runId)
+    // 残缺 consult 开标记具名回执（仅 Prompt 模式；MCP 模式走结构化工具入参）
     const notedBrokenConsults = new Set<string>()
     const drainBrokenConsults = () => {
+      if (isMcp) return
       for (const broken of scanTexts.flatMap((text) => findUnmatchedConsultOpens(text))) {
         const key = `${broken.to}\n${broken.excerpt}`
         if (notedBrokenConsults.has(key)) continue
@@ -991,14 +1238,15 @@ export class TaskRunner {
     const seen = new Set<string>()
     let rounds = 0
     for (;;) {
-      const calls = parseConsultsMerged(...scanTexts).filter((call) => {
+      const rawCalls = isMcp ? this.mcpServer.drainConsults(taskId, claim.runId) : parseConsultsMerged(...scanTexts)
+      const calls = rawCalls.filter((call) => {
         const key = `${call.to}\n${call.prompt}`
         if (seen.has(key)) return false
         seen.add(key)
         return true
       })
-      if (!calls.length) return { finalText: stripConsults(finalText), scanTexts }
-      if (rounds >= MAX_CONSULT_ROUNDS) return { finalText: stripConsults(finalText), scanTexts }
+      if (!calls.length) return { finalText: isMcp ? finalText : stripConsults(finalText), scanTexts }
+      if (rounds >= MAX_CONSULT_ROUNDS) return { finalText: isMcp ? finalText : stripConsults(finalText), scanTexts }
       rounds++
       const answers: Array<{ from: string; text: string }> = []
       for (const call of calls) {
@@ -1007,7 +1255,7 @@ export class TaskRunner {
         if (!this.isCurrentRun(claim)) return { finalText, scanTexts }
         if (answer?.trim()) answers.push({ from: call.to, text: answer.trim() })
       }
-      if (!answers.length) return { finalText: stripConsults(finalText), scanTexts }
+      if (!answers.length) return { finalText: isMcp ? finalText : stripConsults(finalText), scanTexts }
       const turn = await this.sendTurn(taskId, session, consultReplyFeedback(answers), claim)
       if (!this.isCurrentRun(claim)) return { finalText, scanTexts }
       if (!turn.ok) throw new Error(turn.error || '咨询回灌回合失败')
@@ -1018,7 +1266,7 @@ export class TaskRunner {
   }
 
   /**
-   * 阶段接力：回合文本里有 <continue> 时在同一 Issue 创建后继执行（新会话硬切）。
+   * 阶段接力：回合文本里有 <continue>（或 MCP 模式调用了 agentdeck_handoff_phase）时在同一 Issue 创建后继执行（新会话硬切）。
    * 护栏：委派子任务不参与（生命周期归委派循环）；同 issue handoff 任务 ≥ 8 拒绝；
    * 剥掉标记防止外漏，并在结果末尾留指向。
    */
@@ -1031,18 +1279,19 @@ export class TaskRunner {
     const expected: TaskExpectation = claim
       ? runCondition(claim)
       : { status: 'running', runId: task.runId, executionOwner: task.executionOwner }
-    const cont = parseContinueMerged(...scanTexts)
+    const isMcp = !!claim && this.mcpServer.hasRun(taskId, claim.runId)
+    const mcpCont = isMcp ? this.mcpServer.drainHandoff(taskId, claim!.runId) : null
+    const cont = mcpCont ?? (isMcp ? null : parseContinueMerged(...scanTexts))
     if (!cont) {
-      // 可观测性：回复里出现过标记字样却没解析成功（未闭合/围栏内/示例复述），留痕说明为何没接力——
-      // 否则用户只看到"硬切从没触发过"，无从分辨是 agent 没输出还是解析拒收
-      if (scanTexts.some((text) => text.includes('<continue'))) {
+      // 可观测性：Prompt 模式下回复里出现过标记字样却没解析成功（未闭合/围栏内/示例复述），留痕说明为何没接力
+      if (!isMcp && scanTexts.some((text) => text.includes('<continue'))) {
         const e = { ts: Date.now(), kind: 'status' as const, text: '⚠ 检测到 <continue> 字样但未构成有效接力（需完整闭合且位于回复末尾；不在末尾的标记必须显式 start="auto" 才走兜底），未触发' }
         const full = this.store.appendEvent(taskId, e, expected)
         if (full) this.pushEvent(taskId, full)
       }
       return finalText
     }
-    const stripped = stripContinue(finalText)
+    const stripped = isMcp ? finalText.trim() : stripContinue(finalText)
     const note = (text: string) => {
       const e = { ts: Date.now(), kind: 'status' as const, text }
       const full = this.store.appendEvent(taskId, e, expected)
@@ -1184,6 +1433,11 @@ export class TaskRunner {
     const state: IsolatedState = {}
     const ports: ExecutionPorts<IsolatedState> = {
       start: async () => {
+        const systemPrompt = this.buildNativeSystemPrompt(task, backend)
+        // 非 MCP 后端绝不引入额外 microtask yield，保持 claimRun → backend.start 同 tick 同步启动时序
+        const mcpEndpoint = this.resolveDelegationTransport(backend) === 'mcp'
+          ? await this.prepareMcpEndpoint(taskId, claim, backend, 'new')
+          : undefined
         const session = await this.executor.start(
           () => backend.start({
             prompt: content,
@@ -1192,6 +1446,8 @@ export class TaskRunner {
             model: me?.model,
             thinking: effectiveThinking,
             connection: this.resolveConnection(task.agentId),
+            ...(systemPrompt ? { systemPrompt } : {}),
+            ...(mcpEndpoint ? { mcpEndpoint } : {}),
             resumeSessionId,
             turn: turn.stamp,
             events: channel
@@ -1409,27 +1665,51 @@ export class TaskRunner {
     })
     const firstTurn = this.openTurn(taskId, router, claim, runGen, undefined, (r) => firstTurnDone?.(r))
 
-    // agent 身份注入：人设 + （领队时）委派协议。办公室会话（会议发言/咨询应答）只带人设与会话引导：
-    // 不注入派发协议与阶段接力——会议优先规则禁用这些标记，注入了只会在两套协议之间制造冲突
-    const team = this.getTeam?.() ?? []
-    const me = team.find((a) => a.id === task.agentId)
-    const office = isOfficeTask(task)
-    let prompt = buildAgentPrompt(me, task.prompt, team)
+    // agent 身份注入与平台认知分层：
+    // - systemPromptMode='native'（claude/codex）：Host Framing + 人设走原生系统/开发者提示层，免疫自动压缩；
+    // - delegationTransport='mcp'（claude/codex/zcode）：MCP initialize.instructions 携带 Host Framing，
+    //   首条消息改用瘦身版 MCP 约定（无 XML 语法墙），且不武装正文 XML 嗅探；
+    // - 其余后端走 Prompt 兜底，Host Framing 前置在【任务】之前以兼容既有解析契约。
+    const hostCtx = this.resolveHostContext(task, backend)
+    const { me, team, office, isLeader } = hostCtx
+    const nativeSystemPrompt = this.buildNativeSystemPrompt(task, backend)
+    let prompt: string
+    if (hostCtx.sysMode === 'native') {
+      prompt = `【任务】\n${task.prompt}`
+    } else if (hostCtx.transport === 'mcp') {
+      prompt = buildAgentPrompt(me, task.prompt, team)
+    } else {
+      const fallbackFraming = buildHostFraming({
+        agent: me,
+        team,
+        roleKind: hostCtx.roleKind,
+        workspaceKind: hostCtx.workspaceKind,
+        transport: 'prompt',
+        canHandoff: hostCtx.canHandoff,
+        maxRounds: hostCtx.maxRounds,
+        includePersona: false
+      })
+      prompt = me
+        ? `${fallbackFraming}\n\n${buildAgentPrompt(me, task.prompt, team)}`
+        : `${fallbackFraming}\n\n【任务】\n${task.prompt}`
+    }
     if (task.handoff) prompt = `${prompt}\n\n${handoffNoteBlock(task.handoff)}`
     if (!office && me?.subordinates?.length && task.backend !== 'dsh' && !(task.suppressIssue && task.parentTaskId)) {
-      const block = buildDelegationBlock(me, team)
+      const block = hostCtx.transport === 'mcp' ? buildMcpDelegationBlock(me, team) : buildDelegationBlock(me, team)
       if (block) prompt = `${prompt}\n\n${block}`
     }
     // 阶段接力协议（非委派子任务：worker 的生命周期归委派循环管）
-    if (!isWorker && !office) prompt = `${prompt}\n\n${CONTINUE_BLOCK}`
+    if (!isWorker && !office) {
+      prompt = `${prompt}\n\n${hostCtx.transport === 'mcp' ? MCP_CONTINUE_BLOCK : CONTINUE_BLOCK}`
+    }
     if (!isWorker && task.continuesFrom) {
       prompt = `${prompt}\n\n${HANDOFF_RECEIVE_CUE}`
       if (task.manualStartConfirmedAt && Number.isFinite(task.manualStartConfirmedAt)) prompt = `${prompt}\n\n${HANDOFF_START_CONFIRMED_CUE}`
     }
-    // 领队会话武装流式派单嗅探：闭合一个 <delegate> 即提前建单（回灌仍只在回合末）
-    const isLeader = !office && (!!me?.subordinates?.length || (!!task.agentId && (!me || !!me.role && /队长|领队|captain|leader/i.test(me.role))))
-      && task.backend !== 'dsh' && !(task.suppressIssue && task.parentTaskId)
-    if (isLeader) this.armDelegateSniffer(taskId)
+    // 领队会话武装台账：Prompt 模式启用流式正文 XML 嗅探，MCP 模式仅初始化台账、不扫正文 XML
+    if (isLeader) this.armDelegateSniffer(taskId, { sniffText: hostCtx.transport !== 'mcp' })
+    this.runRoundCounters.set(taskId, 0)
+    this.activeMeetingTurns.set(taskId, false)
 
     // 看门狗在 backend.start 之前武装：握手/建会话阶段挂死同样按空转判败并可硬杀，
     // 不再永久卡住 running 状态与并发槽；启动期间的线级心跳照常续命
@@ -1506,6 +1786,10 @@ export class TaskRunner {
       },
       start: async (ctx) => {
         const effectiveThinking = state.resolvedThinking ?? resolveStaticThinking(this.store.get(taskId) ?? task, me)
+        // 非 MCP 后端零额外 microtask 让出，保持 claimRun 后立即同步进入 backend.start
+        const mcpEndpoint = hostCtx.transport === 'mcp'
+          ? await this.prepareMcpEndpoint(taskId, claim, backend, 'new')
+          : undefined
         const session = await this.executor.start(
           () => backend.start({
             prompt,
@@ -1514,6 +1798,8 @@ export class TaskRunner {
             model: me?.model,
             thinking: effectiveThinking,
             connection: this.resolveConnection(task.agentId),
+            ...(nativeSystemPrompt ? { systemPrompt: nativeSystemPrompt } : {}),
+            ...(mcpEndpoint ? { mcpEndpoint } : {}),
             // 自动重试第 1 次带会话续跑（maybeAutoRetry 故意保留 sessionId）：从失败处接着干，
             // 不再整任务从头重来；手动"重新运行"会清 sessionId，恒新会话不受影响
             resumeSessionId: task.sessionId || undefined,
@@ -1595,6 +1881,9 @@ export class TaskRunner {
     const flow = await this.flowEngine.run<RunState>(taskId, flowNodes, state, {
       onFlowEnd: () => {
         sentinel.cancel()
+        this.runRoundCounters.delete(taskId)
+        this.activeMeetingTurns.delete(taskId)
+        this.mcpServer.deactivateRun(taskId, claim.runId)
         this.store.flushEvents(taskId)
         if (this.store.matches(taskId, runIdentity(claim))) {
           this.kernel.dropLaunchHandle(taskId)
@@ -1744,11 +2033,11 @@ export class TaskRunner {
       ...pendingRejects.map((entry) => `- 未建单（运行 ${entry.runId}）：${safeReceipt(entry.reason, 600)}`)
     ].slice(0, 30)
     const recoveryNotice = recoveryLines.length ? delegateRecoveryNotice(recoveryLines) : ''
-    const turnContent = (wantsHandoff ? `${HANDOFF_CUE}\n（用户原话：${message}）` : message) + recoveryNotice
-    // 领队续聊同样武装流式派单嗅探（追问里派发 → 提前建单）；办公室会话不受理派单，不武装
-    const me = (this.getTeam?.() ?? []).find((a) => a.id === task.agentId)
-    if (!isOfficeTask(task) && (me?.subordinates?.length || (task.agentId && (!me || !!me.role && /队长|领队|captain|leader/i.test(me.role))))
-      && task.backend !== 'dsh' && !(task.suppressIssue && task.parentTaskId)) this.armDelegateSniffer(taskId)
+    const hostCtx = this.resolveHostContext(task, backend)
+    const turnContent = (wantsHandoff ? `${hostCtx.transport === 'mcp' ? MCP_HANDOFF_CUE : HANDOFF_CUE}\n（用户原话：${message}）` : message) + recoveryNotice
+    // 领队续聊同样武装台账（Prompt 模式开正文嗅探，MCP 模式仅初始化台账）；办公室会话不武装
+    const me = hostCtx.me
+    if (hostCtx.isLeader) this.armDelegateSniffer(taskId, { sniffText: hostCtx.transport !== 'mcp' })
 
     const runId = this.newRunId(taskId)
     const beginRun = async (): Promise<RunClaim | null> => {
@@ -1889,6 +2178,10 @@ export class TaskRunner {
       if (liveSession) {
         try {
           if (!this.isCurrentRun(claim) || !this.meetingGuardAllows(task)) return { ok: false, error: '会议执行已终止' }
+          this.runRoundCounters.set(taskId, 0)
+          this.activeMeetingTurns.set(taskId, opts?.meetingTurn === true)
+          // 常驻会话（如 zcode）续聊复用既有 MCP Token 并重绑到本次新 Run
+          if (hostCtx.transport === 'mcp') await this.prepareMcpEndpoint(taskId, claim, backend, 'rebind')
           const r = await this.sendTurn(taskId, liveSession, turnContent, claim, resolvedFollowUpThinking ? { thinking: resolvedFollowUpThinking } : undefined)
           if (!this.isCurrentRun(claim)) return { ok: false, error: '回合已失效' }
           if (!r.ok) throw new Error(r.error || '续聊回合失败')
@@ -1959,6 +2252,12 @@ export class TaskRunner {
           state.router = router
           state.turn = turn
           state.generation = gen
+          this.runRoundCounters.set(taskId, 0)
+          this.activeMeetingTurns.set(taskId, opts?.meetingTurn === true)
+          const resumeSystemPrompt = this.buildNativeSystemPrompt(task, backend)
+          const resumeMcpEndpoint = hostCtx.transport === 'mcp'
+            ? await this.prepareMcpEndpoint(taskId, claim, backend, 'new')
+            : undefined
           const resumeSession = await this.executor.start(
             () => backend.start({
               prompt: turnContent,
@@ -1967,6 +2266,8 @@ export class TaskRunner {
               model: me?.model,
               thinking: resolvedFollowUpThinking,
               connection: this.resolveConnection(task.agentId),
+              ...(resumeSystemPrompt ? { systemPrompt: resumeSystemPrompt } : {}),
+              ...(resumeMcpEndpoint ? { mcpEndpoint: resumeMcpEndpoint } : {}),
               resumeSessionId: task.sessionId,
               turn: turnRecord.stamp,
               events: channel
@@ -2038,7 +2339,12 @@ export class TaskRunner {
       return { ok: false, error: msg }
     }
 
-    const executeTurn = () => runTurn().finally(() => this.kernel.dropTurnStartObserver(claim.runId))
+    const executeTurn = () => runTurn().finally(() => {
+      this.kernel.dropTurnStartObserver(claim.runId)
+      this.runRoundCounters.delete(taskId)
+      this.activeMeetingTurns.delete(taskId)
+      this.mcpServer.deactivateRun(taskId, claim.runId)
+    })
     if (opts?.wait === false) {
       // 后台回合自身失败已走 failTask→pushTask 广播显错；这里只兜意外抛出，防静默挂 running
       void this.trackMap(this.activeTurns, taskId, executeTurn()).catch((e) => {
@@ -2171,6 +2477,9 @@ export class TaskRunner {
     this.permissionBroker.shutdown()
     this.doomWindows.clear()
     this.doomEscalatedTasks.clear()
+    this.runRoundCounters.clear()
+    this.activeMeetingTurns.clear()
+    await this.mcpServer.close()
     await this.executor.shutdown()
   }
 

@@ -40,8 +40,9 @@ export class DelegateLedger {
    *  登记即撤，后续调用走既有落盘查册短路。 */
   private spawnCreatesInFlight = new Map<string, Promise<Task | null>>()
   /** 流式派单嗅探：领队会话期间逐条 text 事件累计扫描，闭合一个 <delegate> 即提前建单入队。
-   *  回灌仍只在回合末（委派循环）发生，不会打断领队正在进行的主运行。 */
-  private earlySpawns = new Map<string, { buffer: string; scanOffset: number; closeScanOffset: number; spawned: Map<string, { call: DelegateCall; childId: string }>; seenKeys: Set<string>; pending: Promise<unknown>[]; suspended: boolean }>()
+   *  回灌仍只在回合末（委派循环）发生，不会打断领队正在进行的主运行。
+   *  sniffText=false 用于 MCP 通道：不扫正文 XML，但复用同一份 spawned/seenKeys/suspended 台账。 */
+  private earlySpawns = new Map<string, { buffer: string; scanOffset: number; closeScanOffset: number; spawned: Map<string, { call: DelegateCall; childId: string }>; seenKeys: Set<string>; pending: Promise<unknown>[]; suspended: boolean; sniffText: boolean }>()
   /** 被拒派单的原因（按任务累积）：委派循环每轮取走并回灌给领队，让它当场改派而不是干等不存在的回灌 */
   private delegateRejections = new Map<string, Array<{ runId?: string; reason: string; key?: string }>>()
   private workerIndexReservations = new Map<string, number>()
@@ -61,8 +62,9 @@ export class DelegateLedger {
     if (scope.workerIndex) this.workerIndexReservations.delete(taskId)
   }
 
-  /** 武装流式派单嗅探（领队会话开始时调用；armed 才会在 text 事件上扫描 delegate 标记） */
-  armDelegateSniffer(taskId: string) {
+  /** 武装流式派单嗅探（领队会话开始时调用；opts.sniffText=false 时仅初始化台账、不扫正文 XML） */
+  armDelegateSniffer(taskId: string, opts?: { sniffText?: boolean }) {
+    const sniffText = opts?.sniffText !== false
     const existing = this.earlySpawns.get(taskId)
     if (existing) {
       // Follow-up turns reuse the same provider session. Reset only the
@@ -73,9 +75,60 @@ export class DelegateLedger {
       existing.spawned.clear()
       existing.pending = []
       existing.suspended = false
+      existing.sniffText = sniffText
       return
     }
-    this.earlySpawns.set(taskId, { buffer: '', scanOffset: 0, closeScanOffset: 0, spawned: new Map(), seenKeys: new Set(), pending: [], suspended: false })
+    this.earlySpawns.set(taskId, { buffer: '', scanOffset: 0, closeScanOffset: 0, spawned: new Map(), seenKeys: new Set(), pending: [], suspended: false, sniffText })
+  }
+
+  /** 登记外部结构化通道（如 MCP agentdeck_dispatch_worker）建出的子单，直接汇入同一份
+   *  earlySpawns / seenKeys 台账，复用既有等待终态、回灌、集成与回合失败撤销语义。
+   *  返回 true 表示同一派单已登记（去重命中），false 表示本回合新登记。 */
+  recordExternalSpawn(taskId: string, call: DelegateCall, childId: string): boolean {
+    let state = this.earlySpawns.get(taskId)
+    if (!state) {
+      state = { buffer: '', scanOffset: 0, closeScanOffset: 0, spawned: new Map(), seenKeys: new Set(), pending: [], suspended: false, sniffText: false }
+      this.earlySpawns.set(taskId, state)
+    }
+    const key = `${call.to}\n${call.prompt}`
+    const already = state.spawned.get(key)?.childId === childId || state.seenKeys.has(key)
+    state.seenKeys.add(key)
+    if (!state.spawned.has(key)) {
+      state.spawned.set(key, { call, childId })
+    }
+    return already
+  }
+
+  /** 查询当前任务是否已暂停新建委派子单（预算收尾/护栏早退） */
+  isSpawnsSuspended(taskId: string): boolean {
+    return this.earlySpawns.get(taskId)?.suspended === true
+  }
+
+  /** 消费并确认指定派单 key 的最新未交付拒因（MCP 同步回执专用：已当场返回给领队，避免回合末重复回灌） */
+  consumeDelegateRejectionByKey(taskId: string, expectedRunId: string | undefined, key: string): string | null {
+    if (expectedRunId !== undefined && this.ports.claimOf(taskId)?.runId !== expectedRunId) return null
+    const task = this.ports.taskOf(taskId)
+    const entries = task?.delegateRejections
+    if (task && entries && expectedRunId) {
+      const idx = entries.findIndex((entry) => entry.runId === expectedRunId && !entry.deliveredAt && entry.key === key)
+      if (idx >= 0) {
+        const reason = entries[idx].reason
+        this.ports.updateIf(taskId, { runId: expectedRunId }, {
+          delegateRejections: entries.map((entry, i) => (i === idx ? { ...entry, deliveredAt: Date.now() } : entry))
+        })
+        return reason
+      }
+    }
+    const memory = this.delegateRejections.get(taskId) ?? []
+    const memIdx = memory.findIndex((entry) => entry.key === key && (entry.runId === undefined || expectedRunId === undefined || entry.runId === expectedRunId))
+    if (memIdx >= 0) {
+      const reason = memory[memIdx].reason
+      const remaining = memory.filter((_, i) => i !== memIdx)
+      if (remaining.length) this.delegateRejections.set(taskId, remaining)
+      else this.delegateRejections.delete(taskId)
+      return reason
+    }
+    return null
   }
 
   /** 收尾回合关闭流式建单通道（预算收尾护栏）：文本事件照常推进扫描游标，但不再提前
@@ -220,7 +273,7 @@ export class DelegateLedger {
   /** 逐条 text 事件增量扫描：闭合一个 <delegate to="...">...</delegate> 即提前建单 */
   sniffDelegates(taskId: string, delta?: string) {
     const state = this.earlySpawns.get(taskId)
-    if (!state || !delta) return
+    if (!state || !state.sniffText || !delta) return
     state.buffer += delta
     // Only parse newly closed markup. This keeps token-sized streams
     // amortized O(n) while retaining the complete buffer for the session's

@@ -66,6 +66,19 @@ export interface BackendTurnResult {
 /** 后端对动态思考强度的切换能力：per-turn=支持会话内逐回合热切；startup-only=仅启动期生效；none=暂不支持 */
 export type ThinkingSwitchMode = 'per-turn' | 'startup-only' | 'none'
 
+/** 后端如何承载宿主系统提示（AgentDeck Host Framing / 人设）：native=原生系统/开发者提示层（免疫自动压缩）；fallback=拼进首条用户消息 */
+export type SystemPromptMode = 'native' | 'fallback'
+
+/** 后端如何承载 AgentDeck 协作委派协议：mcp=按会话隔离注入本地 Streamable HTTP MCP；prompt=文本标记协议兜底 */
+export type DelegationTransport = 'mcp' | 'prompt'
+
+/** 按会话动态注入的 AgentDeck 内部 MCP 端点（per-run Bearer Token 隔离，永不修改用户全局配置） */
+export interface BackendMcpEndpoint {
+  serverName: 'agentdeck'
+  url: string
+  token: string
+}
+
 export interface BackendTurnOptions {
   /** 本回合覆盖的思考强度（缺省沿用会话建立时的档位） */
   thinking?: ThinkingLevel
@@ -76,6 +89,10 @@ export interface AgentBackend {
   label: string
   /** 动态思考强度切换能力（缺省按 'none' 保守处理，兼容旧测试桩） */
   thinkingSwitchMode?: ThinkingSwitchMode
+  /** 宿主系统提示注入能力（缺省按 'fallback' 处理，兼容旧测试桩） */
+  systemPromptMode?: SystemPromptMode
+  /** 委派协作协议通道能力（缺省按 'prompt' 处理，兼容旧测试桩） */
+  delegationTransport?: DelegationTransport
   /**
    * 声明 `start` 的 resumeSessionId 通路会真实恢复该 provider 会话（跨进程续聊）。
    *
@@ -103,6 +120,10 @@ export interface AgentBackend {
     thinking?: ThinkingLevel
     /** API 预设连接覆盖（与 model 同时提供时生效）：baseURL/apiKey 注册进会话配置，不写死全局 */
     connection?: { name: string; baseURL: string; apiKey: string; protocol?: 'anthropic' | 'openai' }
+    /** 宿主级系统提示（AgentDeck Host Framing + 人设）：仅 systemPromptMode='native' 的后端经系统/开发者提示层注入 */
+    systemPrompt?: string
+    /** 按会话隔离注入的 AgentDeck MCP 端点：仅 delegationTransport='mcp' 的后端挂入本会话 */
+    mcpEndpoint?: BackendMcpEndpoint
     resumeSessionId?: string
     /** 首回合身份：适配器必须把它回传给该回合产生的每个回调 */
     turn?: BackendTurnStamp

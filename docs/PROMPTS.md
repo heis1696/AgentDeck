@@ -9,6 +9,7 @@ AgentDeck 的提示词不只是文案：它们是运行时解析器（`<delegate
 | 文件 | 内容 | 主要调用方 |
 |---|---|---|
 | `delegation.ts` | 身份注入、交接备注、派发协议（含队长间咨询）、子任务提示、共享工作区只读约定、回灌报告/拒单处理/【下一步】/审核、预算收尾、护栏拒单、重启对账、全文入口、总结轮、咨询请求与回复 | `runner.ts`、`delegate.ts`、`index.ts` |
+| `host.ts` | AgentDeck 平台宿主认知（Host Framing）、原生能力与团队协作分工声明、MCP 模式瘦身协议与回灌模板、回合级防自动压缩状态锚点 | `runner.ts`、`delegate.ts`、`mcp-delegation-server.ts` |
 | `goal.ts` | 目标模式协议块 `GOAL_BLOCK`、推进任务 prompt（首次与兜底新会话同一构造器）、同会话续轮回灌、规格澄清问题 | `goal-controller.ts` |
 | `handoff.ts` | 阶段接力协议 `CONTINUE_BLOCK`、接力按钮指令、接手/手动启动确认、标题重命名 | `runner.ts` |
 | `meeting.ts` | 会议优先规则、汇报/质疑/答辩/综合/强制综合五类发言、纪要 schema、主席插话、办公室会话引导、只读调查的派单与回灌 | `meeting-controller.ts`、`agent-sessions.ts`、`runner.ts` |

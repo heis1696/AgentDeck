@@ -25,6 +25,7 @@ import { isJsonObject, type JsonObject } from './cli-common'
 import { ZcodeConnection } from './zcode-transport'
 import { compactToolArgs, mergeTurnTexts as mergeTexts, runtimePreferences, sessionEvent, zcodeRecord, zcodeString } from './zcode-protocol'
 import { parseEditMeta } from './edit-meta'
+import { isAgentDeckMcpToolName } from '../mcp-delegation-server'
 import {
   buildModelSelectionFromCliConfig as buildModelSelection,
   ensureZcodeCliConfig as ensureCliConfig,
@@ -143,6 +144,8 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
     id: 'zcode',
     label: 'ZCode (GLM)',
     thinkingSwitchMode: 'per-turn',
+    systemPromptMode: 'fallback',
+    delegationTransport: 'mcp',
     // resumeSessionId 走 session/resume（startDshAcpSession 同名参数表之外唯一的服务器端
     // 恢复入口）：对全新 app-server 连接请求恢复既有会话，跨进程生效
     supportsResume: true,
@@ -161,7 +164,7 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
       if (!cfg.ok) return { ok: false, detail: `${cfg.detail} · ${nodeNote}` }
       return { ok: node.source !== 'fallback-electron', detail: `${bundle} · ${provider.detail} · ${cfg.detail} · ${nodeNote}` }
     },
-    async start({ prompt, workdir, mode, model, thinking, connection, events: rawEvents, resumeSessionId, turn }) {
+    async start({ prompt, workdir, mode, model, thinking, connection, mcpEndpoint, events: rawEvents, resumeSessionId, turn }) {
       const { nodePath, zcodePath } = getPaths()
       const bundle = findBundle(zcodePath || undefined)
       if (!bundle) throw new Error('找不到 zcode.cjs')
@@ -441,6 +444,12 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
             options
           }
           const reqId = m.id
+          if (isAgentDeckMcpToolName(req.toolName)) {
+            // AgentDeck 内部协作 MCP 工具自动放行，避免非 yolo 模式下领队派单/审核触发人工权限确认
+            conn.respond(m.id, options.find((o) => o.response.decision === 'allow')?.response ?? { decision: 'allow' })
+            emit({ kind: 'status', text: `permission:auto-allowed: ${req.toolName} (AgentDeck)` })
+            return
+          }
           if (channel()?.onPermission) {
             emit({
               kind: 'status',
@@ -470,17 +479,30 @@ export function createZcodeBackend(getPaths: () => { nodePath: string; zcodePath
       })
 
       emit({ kind: 'status', text: 'starting app-server' })
+      // 会话级隔离 MCP（ZCode 协议原生支持 type:'http' + isolation:'session' + alwaysLoad:true，零污染全局配置）
+      const mcpServers = mcpEndpoint
+        ? [{
+            name: mcpEndpoint.serverName,
+            type: 'http' as const,
+            url: mcpEndpoint.url,
+            headers: [{ name: 'Authorization', value: `Bearer ${mcpEndpoint.token}` }],
+            isolation: 'session' as const,
+            alwaysLoad: true
+          }]
+        : undefined
       let sessionId: string
       if (resumeSessionId) {
         const resumed = await conn.request<JsonObject>('session/resume', {
           sessionId: resumeSessionId,
-          workspace: { workspaceKey: cwd, workspacePath: cwd }
+          workspace: { workspaceKey: cwd, workspacePath: cwd },
+          ...(mcpServers ? { mcpServers } : {})
         })
         sessionId = String(zcodeRecord(resumed.session).sessionId ?? resumeSessionId)
       } else {
         const created = await conn.request<JsonObject>('session/create', {
           workspace: { workspaceKey: cwd, workspacePath: cwd },
-          mode: mode || 'yolo'
+          mode: mode || 'yolo',
+          ...(mcpServers ? { mcpServers } : {})
         })
         sessionId = String(zcodeRecord(created.session).sessionId ?? '')
       }

@@ -3,6 +3,7 @@
 // 便于统一审阅、全局搜索与后续调优。新增提示词请归入对应域文件，新域文件在此汇总导出。
 // 注入地图、术语表、措辞约定与 smoke 固化的原文见 docs/PROMPTS.md；改文案后跑 npm run smoke:prompts。
 export * from './delegation'
+export * from './host'
 export * from './handoff'
 export * from './meeting'
 export * from './goal'

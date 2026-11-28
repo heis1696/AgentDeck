@@ -5,7 +5,7 @@
 // prompt 走 stdin（`-` 显式声明从 stdin 读）：argv 版在 Windows 撞 CreateProcess
 // 32767 字符命令行上限，会议上下文随轮次膨胀后 spawn ENAMETOOLONG
 // 注意：Windows 下 workspace-write 沙箱会废掉命令执行，必须 bypass（实测 exit -1）
-import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnResult, BackendTurnStamp } from './types'
+import type { AgentBackend, BackendMcpEndpoint, BackendSession, BackendSessionEvents, BackendTurnResult, BackendTurnStamp } from './types'
 import { bindTurn } from './types'
 import type { TaskEvent, ThinkingLevel, ToolEditMeta } from '../../shared/types'
 import { isJsonObject, jsonObject, jsonString, runCliJsonl, toolEvent, type CliJsonlRunner } from './cli-common'
@@ -14,6 +14,9 @@ import { resolveCli, probeCli } from './cli-locator'
 
 /** 思考档位 → Codex 的 model_reasoning_effort 原生档（off 关到最小档；max 用协议专属 xhigh） */
 const MODEL_REASONING_EFFORT: Record<ThinkingLevel, string> = { off: 'minimal', low: 'low', medium: 'medium', high: 'high', max: 'xhigh' }
+
+/** Windows CreateProcess 命令行总长 32767 字符上限：developer_instructions 做保守截断，完整人设仍可经 agentdeck_context 取回 */
+const CODEX_DEV_INSTRUCTIONS_MAX = 14_000
 
 export function createCodexBackend(): AgentBackend {
   const runOnce = (
@@ -24,7 +27,9 @@ export function createCodexBackend(): AgentBackend {
     model?: string,
     thinking?: ThinkingLevel,
     /** 本会话当前进程句柄落点：stop/close 只杀自己会话的进程，多任务并发不再串杀/漏杀 */
-    onSpawn?: (runner: Pick<CliJsonlRunner, 'kill'>) => void
+    onSpawn?: (runner: Pick<CliJsonlRunner, 'kill'>) => void,
+    systemPrompt?: string,
+    mcpEndpoint?: BackendMcpEndpoint
   ): Promise<{ sessionId: string } & BackendTurnResult> => {
     const emit = (e: Omit<TaskEvent, 'seq' | 'ts'>) => events.onEvent({ ...e, ts: Date.now() })
     const resolved = resolveCli('codex')
@@ -32,9 +37,21 @@ export function createCodexBackend(): AgentBackend {
     const common = ['--json', '--dangerously-bypass-approvals-and-sandbox', '--skip-git-repo-check']
     const modelArgs = model ? ['-m', model] : []
     const effortArgs = thinking ? ['-c', `model_reasoning_effort=${MODEL_REASONING_EFFORT[thinking]}`] : []
+    const trimmedSystem = systemPrompt?.trim()
+    const boundedSystem = trimmedSystem && trimmedSystem.length > CODEX_DEV_INSTRUCTIONS_MAX
+      ? `${trimmedSystem.slice(0, CODEX_DEV_INSTRUCTIONS_MAX)}…`
+      : trimmedSystem
+    const systemArgs = boundedSystem ? ['-c', `developer_instructions=${JSON.stringify(boundedSystem)}`] : []
+    const mcpArgs = mcpEndpoint
+      ? [
+          '-c', `mcp_servers.${mcpEndpoint.serverName}.url=${JSON.stringify(mcpEndpoint.url)}`,
+          '-c', `mcp_servers.${mcpEndpoint.serverName}.bearer_token_env_var="AGENTDECK_MCP_TOKEN"`
+        ]
+      : []
+    const configArgs = [...modelArgs, ...effortArgs, ...systemArgs, ...mcpArgs]
     const args = resumeSessionId
-      ? ['exec', 'resume', resumeSessionId, ...modelArgs, ...effortArgs, ...common, '-']
-      : ['exec', ...modelArgs, ...effortArgs, ...common, '-']
+      ? ['exec', 'resume', resumeSessionId, ...configArgs, ...common, '-']
+      : ['exec', ...configArgs, ...common, '-']
     let sessionId = resumeSessionId ?? ''
     let finalText = ''
     // Codex can emit multiple agent_message items in one turn. Keep all of
@@ -63,6 +80,7 @@ export function createCodexBackend(): AgentBackend {
       args,
       cwd: workdir,
       stdin: prompt,
+      ...(mcpEndpoint ? { env: { AGENTDECK_MCP_TOKEN: mcpEndpoint.token } } : {}),
       onLine: (obj) => {
         if (!isJsonObject(obj)) return
         const j = obj
@@ -130,18 +148,20 @@ export function createCodexBackend(): AgentBackend {
     id: 'codex',
     label: 'Codex',
     thinkingSwitchMode: 'per-turn',
+    systemPromptMode: 'native',
+    delegationTransport: 'mcp',
     // resumeSessionId 走 `codex exec resume <id>`：每回合独立进程恢复 provider 会话
     supportsResume: true,
     async probe() {
       const p = await probeCli('codex')
       return p.ok ? { ok: true, detail: `codex ${p.version}` } : { ok: false, detail: p.error ?? '未安装' }
     },
-    async start({ prompt, workdir, events: rawEvents, resumeSessionId, model, thinking, turn }) {
+    async start({ prompt, workdir, events: rawEvents, resumeSessionId, model, thinking, systemPrompt, mcpEndpoint, turn }) {
       const dir = workdir || process.cwd()
       let own: Pick<CliJsonlRunner, 'kill'> | null = null
       // 一次性 CLI：每个回合一个进程。回合身份随进程绑定，被杀旧进程的迟到回调带旧身份。
       const runTurn = (turnPrompt: string, resumeId?: string, turnStamp?: BackendTurnStamp, turnThinking?: ThinkingLevel) =>
-        runOnce(turnPrompt, dir, resumeId, bindTurn(rawEvents, turnStamp), model, turnThinking ?? thinking, (r) => { own = r })
+        runOnce(turnPrompt, dir, resumeId, bindTurn(rawEvents, turnStamp), model, turnThinking ?? thinking, (r) => { own = r }, systemPrompt, mcpEndpoint)
       const r = await runTurn(prompt, resumeSessionId, turn)
       if (!r.ok && r.error) throw new Error(r.error)
       const sid = r.sessionId

@@ -15,6 +15,9 @@ import {
   buildReportFeedback,
   budgetTailFeedback,
   policyRejectionPrompt,
+  buildMcpReportFeedback,
+  buildMcpRejectionFeedbackPrompt,
+  buildMcpPolicyRejectionPrompt,
   sparseScopeFailureNote,
   summaryFallbackNote,
   longResultOmittedNote,
@@ -54,6 +57,7 @@ import {
 } from './git'
 import { clampIssueCommentBytes } from './issue-relay'
 import { currentGitChanges } from '../shared/git-snapshot'
+import type { McpActiveReportEntry } from './mcp-delegation-server'
 
 // 拒因摘录标记与回灌界定义在 prompts/delegation.ts（提示词与组装共用同一处）；此处转出口供 runner/smoke 沿用旧导入路径
 export { DELEGATE_REJECT_EXCERPT_MARK, REPORT_INLINE_MAX }
@@ -574,6 +578,16 @@ export interface DelegationContext {
   /** 总结轮通路（独立实现）：对已终态子单的存活会话追加一轮 prompt→reply。
    *  返回 null = 无存活会话/后端不支持续轮；回合 !ok = 总结轮失败——调用方一律按 C 行为回退。 */
   sendChildSummaryTurn?: (childId: string, content: string) => Promise<BackendTurnResult | null>
+  /** 协议通道：mcp 时使用 MCP 瘦身回灌并跳过正文 XML 解析；缺省为 'prompt'（兼容既有调用方与 smoke） */
+  transport?: 'mcp' | 'prompt'
+  /** 注册本轮可审核与可查阅全文的子单报告表到 MCP Run 上下文 */
+  setMcpActiveReports?: (reports: McpActiveReportEntry[]) => void
+  /** 取出本回合经 MCP 工具提交的审核与评估记录 */
+  drainMcpRoundActions?: () => { reviews: Array<ReviewCall & { childId: string; seq: number }>; roundNotes: RoundNote[] }
+  /** 生成防自动压缩状态锚点（附在回灌消息末尾，不破坏【下一步】之前的队员可控段） */
+  buildTurnAnchor?: (input: { remainingRounds: number; activeReportSeqs?: number[] }) => string
+  /** 轮次推进回调（供 MCP Run 上下文实时反映剩余委派预算） */
+  onRoundChange?: (round: number) => void
 }
 
 export interface DelegationOutcome {
@@ -861,6 +875,7 @@ export async function runDelegationLoop(
   if (!active()) return abandoned()
 
   // ---- 二层委派的三道闸（0.7.0；建单路径的同类闸在 runner.spawnDelegateChild）----
+  const isMcp = ctx.transport === 'mcp'
   const { inherited, depth } = ancestorBudget(store, taskId)
   const maxDepth = ctx.opts().maxDepth ?? MAX_DEPTH
   const maxRounds = ctx.opts().maxRounds ?? MAX_ROUNDS
@@ -877,64 +892,74 @@ export async function runDelegationLoop(
     const early = await runner.takeEarlySpawns(taskId, runId)
     if (!active()) return abandoned()
     const acceptedKeys = new Set(early.entries.map((entry) => `${entry.call.to}\n${entry.call.prompt}`))
-    const calls = parseDelegatesMerged(first.delegationText ?? '', first.response)
-    for (const call of calls) {
-      const key = `${call.to}\n${call.prompt}`
-      if (acceptedKeys.has(key)) continue
-      if (runner.delegateRejectionRecorded?.(taskId, runId, key)) continue
-      runner.recordDelegateRejection(taskId, `to="${call.to}"：${why}；不要原样重派`, { to: call.to, prompt: call.prompt })
-    }
-    // 残缺开标记同样具名（解析不出派单≠可以无痕）：护栏触发时领队也要知道它们未建单
-    const bailBrokenSeen = new Set<string>()
-    for (const text of [first.delegationText ?? '', first.response]) {
-      for (const broken of findUnmatchedDelegateOpens(text)) {
-        const key = `${broken.to}\n${broken.excerpt}`
-        if (bailBrokenSeen.has(key)) continue
-        bailBrokenSeen.add(key)
-        runner.recordDelegateRejection(taskId, unmatchedDelegateOpenReason(broken, why), { to: broken.to, prompt: broken.excerpt })
+    if (!isMcp) {
+      const calls = parseDelegatesMerged(first.delegationText ?? '', first.response)
+      for (const call of calls) {
+        const key = `${call.to}\n${call.prompt}`
+        if (acceptedKeys.has(key)) continue
+        if (runner.delegateRejectionRecorded?.(taskId, runId, key)) continue
+        runner.recordDelegateRejection(taskId, `to="${call.to}"：${why}；不要原样重派`, { to: call.to, prompt: call.prompt })
+      }
+      // 残缺开标记同样具名（解析不出派单≠可以无痕）：护栏触发时领队也要知道它们未建单
+      const bailBrokenSeen = new Set<string>()
+      for (const text of [first.delegationText ?? '', first.response]) {
+        for (const broken of findUnmatchedDelegateOpens(text)) {
+          const key = `${broken.to}\n${broken.excerpt}`
+          if (bailBrokenSeen.has(key)) continue
+          bailBrokenSeen.add(key)
+          runner.recordDelegateRejection(taskId, unmatchedDelegateOpenReason(broken, why), { to: broken.to, prompt: broken.excerpt })
+        }
       }
     }
     let rejects = pendingRejections()
     if (rejects.length) {
       try {
-        const turn = await runner.sendTurn(taskId, session, policyRejectionPrompt(rejects), runId)
+        const anchor = ctx.buildTurnAnchor?.({ remainingRounds: 0 }) ?? ''
+        const promptText = isMcp
+          ? buildMcpPolicyRejectionPrompt(rejects, anchor || undefined)
+          : (anchor ? `${policyRejectionPrompt(rejects)}\n\n${anchor}` : policyRejectionPrompt(rejects))
+        const turn = await runner.sendTurn(taskId, session, promptText, runId)
         if (!active()) return abandoned()
         if (!turn.ok) throw new Error(turn.error || '拒单回灌失败')
         acknowledgeRejections(rejects.length)
-        // 拒单回灌回复若再出新标记，同样逐单对账（建议并入⑤）：已接单/已有具名拒单的
-        // 复述不误拒，真正的新标记此刻补具名拒单——护栏已触发绝不建单；残缺开标记同规。
-        // 此刻已无下一轮回灌通道，新拒单以时间线留痕 + Issue 评论兜底，不再追加回合
-        // （对拒单回灌再做回灌会无界循环）。
-        const bailReconciled = new Set(acceptedKeys)
-        const bailRejectsBefore = pendingRejections().length
-        for (const call of parseDelegatesMerged(turn.delegationText ?? '', turn.response)) {
-          const key = `${call.to}\n${call.prompt}`
-          if (bailReconciled.has(key)) continue
-          if (runner.delegateRejectionRecorded?.(taskId, runId, key)) { bailReconciled.add(key); continue }
-          runner.recordDelegateRejection(taskId, `to="${call.to}"：${why}；不要原样重派`, { to: call.to, prompt: call.prompt })
-          bailReconciled.add(key)
-        }
-        const bailBrokenSeen = new Set<string>()
-        for (const text of [turn.delegationText ?? '', turn.response]) {
-          for (const broken of findUnmatchedDelegateOpens(text)) {
-            const key = `${broken.to}\n${broken.excerpt}`
-            if (bailBrokenSeen.has(key)) continue
-            bailBrokenSeen.add(key)
-            runner.recordDelegateRejection(taskId, unmatchedDelegateOpenReason(broken, why), { to: broken.to, prompt: broken.excerpt })
+        if (isMcp) {
+          ctx.drainMcpRoundActions?.()
+        } else {
+          // 拒单回灌回复若再出新标记，同样逐单对账（建议并入⑤）：已接单/已有具名拒单的
+          // 复述不误拒，真正的新标记此刻补具名拒单——护栏已触发绝不建单；残缺开标记同规。
+          // 此刻已无下一轮回灌通道，新拒单以时间线留痕 + Issue 评论兜底，不再追加回合
+          // （对拒单回灌再做回灌会无界循环）。
+          const bailReconciled = new Set(acceptedKeys)
+          const bailRejectsBefore = pendingRejections().length
+          for (const call of parseDelegatesMerged(turn.delegationText ?? '', turn.response)) {
+            const key = `${call.to}\n${call.prompt}`
+            if (bailReconciled.has(key)) continue
+            if (runner.delegateRejectionRecorded?.(taskId, runId, key)) { bailReconciled.add(key); continue }
+            runner.recordDelegateRejection(taskId, `to="${call.to}"：${why}；不要原样重派`, { to: call.to, prompt: call.prompt })
+            bailReconciled.add(key)
+          }
+          const bailBrokenSeen = new Set<string>()
+          for (const text of [turn.delegationText ?? '', turn.response]) {
+            for (const broken of findUnmatchedDelegateOpens(text)) {
+              const key = `${broken.to}\n${broken.excerpt}`
+              if (bailBrokenSeen.has(key)) continue
+              bailBrokenSeen.add(key)
+              runner.recordDelegateRejection(taskId, unmatchedDelegateOpenReason(broken, why), { to: broken.to, prompt: broken.excerpt })
+            }
+          }
+          const bailNewRejects = pendingRejections().length - bailRejectsBefore
+          if (bailNewRejects > 0) {
+            note(`⚠ 拒单回灌回复仍出现 ${bailNewRejects} 条未受理的新派单/残缺标记（护栏已触发不建单），已具名留痕`)
+            if (task.issueId) ctx.addIssueComment?.(task.issueId, leftoverRejectsComment(pendingRejections()))
           }
         }
-        const bailNewRejects = pendingRejections().length - bailRejectsBefore
-        if (bailNewRejects > 0) {
-          note(`⚠ 拒单回灌回复仍出现 ${bailNewRejects} 条未受理的新派单/残缺标记（护栏已触发不建单），已具名留痕`)
-          if (task.issueId) ctx.addIssueComment?.(task.issueId, leftoverRejectsComment(pendingRejections()))
-        }
-        return { rounds: 0, children: [], finalText: stripDelegates(turn.response), scanTexts: [turn.delegationText ?? '', turn.response] }
+        return { rounds: 0, children: [], finalText: isMcp ? turn.response : stripDelegates(turn.response), scanTexts: [turn.delegationText ?? '', turn.response] }
       } catch (error) {
         note(`⚠ 政策拒单未送达领队：${error instanceof Error ? error.message : String(error)}`)
         if (task.issueId) ctx.addIssueComment?.(task.issueId, leftoverRejectsComment(rejects))
       }
     }
-    return { rounds: 0, children: [], finalText: stripDelegates(first.response), scanTexts: [first.delegationText ?? '', first.response] }
+    return { rounds: 0, children: [], finalText: isMcp ? first.response : stripDelegates(first.response), scanTexts: [first.delegationText ?? '', first.response] }
   }
   if (depth >= maxDepth) return bail(`委派层级已达上限（${maxDepth} 层）`)
   const budget = Math.min(maxRounds, maxTotalRounds - inherited)
@@ -947,8 +972,12 @@ export async function runDelegationLoop(
   let allChildren: string[] = []
   const reportedChildren = new Map<string, Task>()
   let round = 0
-  for (const n of parseRoundNotes(first.response)) {
-    note(`领队评估：${n.outcome}${n.reason ? ' — ' + n.reason : ''}`)
+  if (isMcp) {
+    ctx.drainMcpRoundActions?.()
+  } else {
+    for (const n of parseRoundNotes(first.response)) {
+      note(`领队评估：${n.outcome}${n.reason ? ' — ' + n.reason : ''}`)
+    }
   }
 
   // 被拒派单的零新单兜底回灌（有界防循环）：主通道是随每轮报告捎带（下方），这里只接
@@ -964,12 +993,20 @@ export async function runDelegationLoop(
     rejectedFeedbacks++
     note(`⚠ ${rejects.length} 条派单被拒（未建单），原因回灌给领队改派`)
     try {
-      const turn = await runner.sendTurn(taskId, session, buildRejectionFeedbackPrompt(rejects, rosterText), runId)
+      const anchor = ctx.buildTurnAnchor?.({ remainingRounds: Math.max(0, budget - round) }) ?? ''
+      const promptText = isMcp
+        ? buildMcpRejectionFeedbackPrompt(rejects, rosterText, anchor || undefined)
+        : (anchor ? `${buildRejectionFeedbackPrompt(rejects, rosterText)}\n\n${anchor}` : buildRejectionFeedbackPrompt(rejects, rosterText))
+      const turn = await runner.sendTurn(taskId, session, promptText, runId)
       if (!active()) return false
       if (!turn.ok) throw new Error(turn.error || '回灌回合失败')
       acknowledgeRejections(rejects.length)
-      for (const n of parseRoundNotes(turn.response)) {
-        note(`领队评估：${n.outcome}${n.reason ? ' — ' + n.reason : ''}`)
+      if (isMcp) {
+        ctx.drainMcpRoundActions?.()
+      } else {
+        for (const n of parseRoundNotes(turn.response)) {
+          note(`领队评估：${n.outcome}${n.reason ? ' — ' + n.reason : ''}`)
+        }
       }
       scanTexts = [turn.delegationText ?? '', turn.response]
       finalResponse = turn.response
@@ -1010,8 +1047,10 @@ export async function runDelegationLoop(
         runner.recordDelegateRejection(taskId, unmatchedDelegateOpenReason(broken, '委派轮数预算已耗尽'), { to: broken.to, prompt: broken.excerpt })
       }
     }
-    for (const call of parseDelegatesMerged(...scanTexts)) budgetReject(call)
-    for (const text of scanTexts) budgetRejectBroken(text)
+    if (!isMcp) {
+      for (const call of parseDelegatesMerged(...scanTexts)) budgetReject(call)
+      for (const text of scanTexts) budgetRejectBroken(text)
+    }
     if (!tailChildren.size) return
     // 等待收编单全部终态（提前建的单可能早已完成，等待即刻通过）
     await new Promise<void>((resolve) => {
@@ -1041,6 +1080,7 @@ export async function runDelegationLoop(
     // 全文双落 + 报告组装（与主循环同源文案）；单号顺延已报告子单之后。
     // 收编单变 cancelled 保留终局回执：状态行进报告，不从回灌与 allChildren 静默消失。
     const tailEntries: string[] = []
+    const tailMcpReports: McpActiveReportEntry[] = []
     const tailSeq = new Map<string, number>()
     let seq = allChildren.length
     for (const [id, call] of tailChildren) {
@@ -1087,7 +1127,9 @@ export async function runDelegationLoop(
         commitLossNote: tailCommitLosses.has(id) ? commitLossReportNote(tailCommitLosses.get(id)!) : undefined,
         thinking: c.thinking
       })
-      tailEntries.push(childReportEntry(call?.to ?? c.agentId ?? c.backend, c.status, seq, body))
+      const workerLabel = call?.to ?? c.agentId ?? c.backend
+      tailMcpReports.push({ seq, childId: id, worker: workerLabel, title: c.title, status: c.status, fullText: fullBody, ...(copyRel ? { copyPath: copyRel } : {}), reviewable: c.status === 'done' })
+      tailEntries.push(childReportEntry(workerLabel, c.status, seq, body))
       allChildren.push(id)
     }
     if (!tailEntries.length) return
@@ -1099,22 +1141,31 @@ export async function runDelegationLoop(
     // 收尾回合关闭流式建单通道（预算收尾护栏）：不守提示的领队在收尾回复里流式输出
     // 新标记时不再建单——回合末按已接单键对账，新标记具名拒单、复述不误拒、无孤儿子单。
     runner.suspendDelegateSpawns?.(taskId)
+    ctx.setMcpActiveReports?.(tailMcpReports)
+    const tailAnchor = ctx.buildTurnAnchor?.({ remainingRounds: 0, activeReportSeqs: tailMcpReports.filter((r) => r.reviewable).map((r) => r.seq) }) ?? ''
+    const tailRejectNotice = rideAlong.length ? buildRejectNotice(rideAlong, rosterText) : ''
+    const tailFeedbackPrompt = isMcp
+      ? buildMcpReportFeedback(tailEntries.join('\n\n'), tailRejectNotice, { mode: 'final', anchor: tailAnchor || undefined })
+      : (tailAnchor ? `${budgetTailFeedback(tailEntries.join('\n\n'), tailRejectNotice)}\n\n${tailAnchor}` : budgetTailFeedback(tailEntries.join('\n\n'), tailRejectNotice))
     try {
-      const turn = await runner.sendTurn(taskId, session,
-        budgetTailFeedback(tailEntries.join('\n\n'), rideAlong.length ? buildRejectNotice(rideAlong, rosterText) : ''), runId
-      )
+      const turn = await runner.sendTurn(taskId, session, tailFeedbackPrompt, runId)
       if (!active()) return
       if (!turn.ok) throw new Error(turn.error || '预算收尾回灌失败')
       acknowledgeRejections(rideAlong.length)
       runner.acknowledgeDelegateReceipts?.(taskId, runId, [...tailChildren.keys()])
-      for (const n of parseRoundNotes(turn.response)) {
-        note(`领队评估：${n.outcome}${n.reason ? ' — ' + n.reason : ''}`)
+      const mcpActions = isMcp ? ctx.drainMcpRoundActions?.() : undefined
+      if (!isMcp) {
+        for (const n of parseRoundNotes(turn.response)) {
+          note(`领队评估：${n.outcome}${n.reason ? ' — ' + n.reason : ''}`)
+        }
       }
-      // 审核结论与普通轮同规：收编报告附审核协议，领队的 review 标记在此匹配生效
-      const reviews = parseReviews(turn.response)
+      // 审核结论与普通轮同规：MCP 模式已在工具调用时实时落看板，此处仅补记未审核条目
+      const mcpReviewedIds = new Set((mcpActions?.reviews ?? []).map((r) => r.childId))
+      const reviews = isMcp ? [] : parseReviews(turn.response)
       for (const [id, seqNo] of tailSeq) {
         const child = store.get(id)
         if (!child || child.status !== 'done') continue
+        if (mcpReviewedIds.has(id)) continue
         const call = tailChildren.get(id)
         const review = reviews.find((r) => r.of === `#${seqNo}`)
           ?? reviews.find((r) => r.of === call?.to || (child.title && child.title.includes(r.of)))
@@ -1128,8 +1179,10 @@ export async function runDelegationLoop(
       // 收编回灌回合里出现的新标记：不会再受理（预算已尽、循环即将退出），按已接单键
       // 对账具名拒单；残缺开标记同规不绕过；未送达部分由循环后的遗留拒单通道兜底
       const tailTexts = [turn.delegationText ?? '', turn.response]
-      for (const call of parseDelegatesMerged(...tailTexts)) budgetReject(call)
-      for (const text of tailTexts) budgetRejectBroken(text)
+      if (!isMcp) {
+        for (const call of parseDelegatesMerged(...tailTexts)) budgetReject(call)
+        for (const text of tailTexts) budgetRejectBroken(text)
+      }
       scanTexts = tailTexts
       finalResponse = turn.response
     } catch (e) {
@@ -1143,23 +1196,22 @@ export async function runDelegationLoop(
       await collectBudgetTail()
       break
     }
-    const calls = parseDelegatesMerged(...scanTexts)
+    const calls = isMcp ? [] : parseDelegatesMerged(...scanTexts)
     // 收编流式期间提前建的单（等待未决建单完成）。seenKeys 是本会话出现过的全部派单
     // key（含已交付的）：领队在回灌/评估回合里复述旧派单标记时，绝不能当成新派单再建。
     const early = await runner.takeEarlySpawns(taskId, runId)
     if (!active()) return abandoned()
     const fresh = calls.filter((c) => !early.seenKeys.has(`${c.to}\n${c.prompt}`))
-    // 残缺标记（带 to= 但缺闭合/闭合损坏）具名回执：它们不构成派单，但领队协议是
-    // 「只有已接单或具名拒单才能确认结果」，不回执它就会永远等下去（案情一的有效单
-    // 正是先被残缺示例标记吞没、再整单无痕）。recordDelegateRejection 按 key 去重，
-    // 同一文本多轮扫描不会重复记录。
-    const brokenReported = new Set<string>()
-    for (const text of scanTexts) {
-      for (const broken of findUnmatchedDelegateOpens(text)) {
-        const key = `${broken.to}\n${broken.excerpt}`
-        if (brokenReported.has(key)) continue
-        brokenReported.add(key)
-        runner.recordDelegateRejection(taskId, unmatchedDelegateOpenReason(broken), { to: broken.to, prompt: broken.excerpt })
+    // 残缺标记（带 to= 但缺闭合/闭合损坏）具名回执（仅 Prompt 协议模式；MCP 模式不扫正文 XML）
+    if (!isMcp) {
+      const brokenReported = new Set<string>()
+      for (const text of scanTexts) {
+        for (const broken of findUnmatchedDelegateOpens(text)) {
+          const key = `${broken.to}\n${broken.excerpt}`
+          if (brokenReported.has(key)) continue
+          brokenReported.add(key)
+          runner.recordDelegateRejection(taskId, unmatchedDelegateOpenReason(broken), { to: broken.to, prompt: broken.excerpt })
+        }
       }
     }
     if (!fresh.length && !early.entries.length) {
@@ -1217,6 +1269,7 @@ export async function runDelegationLoop(
       break
     }
     round = nextRound
+    ctx.onRoundChange?.(round)
     const childIds = [...roundChildren.keys()]
     allChildren.push(...childIds)
     pushTask(taskId)
@@ -1257,7 +1310,7 @@ export async function runDelegationLoop(
     // 内写入经 git-common-dir 归位主仓库根）与 ② 领队 Issue 评论（64KB 通道上限：钳制后
     // 持真实副本路径指引回权威层）。副本先行落盘（权威层），评论只是第二通道；
     // 评论未送达（返回 null）必须留痕降级，绝不静默丢弃。
-    const fullTextEntries = new Map<string, { seq: number; issueOk: boolean; copyPath: string }>()
+    const fullTextEntries = new Map<string, { seq: number; issueOk: boolean; copyPath: string; fullBody: string }>()
     for (let idx = 0; idx < childIds.length; idx++) {
       const id = childIds[idx]
       const c = store.get(id)
@@ -1288,7 +1341,7 @@ export async function runDelegationLoop(
         issueOk = !!comment
         if (!issueOk) note(`⚠ 单 #${seq} 的全文评论未送达（Issue 不存在或已删除），全文以报告副本与任务时间线为准`)
       }
-      fullTextEntries.set(id, { seq, issueOk, copyPath: copyAbs ? reportCopyRelPath(task.workdir!, copyAbs) : '' })
+      fullTextEntries.set(id, { seq, issueOk, copyPath: copyAbs ? reportCopyRelPath(task.workdir!, copyAbs) : '', fullBody })
     }
 
     // ---- summary 层（可选）：派单标了 summary 且结果超回灌界时，在全文双落之后向该
@@ -1333,6 +1386,7 @@ export async function runDelegationLoop(
     // 集成就能「验收」改动面。
     const childSeqMap = new Map<string, number>()
     const reportEntries: string[] = []
+    const roundMcpReports: McpActiveReportEntry[] = []
     for (let idx = 0; idx < childIds.length; idx++) {
       const id = childIds[idx]
       const c = store.get(id)
@@ -1365,7 +1419,18 @@ export async function runDelegationLoop(
         commitLossNote: commitLosses.has(id) ? commitLossReportNote(commitLosses.get(id)!) : undefined,
         thinking: c.thinking
       })
-      reportEntries.push(childReportEntry(call?.to ?? c.agentId ?? c.backend, c.status, seq, body))
+      const workerLabel = call?.to ?? c.agentId ?? c.backend
+      roundMcpReports.push({
+        seq,
+        childId: id,
+        worker: workerLabel,
+        title: c.title,
+        status: c.status,
+        fullText: full?.fullBody ?? (c.status === 'done' ? (c.result ?? '').trim() || '（无最终输出）' : `状态 ${c.status}${c.error ? ': ' + c.error : ''}`),
+        ...(full?.copyPath ? { copyPath: full.copyPath } : {}),
+        reviewable: c.status === 'done'
+      })
+      reportEntries.push(childReportEntry(workerLabel, c.status, seq, body))
     }
     // ---- 归池时机前移（nxii 根因——多轮派单时每单都等到集成段才归还，逐单付全量建树
     // 全款）：子单终态（commitAll 成功 + 全文双落 + 总结与报告采集之后）即尝试归池，同会话下一轮派单
@@ -1426,21 +1491,34 @@ export async function runDelegationLoop(
       note(`⚠ ${rideAlongRejects.length} 条派单被拒（未建单），原因随报告回灌给领队改派`)
       rejectNotice = buildRejectNotice(rideAlongRejects, rosterText)
     }
+    ctx.setMcpActiveReports?.(roundMcpReports)
+    const roundAnchor = ctx.buildTurnAnchor?.({
+      remainingRounds: Math.max(0, budget - round),
+      activeReportSeqs: roundMcpReports.filter((r) => r.reviewable).map((r) => r.seq)
+    }) ?? ''
+    const feedbackPrompt = isMcp
+      ? buildMcpReportFeedback(report, rejectNotice, { mode: rejectNotice ? 'rejects' : 'normal', anchor: roundAnchor || undefined })
+      : (roundAnchor ? `${buildReportFeedback(report, rejectNotice)}\n\n${roundAnchor}` : buildReportFeedback(report, rejectNotice))
     note(`第 ${round} 轮结果已回灌，等待领队继续`)
     try {
-      const turn = await runner.sendTurn(taskId, session, buildReportFeedback(report, rejectNotice), runId)
+      const turn = await runner.sendTurn(taskId, session, feedbackPrompt, runId)
       if (!active()) return abandoned()
       if (!turn.ok) throw new Error(turn.error || '回灌回合失败')
       acknowledgeRejections(rideAlongRejects.length)
       runner.acknowledgeDelegateReceipts?.(taskId, runId, childIds)
-      for (const n of parseRoundNotes(turn.response)) {
-        note(`第 ${round} 轮评估：${n.outcome}${n.reason ? ' — ' + n.reason : ''}`)
+      const mcpActions = isMcp ? ctx.drainMcpRoundActions?.() : undefined
+      if (!isMcp) {
+        for (const n of parseRoundNotes(turn.response)) {
+          note(`第 ${round} 轮评估：${n.outcome}${n.reason ? ' — ' + n.reason : ''}`)
+        }
       }
-      // 处理审核结论（每轮回灌后对本轮 done 子任务匹配审核）
-      const reviews = parseReviews(turn.response)
+      // 处理审核结论（MCP 模式已在 agentdeck_submit_review 调用时实时落看板，此处仅补记未审核条目）
+      const mcpReviewedIds = new Set((mcpActions?.reviews ?? []).map((r) => r.childId))
+      const reviews = isMcp ? [] : parseReviews(turn.response)
       for (const childId of childIds) {
         const child = store.get(childId)
         if (!child || child.status !== 'done') continue
+        if (mcpReviewedIds.has(childId)) continue
         const seq = childSeqMap.get(childId)
         const call = roundChildren.get(childId)
         // 匹配：#序号 精确匹配，兜底按队员名/标题子串
@@ -1802,5 +1880,6 @@ export async function runDelegationLoop(
   } as Partial<Task>)
   if (updated) pushTask(taskId)
 
-  return { rounds: round, children: allChildren, finalText: stripReviews(stripRoundNotes(stripDelegates(finalResponse || scanTexts[0] || scanTexts[1]))), scanTexts }
+  const rawFinal = finalResponse || scanTexts[0] || scanTexts[1]
+  return { rounds: round, children: allChildren, finalText: isMcp ? rawFinal.trim() : stripReviews(stripRoundNotes(stripDelegates(rawFinal))), scanTexts }
 }

@@ -4,7 +4,11 @@
 // 续聊：--resume <sessionId>
 // prompt 走 stdin（claude -p 无位置参数时从 stdin 读）：argv 版在 Windows 撞
 // CreateProcess 32767 字符命令行上限，会议上下文随轮次膨胀后 spawn ENAMETOOLONG。
-import type { AgentBackend, BackendSession, BackendSessionEvents, BackendTurnStamp } from './types'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { randomBytes } from 'node:crypto'
+import type { AgentBackend, BackendMcpEndpoint, BackendSession, BackendSessionEvents, BackendTurnStamp } from './types'
 import { bindTurn } from './types'
 import type { TaskEvent, ThinkingLevel, ToolEditMeta } from '../../shared/types'
 import { isJsonObject, jsonNumber, jsonObject, jsonString, runCliJsonl, toolEvent, type CliJsonlRunner } from './cli-common'
@@ -25,19 +29,56 @@ export function createClaudeBackend(): AgentBackend {
     connection?: { name: string; baseURL: string; apiKey: string },
     thinking?: ThinkingLevel,
     /** 本会话当前进程句柄落点：stop/close 只杀自己会话的进程，多任务并发不再串杀/漏杀 */
-    onSpawn?: (runner: Pick<CliJsonlRunner, 'kill'>) => void
+    onSpawn?: (runner: Pick<CliJsonlRunner, 'kill'>) => void,
+    systemPrompt?: string,
+    mcpEndpoint?: BackendMcpEndpoint
   ): Promise<{ sessionId: string; response: string; ok: boolean; error?: string }> => {
     const emit = (e: Omit<TaskEvent, 'seq' | 'ts'>) => events.onEvent({ ...e, ts: Date.now() })
     /** tool_result 里没有入参：started 时按 tool_use id 存好编辑元数据，result 时补挂上 */
     const pendingEdits = new Map<string, ToolEditMeta>()
     const resolved = resolveCli('claude')
     if (!resolved) return Promise.reject(new Error('PATH 上找不到 claude'))
+    // 宿主系统提示与会话级 MCP 配置均经临时文件传入（规避 Windows CreateProcess 32767 字符上限与引号转义，
+    // 且不加 --strict-mcp-config 以完整保留用户自身 MCP 服务器）；回合退出后立即清理临时文件。
+    const tempFiles: string[] = []
+    const cleanupTempFiles = () => {
+      for (const file of tempFiles.splice(0)) {
+        try { fs.rmSync(file, { force: true }) } catch {}
+      }
+    }
+    let sysPromptFile: string | undefined
+    let mcpConfigFile: string | undefined
+    try {
+      if (systemPrompt?.trim()) {
+        sysPromptFile = path.join(os.tmpdir(), `agentdeck-claude-sys-${randomBytes(8).toString('hex')}.txt`)
+        fs.writeFileSync(sysPromptFile, systemPrompt, 'utf8')
+        tempFiles.push(sysPromptFile)
+      }
+      if (mcpEndpoint) {
+        mcpConfigFile = path.join(os.tmpdir(), `agentdeck-claude-mcp-${randomBytes(8).toString('hex')}.json`)
+        fs.writeFileSync(mcpConfigFile, JSON.stringify({
+          mcpServers: {
+            [mcpEndpoint.serverName]: {
+              type: 'http',
+              url: mcpEndpoint.url,
+              headers: { Authorization: `Bearer ${mcpEndpoint.token}` }
+            }
+          }
+        }), 'utf8')
+        tempFiles.push(mcpConfigFile)
+      }
+    } catch (err) {
+      cleanupTempFiles()
+      return Promise.reject(err instanceof Error ? err : new Error(String(err)))
+    }
     const args = [
       '-p',
       '--output-format', 'stream-json',
       '--verbose',
       '--dangerously-skip-permissions',
       '--max-turns', '80',
+      ...(sysPromptFile ? ['--append-system-prompt-file', sysPromptFile] : []),
+      ...(mcpConfigFile ? ['--mcp-config', mcpConfigFile] : []),
       ...(model ? ['--model', model] : []),
       ...(resumeSessionId ? ['--resume', resumeSessionId] : [])
     ]
@@ -128,6 +169,7 @@ export function createClaudeBackend(): AgentBackend {
     events.onLaunch?.({ stop: () => runner.kill() })
 
     void runner.exited.then((exitInfo) => {
+      cleanupTempFiles()
       if (!settled) {
         finish(
           exitInfo.code === 0,
@@ -145,19 +187,21 @@ export function createClaudeBackend(): AgentBackend {
     id: 'claude',
     label: 'Claude Code',
     thinkingSwitchMode: 'per-turn',
+    systemPromptMode: 'native',
+    delegationTransport: 'mcp',
     // resumeSessionId 走 `claude --resume <id>`：每回合独立进程按 provider 落盘的会话恢复
     supportsResume: true,
     async probe() {
       const p = await probeCli('claude')
       return p.ok ? { ok: true, detail: `claude ${p.version}` } : { ok: false, detail: p.error ?? '未安装' }
     },
-    async start({ prompt, workdir, events: rawEvents, resumeSessionId, model, connection, thinking, turn }) {
+    async start({ prompt, workdir, events: rawEvents, resumeSessionId, model, connection, thinking, systemPrompt, mcpEndpoint, turn }) {
       const dir = workdir || process.cwd()
       let own: Pick<CliJsonlRunner, 'kill'> | null = null
       // 每个回合都是独立进程：把它自己的回合身份绑到该进程的所有回调上，
       // 被杀掉的旧进程再吐终态也只会带着旧身份，被运行器丢弃。
       const runTurn = (turnPrompt: string, resumeId?: string, turnStamp?: BackendTurnStamp, turnThinking?: ThinkingLevel) =>
-        runOnce(turnPrompt, dir, resumeId, bindTurn(rawEvents, turnStamp), model, connection, turnThinking ?? thinking, (r) => { own = r })
+        runOnce(turnPrompt, dir, resumeId, bindTurn(rawEvents, turnStamp), model, connection, turnThinking ?? thinking, (r) => { own = r }, systemPrompt, mcpEndpoint)
       const first = runTurn(prompt, resumeSessionId, turn)
       const sidPromise = first.then((r) => r.sessionId).catch(() => '')
       // start() 在回合结束后才 resolve 与 zcode 语义不同——但接口允许：
